@@ -268,6 +268,23 @@ final class AppModel: ObservableObject {
     }
 }
 
+// MARK: - Styling
+
+extension View {
+    /// Apply the macOS 26 Liquid Glass button style, falling back to a bordered
+    /// style on earlier systems so the app still builds and runs there. Toolbar
+    /// buttons adopt Liquid Glass automatically; this is for the custom buttons
+    /// (the composer, the settings sheet) so they match.
+    @ViewBuilder
+    func glassButton(prominent: Bool = false) -> some View {
+        if #available(macOS 26.0, *) {
+            if prominent { buttonStyle(.glassProminent) } else { buttonStyle(.glass) }
+        } else {
+            if prominent { buttonStyle(.borderedProminent) } else { buttonStyle(.bordered) }
+        }
+    }
+}
+
 // MARK: - Views
 
 @main
@@ -398,14 +415,21 @@ struct ChatDetail: View {
                 .disabled(!model.connected)
             if model.sending {
                 Button { model.stop() } label: {
-                    Image(systemName: "stop.circle.fill").font(.title2)
-                }.buttonStyle(.plain).help("Stop")
+                    Image(systemName: "stop.fill")
+                        .font(.system(size: 15, weight: .bold))
+                        .frame(width: 26, height: 26)
+                }
+                .glassButton()
+                .help("Stop")
             } else {
                 Button { model.send() } label: {
-                    Image(systemName: "arrow.up.circle.fill").font(.title2)
+                    Image(systemName: "arrow.up")
+                        .font(.system(size: 16, weight: .bold))
+                        .frame(width: 26, height: 26)
                 }
-                .buttonStyle(.plain)
+                .glassButton(prominent: true)
                 .disabled(!model.connected || model.input.trimmingCharacters(in: .whitespaces).isEmpty)
+                .help("Send")
             }
         }
         .padding(12)
@@ -487,7 +511,9 @@ struct SettingsView: View {
             HStack {
                 Spacer()
                 Button("Cancel") { dismiss() }
+                    .glassButton()
                 Button("Connect") { dismiss(); Task { await model.connect() } }
+                    .glassButton(prominent: true)
                     .keyboardShortcut(.defaultAction)
             }
         }
