@@ -241,8 +241,14 @@ func (p *Pool) waitReady(e *entry) {
 	close(e.ready)
 	if err != nil {
 		// A model that never became ready must not linger in the pool holding a
-		// slice of the memory budget.
-		delete(p.entries, e.repoID)
+		// slice of the memory budget. Guard on identity: while this entry was
+		// loading it could have been evicted and a *new* entry created under the
+		// same repoID key. Deleting by key alone would then orphan that healthy
+		// replacement — its process would leak and its memory would stop counting
+		// against the budget.
+		if p.entries[e.repoID] == e {
+			delete(p.entries, e.repoID)
+		}
 	}
 	p.mu.Unlock()
 
@@ -413,7 +419,10 @@ func (p *Pool) reapIdle() {
 			p.mu.Lock()
 			now := p.opts.now()
 			for _, e := range p.entries {
-				if e.inFlight == 0 && now.Sub(e.lastUsed) >= p.opts.IdleTimeout {
+				// Never reap a model that is still loading: its ready channel is
+				// open, so tearing it down would waste the load and error every
+				// caller waiting on it. isReady checks without blocking.
+				if e.inFlight == 0 && isReady(e) && now.Sub(e.lastUsed) >= p.opts.IdleTimeout {
 					p.stopEntryLocked(e)
 				}
 			}
@@ -456,6 +465,17 @@ func (p *Pool) Close() error {
 	}
 	wg.Wait()
 	return nil
+}
+
+// isReady reports whether an entry has finished loading (its ready channel is
+// closed) without blocking.
+func isReady(e *entry) bool {
+	select {
+	case <-e.ready:
+		return true
+	default:
+		return false
+	}
 }
 
 // loadCost estimates the memory a model occupies once loaded: its weights plus

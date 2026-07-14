@@ -150,8 +150,10 @@ func (c *Client) Download(ctx context.Context, req DownloadRequest) error {
 	if firstErr != nil {
 		return firstErr
 	}
-	// Surface a cancelled parent context rather than reporting success.
-	if err := ctx.Err(); err != nil && !errors.Is(err, context.Canceled) {
+	// A cancelled download is INCOMPLETE, not successful. Returning nil here would
+	// let the caller mark a half-downloaded model as ready. Surface the
+	// cancellation (and any other context error) as the error it is.
+	if err := ctx.Err(); err != nil {
 		return err
 	}
 	return nil

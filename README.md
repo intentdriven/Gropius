@@ -1,48 +1,64 @@
-# Gropius
+<div align="center">
 
-Download MLX models on your Mac and serve them to the rest of your network
-through an OpenAI-compatible API. A menu-bar app with a web control panel.
+  <h1>Gropius</h1>
 
-Everything any OpenAI client can do against ChatGPT, it can do against your Mac —
-`base_url=http://your-mac.local:11535/v1`.
+  <p>Download MLX models on your Mac and serve them to the rest of your network — an OpenAI-compatible endpoint, in a menu-bar app.</p>
 
-## What it does
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green" alt="License: MIT"></a>
+  <img src="https://img.shields.io/badge/status-experimental-orange" alt="Status: experimental">
+  <img src="https://img.shields.io/badge/Go-1.25-00ADD8?logo=go&logoColor=white" alt="Go 1.25">
+  <a href="https://claude.ai/claude-code"><img src="https://img.shields.io/badge/Built_with-Claude_Code-3B5CE7?logo=anthropic&logoColor=white" alt="Built with Claude Code"></a>
+  <br />
+  <img src="https://img.shields.io/badge/Apple_Silicon-000000?logo=apple&logoColor=white" alt="Apple Silicon">
+  <img src="https://img.shields.io/badge/MLX-Metal-informational" alt="MLX / Metal">
 
-- **Browse and download** MLX models from HuggingFace (the `mlx-community` org),
-  with live progress and resumable transfers.
-- **Serve** them over an OpenAI-compatible API (`/v1/chat/completions`,
-  `/v1/completions`, `/v1/models`), including streaming.
-- **Share** the endpoint with other machines on your LAN — discoverable over
-  Bonjour — and with other user accounts on the same Mac.
-- **Manage the runtime for you**: it installs its own private Python + MLX under
-  `~/Library/Application Support/Gropius`. Nothing touches your system Python.
+</div>
 
-## Requirements
+---
 
-- Apple Silicon Mac (MLX is Metal-only), macOS 13+.
-- An internet connection for the first run (to install MLX and download models).
+**Gropius** turns one Apple Silicon Mac into a shared local-inference server.
+Browse and download [MLX](https://github.com/ml-explore/mlx) models from
+HuggingFace, and serve them over an OpenAI-compatible API to every other machine
+and user account on your network. Anything that talks to ChatGPT can talk to your
+Mac — just change the base URL.
 
-## Build & run
+It manages its own runtime: on first launch it installs a private Python and MLX
+under `~/Library/Application Support/Gropius` and never touches your system
+Python. Uninstalling is deleting one folder.
+
+## Status
+
+Experimental. Runs and is tested end-to-end on macOS 26 / Apple Silicon.
+Cross-machine LAN use works; TLS and notarized distribution are not yet included.
+
+## Features
+
+- **Model browser** — search the `mlx-community` org, download with live progress,
+  resume interrupted transfers.
+- **OpenAI-compatible server** — `/v1/chat/completions`, `/v1/completions`,
+  `/v1/models`, streaming included. Drop-in for any OpenAI SDK.
+- **Runs many models** — one process per model, with an LRU memory budget so a
+  request for a second model evicts an idle one instead of OOMing the machine.
+- **Network-shared** — bind the LAN, discoverable over Bonjour, optional API key.
+- **Multi-account** — other user accounts on the same Mac share one copy of each
+  model on disk and on the GPU.
+
+## Build
 
 ```sh
-make app        # build Gropius.app
-make install    # copy to /Applications and launch it
+make app         # build Gropius.app (menu-bar app bundle)
+make install     # copy to /Applications and launch it
+make run         # or: run headless in the foreground, for development
 ```
 
-Or for development:
+The first launch installs the MLX runtime (a few minutes, shown in the control
+panel), then you can download and serve models.
 
-```sh
-make run        # headless, in the foreground
-```
+New here? See **[docs/getting-started.md](docs/getting-started.md)**.
 
-The first launch installs the MLX runtime (a few minutes); the control panel
-shows the progress. Then open the panel from the menu-bar icon, find a model,
-and download it.
+## Using it
 
-## Using it from another machine
-
-Open the **Connect** tab in the control panel for ready-to-paste snippets. In
-short:
+Click the menu-bar icon → **Open Control Panel**, or from any OpenAI client:
 
 ```python
 from openai import OpenAI
@@ -55,44 +71,29 @@ print(client.chat.completions.create(
 
 ## Security
 
-By default the server is **reachable by anyone on your network with no API key**.
-The control panel warns you while this is the case. To restrict access, set an
-API key in **Settings** — clients then send `Authorization: Bearer <key>`.
-Requests from the same Mac (loopback, including other user accounts) never need a
-key.
+By default the server is **reachable by anyone on your network with no API key** —
+the control panel warns you while this is so. Set a key in **Settings** to require
+`Authorization: Bearer <key>`. Same-machine clients (loopback, including other
+user accounts) never need a key. The control panel and its `/api/*` endpoints are
+bound to loopback only and are never reachable from the LAN.
 
-The control panel itself is bound to loopback only.
+## Layout
 
-## Sharing models across user accounts
+- [`cmd/gropius/`](cmd/gropius/) — menu-bar app + singleton election.
+- [`internal/`](internal/) — the engine: `hub` (HuggingFace client + downloader),
+  `runtime` (Python/MLX provisioning + process pool), `gateway` (OpenAI + control
+  API), `registry`, `discovery`, `config`, `app`.
+- [`docs/`](docs/) — getting-started guide.
 
-By default each account keeps its own models. To share one copy across every
-account on the Mac:
-
-```sh
-make install-shared     # creates /Users/Shared/Gropius (needs sudo)
-```
-
-After that, whichever account runs Gropius first serves the models; others become
-menu-bar clients of it. One copy on the GPU, one copy on disk.
-
-## Architecture
-
-| Package | Responsibility |
-|---|---|
-| `internal/config` | On-disk layout and settings |
-| `internal/hub` | Pure-Go HuggingFace client + resumable downloader |
-| `internal/registry` | File-backed index of local models |
-| `internal/runtime` | Installs Python/MLX; runs one `mlx_lm.server` per model with LRU eviction |
-| `internal/gateway` | OpenAI API, control API, auth |
-| `internal/discovery` | Bonjour/mDNS advertising |
-| `internal/app` | Composition root |
-| `cmd/gropius` | Menu-bar app + singleton election |
-
-Key design notes are in [DECISIONS.md](DECISIONS.md).
+Design decisions and the empirical facts behind them: [`DECISIONS.md`](DECISIONS.md).
 
 ## Development
 
 ```sh
-make test       # go test -race ./...
-make lint       # fmt + vet + test
+make test        # go test -race ./...
+make lint        # fmt + vet + test
 ```
+
+## Licence
+
+MIT. See [`LICENSE`](LICENSE).

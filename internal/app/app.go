@@ -85,11 +85,18 @@ func New(opts Options) (*App, error) {
 		downloads:   map[string]*download{},
 	}
 
+	launcher := &runtime.ExecLauncher{
+		Paths:  opts.Paths,
+		LogDir: opts.Paths.Logs,
+	}
+	// Kill any model servers left running by a previous run that crashed before
+	// it could stop them — otherwise they hold GPU memory until reboot.
+	if killed := launcher.ReapOrphans(); killed > 0 {
+		opts.Log.Warn("reaped model servers left over from a previous run", "count", killed)
+	}
+
 	a.Pool = runtime.NewPool(runtime.PoolOptions{
-		Launcher: &runtime.ExecLauncher{
-			Paths:  opts.Paths,
-			LogDir: opts.Paths.Logs,
-		},
+		Launcher:          launcher,
 		Models:            modelSource{reg},
 		IdleTimeout:       time.Duration(opts.Config.IdleTimeoutSec) * time.Second,
 		DecodeConcurrency: opts.Config.DecodeConcurrency,
@@ -150,6 +157,12 @@ func (a *App) Download(repoID string) error {
 	if repoID == "" {
 		return errors.New("a model id is required")
 	}
+	// A repo id becomes a filesystem path (ModelDir) and is later passed to
+	// os.RemoveAll on delete. Reject anything that isn't a clean "<org>/<name>"
+	// before it can escape the models directory.
+	if !config.ValidRepoID(repoID) {
+		return fmt.Errorf("%q is not a valid model id (expected <org>/<name>)", repoID)
+	}
 
 	a.dlMu.Lock()
 	if _, busy := a.downloads[repoID]; busy {
@@ -182,21 +195,38 @@ func (a *App) Download(repoID string) error {
 			Dest:        dest,
 			Concurrency: 4,
 			OnProgress: func(p hub.Progress) {
-				a.Registry.SetState(repoID, registry.StateDownloading, p.Percent(), "")
+				// In-memory only: progress ticks are frequent and ephemeral, so
+				// they must not write the registry file to disk each time.
+				a.Registry.UpdateProgress(repoID, p.Percent())
 			},
 		})
+
+		// A completed byte-for-byte download can still be junk (a config that
+		// won't parse, no usable weights). Validate before advertising it as
+		// ready, so /v1/models and the mDNS count only ever list models that are
+		// at least structurally loadable.
+		if err == nil {
+			if verr := validateModelDir(dest); verr != nil {
+				err = fmt.Errorf("downloaded but not a usable MLX model: %w", verr)
+			}
+		}
 
 		switch {
 		case err == nil:
 			// Re-derive the size from disk rather than trusting the manifest.
-			a.Registry.Put(registry.Model{
+			if perr := a.Registry.Put(registry.Model{
 				RepoID:   repoID,
 				Path:     dest,
 				Bytes:    dirSize(dest),
 				State:    registry.StateReady,
 				Progress: 100,
-			})
-			a.Log.Info("model downloaded", "model", repoID)
+			}); perr != nil {
+				// The files are on disk; only the index write failed. Surface it —
+				// a silently unrecorded model would look missing until a rescan.
+				a.Log.Error("model downloaded but could not be recorded", "model", repoID, "err", perr)
+			} else {
+				a.Log.Info("model downloaded", "model", repoID)
+			}
 
 		case errors.Is(err, context.Canceled):
 			// A cancelled download leaves .part files behind on purpose: they let
@@ -245,6 +275,11 @@ func (a *App) Downloading() []string {
 // Delete removes a model: it is unloaded first if it is resident, then its files
 // are deleted.
 func (a *App) Delete(repoID string) error {
+	// Defence in depth: never hand an un-validated id to os.RemoveAll, even one
+	// that somehow reached the registry (e.g. from an older build).
+	if !config.ValidRepoID(repoID) {
+		return fmt.Errorf("%q is not a valid model id", repoID)
+	}
 	// Cancel any download of this model AND wait for it to stop. Cancelling alone
 	// is not enough: the goroutine would keep writing into the directory we are
 	// about to remove, and the model would reappear moments after being deleted.

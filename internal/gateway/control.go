@@ -23,7 +23,23 @@ type Control struct {
 	UI http.Handler
 }
 
-// Routes registers the control-plane endpoints onto a mux.
+// Handler returns the control plane and web UI, restricted to loopback.
+//
+// The control plane is administrative: it can delete models and rewrite settings
+// (including blanking the API key). It must therefore NEVER be reachable from the
+// LAN, even though it shares the same listener as the /v1 API. Binding it to
+// loopback means only this machine — including its other user accounts, which
+// reach it over 127.0.0.1 — can drive it. The web UI is loopback-only for the
+// same reason (and because http://LAN-ip is not a secure browser context).
+func (c *Control) Handler() http.Handler {
+	mux := http.NewServeMux()
+	c.Routes(mux)
+	return loopbackOnly(mux)
+}
+
+// Routes registers the control-plane endpoints onto a mux. Prefer Handler(),
+// which wraps these in the mandatory loopback guard; Routes is exported only so
+// tests can exercise handlers directly.
 func (c *Control) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/state", c.handleState)
 	mux.HandleFunc("GET /api/search", c.handleSearch)
@@ -38,6 +54,18 @@ func (c *Control) Routes(mux *http.ServeMux) {
 	if c.UI != nil {
 		mux.Handle("/", c.UI)
 	}
+}
+
+// loopbackOnly rejects any request that did not originate on this machine.
+func loopbackOnly(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !isLoopback(r.RemoteAddr) {
+			writeError(w, http.StatusForbidden,
+				"the Gropius control panel is only reachable from the computer it runs on")
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // State is the whole picture the UI renders.

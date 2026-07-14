@@ -52,6 +52,20 @@ type ExecLauncher struct {
 	Paths config.Paths
 	// LogDir receives one log file per model process.
 	LogDir string
+
+	ledgerOnce sync.Once
+	ledger     *pidLedger
+}
+
+func (l *ExecLauncher) pidLedger() *pidLedger {
+	l.ledgerOnce.Do(func() { l.ledger = newPIDLedger(l.Paths.Root) })
+	return l.ledger
+}
+
+// ReapOrphans kills any model servers left running by a previous, crashed run.
+// Call once at startup before launching anything.
+func (l *ExecLauncher) ReapOrphans() int {
+	return l.pidLedger().reapOrphans()
 }
 
 // Launch spawns mlx_lm.server for one model.
@@ -110,11 +124,18 @@ func (l *ExecLauncher) Launch(ctx context.Context, spec Spec) (Process, error) {
 		return nil, fmt.Errorf("start mlx_lm.server: %w", err)
 	}
 
+	// Record the child's process group so a future run can reap it if we crash
+	// before Stop runs. Setpgid makes the child lead its own group (pgid == pid).
+	pgid := cmd.Process.Pid
+	l.pidLedger().add(pgid)
+
 	p := &execProcess{
 		cmd:     cmd,
 		log:     logFile,
 		logPath: logPath,
 		done:    make(chan struct{}),
+		ledger:  l.pidLedger(),
+		pgid:    pgid,
 	}
 	go func() {
 		err := cmd.Wait()
@@ -122,6 +143,8 @@ func (l *ExecLauncher) Launch(ctx context.Context, spec Spec) (Process, error) {
 		p.err = err
 		p.mu.Unlock()
 		logFile.Close()
+		// The process is gone; drop it from the crash-recovery ledger.
+		p.ledger.remove(p.pgid)
 		close(p.done)
 	}()
 	return p, nil
@@ -144,6 +167,8 @@ type execProcess struct {
 	log     *os.File
 	logPath string
 	done    chan struct{}
+	ledger  *pidLedger
+	pgid    int
 
 	mu  sync.Mutex
 	err error

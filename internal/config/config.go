@@ -12,6 +12,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // Paths is the on-disk layout. All fields are absolute.
@@ -88,11 +89,47 @@ func NewPaths(root string) Paths {
 // UV is the path to the uv binary Gropius manages.
 func (p Paths) UV() string { return filepath.Join(p.Bin, "uv") }
 
+// ValidRepoID reports whether s is a well-formed HuggingFace repo id, i.e.
+// exactly "<org>/<name>" using only characters HuggingFace itself allows.
+//
+// This is a security boundary, not a nicety: a repo id flows unmodified into a
+// filesystem path (ModelDir) and, once recorded in the registry, into
+// os.RemoveAll on delete. A value like "../../../etc" or "a/b/../../.." would let
+// a caller escape the models directory. The allow-list (letters, digits, and
+// - _ .) matches HuggingFace's own naming rules while forbidding path separators
+// beyond the single required "/" and rejecting any "." path segment.
+func ValidRepoID(s string) bool {
+	org, name, ok := strings.Cut(s, "/")
+	if !ok {
+		return false
+	}
+	return validRepoComponent(org) && validRepoComponent(name)
+}
+
+func validRepoComponent(s string) bool {
+	if s == "" || s == "." || s == ".." {
+		return false
+	}
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		case r == '-' || r == '_' || r == '.':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
 // VenvPython is the interpreter inside the managed virtualenv.
 func (p Paths) VenvPython() string { return filepath.Join(p.Venv, "bin", "python") }
 
 // ModelDir is where a HuggingFace repo id is stored on disk.
 // "mlx-community/Qwen3-8B-4bit" -> <Models>/mlx-community/Qwen3-8B-4bit
+//
+// The repo id must be validated with ValidRepoID first: it becomes a filesystem
+// path, and an unvalidated value like "../../.." would escape p.Models and, once
+// stored in the registry, could be handed to os.RemoveAll on delete.
 func (p Paths) ModelDir(repoID string) string {
 	return filepath.Join(p.Models, filepath.FromSlash(repoID))
 }

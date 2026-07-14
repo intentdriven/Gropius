@@ -102,16 +102,18 @@ func runServer(ln net.Listener, paths config.Paths, cfg config.Config, headless 
 
 	mux := http.NewServeMux()
 
-	// OpenAI-compatible API.
+	// OpenAI-compatible API — LAN-facing, guarded by the optional API key.
 	g := gateway.New(gateway.Options{Config: cfg, Pool: a.Pool, Models: a.Registry, Log: log})
 	apiHandler := g.Handler()
 	for _, p := range []string{"/v1/", "/health"} {
 		mux.Handle(p, apiHandler)
 	}
 
-	// Control plane + web UI.
+	// Control plane + web UI — administrative, so loopback-only (Control.Handler
+	// enforces it). Mounted at "/" as the catch-all for everything that is not a
+	// /v1 or /health request.
 	ctrl := &gateway.Control{App: a, UI: ui.Handler()}
-	ctrl.Routes(mux)
+	mux.Handle("/", ctrl.Handler())
 
 	srv := &http.Server{
 		Handler: withLogging(mux, log),

@@ -161,7 +161,7 @@ func (r *Registry) Put(m Model) error {
 	return err
 }
 
-// SetState updates a model's state (and error/progress) in place.
+// SetState updates a model's state (and error/progress) in place and persists.
 func (r *Registry) SetState(repoID string, state State, progress float64, errMsg string) error {
 	r.mu.Lock()
 	m, ok := r.models[repoID]
@@ -179,6 +179,28 @@ func (r *Registry) SetState(repoID string, state State, progress float64, errMsg
 
 	r.broadcast(snapshot)
 	return err
+}
+
+// UpdateProgress records download progress WITHOUT writing to disk.
+//
+// Download progress ticks arrive ~10 times a second. Persisting the whole
+// registry file on each one would hammer the disk (and flash wear) for a value
+// that is pure UI state and worthless across a restart — a download does not
+// resume from a percentage. Subscribers still get the update so the UI is live;
+// only the disk write is skipped. State *transitions* still go through SetState.
+func (r *Registry) UpdateProgress(repoID string, progress float64) {
+	r.mu.Lock()
+	m, ok := r.models[repoID]
+	if !ok {
+		r.mu.Unlock()
+		return
+	}
+	m.Progress = progress
+	r.models[repoID] = m
+	snapshot := r.listLocked()
+	r.mu.Unlock()
+
+	r.broadcast(snapshot)
 }
 
 // Remove deletes a model from the index and removes its files from disk.
@@ -320,14 +342,24 @@ func (r *Registry) Rescan(modelsDir string) error {
 		}
 		r.models[repoID] = m
 	}
-	// Drop entries whose directory has vanished (deleted outside the app), but
-	// keep in-flight downloads, whose directories are legitimately incomplete.
+	// Drop an entry ONLY when its directory has genuinely vanished (deleted
+	// outside the app). An entry that is merely absent from `found` might just be
+	// mid-write — for a shared cache, another account could be part-way through
+	// downloading it right now, so inspectModelDir transiently reports it
+	// incomplete. Dropping it then would wipe a healthy model from the index on a
+	// race. Distinguish "gone" from "incomplete" with an explicit stat.
 	for repoID, m := range r.models {
 		if _, ok := found[repoID]; ok {
 			continue
 		}
 		if m.State == StateDownloading {
 			continue
+		}
+		if m.Path != "" {
+			if _, err := os.Stat(m.Path); err == nil {
+				// Directory still exists but read as incomplete — leave it alone.
+				continue
+			}
 		}
 		delete(r.models, repoID)
 	}
