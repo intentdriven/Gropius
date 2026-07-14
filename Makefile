@@ -44,12 +44,25 @@ app: build icon
 icon:
 	@build/mkicon.sh
 
-## install: put the app in /Applications and launch it
+## install: put the app in /Applications, allow it through the firewall, launch it
 install: app
 	rm -rf /Applications/$(APP).app
 	cp -R $(BUNDLE) /Applications/
+	$(MAKE) allow-firewall APP_BIN=/Applications/$(APP).app/Contents/MacOS/gropius
 	open /Applications/$(APP).app
 	@echo "Gropius is running in the menu bar."
+
+## allow-firewall: let the macOS Application Firewall accept LAN connections to
+## Gropius. Without this, a locally-built (non-Developer-ID) binary is blocked:
+## the firewall accepts the TCP handshake but drops the data, so other machines
+## see an empty response while loopback still works. Loopback never needs this.
+## Needs sudo; it modifies a security setting, so it prompts for your password.
+APP_BIN ?= $(PWD)/$(BIN)
+allow-firewall:
+	@echo "Allowing Gropius through the macOS firewall (needs your password)…"
+	sudo /usr/libexec/ApplicationFirewall/socketfilterfw --add "$(APP_BIN)"
+	sudo /usr/libexec/ApplicationFirewall/socketfilterfw --unblockapp "$(APP_BIN)"
+	@echo "Done. Other machines on your network can now reach Gropius."
 
 ## install-shared: let every macOS account on this Mac share one model cache.
 ##

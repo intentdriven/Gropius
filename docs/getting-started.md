@@ -107,6 +107,24 @@ menu-bar app just points at it. One copy on disk, one on the GPU.
 
 ## Troubleshooting
 
+- **Another machine gets `ERR_EMPTY_RESPONSE` / "didn't send any data", but
+  `localhost` works on the Mac itself.** The macOS Application Firewall is
+  blocking incoming connections to Gropius. A locally-built app is not signed by
+  a Developer-ID certificate, so the firewall accepts the connection and then
+  drops it — loopback is exempt, which is why same-machine access still works.
+  Allow it through once:
+
+  ```sh
+  make allow-firewall     # or, for the installed app:
+  sudo /usr/libexec/ApplicationFirewall/socketfilterfw \
+    --unblockapp "/Applications/Gropius.app/Contents/MacOS/gropius"
+  ```
+
+  `make install` does this for you. You can also do it in **System Settings →
+  Network → Firewall → Options** by setting Gropius to "Allow incoming
+  connections". Only the Gropius app needs this; its Python helper only ever
+  listens on loopback.
+
 - **The menu-bar icon never appears.** Run it in the foreground to see errors:
   `./dist/Gropius.app/Contents/MacOS/gropius`.
 - **A model stays "downloading" forever / fails.** Check the panel for the error.
