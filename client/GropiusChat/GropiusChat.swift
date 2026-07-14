@@ -517,7 +517,11 @@ struct EmptyState: View {
 
 struct MessageRow: View {
     let message: Message
+    @State private var showReasoning = false
     private var isUser: Bool { message.role == .user }
+    // Thinking is in progress while the assistant has streamed reasoning but no
+    // answer text yet.
+    private var isThinking: Bool { !isUser && displayText.isEmpty }
 
     // Bubble colours, independent of the system accent (which may be anything):
     // iMessage blue for sent, green for replies.
@@ -537,16 +541,14 @@ struct MessageRow: View {
         HStack {
             if isUser { Spacer(minLength: 64) }
             VStack(alignment: isUser ? .trailing : .leading, spacing: 5) {
-                // Thinking-model reasoning sits above the answer, muted, no bubble.
+                // Thinking-model reasoning collapses behind a "Thinking…" line with
+                // a disclosure toggle. Collapsed by default.
                 if !displayReasoning.isEmpty {
-                    Text(displayReasoning)
-                        .font(.callout).italic()
-                        .foregroundStyle(.secondary)
-                        .textSelection(.enabled)
-                        .padding(.horizontal, 6)
-                        .frame(maxWidth: 560, alignment: .leading)
+                    reasoningDisclosure
                 }
-                if displayText.isEmpty && !isUser {
+                // Only spin when nothing at all has arrived yet; once reasoning is
+                // streaming, the "Thinking…" line is the activity indicator.
+                if displayText.isEmpty && !isUser && displayReasoning.isEmpty {
                     ProgressView().controlSize(.small).padding(.vertical, 6).padding(.horizontal, 4)
                 } else if !displayText.isEmpty {
                     Text(displayText)
@@ -560,6 +562,36 @@ struct MessageRow: View {
             }
             if !isUser { Spacer(minLength: 64) }
         }
+    }
+
+    @ViewBuilder private var reasoningDisclosure: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Button {
+                withAnimation(.easeInOut(duration: 0.15)) { showReasoning.toggle() }
+            } label: {
+                HStack(spacing: 5) {
+                    Image(systemName: showReasoning ? "chevron.down" : "chevron.right")
+                        .font(.caption2)
+                    if isThinking { ProgressView().controlSize(.mini) }
+                    Text(isThinking ? "Thinking…" : "Thoughts")
+                        .font(.caption)
+                }
+                .foregroundStyle(.secondary)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+
+            if showReasoning {
+                Text(displayReasoning)
+                    .font(.callout).italic()
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+                    .frame(maxWidth: 560, alignment: .leading)
+                    .transition(.opacity)
+            }
+        }
+        .padding(.horizontal, 6)
+        .frame(maxWidth: 560, alignment: .leading)
     }
 
     @ViewBuilder private var bubble: some View {
