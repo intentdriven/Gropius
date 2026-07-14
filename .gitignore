@@ -36,3 +36,4 @@ go.work.sum
 /dist/
 /build/AppIcon.icns
 /build/AppIcon.iconset/
+.DS_Store
