@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleName</key>
+	<string>Gropius</string>
+	<key>CFBundleDisplayName</key>
+	<string>Gropius</string>
+	<key>CFBundleIdentifier</key>
+	<string>dev.gropius.app</string>
+	<key>CFBundleExecutable</key>
+	<string>gropius</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>1.0</string>
+	<key>CFBundleVersion</key>
+	<string>1</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>13.0</string>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+
+	<!-- Menu-bar only: no Dock icon, no app switcher entry. -->
+	<key>LSUIElement</key>
+	<true/>
+
+	<!-- macOS 15+ requires an explicit reason to touch the local network. Without
+	     this string the system denies LAN access and the server is unreachable
+	     from other machines. -->
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Gropius serves your local MLX models to other devices on your network.</string>
+
+	<!-- Mandatory for Bonjour inside an app bundle. If this list does not include
+	     the service type we advertise, mDNS registration fails SILENTLY: the
+	     server still runs, but other machines cannot discover it. -->
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_gropius._tcp</string>
+	</array>
+</dict>
+</plist>

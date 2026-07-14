@@ -1,0 +1,358 @@
+package gateway
+
+import (
+	"encoding/json"
+	"fmt"
+	"net"
+	"net/http"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/intentdriven/Gropius/internal/app"
+	"github.com/intentdriven/Gropius/internal/config"
+	"github.com/intentdriven/Gropius/internal/hub"
+	"github.com/intentdriven/Gropius/internal/registry"
+	"github.com/intentdriven/Gropius/internal/runtime"
+)
+
+// Control serves the app's own API and the web control panel.
+type Control struct {
+	App *app.App
+	// UI is the embedded web control panel.
+	UI http.Handler
+}
+
+// Routes registers the control-plane endpoints onto a mux.
+func (c *Control) Routes(mux *http.ServeMux) {
+	mux.HandleFunc("GET /api/state", c.handleState)
+	mux.HandleFunc("GET /api/search", c.handleSearch)
+	mux.HandleFunc("POST /api/models/download", c.handleDownload)
+	mux.HandleFunc("POST /api/models/cancel", c.handleCancelDownload)
+	mux.HandleFunc("POST /api/models/delete", c.handleDelete)
+	mux.HandleFunc("POST /api/models/load", c.handleLoad)
+	mux.HandleFunc("POST /api/models/unload", c.handleUnload)
+	mux.HandleFunc("GET /api/settings", c.handleGetSettings)
+	mux.HandleFunc("POST /api/settings", c.handleSetSettings)
+	mux.HandleFunc("GET /api/events", c.handleEvents)
+	if c.UI != nil {
+		mux.Handle("/", c.UI)
+	}
+}
+
+// State is the whole picture the UI renders.
+type State struct {
+	Models   []registry.Model    `json:"models"`
+	Resident []runtime.Resident  `json:"resident"`
+	Setup    runtime.SetupStatus `json:"setup"`
+	Config   config.Config       `json:"config"`
+	// Endpoints are the URLs other machines should use.
+	Endpoints []string `json:"endpoints"`
+	Hostname  string   `json:"hostname"`
+	// Warnings surface things the user should know, e.g. an open LAN endpoint.
+	Warnings []string `json:"warnings"`
+}
+
+// snapshot builds the state the UI renders.
+//
+// Both /api/state and the /api/events stream go through here. They used to build
+// the struct separately, and the streaming one quietly omitted Warnings — so the
+// "anyone on your network can use this server" notice never reached the UI, which
+// is fed exclusively by the stream. One builder, one truth.
+func (c *Control) snapshot() State {
+	cfg := c.App.Config()
+	st := State{
+		Models:    c.App.Registry.List(),
+		Resident:  c.App.Pool.Resident(),
+		Setup:     c.App.Provisioner.Status(),
+		Config:    redactConfig(cfg),
+		Endpoints: Endpoints(cfg),
+		Hostname:  hostname(),
+	}
+	if cfg.ExposedToLAN() && cfg.APIKey == "" {
+		st.Warnings = append(st.Warnings,
+			"This server is reachable by anyone on your network and requires no API key. Set one in Settings to restrict access.")
+	}
+	if !c.App.Provisioner.Installed() {
+		st.Warnings = append(st.Warnings,
+			"The MLX runtime is not installed yet — models cannot be served until setup finishes.")
+	}
+	return st
+}
+
+func (c *Control) handleState(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, c.snapshot())
+}
+
+// redactConfig blanks secrets before they go over the wire. The control panel is
+// reachable on the LAN, so it must never echo the API key or HF token back.
+func redactConfig(c config.Config) config.Config {
+	if c.APIKey != "" {
+		c.APIKey = "********"
+	}
+	if c.HFToken != "" {
+		c.HFToken = "********"
+	}
+	return c
+}
+
+const redacted = "********"
+
+// Endpoints lists the base URLs clients can point at.
+func Endpoints(cfg config.Config) []string {
+	var out []string
+	if h := hostname(); h != "" {
+		out = append(out, fmt.Sprintf("http://%s.local:%d/v1", h, cfg.Port))
+	}
+	if cfg.ExposedToLAN() {
+		for _, ip := range lanIPs() {
+			out = append(out, fmt.Sprintf("http://%s:%d/v1", ip, cfg.Port))
+		}
+	}
+	out = append(out, fmt.Sprintf("http://127.0.0.1:%d/v1", cfg.Port))
+	return out
+}
+
+// hostname is the name other machines use to reach this Mac.
+func hostname() string {
+	return config.LocalHostName()
+}
+
+// lanIPs returns the machine's non-loopback IPv4 addresses.
+func lanIPs() []string {
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, a := range addrs {
+		ipnet, ok := a.(*net.IPNet)
+		if !ok || ipnet.IP.IsLoopback() {
+			continue
+		}
+		if ip4 := ipnet.IP.To4(); ip4 != nil {
+			out = append(out, ip4.String())
+		}
+	}
+	return out
+}
+
+func (c *Control) handleSearch(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query().Get("q")
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	if limit <= 0 {
+		limit = 40
+	}
+
+	// Default to the mlx-community org: it is where the MLX-converted models
+	// live, and searching all of HuggingFace returns mostly models that will not
+	// load. An explicit "author:" prefix overrides that.
+	author := "mlx-community"
+	if strings.HasPrefix(q, "author:") {
+		rest := strings.TrimPrefix(q, "author:")
+		parts := strings.SplitN(rest, " ", 2)
+		author = parts[0]
+		q = ""
+		if len(parts) > 1 {
+			q = parts[1]
+		}
+	}
+
+	models, err := c.App.Hub.Search(r.Context(), hub.SearchQuery{
+		Search: q,
+		Author: author,
+		Limit:  limit,
+		Sort:   "downloads",
+	})
+	if err != nil {
+		writeError(w, http.StatusBadGateway, err.Error())
+		return
+	}
+
+	// Mark what is already local so the UI can show "Downloaded" instead of a
+	// download button.
+	local := map[string]registry.State{}
+	for _, m := range c.App.Registry.List() {
+		local[m.RepoID] = m.State
+	}
+
+	type result struct {
+		hub.Model
+		Quantization string `json:"quantization"`
+		LocalState   string `json:"local_state,omitempty"`
+	}
+	out := make([]result, 0, len(models))
+	for _, m := range models {
+		out = append(out, result{
+			Model:        m,
+			Quantization: m.Quantization(),
+			LocalState:   string(local[m.ID]),
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"results": out})
+}
+
+// modelRequest is the body of the model action endpoints.
+type modelRequest struct {
+	Model string `json:"model"`
+}
+
+func decodeModelRequest(w http.ResponseWriter, r *http.Request) (string, bool) {
+	var req modelRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Model == "" {
+		writeError(w, http.StatusBadRequest, `a "model" field is required`)
+		return "", false
+	}
+	return req.Model, true
+}
+
+func (c *Control) handleDownload(w http.ResponseWriter, r *http.Request) {
+	model, ok := decodeModelRequest(w, r)
+	if !ok {
+		return
+	}
+	if err := c.App.Download(model); err != nil {
+		writeError(w, http.StatusConflict, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]any{"status": "downloading", "model": model})
+}
+
+func (c *Control) handleCancelDownload(w http.ResponseWriter, r *http.Request) {
+	model, ok := decodeModelRequest(w, r)
+	if !ok {
+		return
+	}
+	if err := c.App.CancelDownload(model); err != nil {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"status": "cancelled", "model": model})
+}
+
+func (c *Control) handleDelete(w http.ResponseWriter, r *http.Request) {
+	model, ok := decodeModelRequest(w, r)
+	if !ok {
+		return
+	}
+	if err := c.App.Delete(model); err != nil {
+		writeError(w, http.StatusConflict, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"status": "deleted", "model": model})
+}
+
+// handleLoad warms a model so the first real request is not slow.
+func (c *Control) handleLoad(w http.ResponseWriter, r *http.Request) {
+	model, ok := decodeModelRequest(w, r)
+	if !ok {
+		return
+	}
+	// Loading a large model can take minutes; do not hold the HTTP request open
+	// for it. The UI watches /api/events for the model to appear as resident.
+	go func() {
+		ctx, cancel := contextWithTimeout(15 * time.Minute)
+		defer cancel()
+		_, release, err := c.App.Pool.Acquire(ctx, model)
+		if err != nil {
+			c.App.Log.Error("preload failed", "model", model, "err", err)
+			return
+		}
+		release()
+	}()
+	writeJSON(w, http.StatusAccepted, map[string]any{"status": "loading", "model": model})
+}
+
+func (c *Control) handleUnload(w http.ResponseWriter, r *http.Request) {
+	model, ok := decodeModelRequest(w, r)
+	if !ok {
+		return
+	}
+	if err := c.App.Pool.Unload(model); err != nil {
+		writeError(w, http.StatusConflict, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"status": "unloaded", "model": model})
+}
+
+func (c *Control) handleGetSettings(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, redactConfig(c.App.Config()))
+}
+
+func (c *Control) handleSetSettings(w http.ResponseWriter, r *http.Request) {
+	current := c.App.Config()
+
+	var incoming config.Config
+	if err := json.NewDecoder(r.Body).Decode(&incoming); err != nil {
+		writeError(w, http.StatusBadRequest, "settings body is not valid JSON")
+		return
+	}
+	// The UI is served the redacted placeholder; echoing it back must not
+	// overwrite the real secret with literal asterisks.
+	if incoming.APIKey == redacted {
+		incoming.APIKey = current.APIKey
+	}
+	if incoming.HFToken == redacted {
+		incoming.HFToken = current.HFToken
+	}
+
+	if err := c.App.SetConfig(incoming); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status":  "saved",
+		"restart": incoming.Port != current.Port || incoming.Host != current.Host,
+	})
+}
+
+// handleEvents streams state snapshots to the UI over SSE, so download progress
+// appears without polling.
+func (c *Control) handleEvents(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.WriteHeader(http.StatusOK)
+
+	rc := http.NewResponseController(w)
+	updates, unsub := c.App.Registry.Subscribe()
+	defer unsub()
+
+	send := func() bool {
+		b, err := json.Marshal(c.snapshot())
+		if err != nil {
+			return false
+		}
+		if _, err := fmt.Fprintf(w, "data: %s\n\n", b); err != nil {
+			return false
+		}
+		return rc.Flush() == nil
+	}
+
+	if !send() {
+		return
+	}
+
+	// A slow tick alongside the change notifications keeps "resident" and
+	// "setup" fresh — neither of those goes through the registry's subscription.
+	tick := time.NewTicker(2 * time.Second)
+	defer tick.Stop()
+
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case _, ok := <-updates:
+			if !ok {
+				return
+			}
+			if !send() {
+				return
+			}
+		case <-tick.C:
+			if !send() {
+				return
+			}
+		}
+	}
+}
