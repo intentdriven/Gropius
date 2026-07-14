@@ -154,9 +154,16 @@ func runServer(ln net.Listener, paths config.Paths, cfg config.Config, headless 
 		if adv != nil {
 			adv.Stop()
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		// Graceful shutdown waits for open connections to finish — but the control
+		// panel holds a /api/events SSE stream open indefinitely, so a plain
+		// Shutdown would block for the whole timeout on any open dashboard tab.
+		// Give real in-flight requests a short grace period, then force-close the
+		// long-lived streams so Quit is near-instant.
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
-		srv.Shutdown(ctx)
+		if err := srv.Shutdown(ctx); err != nil {
+			srv.Close()
+		}
 	}
 
 	// Quit on ^C / SIGTERM as well as from the menu.
