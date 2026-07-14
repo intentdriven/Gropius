@@ -65,7 +65,15 @@ final class AppModel: ObservableObject {
     @Published var input: String = ""
     @Published var status: String = "Not connected"
     @Published var connected: Bool = false
+    @Published var connecting: Bool = false
     @Published var sending: Bool = false
+
+    /// Coarse connection health, for the status dot.
+    enum Connection { case online, warning, offline }
+    var connection: Connection {
+        if !connected { return connecting ? .warning : .offline }
+        return models.isEmpty ? .warning : .online
+    }
 
     private var streamTask: Task<Void, Never>?
 
@@ -154,6 +162,8 @@ final class AppModel: ObservableObject {
             return
         }
         req.httpMethod = "GET"
+        connecting = true
+        defer { connecting = false }
         status = "Connecting…"
         do {
             let (data, resp) = try await URLSession.shared.data(for: req)
@@ -356,8 +366,10 @@ struct ChatDetail: View {
         }
         .navigationTitle("Gropius Chat")
         .toolbar {
-            ToolbarItem(placement: .principal) {
-                Text(model.status).font(.caption).foregroundStyle(.secondary)
+            ToolbarItem {
+                StatusDot(color: statusColor,
+                          pulsing: model.connection == .online,
+                          tooltip: model.status)
             }
             if model.connected && !model.models.isEmpty {
                 ToolbarItem {
@@ -435,8 +447,52 @@ struct ChatDetail: View {
         .padding(12)
     }
 
+    private var statusColor: Color {
+        switch model.connection {
+        case .online:  return .green
+        case .warning: return .orange
+        case .offline: return .red
+        }
+    }
+
     private func short(_ id: String) -> String {
         id.contains("/") ? String(id.split(separator: "/").last!) : id
+    }
+}
+
+/// A small connection indicator: green (online), orange (degraded), red (offline).
+/// The online state pulses gently. The full status text is available on hover.
+struct StatusDot: View {
+    let color: Color
+    let pulsing: Bool
+    let tooltip: String
+    @State private var animate = false
+
+    var body: some View {
+        ZStack {
+            Circle()
+                .fill(color.opacity(0.45))
+                .frame(width: 9, height: 9)
+                .scaleEffect(animate ? 2.4 : 1)
+                .opacity(animate ? 0 : 0.7)
+            Circle()
+                .fill(color)
+                .frame(width: 9, height: 9)
+                .shadow(color: color.opacity(0.8), radius: pulsing ? 3 : 0)
+        }
+        .frame(width: 22, height: 18)
+        .help(tooltip)
+        .onAppear(perform: restart)
+        .onChange(of: pulsing) { _, _ in restart() }
+        .onChange(of: color) { _, _ in restart() }
+    }
+
+    private func restart() {
+        animate = false
+        guard pulsing else { return }
+        withAnimation(.easeOut(duration: 1.5).repeatForever(autoreverses: false)) {
+            animate = true
+        }
     }
 }
 

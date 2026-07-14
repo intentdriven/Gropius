@@ -123,6 +123,8 @@ button.ghost { background: none; color: var(--ink); }
 button.ghost:hover { background: var(--ink); color: var(--paper); }
 button.danger { background: none; color: var(--red); border-color: var(--red); }
 button.danger:hover { background: var(--red); color: #fff; }
+/* An armed confirm button reads as filled-red so the second click is obviously live. */
+button.armed, button.danger.armed { background: var(--red); color: #fff; border-color: var(--red); }
 button:disabled { opacity: .45; cursor: default; }
 button.link {
   border: 0; background: none; color: var(--blue); padding: 4px 0;

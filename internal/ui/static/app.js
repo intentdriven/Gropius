@@ -136,22 +136,21 @@ function renderModels() {
     } else if (m.state === 'failed') {
       actions.append(btn('Retry', '', () =>
         postModel('/api/models/download', m.repo_id).catch(alertErr)));
-      actions.append(btn('Remove', 'danger', () => del(m.repo_id)));
+      // A failed/partial download has nothing worth protecting — remove at once.
+      actions.append(btn('Remove', 'danger', () =>
+        postModel('/api/models/delete', m.repo_id).catch(alertErr)));
     } else {
       actions.append(loaded
         ? btn('Unload', 'ghost', () =>
             postModel('/api/models/unload', m.repo_id).catch(alertErr))
         : btn('Load', 'ghost', () =>
             postModel('/api/models/load', m.repo_id).catch(alertErr)));
-      actions.append(btn('Delete', 'danger', () => del(m.repo_id)));
+      // A ready model is real data, so require a deliberate second click.
+      actions.append(confirmBtn('Delete', 'Confirm?', 'danger', () =>
+        postModel('/api/models/delete', m.repo_id).catch(alertErr)));
     }
     list.appendChild(card);
   });
-}
-
-function del(repo) {
-  if (!confirm(`Delete ${repo}? This removes the downloaded files from disk.`)) return;
-  postModel('/api/models/delete', repo).catch(alertErr);
 }
 
 function btn(label, cls, onClick) {
@@ -159,6 +158,37 @@ function btn(label, cls, onClick) {
   b.textContent = label;
   if (cls) b.className = cls;
   b.addEventListener('click', onClick);
+  return b;
+}
+
+// confirmBtn is an inline two-click confirmation. The first click arms the
+// button (it shows confirmLabel for 3s); a second click within that window runs
+// the action. This replaces window.confirm, which browsers let the user
+// permanently suppress — silently turning destructive buttons into no-ops.
+function confirmBtn(label, confirmLabel, cls, onConfirm) {
+  const b = document.createElement('button');
+  b.textContent = label;
+  if (cls) b.className = cls;
+  let armed = false;
+  let timer = null;
+  b.addEventListener('click', () => {
+    if (armed) {
+      clearTimeout(timer);
+      armed = false;
+      b.textContent = label;
+      b.classList.remove('armed');
+      onConfirm();
+      return;
+    }
+    armed = true;
+    b.textContent = confirmLabel;
+    b.classList.add('armed');
+    timer = setTimeout(() => {
+      armed = false;
+      b.textContent = label;
+      b.classList.remove('armed');
+    }, 3000);
+  });
   return b;
 }
 
