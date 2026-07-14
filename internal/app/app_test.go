@@ -164,6 +164,31 @@ func TestCancelDownload(t *testing.T) {
 	}
 }
 
+func TestCancelClearsOrphanedDownloadState(t *testing.T) {
+	a := newTestApp(t)
+	// A download recorded in the registry with no live goroutine behind it —
+	// exactly what a crash or restart leaves behind.
+	if err := a.Registry.Put(registry.Model{
+		RepoID: "org/orphan",
+		Path:   a.Paths.ModelDir("org/orphan"),
+		State:  registry.StateDownloading,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := a.CancelDownload("org/orphan"); err != nil {
+		t.Fatalf("CancelDownload on an orphan should succeed, got %v", err)
+	}
+
+	m, err := a.Registry.Get("org/orphan")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if m.State != registry.StateFailed {
+		t.Fatalf("state = %q, want failed so the UI offers Retry/Remove", m.State)
+	}
+}
+
 func TestDeleteRemovesFilesAndRegistryEntry(t *testing.T) {
 	a := newTestApp(t)
 	hub := fakeHub(t)

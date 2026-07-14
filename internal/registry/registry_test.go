@@ -19,6 +19,60 @@ func newTestRegistry(t *testing.T) (*Registry, string) {
 	return r, dir
 }
 
+func TestReconcileInterruptedMarksOrphanedDownloadsFailed(t *testing.T) {
+	r, _ := newTestRegistry(t)
+	r.Put(Model{RepoID: "org/downloading", State: StateDownloading, Progress: 21})
+	r.Put(Model{RepoID: "org/ready", State: StateReady})
+	r.Put(Model{RepoID: "org/failed", State: StateFailed, Err: "boom"})
+
+	changed := r.ReconcileInterrupted()
+	if len(changed) != 1 || changed[0] != "org/downloading" {
+		t.Fatalf("changed = %v, want [org/downloading]", changed)
+	}
+
+	got, err := r.Get("org/downloading")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.State != StateFailed {
+		t.Fatalf("state = %q, want failed", got.State)
+	}
+	if got.Err == "" {
+		t.Fatal("failed model should carry an explanation")
+	}
+	// A ready model must be left untouched.
+	if ready, _ := r.Get("org/ready"); ready.State != StateReady {
+		t.Fatalf("ready model was altered: %q", ready.State)
+	}
+}
+
+func TestReconcileInterruptedPersistsAcrossReopen(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "registry.json")
+	r1, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	r1.Put(Model{RepoID: "org/dl", State: StateDownloading})
+	r1.ReconcileInterrupted()
+
+	r2, err := Open(path)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	if m, _ := r2.Get("org/dl"); m.State != StateFailed {
+		t.Fatalf("state after reopen = %q, want failed", m.State)
+	}
+}
+
+func TestReconcileInterruptedNoOpWhenNothingDownloading(t *testing.T) {
+	r, _ := newTestRegistry(t)
+	r.Put(Model{RepoID: "org/ready", State: StateReady})
+	if changed := r.ReconcileInterrupted(); changed != nil {
+		t.Fatalf("changed = %v, want nil", changed)
+	}
+}
+
 func TestPutGetList(t *testing.T) {
 	r, _ := newTestRegistry(t)
 

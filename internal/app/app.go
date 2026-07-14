@@ -71,6 +71,12 @@ func New(opts Options) (*App, error) {
 	if err := reg.Rescan(opts.Paths.Models); err != nil {
 		opts.Log.Warn("could not scan the models directory", "err", err)
 	}
+	// A download in flight when the previous process died is left recorded as
+	// "downloading" with no goroutine behind it. Mark such orphans failed so the
+	// UI offers Retry/Remove instead of a Cancel button that cannot work.
+	if interrupted := reg.ReconcileInterrupted(); len(interrupted) > 0 {
+		opts.Log.Warn("marked interrupted downloads as failed", "models", interrupted)
+	}
 
 	hc := hub.New()
 	hc.Token = opts.Config.HFToken
@@ -250,15 +256,22 @@ func (a *App) finishDownload(repoID string) {
 }
 
 // CancelDownload stops an in-flight download.
+//
+// If there is no live download but the registry still records the model as
+// downloading — an orphan left by a crash or restart — its state is cleared to
+// failed so it can be retried or removed, rather than reporting a spurious error.
 func (a *App) CancelDownload(repoID string) error {
 	a.dlMu.Lock()
 	dl, ok := a.downloads[repoID]
 	a.dlMu.Unlock()
-	if !ok {
-		return fmt.Errorf("%s is not downloading", repoID)
+	if ok {
+		dl.cancel()
+		return nil
 	}
-	dl.cancel()
-	return nil
+	if m, err := a.Registry.Get(repoID); err == nil && m.State == registry.StateDownloading {
+		return a.Registry.SetState(repoID, registry.StateFailed, m.Progress, "cancelled")
+	}
+	return fmt.Errorf("%s is not downloading", repoID)
 }
 
 // Downloading lists the repos currently being fetched.

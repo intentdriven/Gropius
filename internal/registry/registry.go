@@ -181,6 +181,42 @@ func (r *Registry) SetState(repoID string, state State, progress float64, errMsg
 	return err
 }
 
+// ReconcileInterrupted marks every model still recorded as "downloading" as
+// failed, and returns the ids it changed.
+//
+// Only one Gropius process ever downloads (the singleton that owns the port), so
+// any "downloading" entry found when a fresh process starts up is orphaned: the
+// goroutine that was fetching it died with the previous process. Left alone it
+// stays "downloading" forever — the UI offers only a Cancel button for that
+// state, and Cancel fails because there is no live download to cancel, so the
+// entry can be neither resumed nor removed. Transitioning it to failed makes the
+// UI offer Retry (which resumes from the .part files left on disk) and Remove.
+//
+// Call this once at startup, after Rescan.
+func (r *Registry) ReconcileInterrupted() []string {
+	r.mu.Lock()
+	var changed []string
+	for repoID, m := range r.models {
+		if m.State != StateDownloading {
+			continue
+		}
+		m.State = StateFailed
+		m.Err = "interrupted — Gropius restarted while this was downloading; retry to resume or remove it"
+		r.models[repoID] = m
+		changed = append(changed, repoID)
+	}
+	if len(changed) == 0 {
+		r.mu.Unlock()
+		return nil
+	}
+	snapshot := r.listLocked()
+	_ = r.saveLocked()
+	r.mu.Unlock()
+
+	r.broadcast(snapshot)
+	return changed
+}
+
 // UpdateProgress records download progress WITHOUT writing to disk.
 //
 // Download progress ticks arrive ~10 times a second. Persisting the whole
