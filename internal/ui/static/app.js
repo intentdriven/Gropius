@@ -112,7 +112,8 @@ function renderModels() {
 
     let info = '';
     if (m.state === 'downloading') {
-      info = `downloading… ${m.progress.toFixed(0)}%`;
+      const of = m.size_bytes ? ` of ${bytes(m.size_bytes)}` : '';
+      info = `downloading… ${m.progress.toFixed(0)}%${of}`;
     } else if (m.state === 'failed') {
       info = escapeHtml(m.err || 'failed');
     } else {
@@ -131,8 +132,10 @@ function renderModels() {
     const actions = card.querySelector('.actions');
 
     if (m.state === 'downloading') {
+      // Cancel abandons the download outright: stop it and remove the partial
+      // files, rather than leaving a lingering "failed" row behind.
       actions.append(btn('Cancel', 'danger', () =>
-        postModel('/api/models/cancel', m.repo_id).catch(alertErr)));
+        postModel('/api/models/delete', m.repo_id).catch(alertErr)));
     } else if (m.state === 'failed') {
       actions.append(btn('Retry', '', () =>
         postModel('/api/models/download', m.repo_id).catch(alertErr)));
@@ -200,17 +203,40 @@ $('searchForm').addEventListener('submit', async (e) => {
   box.innerHTML = '<p class="hint">Searching…</p>';
   try {
     const data = await api(`/api/search?q=${encodeURIComponent(q)}`);
-    renderSearch(data.results || []);
+    renderSearch(data);
   } catch (err) {
     box.innerHTML = `<p class="msg err">${escapeHtml(err.message)}</p>`;
   }
 });
 
-function renderSearch(results) {
+function renderSearch(data) {
   const box = $('searchResults');
+  const results = (data && data.results) || [];
+  const machine = data && data.machine;
+  const hidden = (data && data.hidden) || 0;
   box.innerHTML = '';
+
+  // A note describing this Mac and how many models were hidden as too large.
+  if (machine && machine.total_ram) {
+    const note = document.createElement('p');
+    note.className = 'hint';
+    let text = `This Mac: ${bytes(machine.total_ram)} RAM · ${bytes(machine.free_disk)} free.`;
+    if (hidden > 0) {
+      text += ` ${hidden} model${hidden === 1 ? '' : 's'} hidden (too large to run or store here).`;
+    } else {
+      text += ' Showing models that fit.';
+    }
+    note.textContent = text;
+    box.appendChild(note);
+  }
+
   if (!results.length) {
-    box.innerHTML = '<p class="hint">No models found.</p>';
+    const p = document.createElement('p');
+    p.className = 'hint';
+    p.textContent = hidden > 0
+      ? 'No models small enough for this Mac matched your search.'
+      : 'No models found.';
+    box.appendChild(p);
     return;
   }
   results.forEach((m) => {
@@ -218,10 +244,11 @@ function renderSearch(results) {
     card.className = 'card';
     const quant = m.quantization
       ? `<span class="pill quant">${escapeHtml(m.quantization)}</span>` : '';
+    const size = m.size_bytes ? ` · ${bytes(m.size_bytes)}` : '';
     card.innerHTML = `
       <div class="meta">
         <div class="name">${escapeHtml(m.id)}${quant}</div>
-        <div class="info">${(m.downloads || 0).toLocaleString()} downloads · ${m.likes || 0} likes</div>
+        <div class="info">${(m.downloads || 0).toLocaleString()} downloads · ${m.likes || 0} likes${size}</div>
       </div>
       <div class="actions"></div>`;
 
