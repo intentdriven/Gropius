@@ -517,30 +517,47 @@ struct EmptyState: View {
 
 struct MessageRow: View {
     let message: Message
+    private var isUser: Bool { message.role == .user }
+
+    // iMessage blue for sent bubbles, independent of the system accent colour
+    // (which the user might have set to anything).
+    private static let sentBlue = Color(red: 0.039, green: 0.518, blue: 1.0)
+
     var body: some View {
         HStack {
-            if message.role == .user { Spacer(minLength: 40) }
-            VStack(alignment: .leading, spacing: 6) {
+            if isUser { Spacer(minLength: 64) }
+            VStack(alignment: isUser ? .trailing : .leading, spacing: 5) {
+                // Thinking-model reasoning sits above the answer, muted, no bubble.
                 if !message.reasoning.isEmpty {
                     Text(message.reasoning)
-                        .font(.caption).foregroundStyle(.secondary).italic()
+                        .font(.callout).italic()
+                        .foregroundStyle(.secondary)
                         .textSelection(.enabled)
+                        .padding(.horizontal, 6)
+                        .frame(maxWidth: 560, alignment: .leading)
                 }
-                if message.text.isEmpty && message.role == .assistant {
-                    ProgressView().controlSize(.small)
-                } else {
+                if message.text.isEmpty && !isUser {
+                    ProgressView().controlSize(.small).padding(.vertical, 6).padding(.horizontal, 4)
+                } else if !message.text.isEmpty {
                     Text(message.text)
                         .textSelection(.enabled)
-                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .foregroundStyle(isUser ? .white : .primary)
+                        .padding(.horizontal, 13)
+                        .padding(.vertical, 8)
+                        .background(bubble)
+                        .frame(maxWidth: 560, alignment: isUser ? .trailing : .leading)
                 }
             }
-            .padding(10)
-            .background(
-                RoundedRectangle(cornerRadius: 10)
-                    .fill(message.role == .user ? Color.accentColor.opacity(0.18) : Color(.textBackgroundColor))
-            )
-            .overlay(RoundedRectangle(cornerRadius: 10).stroke(.quaternary, lineWidth: 1))
-            if message.role == .assistant { Spacer(minLength: 40) }
+            if !isUser { Spacer(minLength: 64) }
+        }
+    }
+
+    @ViewBuilder private var bubble: some View {
+        let shape = RoundedRectangle(cornerRadius: 18, style: .continuous)
+        if isUser {
+            shape.fill(Self.sentBlue)
+        } else {
+            shape.fill(.quaternary)
         }
     }
 }
