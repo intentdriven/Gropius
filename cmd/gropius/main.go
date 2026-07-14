@@ -61,18 +61,23 @@ func main() {
 		cfg = config.Default()
 	}
 
-	// Claim the port. Losing this race is a normal outcome, not an error: another
-	// account (or another copy of the app) is already serving.
-	ln, err := net.Listen("tcp", fmt.Sprintf("%s:%d", cfg.Host, cfg.Port))
+	// Claim the port. Losing this race to a live server is a normal outcome, not
+	// an error: another account (or another copy of the app) is already serving.
+	// A predecessor still shutting down is NOT a loss — acquireListener waits for
+	// the port to free rather than falling into client mode with nothing serving.
+	addr := fmt.Sprintf("%s:%d", cfg.Host, cfg.Port)
+	ln, claimed, err := acquireListener(addr, 5*time.Second, func() bool {
+		return serverResponding(cfg.Port)
+	})
 	if err != nil {
-		if isAddrInUse(err) {
-			log.Info("another Gropius server is already running; starting as a client",
-				"port", cfg.Port)
-			runClient(cfg, *headless, log)
-			return
-		}
-		log.Error("cannot listen", "addr", fmt.Sprintf("%s:%d", cfg.Host, cfg.Port), "err", err)
+		log.Error("cannot listen", "addr", addr, "err", err)
 		os.Exit(1)
+	}
+	if !claimed {
+		log.Info("another Gropius server is already running; starting as a client",
+			"port", cfg.Port)
+		runClient(cfg, *headless, log)
+		return
 	}
 
 	if err := runServer(ln, paths, cfg, *headless, log); err != nil {
