@@ -31,6 +31,15 @@ open dist/GropiusChat.app
 Thinking models (Qwen3, etc.) stream their reasoning; it shows in grey above the
 answer, so a reply that spends its whole budget reasoning is never blank.
 
+### Chats
+
+The left **sidebar** holds your conversations. The **＋** button (or the pencil in
+the sidebar) starts a new chat; the toolbar's sidebar button hides or shows the
+list. Delete a chat by swiping, right-clicking, or the Delete key. Everything is
+saved to `~/Library/Application Support/GropiusChat/conversations.json` and
+restored on next launch — history lives on the machine running the client, not on
+the server.
+
 ## Distributing it to another Mac
 
 The app is **ad-hoc signed**, not signed with an Apple Developer ID. That's fine

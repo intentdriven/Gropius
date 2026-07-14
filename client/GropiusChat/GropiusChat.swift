@@ -2,25 +2,32 @@
 //
 // It talks to the OpenAI-compatible endpoint another Mac exposes with Gropius:
 // GET /v1/models to list what is available, POST /v1/chat/completions (streaming)
-// to chat. Nothing here is specific to a model — point it at the server, pick a
-// model, type.
+// to chat. Conversations are kept in a toggleable sidebar and persisted to disk.
 //
 // Built as a single-file SwiftUI app so it compiles with swiftc and packages
 // into a .app without an Xcode project. See build.sh.
 
 import SwiftUI
 
-// MARK: - Wire types
+// MARK: - Model types
 
-/// One turn in the transcript.
-struct Message: Identifiable {
-    enum Role { case user, assistant }
-    let id = UUID()
+/// One turn in a conversation.
+struct Message: Identifiable, Codable, Equatable {
+    enum Role: String, Codable { case user, assistant }
+    var id = UUID()
     var role: Role
     var text: String = ""
     /// Thinking models (e.g. Qwen3) stream their reasoning separately; we keep it
     /// so a reply that spends its whole budget reasoning is not shown as blank.
     var reasoning: String = ""
+}
+
+/// A saved chat: a title plus its messages.
+struct Conversation: Identifiable, Codable {
+    var id = UUID()
+    var title: String = "New Chat"
+    var messages: [Message] = []
+    var createdAt = Date()
 }
 
 /// GET /v1/models
@@ -42,17 +49,19 @@ private struct StreamChunk: Decodable {
     let choices: [Choice]
 }
 
-// MARK: - Client
+// MARK: - App model
 
 @MainActor
-final class ChatModel: ObservableObject {
+final class AppModel: ObservableObject {
     // Persisted connection settings.
     @AppStorage("serverURL") var serverURL: String = "http://AlicesMac.local:11535"
     @AppStorage("apiKey") var apiKey: String = ""
     @AppStorage("selectedModel") var selectedModel: String = ""
 
+    @Published var conversations: [Conversation] = []
+    @Published var selectedID: UUID?
+
     @Published var models: [String] = []
-    @Published var messages: [Message] = []
     @Published var input: String = ""
     @Published var status: String = "Not connected"
     @Published var connected: Bool = false
@@ -60,7 +69,68 @@ final class ChatModel: ObservableObject {
 
     private var streamTask: Task<Void, Never>?
 
-    /// The server base with any trailing slash trimmed.
+    init() {
+        load()
+        if conversations.isEmpty {
+            let c = Conversation()
+            conversations = [c]
+            selectedID = c.id
+        } else {
+            selectedID = conversations.first?.id
+        }
+    }
+
+    // MARK: Conversation management
+
+    var currentIndex: Int? { conversations.firstIndex { $0.id == selectedID } }
+    var currentMessages: [Message] { currentIndex.map { conversations[$0].messages } ?? [] }
+
+    func newChat() {
+        stop()
+        let c = Conversation()
+        conversations.insert(c, at: 0)
+        selectedID = c.id
+        save()
+    }
+
+    func deleteChat(_ id: UUID) {
+        stop()
+        conversations.removeAll { $0.id == id }
+        if selectedID == id { selectedID = conversations.first?.id }
+        if conversations.isEmpty {
+            let c = Conversation()
+            conversations = [c]
+            selectedID = c.id
+        }
+        save()
+    }
+
+    // MARK: Persistence
+
+    private var saveURL: URL {
+        let base = FileManager.default
+            .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("GropiusChat", isDirectory: true)
+        return base.appendingPathComponent("conversations.json")
+    }
+
+    private func load() {
+        guard let data = try? Data(contentsOf: saveURL),
+              let saved = try? JSONDecoder().decode([Conversation].self, from: data)
+        else { return }
+        conversations = saved
+    }
+
+    func save() {
+        let dir = saveURL.deletingLastPathComponent()
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        if let data = try? JSONEncoder().encode(conversations) {
+            try? data.write(to: saveURL, options: .atomic)
+        }
+    }
+
+    // MARK: Networking
+
     private var base: String {
         var s = serverURL.trimmingCharacters(in: .whitespaces)
         while s.hasSuffix("/") { s.removeLast() }
@@ -77,7 +147,7 @@ final class ChatModel: ObservableObject {
         return r
     }
 
-    /// Fetch the model list; this doubles as the connection test.
+    /// Fetch the model list; doubles as the connection test.
     func connect() async {
         guard var req = request("/v1/models") else {
             status = "That server URL is not valid."
@@ -88,19 +158,14 @@ final class ChatModel: ObservableObject {
         do {
             let (data, resp) = try await URLSession.shared.data(for: req)
             guard let http = resp as? HTTPURLResponse else {
-                status = "No response from the server."
-                connected = false
-                return
+                status = "No response from the server."; connected = false; return
             }
             if http.statusCode == 401 {
                 status = "The server requires an API key. Add one in Settings."
-                connected = false
-                return
+                connected = false; return
             }
             guard http.statusCode == 200 else {
-                status = "Server returned HTTP \(http.statusCode)."
-                connected = false
-                return
+                status = "Server returned HTTP \(http.statusCode)."; connected = false; return
             }
             let list = try JSONDecoder().decode(ModelsResponse.self, from: data)
             models = list.data.map(\.id).sorted()
@@ -109,7 +174,7 @@ final class ChatModel: ObservableObject {
             }
             connected = true
             status = models.isEmpty
-                ? "Connected, but the server has no models downloaded yet."
+                ? "Connected, but no models are downloaded yet."
                 : "Connected · \(models.count) model\(models.count == 1 ? "" : "s")"
         } catch {
             connected = false
@@ -119,31 +184,35 @@ final class ChatModel: ObservableObject {
 
     func send() {
         let prompt = input.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !prompt.isEmpty, !selectedModel.isEmpty, !sending else { return }
+        guard !prompt.isEmpty, !selectedModel.isEmpty, !sending,
+              let idx = currentIndex, let convoID = selectedID else { return }
         input = ""
-        messages.append(Message(role: .user, text: prompt))
-        messages.append(Message(role: .assistant))
-        let assistantIndex = messages.count - 1
+        conversations[idx].messages.append(Message(role: .user, text: prompt))
+        if conversations[idx].title == "New Chat" {
+            conversations[idx].title = String(prompt.prefix(48))
+        }
+        conversations[idx].messages.append(Message(role: .assistant))
+        save()
 
         sending = true
-        streamTask = Task { await stream(into: assistantIndex) }
+        streamTask = Task { await stream(convoID: convoID) }
     }
 
-    func stop() {
-        streamTask?.cancel()
-    }
+    func stop() { streamTask?.cancel() }
 
-    private func stream(into index: Int) async {
-        defer { sending = false }
+    private func stream(convoID: UUID) async {
+        defer { sending = false; save() }
+
+        guard let ci0 = conversations.firstIndex(where: { $0.id == convoID }) else { return }
+        let assistantIndex = conversations[ci0].messages.count - 1
+        guard assistantIndex >= 0 else { return }
 
         guard var req = request("/v1/chat/completions") else { return }
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
 
-        // Build the message history from the transcript (excluding the empty
-        // assistant turn we are about to fill in).
-        let history: [[String: String]] = messages[..<index].map { m in
-            ["role": m.role == .user ? "user" : "assistant", "content": m.text]
+        let history: [[String: String]] = conversations[ci0].messages[..<assistantIndex].map {
+            ["role": $0.role == .user ? "user" : "assistant", "content": $0.text]
         }
         let body: [String: Any] = [
             "model": selectedModel,
@@ -153,10 +222,22 @@ final class ChatModel: ObservableObject {
         ]
         req.httpBody = try? JSONSerialization.data(withJSONObject: body)
 
+        func write(content: String = "", reasoning: String = "") {
+            guard let ci = conversations.firstIndex(where: { $0.id == convoID }),
+                  assistantIndex < conversations[ci].messages.count else { return }
+            conversations[ci].messages[assistantIndex].text += content
+            conversations[ci].messages[assistantIndex].reasoning += reasoning
+        }
+        func assistant() -> Message? {
+            guard let ci = conversations.firstIndex(where: { $0.id == convoID }),
+                  assistantIndex < conversations[ci].messages.count else { return nil }
+            return conversations[ci].messages[assistantIndex]
+        }
+
         do {
             let (bytes, resp) = try await URLSession.shared.bytes(for: req)
             if let http = resp as? HTTPURLResponse, http.statusCode != 200 {
-                messages[index].text = "⚠️ Server returned HTTP \(http.statusCode)."
+                write(content: "⚠️ Server returned HTTP \(http.statusCode).")
                 return
             }
             for try await line in bytes.lines {
@@ -167,29 +248,23 @@ final class ChatModel: ObservableObject {
                 guard let d = payload.data(using: .utf8),
                       let chunk = try? JSONDecoder().decode(StreamChunk.self, from: d),
                       let delta = chunk.choices.first?.delta else { continue }
-                if let c = delta.content, !c.isEmpty {
-                    messages[index].text += c
-                }
+                if let c = delta.content, !c.isEmpty { write(content: c) }
                 if let r = delta.reasoning ?? delta.reasoning_content, !r.isEmpty {
-                    messages[index].reasoning += r
+                    write(reasoning: r)
                 }
             }
             // A thinking model can exhaust its token budget before emitting a final
             // answer. Rather than show nothing, fall back to the reasoning.
-            if messages[index].text.isEmpty && !messages[index].reasoning.isEmpty {
-                messages[index].text = messages[index].reasoning
-                messages[index].reasoning = ""
+            if let m = assistant(), m.text.isEmpty, !m.reasoning.isEmpty,
+               let ci = conversations.firstIndex(where: { $0.id == convoID }) {
+                conversations[ci].messages[assistantIndex].text = m.reasoning
+                conversations[ci].messages[assistantIndex].reasoning = ""
             }
         } catch is CancellationError {
-            if messages[index].text.isEmpty { messages[index].text = "⏹ Stopped." }
+            if assistant()?.text.isEmpty == true { write(content: "⏹ Stopped.") }
         } catch {
-            messages[index].text = "⚠️ \(error.localizedDescription)"
+            write(content: "⚠️ \(error.localizedDescription)")
         }
-    }
-
-    func newChat() {
-        stop()
-        messages.removeAll()
     }
 }
 
@@ -199,82 +274,115 @@ final class ChatModel: ObservableObject {
 struct GropiusChatApp: App {
     var body: some Scene {
         WindowGroup("Gropius Chat") {
-            ContentView()
-                .frame(minWidth: 560, minHeight: 480)
+            RootView().frame(minWidth: 720, minHeight: 480)
         }
-        .windowResizability(.contentMinSize)
     }
 }
 
-struct ContentView: View {
-    @StateObject private var model = ChatModel()
+struct RootView: View {
+    @StateObject private var model = AppModel()
     @State private var showSettings = false
 
     var body: some View {
-        VStack(spacing: 0) {
-            header
-            Divider()
-            transcript
-            Divider()
-            composer
+        NavigationSplitView {
+            Sidebar(model: model)
+                .navigationSplitViewColumnWidth(min: 200, ideal: 240, max: 340)
+        } detail: {
+            ChatDetail(model: model, showSettings: $showSettings)
         }
         .sheet(isPresented: $showSettings) { SettingsView(model: model) }
         .task { await model.connect() }
     }
+}
 
-    private var header: some View {
-        HStack(spacing: 12) {
-            // Gropius mark: three primary blocks.
-            HStack(spacing: 3) {
-                Rectangle().fill(.red).frame(width: 10, height: 16)
-                Rectangle().fill(.yellow).frame(width: 10, height: 16)
-                Rectangle().fill(.blue).frame(width: 10, height: 16)
+struct Sidebar: View {
+    @ObservedObject var model: AppModel
+
+    var body: some View {
+        List(selection: Binding(get: { model.selectedID },
+                                set: { model.selectedID = $0 })) {
+            ForEach(model.conversations) { c in
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(c.title.isEmpty ? "New Chat" : c.title)
+                        .lineLimit(1)
+                    Text("\(c.messages.count) message\(c.messages.count == 1 ? "" : "s")")
+                        .font(.caption2).foregroundStyle(.secondary)
+                }
+                .tag(c.id)
+                .contextMenu {
+                    Button("Delete", role: .destructive) { model.deleteChat(c.id) }
+                }
             }
-            VStack(alignment: .leading, spacing: 1) {
-                Text("Gropius Chat").font(.headline)
+            .onDelete { offsets in
+                offsets.map { model.conversations[$0].id }.forEach(model.deleteChat)
+            }
+        }
+        .navigationTitle("Chats")
+        .toolbar {
+            ToolbarItem {
+                Button { model.newChat() } label: { Image(systemName: "square.and.pencil") }
+                    .help("New chat")
+            }
+        }
+    }
+}
+
+struct ChatDetail: View {
+    @ObservedObject var model: AppModel
+    @Binding var showSettings: Bool
+
+    var body: some View {
+        VStack(spacing: 0) {
+            transcript
+            Divider()
+            composer
+        }
+        .navigationTitle("Gropius Chat")
+        .toolbar {
+            ToolbarItem(placement: .principal) {
                 Text(model.status).font(.caption).foregroundStyle(.secondary)
             }
-            Spacer()
             if model.connected && !model.models.isEmpty {
-                Picker("", selection: $model.selectedModel) {
-                    ForEach(model.models, id: \.self) { Text(short($0)).tag($0) }
+                ToolbarItem {
+                    Picker("", selection: $model.selectedModel) {
+                        ForEach(model.models, id: \.self) { Text(short($0)).tag($0) }
+                    }
+                    .labelsHidden().frame(minWidth: 140)
+                    .help("Model")
                 }
-                .labelsHidden()
-                .frame(maxWidth: 220)
             }
-            Button {
-                Task { await model.connect() }
-            } label: { Image(systemName: "arrow.clockwise") }
-                .help("Reconnect and refresh models")
-            Button { model.newChat() } label: { Image(systemName: "square.and.pencil") }
-                .help("New chat")
-            Button { showSettings = true } label: { Image(systemName: "gearshape") }
-                .help("Server settings")
+            ToolbarItem {
+                Button { Task { await model.connect() } } label: {
+                    Image(systemName: "arrow.clockwise")
+                }.help("Reconnect and refresh models")
+            }
+            ToolbarItem {
+                Button { showSettings = true } label: { Image(systemName: "gearshape") }
+                    .help("Server settings")
+            }
         }
-        .padding(12)
     }
 
     private var transcript: some View {
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 10) {
-                    if model.messages.isEmpty {
-                        Text("Ask the model anything. Messages go to \(model.selectedModel.isEmpty ? "the selected model" : short(model.selectedModel)) on your Gropius server.")
-                            .foregroundStyle(.secondary)
-                            .padding(.top, 40)
-                            .frame(maxWidth: .infinity)
-                            .multilineTextAlignment(.center)
+                    if model.currentMessages.isEmpty {
+                        EmptyState(model: model)
                     }
-                    ForEach(model.messages) { m in
+                    ForEach(model.currentMessages) { m in
                         MessageRow(message: m).id(m.id)
                     }
                 }
                 .padding(12)
             }
-            .onChange(of: model.messages.last?.text) { _, _ in
-                if let last = model.messages.last {
+            .onChange(of: model.currentMessages.last?.text) { _, _ in
+                if let last = model.currentMessages.last {
                     withAnimation { proxy.scrollTo(last.id, anchor: .bottom) }
                 }
+            }
+            .onChange(of: model.selectedID) { _, _ in
+                if let last = model.currentMessages.last { proxy.scrollTo(last.id, anchor: .bottom) }
             }
         }
     }
@@ -291,7 +399,7 @@ struct ContentView: View {
             if model.sending {
                 Button { model.stop() } label: {
                     Image(systemName: "stop.circle.fill").font(.title2)
-                }.buttonStyle(.plain)
+                }.buttonStyle(.plain).help("Stop")
             } else {
                 Button { model.send() } label: {
                     Image(systemName: "arrow.up.circle.fill").font(.title2)
@@ -308,6 +416,25 @@ struct ContentView: View {
     }
 }
 
+struct EmptyState: View {
+    @ObservedObject var model: AppModel
+    var body: some View {
+        VStack(spacing: 14) {
+            HStack(spacing: 4) {
+                Rectangle().fill(.red).frame(width: 16, height: 26)
+                Rectangle().fill(.yellow).frame(width: 16, height: 26)
+                Rectangle().fill(.blue).frame(width: 16, height: 26)
+            }
+            Text(model.selectedModel.isEmpty
+                 ? "Connect to a Gropius server to start."
+                 : "Ask \(model.selectedModel.split(separator: "/").last.map(String.init) ?? "the model") anything.")
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.top, 60)
+    }
+}
+
 struct MessageRow: View {
     let message: Message
     var body: some View {
@@ -316,9 +443,7 @@ struct MessageRow: View {
             VStack(alignment: .leading, spacing: 6) {
                 if !message.reasoning.isEmpty {
                     Text(message.reasoning)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .italic()
+                        .font(.caption).foregroundStyle(.secondary).italic()
                         .textSelection(.enabled)
                 }
                 if message.text.isEmpty && message.role == .assistant {
@@ -334,16 +459,14 @@ struct MessageRow: View {
                 RoundedRectangle(cornerRadius: 10)
                     .fill(message.role == .user ? Color.accentColor.opacity(0.18) : Color(.textBackgroundColor))
             )
-            .overlay(
-                RoundedRectangle(cornerRadius: 10).stroke(.quaternary, lineWidth: 1)
-            )
+            .overlay(RoundedRectangle(cornerRadius: 10).stroke(.quaternary, lineWidth: 1))
             if message.role == .assistant { Spacer(minLength: 40) }
         }
     }
 }
 
 struct SettingsView: View {
-    @ObservedObject var model: ChatModel
+    @ObservedObject var model: AppModel
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
@@ -353,7 +476,7 @@ struct SettingsView: View {
                 Text("Server URL").font(.caption).foregroundStyle(.secondary)
                 TextField("http://AlicesMac.local:11535", text: $model.serverURL)
                     .textFieldStyle(.roundedBorder)
-                Text("The Gropius server's address. Use the Mac's .local name or its LAN IP, port 11535.")
+                Text("The Gropius server's address — the Mac's .local name or LAN IP, port 11535.")
                     .font(.caption2).foregroundStyle(.secondary)
             }
             VStack(alignment: .leading, spacing: 4) {
@@ -364,10 +487,8 @@ struct SettingsView: View {
             HStack {
                 Spacer()
                 Button("Cancel") { dismiss() }
-                Button("Connect") {
-                    dismiss()
-                    Task { await model.connect() }
-                }.keyboardShortcut(.defaultAction)
+                Button("Connect") { dismiss(); Task { await model.connect() } }
+                    .keyboardShortcut(.defaultAction)
             }
         }
         .padding(20)

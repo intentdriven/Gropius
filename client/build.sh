@@ -34,6 +34,10 @@ fi
 
 cp Info.plist "$BUNDLE/Contents/Info.plist"
 
+# App icon. Regenerate the .icns from the source art if it is missing.
+if [ ! -f icon/AppIcon.icns ]; then ./mkicon.sh; fi
+cp icon/AppIcon.icns "$RES/AppIcon.icns"
+
 # A stable ad-hoc identity keeps Local Network Privacy from re-prompting on every
 # build. This is NOT a Developer-ID signature — see README for distribution.
 codesign --force --identifier dev.gropius.chat --sign - "$BUNDLE"
