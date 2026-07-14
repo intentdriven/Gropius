@@ -519,29 +519,39 @@ struct MessageRow: View {
     let message: Message
     private var isUser: Bool { message.role == .user }
 
-    // iMessage blue for sent bubbles, independent of the system accent colour
-    // (which the user might have set to anything).
+    // Bubble colours, independent of the system accent (which may be anything):
+    // iMessage blue for sent, green for replies.
     private static let sentBlue = Color(red: 0.039, green: 0.518, blue: 1.0)
+    private static let replyGreen = Color(red: 0.204, green: 0.780, blue: 0.349)
+
+    // Models often stream leading/trailing newlines (e.g. after the reasoning),
+    // which would show as an empty line inside the bubble. Trim for display.
+    private var displayText: String {
+        message.text.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+    private var displayReasoning: String {
+        message.reasoning.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
 
     var body: some View {
         HStack {
             if isUser { Spacer(minLength: 64) }
             VStack(alignment: isUser ? .trailing : .leading, spacing: 5) {
                 // Thinking-model reasoning sits above the answer, muted, no bubble.
-                if !message.reasoning.isEmpty {
-                    Text(message.reasoning)
+                if !displayReasoning.isEmpty {
+                    Text(displayReasoning)
                         .font(.callout).italic()
                         .foregroundStyle(.secondary)
                         .textSelection(.enabled)
                         .padding(.horizontal, 6)
                         .frame(maxWidth: 560, alignment: .leading)
                 }
-                if message.text.isEmpty && !isUser {
+                if displayText.isEmpty && !isUser {
                     ProgressView().controlSize(.small).padding(.vertical, 6).padding(.horizontal, 4)
-                } else if !message.text.isEmpty {
-                    Text(message.text)
+                } else if !displayText.isEmpty {
+                    Text(displayText)
                         .textSelection(.enabled)
-                        .foregroundStyle(isUser ? .white : .primary)
+                        .foregroundStyle(.white)
                         .padding(.horizontal, 13)
                         .padding(.vertical, 8)
                         .background(bubble)
@@ -554,11 +564,7 @@ struct MessageRow: View {
 
     @ViewBuilder private var bubble: some View {
         let shape = RoundedRectangle(cornerRadius: 18, style: .continuous)
-        if isUser {
-            shape.fill(Self.sentBlue)
-        } else {
-            shape.fill(.quaternary)
-        }
+        shape.fill(isUser ? Self.sentBlue : Self.replyGreen)
     }
 }
 
