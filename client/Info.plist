@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key>
+    <string>GropiusChat</string>
+    <key>CFBundleDisplayName</key>
+    <string>Gropius Chat</string>
+    <key>CFBundleIdentifier</key>
+    <string>dev.gropius.chat</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+    <key>CFBundleShortVersionString</key>
+    <string>1.0</string>
+    <key>CFBundleExecutable</key>
+    <string>GropiusChat</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>14.0</string>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+    <!-- The client only talks to a plain-HTTP LAN server, so allow it. -->
+    <key>NSAppTransportSecurity</key>
+    <dict>
+        <key>NSAllowsLocalNetworking</key>
+        <true/>
+        <key>NSAllowsArbitraryLoads</key>
+        <true/>
+    </dict>
+    <!-- Reaching a peer over the LAN triggers macOS Local Network Privacy. -->
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>Gropius Chat connects to a Gropius model server on your local network.</string>
+</dict>
+</plist>
