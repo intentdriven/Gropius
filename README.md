@@ -43,18 +43,42 @@ Cross-machine LAN use works; TLS and notarized distribution are not yet included
 - **Multi-account** — other user accounts on the same Mac share one copy of each
   model on disk and on the GPU.
 
-## Build
+## Install
+
+One line — installs `Gropius.app` (the menu-bar server) to `/Applications`, allows
+it through the firewall, and launches it:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/REPPL/Gropius/main/install.sh | bash
+```
+
+The **server needs Apple Silicon** (MLX runs on Metal). For the native chat client
+(`GropiusChat.app`, universal — runs on Intel too, talks to a server over the
+network):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/REPPL/Gropius/main/install.sh | bash -s -- client
+```
+
+> **While this repo is private**, prefix the command with an auth header and keep
+> the [GitHub CLI](https://cli.github.com) logged in (`gh auth login`):
+> ```sh
+> curl -fsSL -H "Authorization: Bearer $(gh auth token)" \
+>   https://raw.githubusercontent.com/REPPL/Gropius/main/install.sh | bash
+> ```
+
+The binaries are ad-hoc signed, not notarized; a `curl`-installed app is not
+Gatekeeper-quarantined, so it launches without a prompt. The first launch installs
+the MLX runtime (a few minutes, shown in the control panel), then you can download
+and serve models. New here? See **[docs/getting-started.md](docs/getting-started.md)**.
+
+## Build from source
 
 ```sh
 make app         # build Gropius.app (menu-bar app bundle)
 make install     # copy to /Applications and launch it
 make run         # or: run headless in the foreground, for development
 ```
-
-The first launch installs the MLX runtime (a few minutes, shown in the control
-panel), then you can download and serve models.
-
-New here? See **[docs/getting-started.md](docs/getting-started.md)**.
 
 ## Using it
 
