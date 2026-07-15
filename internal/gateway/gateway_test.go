@@ -450,6 +450,42 @@ func TestWrongAPIKeyIsRejected(t *testing.T) {
 	}
 }
 
+// A key set at runtime (through the control panel) must take effect on the
+// already-running gateway without a restart. Reading a frozen config snapshot
+// left the LAN endpoint unauthenticated while the UI reported it as protected.
+func TestAPIKeyChangeTakesEffectLive(t *testing.T) {
+	fake := mlxtest.Start(mlxtest.Options{ModelArg: "/m"})
+	t.Cleanup(fake.Close)
+
+	live := config.Default() // starts with no key
+	models := &stubModels{models: []registry.Model{{RepoID: "org/m", State: registry.StateReady}}}
+	g := New(Options{
+		ConfigFunc: func() config.Config { return live },
+		Pool:       &stubPool{srv: fake},
+		Models:     models,
+	})
+	h := g.Handler()
+
+	// With no key, a LAN request is served.
+	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	req.RemoteAddr = "192.168.1.50:9999"
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("with no key, LAN request got %d, want 200", w.Code)
+	}
+
+	// Set a key at runtime; the same handler must now demand it.
+	live.APIKey = "bh_live"
+	req = httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	req.RemoteAddr = "192.168.1.50:9999"
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("after setting a key at runtime, LAN request got %d, want 401", w.Code)
+	}
+}
+
 // Other macOS user accounts reach the server over loopback. Forcing them to
 // configure a key would break every local OpenAI client for no security gain.
 func TestLoopbackIsExemptFromAuth(t *testing.T) {

@@ -61,13 +61,15 @@ func writableDir(dir string) bool {
 	if err != nil || !fi.IsDir() {
 		return false
 	}
-	probe := filepath.Join(dir, ".gropius-write-probe")
-	f, err := os.OpenFile(probe, os.O_CREATE|os.O_WRONLY, 0o644)
+	// A randomly-named temp (os.CreateTemp implies O_CREATE|O_EXCL) avoids the
+	// symlink race a fixed name invites in a shared, group-writable directory.
+	f, err := os.CreateTemp(dir, ".gropius-write-probe-*")
 	if err != nil {
 		return false
 	}
+	name := f.Name()
 	f.Close()
-	os.Remove(probe)
+	os.Remove(name)
 	return true
 }
 
@@ -230,12 +232,31 @@ func Save(path string, c Config) error {
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, append(b, '\n'), 0o600); err != nil {
+	// config.json holds the API key and HuggingFace token. Never write it through
+	// a predictable temp name: in a shared, group-writable root another local
+	// account could pre-create "config.json.tmp" as a symlink (redirecting the
+	// write) or with loose permissions the rename would then preserve. os.CreateTemp
+	// uses a random name with O_EXCL and mode 0600, closing both holes.
+	tmp, err := os.CreateTemp(dir, "config-*.json.tmp")
+	if err != nil {
 		return err
 	}
-	return os.Rename(tmp, path)
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName) // harmless no-op once the rename succeeds
+	if err := tmp.Chmod(0o600); err != nil {
+		tmp.Close()
+		return err
+	}
+	if _, err := tmp.Write(append(b, '\n')); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpName, path)
 }

@@ -52,10 +52,43 @@ func TestControlAPIAllowsLoopback(t *testing.T) {
 	for _, addr := range []string{"127.0.0.1:5555", "[::1]:5555"} {
 		req := httptest.NewRequest("GET", "/api/state", nil)
 		req.RemoteAddr = addr
+		req.Host = "localhost:11535" // the Host the real UI uses
 		w := httptest.NewRecorder()
 		h.ServeHTTP(w, req)
 		if w.Code != http.StatusOK {
 			t.Errorf("loopback %s got %d, want 200", addr, w.Code)
 		}
+	}
+}
+
+// DNS rebinding turns an attacker's origin into a loopback socket: RemoteAddr is
+// 127.0.0.1 but the Host header is still the attacker's name. The control plane
+// must reject it on the Host header even though the peer address looks local.
+func TestControlAPIRejectsRebindingHost(t *testing.T) {
+	h := controlHandler(t)
+	req := httptest.NewRequest("POST", "/api/models/delete",
+		strings.NewReader(`{"model":"org/m"}`))
+	req.RemoteAddr = "127.0.0.1:5555" // rebound to loopback
+	req.Host = "evil.example:11535"   // ...but the attacker's Host survives
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusForbidden {
+		t.Errorf("rebinding Host returned %d, want 403", w.Code)
+	}
+}
+
+// A classic cross-site POST from a malicious page carries its Origin. Even with
+// a loopback peer and Host, a non-loopback Origin must be refused.
+func TestControlAPIRejectsCrossOrigin(t *testing.T) {
+	h := controlHandler(t)
+	req := httptest.NewRequest("POST", "/api/models/delete",
+		strings.NewReader(`{"model":"org/m"}`))
+	req.RemoteAddr = "127.0.0.1:5555"
+	req.Host = "localhost:11535"
+	req.Header.Set("Origin", "https://evil.example")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusForbidden {
+		t.Errorf("cross-origin POST returned %d, want 403", w.Code)
 	}
 }
