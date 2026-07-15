@@ -1,0 +1,128 @@
+name: release
+
+# Build the macOS binaries and publish the GitHub Release from GitHub's own
+# runner — NOT from a developer's Mac. Large uploads from the author's network
+# were being corrupted in transit ("tls: bad record MAC" / broken pipe), so the
+# server binary never reached the Release. Building and uploading from a macOS
+# runner sidesteps that entirely: the artefacts are created and attached inside
+# GitHub's infrastructure.
+#
+# Two entry points, one job:
+#   • push a version tag (vX.Y.Z)         → builds and releases that tag's commit
+#   • Actions ▸ release ▸ "Run workflow"  → re-releases an existing tag on demand
+#     (used to attach binaries to a tag that was created before this workflow
+#     existed, e.g. v0.1.0)
+#
+# The runner is Apple Silicon (macos-15), so the arm64 server binary and the
+# universal client both build natively — no cross-compilation, and the server's
+# `codesign --sign -` ad-hoc signature is produced the same way `make app` does
+# locally.
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag to (re-)release, e.g. v0.1.0'
+        required: true
+        type: string
+
+# Never run two releases of the same tag at once, and never cancel one mid-flight
+# — a half-published Release is worse than a queued one.
+concurrency:
+  group: release-${{ github.event.inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+# The tag being released, derived once for both entry points and exported to
+# every step as $TAG.
+env:
+  TAG: ${{ github.event.inputs.tag || github.ref_name }}
+
+# Floor: read-only. The single job elevates itself to contents: write to create
+# the Release and upload assets.
+permissions:
+  contents: read
+
+jobs:
+  release:
+    runs-on: macos-15
+    timeout-minutes: 30
+    permissions:
+      contents: write # create the Release and upload its assets
+    steps:
+      - name: Check out the released commit
+        uses: actions/checkout@v4
+        with:
+          # On a tag push, github.sha is the tagged commit. On manual dispatch,
+          # check out the tag the user named so the build matches that tag.
+          ref: ${{ github.event.inputs.tag || github.sha }}
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+          cache: false
+
+      # Verify gate — mirror `make lint`: a red build, vet, or test aborts before
+      # anything is built or published.
+      - name: Build
+        run: go build ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test (race)
+        run: go test -race ./...
+
+      - name: Build the server app (Gropius.app, arm64, ad-hoc signed)
+        run: make app
+
+      - name: Build the client app (GropiusChat.app, universal)
+        run: client/build.sh
+
+      # Sanity-check the architectures before shipping: the server must be arm64
+      # (MLX is Metal-only) and the client must be universal so it runs on Intel
+      # Macs too. A wrong-arch binary that still zips fine would otherwise ship
+      # silently.
+      - name: Verify binary architectures
+        run: |
+          set -euo pipefail
+          server="dist/Gropius.app/Contents/MacOS/gropius"
+          client="client/dist/GropiusChat.app/Contents/MacOS/GropiusChat"
+          echo "server: $(lipo -archs "$server")"
+          echo "client: $(lipo -archs "$client")"
+          lipo -archs "$server" | grep -qw arm64 || { echo "server is not arm64" >&2; exit 1; }
+          lipo -archs "$client" | grep -qw arm64 || { echo "client missing arm64" >&2; exit 1; }
+          lipo -archs "$client" | grep -qw x86_64 || { echo "client missing x86_64 (not universal)" >&2; exit 1; }
+
+      # Package each .app so it extracts to `<App>.app` at the archive root —
+      # exactly what install.sh's `ditto -x -k` step expects (--keepParent keeps
+      # the .app directory as the top-level entry).
+      - name: Package the apps
+        run: |
+          set -euo pipefail
+          ditto -c -k --keepParent dist/Gropius.app Gropius.app.zip
+          ditto -c -k --keepParent client/dist/GropiusChat.app GropiusChat.app.zip
+          shasum -a 256 Gropius.app.zip GropiusChat.app.zip
+
+      # Create the Release if it doesn't exist yet, otherwise attach/replace the
+      # assets on the existing one. --clobber makes re-runs idempotent. install.sh
+      # fetches `releases/latest/download/<asset>`, so the Release must be a
+      # normal (non-draft, non-prerelease) published release — which is the
+      # default for both paths here.
+      - name: Publish the Release with both apps attached
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG exists — uploading assets."
+            gh release upload "$TAG" Gropius.app.zip GropiusChat.app.zip --clobber
+          else
+            echo "Release $TAG does not exist — creating it."
+            gh release create "$TAG" Gropius.app.zip GropiusChat.app.zip \
+              --verify-tag --title "$TAG" \
+              --notes "macOS build. Install with the one-liner in the README."
+          fi

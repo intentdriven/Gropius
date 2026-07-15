@@ -36,6 +36,8 @@ go.work.sum
 /dist/
 /client/dist/
 /release-artifacts/
-/build/AppIcon.icns
+# NOTE: build/AppIcon.icns IS committed (the 1024px source PNG isn't in the repo,
+# and make icon short-circuits when the .icns already exists) so CI can build the
+# server app on a clean checkout. Only the transient iconset staging dir is ignored.
 /build/AppIcon.iconset/
 .DS_Store
