@@ -31,6 +31,36 @@ func newTestControl(t *testing.T, cfg config.Config) *httptest.Server {
 	return srv
 }
 
+// /api/instance serves this run's identity token, which the singleton
+// coordinator uses to tell a genuine Gropius apart from a port squatter.
+func TestInstanceEndpointServesToken(t *testing.T) {
+	paths := config.NewPaths(t.TempDir())
+	a, err := app.New(app.Options{Paths: paths, Config: config.Default()})
+	if err != nil {
+		t.Fatalf("app.New: %v", err)
+	}
+	t.Cleanup(func() { a.Close() })
+
+	ctrl := &Control{App: a, InstanceToken: "tok-12345"}
+	mux := http.NewServeMux()
+	ctrl.Routes(mux)
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	resp, err := srv.Client().Get(srv.URL + "/api/instance")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var body struct {
+		Token string `json:"token"`
+	}
+	json.NewDecoder(resp.Body).Decode(&body)
+	if body.Token != "tok-12345" {
+		t.Errorf("token = %q, want %q", body.Token, "tok-12345")
+	}
+}
+
 // The UI is driven entirely by /api/events. A warning that only appears in
 // /api/state is a warning the user never sees — which is exactly what happened
 // with the "open to the whole network" notice.

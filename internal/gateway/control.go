@@ -24,6 +24,10 @@ type Control struct {
 	App *app.App
 	// UI is the embedded web control panel.
 	UI http.Handler
+	// InstanceToken identifies this server run. It is served on the loopback-only
+	// control plane so a future launch can tell this user's server apart from a
+	// process squatting on the port (see cmd/gropius singleton coordination).
+	InstanceToken string
 }
 
 // Handler returns the control plane and web UI, restricted to loopback.
@@ -54,9 +58,17 @@ func (c *Control) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/settings", c.handleGetSettings)
 	mux.HandleFunc("POST /api/settings", c.handleSetSettings)
 	mux.HandleFunc("GET /api/events", c.handleEvents)
+	mux.HandleFunc("GET /api/instance", c.handleInstance)
 	if c.UI != nil {
 		mux.Handle("/", c.UI)
 	}
+}
+
+// handleInstance serves this server run's identity token. It is loopback-only
+// (the whole control plane is), so the token never reaches the LAN; a future
+// launch uses it to confirm the process on the port is this user's Gropius.
+func (c *Control) handleInstance(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{"token": c.InstanceToken})
 }
 
 // loopbackOnly rejects any request that did not originate on this machine, and
