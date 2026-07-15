@@ -115,6 +115,57 @@ func TestFilesPrefersLFSSize(t *testing.T) {
 	}
 }
 
+// The recursive tree listing includes directory entries; they are not fetchable
+// (a GET of one 404s and aborts the whole download), so Files must drop them.
+func TestFilesDropsDirectoryEntries(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `[
+			{"type":"directory","path":"assets","size":0},
+			{"type":"file","path":"config.json","size":10,"oid":"a"},
+			{"type":"file","path":"model.safetensors","size":20,"oid":"b"}
+		]`)
+	}))
+	defer srv.Close()
+
+	c := &Client{BaseURL: srv.URL, HTTP: srv.Client()}
+	files, err := c.Files(context.Background(), "org/repo", "")
+	if err != nil {
+		t.Fatalf("Files: %v", err)
+	}
+	if len(files) != 2 {
+		t.Fatalf("got %d files, want 2 (the directory entry must be dropped)", len(files))
+	}
+	for _, f := range files {
+		if f.Path == "assets" {
+			t.Error("directory entry 'assets' leaked into the file list")
+		}
+	}
+}
+
+// Repos with more than 1000 tree entries paginate via a Link rel="next" header;
+// Files must follow it or downloads silently omit later shards.
+func TestFilesFollowsPagination(t *testing.T) {
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("cursor") == "" {
+			w.Header().Set("Link", "<"+srv.URL+"/api/models/org/repo/tree/main?recursive=true&cursor=p2>; rel=\"next\"")
+			fmt.Fprint(w, `[{"type":"file","path":"a.safetensors","size":1,"oid":"a"}]`)
+			return
+		}
+		fmt.Fprint(w, `[{"type":"file","path":"b.safetensors","size":2,"oid":"b"}]`)
+	}))
+	defer srv.Close()
+
+	c := &Client{BaseURL: srv.URL, HTTP: srv.Client()}
+	files, err := c.Files(context.Background(), "org/repo", "")
+	if err != nil {
+		t.Fatalf("Files: %v", err)
+	}
+	if len(files) != 2 {
+		t.Fatalf("got %d files, want 2 across both pages", len(files))
+	}
+}
+
 func TestFilesNotFound(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "not found", http.StatusNotFound)
@@ -167,6 +218,22 @@ func TestResolveURL(t *testing.T) {
 	want := "https://huggingface.co/mlx-community/Qwen3-0.6B-4bit/resolve/main/model.safetensors"
 	if got != want {
 		t.Errorf("ResolveURL = %q, want %q", got, want)
+	}
+}
+
+// A filename with URL-significant characters must be escaped, or the '#' turns
+// the rest into a fragment and the GET hits the wrong path.
+func TestResolveURLEscapesSpecialChars(t *testing.T) {
+	c := &Client{BaseURL: "https://huggingface.co"}
+	got := c.ResolveURL("org/repo", "main", "weights#2.safetensors")
+	want := "https://huggingface.co/org/repo/resolve/main/weights%232.safetensors"
+	if got != want {
+		t.Errorf("ResolveURL = %q, want %q", got, want)
+	}
+	// Path separators must survive as separators, not be escaped.
+	nested := c.ResolveURL("org/repo", "main", "sub/dir/model.json")
+	if nested != "https://huggingface.co/org/repo/resolve/main/sub/dir/model.json" {
+		t.Errorf("nested path mangled: %q", nested)
 	}
 }
 
