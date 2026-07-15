@@ -70,14 +70,16 @@ allow-firewall:
 ## 4-bit costs 40 GB twice. Gropius uses /Users/Shared/Gropius automatically once
 ## it exists and is writable.
 ##
-## The setgid bit (the leading 2 in 2775) is the load-bearing part: it makes new
-## files inherit the `staff` group, so a model downloaded by one account is
-## writable by the next. /Users/Shared is world-writable and sticky by default,
-## which is NOT enough on its own.
+## The mode is 3775, and both special bits matter:
+##   • setgid (the 2) makes new files inherit the `staff` group, so a model one
+##     account downloads is writable by the next.
+##   • sticky (the 1) means a file can only be deleted or renamed by its owner —
+##     without it, any account in `staff` could replace or remove another user's
+##     models (or config/registry files) in this group-writable directory.
 install-shared:
 	sudo mkdir -p /Users/Shared/Gropius
 	sudo chgrp -R staff /Users/Shared/Gropius
-	sudo chmod -R 2775 /Users/Shared/Gropius
+	sudo chmod -R 3775 /Users/Shared/Gropius
 	@echo "Shared model cache ready at /Users/Shared/Gropius."
 	@echo "Restart Gropius; every account on this Mac will now share one set of models."
 
