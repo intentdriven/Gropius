@@ -40,7 +40,10 @@ type Model struct {
 	Path string `json:"path"`
 	// Bytes is the on-disk size of the model's files.
 	Bytes int64 `json:"bytes"`
-	State State `json:"state"`
+	// SizeBytes is the model's total download size, known from the start of a
+	// download. It is what the UI shows as "downloading X% of <size>".
+	SizeBytes int64 `json:"size_bytes,omitempty"`
+	State     State `json:"state"`
 	// Err explains a StateFailed model.
 	Err string `json:"err,omitempty"`
 	// Progress is 0-100 while downloading.
@@ -215,6 +218,28 @@ func (r *Registry) ReconcileInterrupted() []string {
 
 	r.broadcast(snapshot)
 	return changed
+}
+
+// SetSize records a model's total download size, once. It is a no-op if the
+// size is already known, so it is safe to call from a progress callback without
+// rewriting the registry file on every tick.
+func (r *Registry) SetSize(repoID string, size int64) {
+	if size <= 0 {
+		return
+	}
+	r.mu.Lock()
+	m, ok := r.models[repoID]
+	if !ok || m.SizeBytes > 0 {
+		r.mu.Unlock()
+		return
+	}
+	m.SizeBytes = size
+	r.models[repoID] = m
+	snapshot := r.listLocked()
+	_ = r.saveLocked()
+	r.mu.Unlock()
+
+	r.broadcast(snapshot)
 }
 
 // UpdateProgress records download progress WITHOUT writing to disk.
