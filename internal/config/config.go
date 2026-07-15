@@ -169,6 +169,12 @@ type Config struct {
 
 	// HFToken authenticates against gated HuggingFace repos.
 	HFToken string `json:"hf_token"`
+
+	// Preload lists repo ids to load into memory at startup, so the first request
+	// after a restart is not a multi-minute cold start. Loaded sequentially and
+	// best-effort — an invalid or too-large entry is logged and skipped, never
+	// blocking startup.
+	Preload []string `json:"preload,omitempty"`
 }
 
 // Default returns the shipping defaults: LAN-exposed, unauthenticated.

@@ -170,21 +170,46 @@ func (g *Gateway) handleListModels(w http.ResponseWriter, r *http.Request) {
 // ones keeps a hostile or buggy client from exhausting memory.
 const maxRequestBody = 32 << 20
 
+// bodyReadTimeout bounds how long a client may take to send its request body.
+// The server has no WriteTimeout (a generation legitimately streams for minutes),
+// which would otherwise leave a slow-uploading client holding a connection and a
+// goroutine open indefinitely — a slowloris on the body. The deadline covers only
+// the read phase; it is cleared before the model request so generation is unbounded.
+const bodyReadTimeout = 30 * time.Second
+
 // handleCompletions proxies a chat/text completion to the right model server.
 func (g *Gateway) handleCompletions(w http.ResponseWriter, r *http.Request) {
+	rc := http.NewResponseController(w)
+	_ = rc.SetReadDeadline(time.Now().Add(bodyReadTimeout))
+
 	raw, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxRequestBody))
 	if err != nil {
-		writeError(w, http.StatusRequestEntityTooLarge, "request body too large")
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			writeError(w, http.StatusRequestEntityTooLarge, "request body too large")
+		} else {
+			writeError(w, http.StatusRequestTimeout, "timed out reading the request body")
+		}
 		return
 	}
+	// Body is in hand; the multi-minute generation phase must not be bounded.
+	_ = rc.SetReadDeadline(time.Time{})
 
-	var payload map[string]any
+	// Decode into raw messages, not a fully-materialised map: the gateway only
+	// rewrites the "model" field, so parsing the entire prompt (the messages array
+	// can be hundreds of KB) into Go values and re-serialising it is wasted CPU and
+	// garbage on the request's critical path. RawMessage keeps every other field as
+	// the original bytes, copied through once.
+	var payload map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &payload); err != nil {
 		writeError(w, http.StatusBadRequest, "request body is not valid JSON")
 		return
 	}
 
-	requested, _ := payload["model"].(string)
+	var requested string
+	if rawModel, ok := payload["model"]; ok {
+		_ = json.Unmarshal(rawModel, &requested)
+	}
 	if requested == "" {
 		writeError(w, http.StatusBadRequest, `the "model" field is required`)
 		return
@@ -210,7 +235,12 @@ func (g *Gateway) handleCompletions(w http.ResponseWriter, r *http.Request) {
 	// that model: anything other than the exact --model value it was started with
 	// makes it try to download a repo of that name from HuggingFace, which fails
 	// with a 404 when offline.
-	payload["model"] = up.ModelArg
+	rewritten, err := json.Marshal(up.ModelArg)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "could not re-encode the request")
+		return
+	}
+	payload["model"] = rewritten
 	body, err := json.Marshal(payload)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "could not re-encode the request")

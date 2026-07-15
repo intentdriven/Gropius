@@ -218,6 +218,49 @@ func TestAcquireLaunchesAndReturnsReadyUpstream(t *testing.T) {
 	}
 }
 
+// The per-model semaphore bounds in-flight requests to 2x DecodeConcurrency, so a
+// burst cannot swamp one mlx-lm server's memory. Past the cap, Acquire blocks
+// until a slot frees rather than admitting the request.
+func TestAcquireBoundsPerModelConcurrency(t *testing.T) {
+	l := newFakeLauncher()
+	src := &fakeSource{models: map[string]int64{"org/m": 1 << 20}}
+	p := newTestPool(t, l, src, PoolOptions{MaxResidentBytes: 1 << 30, DecodeConcurrency: 1})
+	// cap = 2 * DecodeConcurrency = 2.
+
+	r1, rel1, err := p.Acquire(context.Background(), "org/m")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = r1
+	_, rel2, err := p.Acquire(context.Background(), "org/m")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The third acquire must block (both slots are held). Its context cancels first.
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	_, rel3, err := p.Acquire(ctx, "org/m")
+	if err == nil {
+		rel3()
+		t.Fatal("third concurrent Acquire should have blocked past the cap, but succeeded immediately")
+	}
+	if time.Since(start) < 100*time.Millisecond {
+		t.Errorf("third Acquire returned after %v, expected it to block until its context expired", time.Since(start))
+	}
+
+	// Freeing a slot lets a new acquire through promptly.
+	rel1()
+	r4, rel4, err := p.Acquire(context.Background(), "org/m")
+	if err != nil {
+		t.Fatalf("Acquire after freeing a slot: %v", err)
+	}
+	_ = r4
+	rel4()
+	rel2()
+}
+
 func TestAcquireReusesRunningModel(t *testing.T) {
 	l := newFakeLauncher()
 	src := &fakeSource{models: map[string]int64{"org/m": 1 << 20}}
