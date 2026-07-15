@@ -107,8 +107,17 @@ func runServer(ln net.Listener, paths config.Paths, cfg config.Config, headless 
 
 	mux := http.NewServeMux()
 
-	// OpenAI-compatible API — LAN-facing, guarded by the optional API key.
-	g := gateway.New(gateway.Options{Config: cfg, Pool: a.Pool, Models: a.Registry, Log: log})
+	// A LAN-bound listener with no key is open to the whole network. The control
+	// panel warns about this, but a user running headless never sees it — say so
+	// on stderr too.
+	if cfg.ExposedToLAN() && cfg.APIKey == "" {
+		log.Warn("SECURITY: bound to a LAN address with no API key — anyone on your network can use this server; set a key in Settings or bind to 127.0.0.1")
+	}
+
+	// OpenAI-compatible API — LAN-facing, guarded by the optional API key. The
+	// gateway reads the key live (a.Config) so setting one in the control panel
+	// takes effect without a restart.
+	g := gateway.New(gateway.Options{ConfigFunc: a.Config, Pool: a.Pool, Models: a.Registry, Log: log})
 	apiHandler := g.Handler()
 	for _, p := range []string{"/v1/", "/health"} {
 		mux.Handle(p, apiHandler)

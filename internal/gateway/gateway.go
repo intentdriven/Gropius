@@ -37,16 +37,22 @@ type Models interface {
 // Options configures a Gateway.
 type Options struct {
 	Config config.Config
-	Pool   Pool
-	Models Models
-	Log    *slog.Logger
+	// ConfigFunc, when set, supplies the live config on every request and takes
+	// precedence over Config. The gateway reads the API key through it, so a key
+	// set at runtime through the control panel takes effect immediately rather
+	// than only after a restart. Without it the gateway would keep serving the
+	// LAN unauthenticated while the UI reports the endpoint as protected.
+	ConfigFunc func() config.Config
+	Pool       Pool
+	Models     Models
+	Log        *slog.Logger
 	// Transport is the HTTP transport used to reach model servers.
 	Transport http.RoundTripper
 }
 
 // Gateway routes OpenAI requests to model servers.
 type Gateway struct {
-	cfg    config.Config
+	cfg    func() config.Config
 	pool   Pool
 	models Models
 	log    *slog.Logger
@@ -57,6 +63,11 @@ type Gateway struct {
 func New(opts Options) *Gateway {
 	if opts.Log == nil {
 		opts.Log = slog.Default()
+	}
+	cfgFn := opts.ConfigFunc
+	if cfgFn == nil {
+		frozen := opts.Config
+		cfgFn = func() config.Config { return frozen }
 	}
 	if opts.Transport == nil {
 		// Model servers are on loopback and a long generation can legitimately
@@ -69,7 +80,7 @@ func New(opts Options) *Gateway {
 		}
 	}
 	return &Gateway{
-		cfg:    opts.Config,
+		cfg:    cfgFn,
 		pool:   opts.Pool,
 		models: opts.Models,
 		log:    opts.Log,
@@ -94,13 +105,14 @@ func (g *Gateway) Handler() http.Handler {
 // OpenAI client for no security gain.
 func (g *Gateway) withAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if g.cfg.APIKey == "" || isLoopback(r.RemoteAddr) {
+		apiKey := g.cfg().APIKey
+		if apiKey == "" || isLoopback(r.RemoteAddr) {
 			next.ServeHTTP(w, r)
 			return
 		}
 		token := bearerToken(r.Header.Get("Authorization"))
 		// Constant-time compare: a byte-wise early return would leak the key.
-		if subtle.ConstantTimeCompare([]byte(token), []byte(g.cfg.APIKey)) != 1 {
+		if subtle.ConstantTimeCompare([]byte(token), []byte(apiKey)) != 1 {
 			writeError(w, http.StatusUnauthorized,
 				"invalid or missing API key — send it as 'Authorization: Bearer <key>'")
 			return

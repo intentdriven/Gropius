@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 )
 
@@ -273,7 +274,12 @@ func (c *Client) downloadFile(ctx context.Context, req DownloadRequest, f File, 
 		return apiError(resp, u)
 	}
 
-	flags := os.O_CREATE | os.O_WRONLY
+	// O_NOFOLLOW: refuse to write through a symlink planted at the .part path. In
+	// a shared, group-writable model cache another local account could point that
+	// predictable name at a file the downloading user can write, turning a model
+	// fetch into a write-what-where. Opening the final component without following
+	// links makes such an open fail (ELOOP) instead.
+	flags := os.O_CREATE | os.O_WRONLY | syscall.O_NOFOLLOW
 	if resumeAt > 0 {
 		flags |= os.O_APPEND
 	} else {

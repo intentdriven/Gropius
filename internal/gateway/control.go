@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -58,7 +59,20 @@ func (c *Control) Routes(mux *http.ServeMux) {
 	}
 }
 
-// loopbackOnly rejects any request that did not originate on this machine.
+// loopbackOnly rejects any request that did not originate on this machine, and
+// additionally defends the control plane against browser-driven cross-origin
+// attacks that a source-address check alone cannot see.
+//
+// A page the victim visits runs in their browser, which connects from 127.0.0.1
+// — so RemoteAddr is loopback and a bare check waves the request through. Two
+// extra guards close that:
+//
+//   - Host allow-list: a DNS-rebinding attack points a hostname it controls at
+//     127.0.0.1, so the socket is loopback but the Host header is the attacker's.
+//     Requiring a genuine loopback Host rejects the rebound request.
+//   - Origin allow-list: a cross-site POST from evil.com carries its origin. The
+//     real UI is same-origin (a loopback origin), so any other origin is refused.
+//     This blocks classic CSRF, which needs no rebinding.
 func loopbackOnly(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !isLoopback(r.RemoteAddr) {
@@ -66,8 +80,40 @@ func loopbackOnly(next http.Handler) http.Handler {
 				"the Gropius control panel is only reachable from the computer it runs on")
 			return
 		}
+		if !isLoopbackHost(r.Host) {
+			writeError(w, http.StatusForbidden,
+				"unrecognised Host header — the control panel only answers to localhost")
+			return
+		}
+		if origin := r.Header.Get("Origin"); origin != "" && !isLoopbackOrigin(origin) {
+			writeError(w, http.StatusForbidden,
+				"cross-origin request to the control panel refused")
+			return
+		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// isLoopbackHost reports whether an HTTP Host header (with or without a port)
+// names this machine's loopback interface.
+func isLoopbackHost(host string) bool {
+	if host == "" {
+		return false
+	}
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+	host = strings.Trim(host, "[]")
+	return host == "127.0.0.1" || host == "::1" || host == "localhost"
+}
+
+// isLoopbackOrigin reports whether an Origin header refers to a loopback host.
+func isLoopbackOrigin(origin string) bool {
+	u, err := url.Parse(origin)
+	if err != nil || u.Host == "" {
+		return false
+	}
+	return isLoopbackHost(u.Host)
 }
 
 // State is the whole picture the UI renders.
