@@ -20,7 +20,7 @@ func freeAddr(t *testing.T) string {
 }
 
 func TestAcquireListenerClaimsFreePort(t *testing.T) {
-	ln, claimed, err := acquireListener(freeAddr(t), time.Second, func() bool { return false })
+	ln, claimed, err := acquireListener(freeAddr(t), time.Second, func() portHolder { return holderNone })
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -37,12 +37,31 @@ func TestAcquireListenerDefersToLiveServer(t *testing.T) {
 	}
 	defer occupied.Close()
 
-	ln, claimed, err := acquireListener(occupied.Addr().String(), time.Second, func() bool { return true })
+	ln, claimed, err := acquireListener(occupied.Addr().String(), time.Second, func() portHolder { return holderOurs })
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if claimed || ln != nil {
 		t.Fatalf("claimed=%v, want claimed=false (defer to the live server)", claimed)
+	}
+}
+
+// The hijack defense: an unidentified process holds the port. acquireListener
+// must refuse with an error rather than silently become its client and route
+// this user's model traffic to a possible impostor.
+func TestAcquireListenerRefusesForeignHolder(t *testing.T) {
+	occupied, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer occupied.Close()
+
+	ln, claimed, err := acquireListener(occupied.Addr().String(), time.Second, func() portHolder { return holderForeign })
+	if err == nil {
+		t.Fatal("expected an error when a foreign process holds the port")
+	}
+	if claimed || ln != nil {
+		t.Fatalf("claimed=%v ln=%v, want no listener for a foreign holder", claimed, ln)
 	}
 }
 
@@ -63,7 +82,7 @@ func TestAcquireListenerWaitsForShutdownThenClaims(t *testing.T) {
 	}()
 
 	start := time.Now()
-	ln, claimed, err := acquireListener(addr, 3*time.Second, func() bool { return false })
+	ln, claimed, err := acquireListener(addr, 3*time.Second, func() portHolder { return holderNone })
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -76,6 +95,9 @@ func TestAcquireListenerWaitsForShutdownThenClaims(t *testing.T) {
 	ln.Close()
 }
 
+// A port that stays busy with nothing identifiable answering is no longer
+// silently treated as a server to client-mode into: acquireListener gives up
+// with an error so the user learns the port is stuck rather than trusting it.
 func TestAcquireListenerGivesUpAfterWait(t *testing.T) {
 	occupied, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -83,11 +105,11 @@ func TestAcquireListenerGivesUpAfterWait(t *testing.T) {
 	}
 	defer occupied.Close()
 
-	ln, claimed, err := acquireListener(occupied.Addr().String(), 300*time.Millisecond, func() bool { return false })
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	ln, claimed, err := acquireListener(occupied.Addr().String(), 300*time.Millisecond, func() portHolder { return holderNone })
+	if err == nil {
+		t.Fatal("expected an error after the wait expires with the port still held")
 	}
 	if claimed || ln != nil {
-		t.Fatalf("claimed=%v, want claimed=false after the wait expires", claimed)
+		t.Fatalf("claimed=%v ln=%v, want no listener after the wait expires", claimed, ln)
 	}
 }

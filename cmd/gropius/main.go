@@ -74,8 +74,8 @@ func main() {
 	// A predecessor still shutting down is NOT a loss — acquireListener waits for
 	// the port to free rather than falling into client mode with nothing serving.
 	addr := fmt.Sprintf("%s:%d", cfg.Host, cfg.Port)
-	ln, claimed, err := acquireListener(addr, 5*time.Second, func() bool {
-		return serverResponding(cfg.Port)
+	ln, claimed, err := acquireListener(addr, 5*time.Second, func() portHolder {
+		return probePortHolder(paths, cfg.Port)
 	})
 	if err != nil {
 		log.Error("cannot listen", "addr", addr, "err", err)
@@ -131,10 +131,23 @@ func runServer(ln net.Listener, paths config.Paths, cfg config.Config, headless 
 		mux.Handle(p, apiHandler)
 	}
 
+	// A per-run identity token, recorded 0600 in the data root and served on the
+	// loopback-only control plane. It lets a future launch tell OUR server (or a
+	// shared-root peer) apart from a process merely squatting on the port, so it
+	// never silently hands local model traffic to an impostor. Best-effort: if the
+	// token cannot be written the check simply degrades to "unidentified".
+	instanceToken, err := newInstanceToken()
+	if err != nil {
+		return err
+	}
+	if err := writeInstanceToken(paths, instanceToken); err != nil {
+		log.Warn("could not record the instance identity token", "err", err)
+	}
+
 	// Control plane + web UI — administrative, so loopback-only (Control.Handler
 	// enforces it). Mounted at "/" as the catch-all for everything that is not a
 	// /v1 or /health request.
-	ctrl := &gateway.Control{App: a, UI: ui.Handler()}
+	ctrl := &gateway.Control{App: a, UI: ui.Handler(), InstanceToken: instanceToken}
 	mux.Handle("/", ctrl.Handler())
 
 	srv := &http.Server{
