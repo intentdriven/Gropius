@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Gropius · MLX Model Server</title>
+<link rel="stylesheet" href="style.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' fill='%23111'/><circle cx='30' cy='30' r='18' fill='%23e63946'/><rect x='52' y='12' width='36' height='36' fill='%23f4d35e'/><polygon points='30,88 12,56 48,56' fill='%231d63c4'/></svg>">
+</head>
+<body>
+
+<header>
+  <div class="brand">
+    <svg class="logo" viewBox="0 0 100 100" aria-hidden="true">
+      <circle cx="30" cy="30" r="18" fill="#e63946"/>
+      <rect x="52" y="12" width="36" height="36" fill="#f4d35e"/>
+      <polygon points="30,88 12,56 48,56" fill="#1d63c4"/>
+      <rect x="52" y="56" width="36" height="32" fill="#e9e9e9"/>
+    </svg>
+    <div>
+      <h1>Gropius</h1>
+      <p class="sub">Local MLX models, served to your network</p>
+    </div>
+  </div>
+  <div class="status" id="serverStatus">
+    <span class="dot" id="statusDot"></span>
+    <span id="statusText">connecting…</span>
+  </div>
+</header>
+
+<div id="warnings"></div>
+
+<div id="setupBanner" class="banner setup" hidden>
+  <div class="spinner"></div>
+  <div>
+    <strong id="setupStage">Setting up the MLX runtime…</strong>
+    <p>Gropius is installing its own private Python and MLX. This happens once and takes a few minutes.</p>
+    <p class="mono" id="setupErr"></p>
+  </div>
+</div>
+
+<nav class="tabs">
+  <button class="tab active" data-tab="models">My Models</button>
+  <button class="tab" data-tab="search">Find Models</button>
+  <button class="tab" data-tab="connect">Connect</button>
+  <button class="tab" data-tab="settings">Settings</button>
+</nav>
+
+<!-- ── My Models ─────────────────────────────────────────── -->
+<section id="tab-models" class="panel active">
+  <div id="modelList"></div>
+  <div id="modelsEmpty" class="empty" hidden>
+    <p><strong>No models yet.</strong></p>
+    <p>Go to <a href="#" onclick="showTab('search');return false">Find Models</a> to download one.</p>
+  </div>
+</section>
+
+<!-- ── Find Models ───────────────────────────────────────── -->
+<section id="tab-search" class="panel">
+  <form id="searchForm" class="searchbar">
+    <input id="searchInput" type="search" placeholder="Search MLX models, e.g. qwen3, llama, mistral…" autocomplete="off">
+    <button type="submit">Search</button>
+  </form>
+  <p class="hint">Searching the <code>mlx-community</code> organisation. Prefix with <code>author:someone</code> to look elsewhere.</p>
+  <div id="searchResults"></div>
+</section>
+
+<!-- ── Connect ───────────────────────────────────────────── -->
+<section id="tab-connect" class="panel">
+  <h2>Point any OpenAI client here</h2>
+  <p>Gropius speaks the OpenAI API. Anything that talks to ChatGPT can talk to your Mac.</p>
+
+  <h3>Base URL</h3>
+  <div id="endpoints"></div>
+
+  <h3>Example</h3>
+  <pre id="curlExample" class="code"></pre>
+
+  <h3>Python</h3>
+  <pre id="pyExample" class="code"></pre>
+</section>
+
+<!-- ── Settings ──────────────────────────────────────────── -->
+<section id="tab-settings" class="panel">
+  <form id="settingsForm">
+    <label>
+      <span>Bind address</span>
+      <select id="setHost">
+        <option value="0.0.0.0">0.0.0.0 — reachable from your whole network</option>
+        <option value="127.0.0.1">127.0.0.1 — this Mac only</option>
+      </select>
+    </label>
+    <label>
+      <span>Port</span>
+      <input id="setPort" type="number" min="1" max="65535">
+    </label>
+    <label>
+      <span>API key <em>(leave blank for no authentication)</em></span>
+      <input id="setKey" type="text" placeholder="no key — anyone on the network can use this server">
+      <button type="button" id="genKey" class="link">Generate a key</button>
+    </label>
+    <label>
+      <span>Unload models after idle (seconds, 0 = never)</span>
+      <input id="setIdle" type="number" min="0">
+    </label>
+    <label>
+      <span>Batched requests (decode concurrency)</span>
+      <input id="setConc" type="number" min="1" max="64">
+    </label>
+    <label>
+      <span>HuggingFace token <em>(only needed for gated models)</em></span>
+      <input id="setHF" type="password" placeholder="hf_…">
+    </label>
+    <button type="submit">Save settings</button>
+    <p id="settingsMsg" class="msg"></p>
+  </form>
+</section>
+
+<script src="app.js"></script>
+</body>
+</html>

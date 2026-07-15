@@ -1,0 +1,180 @@
+/* Gropius: primary colours, hard geometry, generous whitespace. */
+:root {
+  --red:    #e63946;
+  --yellow: #f4d35e;
+  --blue:   #1d63c4;
+  --ink:    #14141a;
+  --paper:  #faf8f5;
+  --line:   #d9d5cd;
+  --muted:  #6b675f;
+  --ok:     #2a9d5c;
+  --warn:   #c9700f;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --ink:   #f2f0ec;
+    --paper: #16161a;
+    --line:  #33323a;
+    --muted: #9a968d;
+  }
+}
+
+* { box-sizing: border-box; }
+
+/* The `hidden` attribute is only display:none in the UA stylesheet, so any
+   author rule that sets display (e.g. .banner { display: flex }) silently
+   overrides it and the element stays visible. Make hidden actually hide. */
+[hidden] { display: none !important; }
+
+body {
+  margin: 0;
+  padding: 0 24px 64px;
+  max-width: 980px;
+  margin-inline: auto;
+  font: 15px/1.55 ui-sans-serif, -apple-system, "Helvetica Neue", sans-serif;
+  color: var(--ink);
+  background: var(--paper);
+}
+
+header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 28px 0 20px;
+  border-bottom: 3px solid var(--ink);
+  flex-wrap: wrap;
+}
+
+.brand { display: flex; align-items: center; gap: 14px; }
+.logo  { width: 44px; height: 44px; }
+
+h1 { margin: 0; font-size: 26px; letter-spacing: -0.02em; }
+.sub { margin: 2px 0 0; color: var(--muted); font-size: 13px; }
+
+.status { display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 600; }
+.dot { width: 10px; height: 10px; border-radius: 50%; background: var(--muted); }
+.dot.up   { background: var(--ok); }
+.dot.down { background: var(--red); }
+
+/* Tabs */
+.tabs { display: flex; gap: 0; margin: 22px 0; border-bottom: 1px solid var(--line); }
+.tab {
+  appearance: none; border: 0; background: none; cursor: pointer;
+  padding: 10px 18px; font: inherit; font-weight: 600; color: var(--muted);
+  border-bottom: 3px solid transparent; margin-bottom: -1px;
+}
+.tab:hover { color: var(--ink); }
+.tab.active { color: var(--ink); border-bottom-color: var(--red); }
+
+.panel { display: none; }
+.panel.active { display: block; }
+
+/* Banners */
+.banner {
+  display: flex; gap: 14px; align-items: flex-start;
+  padding: 14px 16px; margin: 16px 0;
+  border-left: 5px solid var(--blue);
+  background: color-mix(in srgb, var(--blue) 8%, transparent);
+}
+.banner p { margin: 4px 0 0; font-size: 13px; }
+.banner.warn { border-left-color: var(--yellow); background: color-mix(in srgb, var(--yellow) 16%, transparent); }
+
+.spinner {
+  width: 18px; height: 18px; flex: none; margin-top: 2px;
+  border: 3px solid var(--line); border-top-color: var(--blue);
+  border-radius: 50%; animation: spin 0.8s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* Model cards */
+.card {
+  display: flex; align-items: center; gap: 16px;
+  padding: 16px; margin-bottom: 10px;
+  border: 1px solid var(--line);
+  background: color-mix(in srgb, var(--ink) 3%, transparent);
+}
+.card .meta { flex: 1; min-width: 0; }
+.card .name { font-weight: 700; word-break: break-word; }
+.card .info { color: var(--muted); font-size: 13px; margin-top: 2px; }
+
+.pill {
+  display: inline-block; padding: 1px 8px; margin-left: 6px;
+  font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em;
+  border: 1px solid currentColor;
+}
+.pill.ready  { color: var(--ok); }
+.pill.loaded { color: var(--blue); }
+.pill.failed { color: var(--red); }
+.pill.quant  { color: var(--muted); }
+
+/* Progress */
+.bar { height: 6px; background: var(--line); margin-top: 8px; overflow: hidden; }
+.bar > i { display: block; height: 100%; background: var(--blue); transition: width .3s; }
+
+/* Buttons */
+button, .btn {
+  appearance: none; cursor: pointer; font: inherit; font-weight: 600;
+  padding: 8px 16px; border: 2px solid var(--ink); background: var(--ink); color: var(--paper);
+}
+button:hover { background: var(--blue); border-color: var(--blue); }
+button.ghost { background: none; color: var(--ink); }
+button.ghost:hover { background: var(--ink); color: var(--paper); }
+button.danger { background: none; color: var(--red); border-color: var(--red); }
+button.danger:hover { background: var(--red); color: #fff; }
+/* An armed confirm button reads as filled-red so the second click is obviously live. */
+button.armed, button.danger.armed { background: var(--red); color: #fff; border-color: var(--red); }
+button:disabled { opacity: .45; cursor: default; }
+button.link {
+  border: 0; background: none; color: var(--blue); padding: 4px 0;
+  text-decoration: underline; font-weight: 600;
+}
+button.link:hover { background: none; color: var(--red); }
+
+/* Search */
+.searchbar { display: flex; gap: 8px; margin-bottom: 8px; }
+.searchbar input {
+  flex: 1; padding: 10px 12px; font: inherit;
+  border: 2px solid var(--ink); background: var(--paper); color: var(--ink);
+}
+.hint { color: var(--muted); font-size: 13px; margin: 0 0 18px; }
+
+/* Forms */
+form label { display: block; margin-bottom: 18px; max-width: 560px; }
+form label > span { display: block; font-weight: 600; margin-bottom: 5px; }
+form label em { color: var(--muted); font-weight: 400; font-style: normal; }
+form input, form select {
+  width: 100%; padding: 9px 11px; font: inherit;
+  border: 2px solid var(--line); background: var(--paper); color: var(--ink);
+}
+form input:focus, form select:focus { outline: none; border-color: var(--blue); }
+
+.msg { font-weight: 600; color: var(--ok); }
+.msg.err { color: var(--red); }
+
+/* Code */
+.code, .mono {
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 12.5px;
+}
+.code {
+  padding: 14px; overflow-x: auto; white-space: pre;
+  background: var(--ink); color: var(--paper);
+}
+@media (prefers-color-scheme: dark) {
+  .code { background: #0b0b0e; }
+}
+
+.endpoint {
+  display: flex; align-items: center; gap: 10px;
+  padding: 10px 12px; margin-bottom: 6px;
+  border: 1px solid var(--line);
+  font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 13px;
+}
+.endpoint span { flex: 1; word-break: break-all; }
+.endpoint button { padding: 4px 10px; font-size: 12px; }
+
+.empty { padding: 48px 0; text-align: center; color: var(--muted); }
+h2 { font-size: 19px; margin-top: 0; }
+h3 { font-size: 14px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin: 26px 0 8px; }

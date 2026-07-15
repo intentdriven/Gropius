@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <!-- Gropius chat: a dark speech bubble holding the three primary bars. -->
+  <defs>
+    <clipPath id="bubble">
+      <path d="M132 240 h760 a90 90 0 0 1 90 90 v300 a90 90 0 0 1 -90 90 H470
+               l-150 150 v-150 H132 a90 90 0 0 1 -90 -90 V330 a90 90 0 0 1 90 -90 Z"/>
+    </clipPath>
+  </defs>
+
+  <!-- bubble body + tail -->
+  <path d="M132 240 h760 a90 90 0 0 1 90 90 v300 a90 90 0 0 1 -90 90 H470
+           l-150 150 v-150 H132 a90 90 0 0 1 -90 -90 V330 a90 90 0 0 1 90 -90 Z"
+        fill="#17181d"/>
+
+  <!-- three primary bars inside -->
+  <g>
+    <rect x="300" y="330" width="120" height="300" rx="20" fill="#E63329"/>
+    <rect x="452" y="330" width="120" height="300" rx="20" fill="#F5C518"/>
+    <rect x="604" y="330" width="120" height="300" rx="20" fill="#2B5DAA"/>
+  </g>
+</svg>

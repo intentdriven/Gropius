@@ -1,0 +1,510 @@
+package runtime
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"net/http"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/intentdriven/Gropius/internal/mlxtest"
+)
+
+// fakeSource resolves models without touching the filesystem.
+type fakeSource struct {
+	mu     sync.Mutex
+	models map[string]int64 // repoID -> size
+}
+
+func (s *fakeSource) Resolve(repoID string) (string, int64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	size, ok := s.models[repoID]
+	if !ok {
+		return "", 0, fmt.Errorf("%s is not downloaded", repoID)
+	}
+	return "/models/" + repoID, size, nil
+}
+
+// fakeProc is a Process backed by an in-process fake mlx server.
+type fakeProc struct {
+	srv     *mlxtest.Server
+	done    chan struct{}
+	stopped chan struct{}
+	once    sync.Once
+	err     error
+}
+
+func (p *fakeProc) Done() <-chan struct{} { return p.done }
+func (p *fakeProc) Err() error            { return p.err }
+func (p *fakeProc) Pid() int              { return 4242 }
+func (p *fakeProc) Stop(ctx context.Context) error {
+	p.once.Do(func() {
+		p.srv.Close()
+		close(p.done)
+		close(p.stopped)
+	})
+	return nil
+}
+
+// fakeLauncher stands up a fake mlx server per model, and records launches.
+type fakeLauncher struct {
+	loadDelay time.Duration
+	// failFor makes Launch fail for a repo.
+	failFor string
+	// dieAfter makes the process exit on its own shortly after launch, as a
+	// real model server does when the weights are corrupt.
+	dieAfter map[string]bool
+
+	mu       sync.Mutex
+	launched []string
+	procs    map[string]*fakeProc
+	// servers maps repoID -> the fake server, so tests can inspect requests.
+	servers map[string]*mlxtest.Server
+}
+
+func newFakeLauncher() *fakeLauncher {
+	return &fakeLauncher{
+		procs:    map[string]*fakeProc{},
+		servers:  map[string]*mlxtest.Server{},
+		dieAfter: map[string]bool{},
+	}
+}
+
+func (l *fakeLauncher) Launch(ctx context.Context, spec Spec) (Process, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	if l.failFor == spec.RepoID {
+		return nil, errors.New("simulated launch failure")
+	}
+
+	loadDelay := l.loadDelay
+	if l.dieAfter[spec.RepoID] {
+		// A process that dies during startup never finished loading, so it must
+		// never answer a completion successfully. Keep it "loading" forever; it
+		// will be killed below before it could ever become ready.
+		loadDelay = time.Hour
+	}
+	srv := mlxtest.Start(mlxtest.Options{
+		ModelArg:  spec.ModelPath,
+		LoadDelay: loadDelay,
+	})
+	// The pool addresses the server by port, so the fake must answer there. We
+	// cheat by rewriting the pool's expected port to the httptest port via a
+	// custom HTTP client in the tests below.
+	p := &fakeProc{srv: srv, done: make(chan struct{}), stopped: make(chan struct{})}
+
+	l.launched = append(l.launched, spec.RepoID)
+	l.procs[spec.RepoID] = p
+	l.servers[spec.RepoID] = srv
+
+	if l.dieAfter[spec.RepoID] {
+		p.err = errors.New("exit status 1")
+		go func() {
+			time.Sleep(20 * time.Millisecond)
+			p.once.Do(func() { srv.Close(); close(p.done); close(p.stopped) })
+		}()
+	}
+	return p, nil
+}
+
+func (l *fakeLauncher) launchCount() int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return len(l.launched)
+}
+
+func (l *fakeLauncher) launchedRepos() []string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return append([]string(nil), l.launched...)
+}
+
+func (l *fakeLauncher) serverFor(repoID string) *mlxtest.Server {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.servers[repoID]
+}
+
+// portRewriter routes the pool's http://127.0.0.1:<allocated-port> probes to
+// whichever httptest server the fake launcher actually stood up.
+type portRewriter struct {
+	l *fakeLauncher
+}
+
+func (rt *portRewriter) RoundTrip(req *http.Request) (*http.Response, error) {
+	rt.l.mu.Lock()
+	var target string
+	// The readiness probe names the model in its body; match on the model path
+	// embedded in the URL is not possible, so route by the single running server
+	// whose ModelArg matches. Simplest correct approach: try each server.
+	servers := make([]*mlxtest.Server, 0, len(rt.l.servers))
+	for _, s := range rt.l.servers {
+		servers = append(servers, s)
+	}
+	rt.l.mu.Unlock()
+
+	// Route to the server whose ModelArg matches the request's model field.
+	body, err := readAndRestore(req)
+	if err != nil {
+		return nil, err
+	}
+	for _, s := range servers {
+		if strings.Contains(body, `"model":"`+s.ModelArg+`"`) ||
+			strings.Contains(body, `"model": "`+s.ModelArg+`"`) {
+			target = s.URL()
+			break
+		}
+	}
+	if target == "" && len(servers) > 0 {
+		target = servers[0].URL()
+	}
+	if target == "" {
+		return nil, errors.New("no fake server running")
+	}
+
+	u := target + req.URL.Path
+	newReq, err := http.NewRequestWithContext(req.Context(), req.Method, u, req.Body)
+	if err != nil {
+		return nil, err
+	}
+	newReq.Header = req.Header
+	return http.DefaultTransport.RoundTrip(newReq)
+}
+
+func newTestPool(t *testing.T, l *fakeLauncher, src *fakeSource, opts PoolOptions) *Pool {
+	t.Helper()
+	opts.Launcher = l
+	opts.Models = src
+	if opts.HTTP == nil {
+		opts.HTTP = &http.Client{
+			Timeout:   5 * time.Second,
+			Transport: &portRewriter{l: l},
+		}
+	}
+	if opts.ReadyTimeout == 0 {
+		opts.ReadyTimeout = 5 * time.Second
+	}
+	p := NewPool(opts)
+	t.Cleanup(func() { p.Close() })
+	return p
+}
+
+func TestAcquireLaunchesAndReturnsReadyUpstream(t *testing.T) {
+	l := newFakeLauncher()
+	src := &fakeSource{models: map[string]int64{"org/m": 1 << 20}}
+	p := newTestPool(t, l, src, PoolOptions{MaxResidentBytes: 1 << 30})
+
+	up, release, err := p.Acquire(context.Background(), "org/m")
+	if err != nil {
+		t.Fatalf("Acquire: %v", err)
+	}
+	defer release()
+
+	if up.RepoID != "org/m" {
+		t.Errorf("RepoID = %q", up.RepoID)
+	}
+	// The ModelArg must be the backend's --model value, not the friendly name:
+	// mlx-lm would otherwise try to download a repo called "org/m".
+	if up.ModelArg != "/models/org/m" {
+		t.Errorf("ModelArg = %q, want the backend --model path", up.ModelArg)
+	}
+	if l.launchCount() != 1 {
+		t.Errorf("launched %d processes, want 1", l.launchCount())
+	}
+}
+
+func TestAcquireReusesRunningModel(t *testing.T) {
+	l := newFakeLauncher()
+	src := &fakeSource{models: map[string]int64{"org/m": 1 << 20}}
+	p := newTestPool(t, l, src, PoolOptions{MaxResidentBytes: 1 << 30})
+
+	for i := 0; i < 3; i++ {
+		_, release, err := p.Acquire(context.Background(), "org/m")
+		if err != nil {
+			t.Fatal(err)
+		}
+		release()
+	}
+	if l.launchCount() != 1 {
+		t.Errorf("launched %d processes for 3 acquires; the model should be reused", l.launchCount())
+	}
+}
+
+// Loading a model is slow. Concurrent callers must share one load, not each
+// start their own process.
+func TestConcurrentAcquireLoadsModelOnlyOnce(t *testing.T) {
+	l := newFakeLauncher()
+	l.loadDelay = 150 * time.Millisecond
+	src := &fakeSource{models: map[string]int64{"org/m": 1 << 20}}
+	p := newTestPool(t, l, src, PoolOptions{MaxResidentBytes: 1 << 30})
+
+	var wg sync.WaitGroup
+	errs := make(chan error, 10)
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, release, err := p.Acquire(context.Background(), "org/m")
+			if err != nil {
+				errs <- err
+				return
+			}
+			release()
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Errorf("Acquire: %v", err)
+	}
+
+	if got := l.launchCount(); got != 1 {
+		t.Errorf("launched %d processes for 10 concurrent acquires, want 1", got)
+	}
+}
+
+func TestAcquireUnknownModelFails(t *testing.T) {
+	l := newFakeLauncher()
+	src := &fakeSource{models: map[string]int64{}}
+	p := newTestPool(t, l, src, PoolOptions{MaxResidentBytes: 1 << 30})
+
+	if _, _, err := p.Acquire(context.Background(), "org/missing"); err == nil {
+		t.Fatal("expected an error for a model that is not downloaded")
+	}
+}
+
+// A model that cannot load (corrupt weights, missing dep) must surface an error
+// promptly instead of hanging every client until the readiness timeout.
+func TestProcessThatDiesDuringStartupReportsError(t *testing.T) {
+	l := newFakeLauncher()
+	l.dieAfter["org/broken"] = true
+	src := &fakeSource{models: map[string]int64{"org/broken": 1 << 20}}
+	p := newTestPool(t, l, src, PoolOptions{MaxResidentBytes: 1 << 30, ReadyTimeout: 5 * time.Second})
+
+	start := time.Now()
+	_, _, err := p.Acquire(context.Background(), "org/broken")
+	if err == nil {
+		t.Fatal("expected an error when the model server exits during startup")
+	}
+	if time.Since(start) > 3*time.Second {
+		t.Errorf("took %s to notice a dead process; it should fail fast, not wait for the readiness timeout", time.Since(start))
+	}
+	if !strings.Contains(err.Error(), "exited") {
+		t.Errorf("error should say the server exited, got: %v", err)
+	}
+}
+
+// A failed model must not stay in the pool consuming the memory budget.
+func TestFailedModelIsRemovedFromPool(t *testing.T) {
+	l := newFakeLauncher()
+	l.dieAfter["org/broken"] = true
+	src := &fakeSource{models: map[string]int64{"org/broken": 1 << 20}}
+	p := newTestPool(t, l, src, PoolOptions{MaxResidentBytes: 1 << 30, ReadyTimeout: 5 * time.Second})
+
+	p.Acquire(context.Background(), "org/broken")
+
+	if len(p.Resident()) != 0 {
+		t.Errorf("a model that failed to load is still resident: %v", p.Resident())
+	}
+}
+
+func TestLaunchFailureIsReported(t *testing.T) {
+	l := newFakeLauncher()
+	l.failFor = "org/m"
+	src := &fakeSource{models: map[string]int64{"org/m": 1 << 20}}
+	p := newTestPool(t, l, src, PoolOptions{MaxResidentBytes: 1 << 30})
+
+	if _, _, err := p.Acquire(context.Background(), "org/m"); err == nil {
+		t.Fatal("expected the launch failure to surface")
+	}
+}
+
+// The memory budget is the whole point of the pool: loading a second model that
+// does not fit must evict the first rather than OOM the machine.
+func TestEvictsLRUModelWhenBudgetExceeded(t *testing.T) {
+	l := newFakeLauncher()
+	src := &fakeSource{models: map[string]int64{
+		"org/a": 100,
+		"org/b": 100,
+	}}
+	// loadCost is 1.2x, so 100 bytes costs 120. A 200-byte budget fits exactly one.
+	p := newTestPool(t, l, src, PoolOptions{MaxResidentBytes: 200})
+
+	_, relA, err := p.Acquire(context.Background(), "org/a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	relA() // no longer in flight, so it is evictable
+
+	_, relB, err := p.Acquire(context.Background(), "org/b")
+	if err != nil {
+		t.Fatalf("Acquire b: %v", err)
+	}
+	defer relB()
+
+	res := p.Resident()
+	if len(res) != 1 {
+		t.Fatalf("expected exactly 1 resident model after eviction, got %d: %v", len(res), res)
+	}
+	if res[0].RepoID != "org/b" {
+		t.Errorf("resident model = %q, want org/b (org/a should have been evicted)", res[0].RepoID)
+	}
+}
+
+// Eviction must never kill a model that is mid-request.
+func TestInFlightModelIsNotEvicted(t *testing.T) {
+	l := newFakeLauncher()
+	src := &fakeSource{models: map[string]int64{"org/a": 100, "org/b": 100}}
+	p := newTestPool(t, l, src, PoolOptions{MaxResidentBytes: 200})
+
+	// Hold org/a in flight — do not release it.
+	_, relA, err := p.Acquire(context.Background(), "org/a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer relA()
+
+	// org/b cannot fit, and the only candidate for eviction is pinned.
+	_, _, err = p.Acquire(context.Background(), "org/b")
+	if err == nil {
+		t.Fatal("expected an error: there is no room and the resident model is in use")
+	}
+	if !strings.Contains(err.Error(), "memory") {
+		t.Errorf("error should explain the memory pressure, got: %v", err)
+	}
+
+	// org/a must still be alive and serving.
+	res := p.Resident()
+	if len(res) != 1 || res[0].RepoID != "org/a" {
+		t.Errorf("the in-flight model was evicted: %v", res)
+	}
+}
+
+func TestModelTooLargeForBudgetIsRejectedClearly(t *testing.T) {
+	l := newFakeLauncher()
+	src := &fakeSource{models: map[string]int64{"org/huge": 1 << 40}}
+	p := newTestPool(t, l, src, PoolOptions{MaxResidentBytes: 1 << 20})
+
+	_, _, err := p.Acquire(context.Background(), "org/huge")
+	if err == nil {
+		t.Fatal("expected an error for a model larger than the whole budget")
+	}
+	if !strings.Contains(err.Error(), "memory") {
+		t.Errorf("error should mention memory, got: %v", err)
+	}
+	if l.launchCount() != 0 {
+		t.Error("a model that cannot possibly fit must not be launched at all")
+	}
+}
+
+func TestUnloadStopsTheModelServer(t *testing.T) {
+	l := newFakeLauncher()
+	src := &fakeSource{models: map[string]int64{"org/m": 1 << 20}}
+	p := newTestPool(t, l, src, PoolOptions{MaxResidentBytes: 1 << 30})
+
+	_, release, err := p.Acquire(context.Background(), "org/m")
+	if err != nil {
+		t.Fatal(err)
+	}
+	release()
+
+	if err := p.Unload("org/m"); err != nil {
+		t.Fatalf("Unload: %v", err)
+	}
+	if len(p.Resident()) != 0 {
+		t.Error("model still resident after Unload")
+	}
+	if err := p.Unload("org/m"); err == nil {
+		t.Error("unloading an already-unloaded model should error")
+	}
+}
+
+func TestUnloadRefusesWhileRequestInFlight(t *testing.T) {
+	l := newFakeLauncher()
+	src := &fakeSource{models: map[string]int64{"org/m": 1 << 20}}
+	p := newTestPool(t, l, src, PoolOptions{MaxResidentBytes: 1 << 30})
+
+	_, release, err := p.Acquire(context.Background(), "org/m")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+
+	if err := p.Unload("org/m"); err == nil {
+		t.Error("Unload should refuse to kill a model that is serving a request")
+	}
+}
+
+// Idle models should give their memory back.
+func TestIdleModelIsUnloaded(t *testing.T) {
+	l := newFakeLauncher()
+	src := &fakeSource{models: map[string]int64{"org/m": 1 << 20}}
+	p := newTestPool(t, l, src, PoolOptions{
+		MaxResidentBytes: 1 << 30,
+		IdleTimeout:      200 * time.Millisecond,
+	})
+
+	_, release, err := p.Acquire(context.Background(), "org/m")
+	if err != nil {
+		t.Fatal(err)
+	}
+	release()
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if len(p.Resident()) == 0 {
+			return // reaped, as intended
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	t.Error("an idle model was never unloaded; its memory is stranded")
+}
+
+func TestCloseStopsEverything(t *testing.T) {
+	l := newFakeLauncher()
+	src := &fakeSource{models: map[string]int64{"org/a": 100, "org/b": 100}}
+	p := newTestPool(t, l, src, PoolOptions{MaxResidentBytes: 1 << 30})
+
+	_, relA, _ := p.Acquire(context.Background(), "org/a")
+	relA()
+
+	if err := p.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if len(p.Resident()) != 0 {
+		t.Error("models still resident after Close")
+	}
+	if _, _, err := p.Acquire(context.Background(), "org/a"); !errors.Is(err, ErrClosed) {
+		t.Errorf("Acquire after Close should return ErrClosed, got %v", err)
+	}
+	if err := p.Close(); err != nil {
+		t.Errorf("Close should be idempotent, got %v", err)
+	}
+}
+
+func TestLoadCostAddsHeadroom(t *testing.T) {
+	if got := loadCost(1000); got != 1200 {
+		t.Errorf("loadCost(1000) = %d, want 1200 (weights + KV-cache headroom)", got)
+	}
+}
+
+func TestHumanBytes(t *testing.T) {
+	tests := []struct {
+		in   int64
+		want string
+	}{
+		{512, "512 B"},
+		{2048, "2.0 KB"},
+		{5 << 30, "5.0 GB"},
+	}
+	for _, tt := range tests {
+		if got := humanBytes(tt.in); got != tt.want {
+			t.Errorf("humanBytes(%d) = %q, want %q", tt.in, got, tt.want)
+		}
+	}
+}

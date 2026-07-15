@@ -1,2 +1,99 @@
-# Gropius
-A (currently) headless local LLM host for MLX models.
+<div align="center">
+
+  <h1>Gropius</h1>
+
+  <p>Download MLX models on your Mac and serve them to the rest of your network — an OpenAI-compatible endpoint, in a menu-bar app.</p>
+
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green" alt="License: MIT"></a>
+  <img src="https://img.shields.io/badge/status-experimental-orange" alt="Status: experimental">
+  <img src="https://img.shields.io/badge/Go-1.25-00ADD8?logo=go&logoColor=white" alt="Go 1.25">
+  <a href="https://claude.ai/claude-code"><img src="https://img.shields.io/badge/Built_with-Claude_Code-3B5CE7?logo=anthropic&logoColor=white" alt="Built with Claude Code"></a>
+  <br />
+  <img src="https://img.shields.io/badge/Apple_Silicon-000000?logo=apple&logoColor=white" alt="Apple Silicon">
+  <img src="https://img.shields.io/badge/MLX-Metal-informational" alt="MLX / Metal">
+
+</div>
+
+---
+
+**Gropius** turns one Apple Silicon Mac into a shared local-inference server.
+Browse and download [MLX](https://github.com/ml-explore/mlx) models from
+HuggingFace, and serve them over an OpenAI-compatible API to every other machine
+and user account on your network. Anything that talks to ChatGPT can talk to your
+Mac — just change the base URL.
+
+It manages its own runtime: on first launch it installs a private Python and MLX
+under `~/Library/Application Support/Gropius` and never touches your system
+Python. Uninstalling is deleting one folder.
+
+## Status
+
+Experimental. Runs and is tested end-to-end on macOS 26 / Apple Silicon.
+Cross-machine LAN use works; TLS and notarized distribution are not yet included.
+
+## Features
+
+- **Model browser** — search the `mlx-community` org, download with live progress,
+  resume interrupted transfers.
+- **OpenAI-compatible server** — `/v1/chat/completions`, `/v1/completions`,
+  `/v1/models`, streaming included. Drop-in for any OpenAI SDK.
+- **Runs many models** — one process per model, with an LRU memory budget so a
+  request for a second model evicts an idle one instead of OOMing the machine.
+- **Network-shared** — bind the LAN, discoverable over Bonjour, optional API key.
+- **Multi-account** — other user accounts on the same Mac share one copy of each
+  model on disk and on the GPU.
+
+## Build
+
+```sh
+make app         # build Gropius.app (menu-bar app bundle)
+make install     # copy to /Applications and launch it
+make run         # or: run headless in the foreground, for development
+```
+
+The first launch installs the MLX runtime (a few minutes, shown in the control
+panel), then you can download and serve models.
+
+New here? See **[docs/getting-started.md](docs/getting-started.md)**.
+
+## Using it
+
+Click the menu-bar icon → **Open Control Panel**, or from any OpenAI client:
+
+```python
+from openai import OpenAI
+client = OpenAI(base_url="http://your-mac.local:11535/v1", api_key="not-needed")
+print(client.chat.completions.create(
+    model="mlx-community/Qwen3-8B-4bit",
+    messages=[{"role": "user", "content": "Hello!"}],
+).choices[0].message.content)
+```
+
+## Security
+
+By default the server is **reachable by anyone on your network with no API key** —
+the control panel warns you while this is so. Set a key in **Settings** to require
+`Authorization: Bearer <key>`. Same-machine clients (loopback, including other
+user accounts) never need a key. The control panel and its `/api/*` endpoints are
+bound to loopback only and are never reachable from the LAN.
+
+## Layout
+
+- [`cmd/gropius/`](cmd/gropius/) — menu-bar app + singleton election.
+- [`internal/`](internal/) — the engine: `hub` (HuggingFace client + downloader),
+  `runtime` (Python/MLX provisioning + process pool), `gateway` (OpenAI + control
+  API), `registry`, `discovery`, `config`, `app`.
+- [`docs/`](docs/) — getting-started guide.
+
+Design decisions and the empirical facts behind them: [`DECISIONS.md`](DECISIONS.md).
+
+## Development
+
+```sh
+make test        # go test -race ./...
+make lint        # fmt + vet + test
+```
+
+## Licence
+
+MIT. See [`LICENSE`](LICENSE).
