@@ -108,7 +108,37 @@ func New(opts Options) (*App, error) {
 		DecodeConcurrency: opts.Config.DecodeConcurrency,
 	})
 
+	if len(opts.Config.Preload) > 0 {
+		go a.preload(opts.Config.Preload)
+	}
+
 	return a, nil
+}
+
+// preload warms the configured models so the first real request after a restart
+// finds them resident rather than paying a cold start.
+//
+// Sequential on purpose: several parallel loads would each pin themselves
+// (inFlight > 0) before the next tried to evict, so the pool's memory budget
+// could find no evictable victim and fail them all. One at a time lets each load
+// finish (and, if the budget is tight, be evicted in LRU order) cleanly.
+func (a *App) preload(ids []string) {
+	for _, id := range ids {
+		if !config.ValidRepoID(id) {
+			a.Log.Warn("skipping invalid preload model id", "model", id)
+			continue
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), runtime.ProbeTimeout)
+		_, release, err := a.Pool.Acquire(ctx, id)
+		if err != nil {
+			a.Log.Warn("preload failed", "model", id, "err", err)
+			cancel()
+			continue
+		}
+		release()
+		cancel()
+		a.Log.Info("preloaded model", "model", id)
+	}
 }
 
 // Config returns the current settings.

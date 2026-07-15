@@ -91,6 +91,14 @@ type entry struct {
 	lastUsed time.Time
 	inFlight int
 
+	// sem bounds how many requests run against this one model server at once. Its
+	// capacity is a small multiple of the server's --decode-concurrency: mlx-lm
+	// batches only that many decodes, and each extra in-flight sequence holds its
+	// own KV cache. On a unified-memory Mac an unbounded burst is a direct path to
+	// a GPU-memory blowup that crashes the server and every request with it, so
+	// excess requests queue on this channel instead.
+	sem chan struct{}
+
 	// ready is closed once the model answers a real completion.
 	ready    chan struct{}
 	readyErr error
@@ -99,7 +107,12 @@ type entry struct {
 // NewPool creates a pool. Call Close to shut down every model server.
 func NewPool(opts PoolOptions) *Pool {
 	if opts.HTTP == nil {
-		opts.HTTP = &http.Client{Timeout: 30 * time.Second}
+		// No client-level timeout: this client is used only by the readiness probe,
+		// whose single completion request rides mlx-lm's lazy weight load — which
+		// takes minutes for a large model. Each probe request is instead bounded by
+		// the ReadyTimeout-scoped context in probeReady. A fixed 30s here would abort
+		// mid-load and force wasteful re-probing.
+		opts.HTTP = &http.Client{}
 	}
 	if opts.now == nil {
 		opts.now = time.Now
@@ -173,11 +186,27 @@ func (p *Pool) Acquire(ctx context.Context, repoID string) (*Upstream, func(), e
 		return nil, nil, ctx.Err()
 	}
 
+	// The model is ready; now claim a concurrency slot on it. Beyond the batch the
+	// server can actually decode, extra requests wait here rather than piling into
+	// mlx-lm and blowing its memory. The wait is bounded by the caller's context.
+	// This is done only on the success path, so the early `release()` calls above
+	// (which never took a slot) stay correct; the returned closure drains both.
+	select {
+	case e.sem <- struct{}{}:
+	case <-ctx.Done():
+		release()
+		return nil, nil, ctx.Err()
+	}
+	releaseSlot := func() {
+		<-e.sem
+		release()
+	}
+
 	return &Upstream{
 		RepoID:   repoID,
 		BaseURL:  fmt.Sprintf("http://127.0.0.1:%d", e.port),
 		ModelArg: e.modelArg,
-	}, release, nil
+	}, releaseSlot, nil
 }
 
 // startLocked launches a model server. Callers must hold p.mu.
@@ -210,6 +239,9 @@ func (p *Pool) startLocked(repoID string) (*entry, error) {
 		loadedAt: p.opts.now(),
 		lastUsed: p.opts.now(),
 		ready:    make(chan struct{}),
+		// Allow twice the decode batch size in flight: enough to keep mlx-lm's
+		// batching full without letting an unbounded burst exhaust GPU memory.
+		sem: make(chan struct{}, 2*p.opts.DecodeConcurrency),
 	}
 
 	proc, err := p.opts.Launcher.Launch(context.Background(), Spec{
@@ -307,7 +339,11 @@ func (p *Pool) probeReady(ctx context.Context, e *entry) error {
 			return fmt.Errorf("%s did not become ready within %s", e.repoID, p.opts.ReadyTimeout)
 		case <-time.After(backoff):
 		}
-		if backoff < 2*time.Second {
+		// Cap the retry interval low: this loop only spins while the server socket
+		// is not yet up (a ready request returns the instant the model loads). A
+		// short ramp avoids a busy-spin without adding up to ~2s of dead time
+		// between the model becoming ready and the next probe noticing.
+		if backoff < 400*time.Millisecond {
 			backoff *= 2
 		}
 	}
