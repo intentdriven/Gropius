@@ -204,6 +204,10 @@ func (a *App) Download(repoID string) error {
 				// In-memory only: progress ticks are frequent and ephemeral, so
 				// they must not write the registry file to disk each time.
 				a.Registry.UpdateProgress(repoID, p.Percent())
+				// Record the total size once, so the UI can show "X% of <size>".
+				if p.Total > 0 {
+					a.Registry.SetSize(repoID, p.Total)
+				}
 			},
 		})
 

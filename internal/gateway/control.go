@@ -7,9 +7,11 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/intentdriven/Gropius/internal/app"
+	"github.com/intentdriven/Gropius/internal/capability"
 	"github.com/intentdriven/Gropius/internal/config"
 	"github.com/intentdriven/Gropius/internal/hub"
 	"github.com/intentdriven/Gropius/internal/registry"
@@ -204,20 +206,57 @@ func (c *Control) handleSearch(w http.ResponseWriter, r *http.Request) {
 		local[m.RepoID] = m.State
 	}
 
+	// Measure this machine so we can show each model's size and hide the ones
+	// that will not fit — too big to store, or too big to run in the RAM budget.
+	machine := capability.Assess(c.App.Paths.Models)
+
+	// The search payload carries no file sizes, so fetch each repo's download
+	// size concurrently (one tree request each, bounded).
+	sizes := make([]int64, len(models))
+	ctx := r.Context()
+	sem := make(chan struct{}, 8)
+	var wg sync.WaitGroup
+	for i, m := range models {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(i int, repoID string) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			if size, err := c.App.Hub.RepoSize(ctx, repoID); err == nil {
+				sizes[i] = size
+			}
+		}(i, m.ID)
+	}
+	wg.Wait()
+
 	type result struct {
 		hub.Model
 		Quantization string `json:"quantization"`
 		LocalState   string `json:"local_state,omitempty"`
+		SizeBytes    int64  `json:"size_bytes,omitempty"`
 	}
 	out := make([]result, 0, len(models))
-	for _, m := range models {
+	hidden := 0
+	for i, m := range models {
+		state := string(local[m.ID])
+		// Always show models already on this machine and models we could not
+		// measure; otherwise hide ones that do not fit.
+		if state == "" && !machine.Fits(sizes[i]) {
+			hidden++
+			continue
+		}
 		out = append(out, result{
 			Model:        m,
 			Quantization: m.Quantization(),
-			LocalState:   string(local[m.ID]),
+			LocalState:   state,
+			SizeBytes:    sizes[i],
 		})
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"results": out})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"results": out,
+		"machine": machine,
+		"hidden":  hidden,
+	})
 }
 
 // modelRequest is the body of the model action endpoints.

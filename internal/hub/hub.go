@@ -257,6 +257,16 @@ func (c *Client) Files(ctx context.Context, repoID, revision string) ([]File, er
 	return entries, nil
 }
 
+// RepoSize returns the total download size, in bytes, of the MLX-relevant files
+// in a repo at the default revision. This is what Gropius would actually fetch.
+func (c *Client) RepoSize(ctx context.Context, repoID string) (int64, error) {
+	files, err := c.Files(ctx, repoID, "main")
+	if err != nil {
+		return 0, err
+	}
+	return TotalSize(WantedFiles(files)), nil
+}
+
 // ResolveURL is the direct-download URL for one file in a repo.
 func (c *Client) ResolveURL(repoID, revision, file string) string {
 	if revision == "" {
