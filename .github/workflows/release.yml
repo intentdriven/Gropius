@@ -13,10 +13,14 @@ name: release
 #     (used to attach binaries to a tag that was created before this workflow
 #     existed, e.g. v0.1.0)
 #
-# The runner is Apple Silicon (macos-15), so the arm64 server binary and the
-# universal client both build natively — no cross-compilation, and the server's
-# `codesign --sign -` ad-hoc signature is produced the same way `make app` does
-# locally.
+# The runner is Apple Silicon macOS 26 (macos-26 = Tahoe), so the arm64 server
+# binary and the universal client both build natively — no cross-compilation, and
+# the server's `codesign --sign -` ad-hoc signature is produced the same way
+# `make app` does locally. macOS 26 specifically: the client uses the Liquid
+# Glass button styles (.glass / .glassProminent), which only exist in the macOS
+# 26 SDK — an older runner image (macos-15) fails to compile them even inside an
+# `#available(macOS 26.0, *)` guard, since that guard is a runtime check and the
+# symbol must still be present in the build SDK.
 on:
   push:
     tags:
@@ -46,7 +50,7 @@ permissions:
 
 jobs:
   release:
-    runs-on: macos-15
+    runs-on: macos-26
     timeout-minutes: 30
     permissions:
       contents: write # create the Release and upload its assets
