@@ -20,11 +20,16 @@ vet:
 
 lint: fmt vet test
 
-## build: the plain binary
+## build: the plain binary. LDFLAGS is empty for dev builds (keeps debug symbols
+## for delve); the app/release build overrides it to strip.
+LDFLAGS ?=
 build:
-	go build -o $(BIN) $(PKG)
+	go build -ldflags "$(LDFLAGS)" -o $(BIN) $(PKG)
 
-## app: a real .app bundle (menu-bar app, LAN + Bonjour entitlements)
+## app: a real .app bundle (menu-bar app, LAN + Bonjour entitlements).
+## Strips debug info (-s -w): a distributed binary needs no DWARF, and it roughly
+## halves the download.
+app: LDFLAGS = -s -w
 app: build icon
 	rm -rf $(BUNDLE)
 	mkdir -p $(BUNDLE)/Contents/MacOS $(BUNDLE)/Contents/Resources
