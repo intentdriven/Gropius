@@ -95,6 +95,10 @@ func (m Model) Quantization() string {
 // File is one entry in a repo's file tree.
 type File struct {
 	Path string `json:"path"`
+	// Type is "file" or "directory" in the Hub tree listing. Directory entries
+	// must be dropped before download: they are not fetchable and a GET of one
+	// 404s, which would abort the whole repo download.
+	Type string `json:"type"`
 	Size int64  `json:"size"`
 	OID  string `json:"oid"`
 	LFS  *struct {
@@ -221,6 +225,11 @@ func (c *Client) Search(ctx context.Context, q SearchQuery) ([]Model, error) {
 
 // Files lists a repo's file tree at the given revision (default "main"),
 // including sizes, which the downloader needs for progress reporting.
+//
+// The tree endpoint paginates at 1000 entries and signals more with a
+// `Link: <...>; rel="next"` header. We follow it to the end: a repo with more
+// than 1000 tree entries (a heavily-sharded model, say) would otherwise yield a
+// silently truncated list, and the download would "succeed" while missing shards.
 func (c *Client) Files(ctx context.Context, repoID, revision string) ([]File, error) {
 	if revision == "" {
 		revision = "main"
@@ -228,33 +237,73 @@ func (c *Client) Files(ctx context.Context, repoID, revision string) ([]File, er
 	u := fmt.Sprintf("%s/api/models/%s/tree/%s?recursive=true",
 		c.baseURL(), repoID, url.PathEscape(revision))
 
-	req, err := c.newRequest(ctx, http.MethodGet, u)
-	if err != nil {
-		return nil, err
-	}
-	resp, err := c.httpClient().Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("list files for %s: %w", repoID, err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return nil, apiError(resp, u)
-	}
-
 	var entries []File
-	if err := json.NewDecoder(resp.Body).Decode(&entries); err != nil {
-		return nil, fmt.Errorf("decode file tree for %s: %w", repoID, err)
+	for u != "" {
+		req, err := c.newRequest(ctx, http.MethodGet, u)
+		if err != nil {
+			return nil, err
+		}
+		resp, err := c.httpClient().Do(req)
+		if err != nil {
+			return nil, fmt.Errorf("list files for %s: %w", repoID, err)
+		}
+		if resp.StatusCode != http.StatusOK {
+			err := apiError(resp, u)
+			resp.Body.Close()
+			return nil, err
+		}
+
+		var page []File
+		if err := json.NewDecoder(resp.Body).Decode(&page); err != nil {
+			resp.Body.Close()
+			return nil, fmt.Errorf("decode file tree for %s: %w", repoID, err)
+		}
+		next := nextPageURL(resp.Header.Get("Link"))
+		resp.Body.Close()
+
+		entries = append(entries, page...)
+		u = next
 	}
 
 	// LFS entries carry the true size in the nested object; the outer size is
 	// the pointer file's size for some repos. Prefer the LFS size when present.
-	for i := range entries {
-		if entries[i].LFS != nil && entries[i].LFS.Size > 0 {
-			entries[i].Size = entries[i].LFS.Size
-			entries[i].OID = entries[i].LFS.OID
+	// Directory entries are not fetchable — drop them so they never reach the
+	// downloader (a GET of a directory 404s and aborts the whole download).
+	out := entries[:0]
+	for _, e := range entries {
+		if e.Type == "directory" {
+			continue
 		}
+		if e.LFS != nil && e.LFS.Size > 0 {
+			e.Size = e.LFS.Size
+			e.OID = e.LFS.OID
+		}
+		out = append(out, e)
 	}
-	return entries, nil
+	return out, nil
+}
+
+// nextPageURL extracts the rel="next" URL from an RFC 8288 Link header, or "".
+func nextPageURL(link string) string {
+	for _, part := range strings.Split(link, ",") {
+		segs := strings.Split(strings.TrimSpace(part), ";")
+		if len(segs) < 2 {
+			continue
+		}
+		isNext := false
+		for _, s := range segs[1:] {
+			if strings.Contains(strings.ToLower(s), `rel="next"`) {
+				isNext = true
+				break
+			}
+		}
+		if !isNext {
+			continue
+		}
+		u := strings.TrimSpace(segs[0])
+		return strings.TrimSuffix(strings.TrimPrefix(u, "<"), ">")
+	}
+	return ""
 }
 
 // RepoSize returns the total download size, in bytes, of the MLX-relevant files
@@ -268,11 +317,26 @@ func (c *Client) RepoSize(ctx context.Context, repoID string) (int64, error) {
 }
 
 // ResolveURL is the direct-download URL for one file in a repo.
+//
+// The revision and each file-path segment are escaped: a file named e.g.
+// "weights#2.safetensors" would otherwise have everything after '#' parsed as a
+// URL fragment, producing a wrong request that 404s and aborts the download.
 func (c *Client) ResolveURL(repoID, revision, file string) string {
 	if revision == "" {
 		revision = "main"
 	}
-	return fmt.Sprintf("%s/%s/resolve/%s/%s", c.baseURL(), repoID, revision, file)
+	return fmt.Sprintf("%s/%s/resolve/%s/%s",
+		c.baseURL(), repoID, url.PathEscape(revision), escapePathSegments(file))
+}
+
+// escapePathSegments percent-escapes each '/'-separated segment while keeping the
+// separators, so a repo-relative path stays a valid, correct URL path.
+func escapePathSegments(p string) string {
+	segs := strings.Split(p, "/")
+	for i, s := range segs {
+		segs[i] = url.PathEscape(s)
+	}
+	return strings.Join(segs, "/")
 }
 
 // wantedFile reports whether a repo file is needed to run the model.

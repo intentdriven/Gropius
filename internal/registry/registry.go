@@ -297,14 +297,33 @@ func (r *Registry) saveLocked() error {
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(r.path), 0o755); err != nil {
+	dir := filepath.Dir(r.path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
-	tmp := r.path + ".tmp"
-	if err := os.WriteFile(tmp, append(b, '\n'), 0o644); err != nil {
+	// A random-named temp (O_EXCL) rather than a predictable "registry.json.tmp":
+	// in a group-writable shared root another local account could pre-plant that
+	// fixed name as a symlink and redirect the write. registry.json holds no
+	// secrets (a lost one rebuilds via Rescan), but the unsafe pattern is the same
+	// one hardened in config.Save, so keep them consistent.
+	tmp, err := os.CreateTemp(dir, "registry-*.json.tmp")
+	if err != nil {
 		return err
 	}
-	return os.Rename(tmp, r.path)
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName) // no-op after a successful rename
+	if _, err := tmp.Write(append(b, '\n')); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpName, r.path)
 }
 
 // Subscribe returns a channel that receives a snapshot on every change, plus a

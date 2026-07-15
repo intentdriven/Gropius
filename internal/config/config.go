@@ -255,6 +255,15 @@ func Save(path string, c Config) error {
 		tmp.Close()
 		return err
 	}
+	// Flush to disk before the rename. The rename is atomic against a process
+	// crash, but not against a power loss that makes the rename durable before the
+	// data — which would leave a truncated config.json. A truncated config fails to
+	// parse and reverts to defaults, so durability here is a security concern, not
+	// just a tidiness one.
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return err
+	}
 	if err := tmp.Close(); err != nil {
 		return err
 	}

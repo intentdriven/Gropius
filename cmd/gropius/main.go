@@ -57,8 +57,16 @@ func main() {
 
 	cfg, err := config.Load(paths.Config)
 	if err != nil {
-		log.Warn("config could not be read; using defaults", "err", err)
+		// config.json exists but is unreadable/corrupt (a fresh install returns no
+		// error). The shipping default is LAN-exposed with no key, so falling back
+		// to it here would silently discard the user's hardening — a truncated
+		// config would swing a locked-down server wide open. Fail CLOSED to
+		// loopback instead; the user fixes or deletes the file from the local UI.
+		log.Error("config.json could not be read — starting locked down to loopback only so the server is not unintentionally exposed; fix or delete it and restart",
+			"path", paths.Config, "err", err)
 		cfg = config.Default()
+		cfg.Host = "127.0.0.1"
+		cfg.Advertise = false
 	}
 
 	// Claim the port. Losing this race to a live server is a normal outcome, not

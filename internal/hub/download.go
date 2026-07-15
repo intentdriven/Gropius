@@ -113,6 +113,10 @@ func (c *Client) Download(ctx context.Context, req DownloadRequest) error {
 			tracker.addCompleted(n)
 		}
 	}
+	// The transfer rate must measure THIS session's bytes, not the ones already
+	// on disk. Without a baseline, resuming a nearly-complete download reports an
+	// absurd rate (e.g. 27 GB "transferred" in the first second) and a near-zero ETA.
+	tracker.baseline = tracker.completed.Load()
 	tracker.emit("")
 
 	sem := make(chan struct{}, req.Concurrency)
@@ -328,6 +332,9 @@ type progressTracker struct {
 	filesTotal int
 	onProgress func(Progress)
 	started    time.Time
+	// baseline is the completed-byte count at the start of this session (bytes
+	// already on disk from a prior run). Transfer rate is measured from it.
+	baseline int64
 
 	completed atomic.Int64
 	filesDone atomic.Int64
@@ -370,7 +377,10 @@ func (t *progressTracker) emit(path string) {
 	done := t.completed.Load()
 	var rate int64
 	if el := time.Since(t.started).Seconds(); el > 0.5 {
-		rate = int64(float64(done) / el)
+		// Only this session's bytes count toward the rate, not those resumed from disk.
+		if session := done - t.baseline; session > 0 {
+			rate = int64(float64(session) / el)
+		}
 	}
 	p := Progress{
 		RepoID:      t.repoID,
