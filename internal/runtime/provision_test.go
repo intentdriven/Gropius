@@ -72,6 +72,38 @@ func TestExtractUVMissingBinary(t *testing.T) {
 	}
 }
 
+// The embedded MLX lock must stay fully hash-pinned: pin mlx-lm at the tested
+// version, and carry a hash for every package. A regeneration that dropped
+// --generate-hashes, or an accidental empty file, would silently return the
+// install to trusting PyPI content — this catches that at test time.
+func TestMLXRequirementsAreHashLocked(t *testing.T) {
+	s := string(mlxRequirements)
+	if len(s) == 0 {
+		t.Fatal("embedded mlx-requirements.txt is empty")
+	}
+	if !strings.Contains(s, "mlx-lm=="+mlxLMVersion) {
+		t.Errorf("lock does not pin mlx-lm==%s", mlxLMVersion)
+	}
+
+	pkgs := 0
+	for _, ln := range strings.Split(s, "\n") {
+		t := strings.TrimSpace(ln)
+		if t == "" || strings.HasPrefix(t, "#") {
+			continue
+		}
+		if strings.Contains(t, "==") {
+			pkgs++
+		}
+	}
+	if pkgs < 10 {
+		t.Errorf("expected the full transitive tree (>=10 pinned packages), got %d", pkgs)
+	}
+	hashes := strings.Count(s, "--hash=sha256:")
+	if hashes < pkgs {
+		t.Errorf("only %d hashes for %d pinned packages — a dependency is unhashed", hashes, pkgs)
+	}
+}
+
 // TestEnsureUVRejectsTamperedDownload proves the SHA-256 pin is enforced: a
 // well-formed tarball whose digest does not match the pinned hash must never
 // be installed.

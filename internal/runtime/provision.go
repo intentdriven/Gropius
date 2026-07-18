@@ -6,6 +6,7 @@ import (
 	"compress/gzip"
 	"context"
 	"crypto/sha256"
+	_ "embed"
 	"encoding/hex"
 	"fmt"
 	"io"
@@ -20,6 +21,22 @@ import (
 
 	"github.com/intentdriven/Gropius/internal/config"
 )
+
+// mlxRequirements is the fully-resolved, hash-locked dependency set for the
+// pinned mlx-lm. Installing with `uv pip install --require-hashes` against this
+// extends the "exact bytes or fail" guarantee — the one the SHA-256-pinned uv
+// binary already gives — to the entire Python payload: a compromised or
+// republished PyPI package, or dependency confusion on a transitive name, is
+// rejected by hash rather than silently executed under the user's account.
+//
+// Regenerate when bumping mlxLMVersion (needs the pinned uv, macOS/arm64):
+//
+//	echo "mlx-lm==<version>" > requirements.in
+//	uv pip compile requirements.in --generate-hashes --python-version 3.12 \
+//	    -o internal/runtime/mlx-requirements.txt
+//
+//go:embed mlx-requirements.txt
+var mlxRequirements []byte
 
 // mlxPin is the exact MLX stack Gropius installs.
 //
@@ -181,7 +198,13 @@ func (p *Provisioner) ensureUV(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	resp, err := http.DefaultClient.Do(req)
+	// A bounded client, not http.DefaultClient: provisioning runs on a background
+	// context with no deadline, so a stalled or slow-loris peer on this download
+	// would otherwise hang first-run setup indefinitely. Integrity is unaffected
+	// either way — the SHA-256 pin below still gates execution — this only bounds
+	// the wait. 10 minutes is far beyond a real ~20 MB fetch.
+	client := &http.Client{Timeout: 10 * time.Minute}
+	resp, err := client.Do(req)
 	if err != nil {
 		return fmt.Errorf("download uv %s: %w", uvVersion, err)
 	}
@@ -273,14 +296,22 @@ func (p *Provisioner) ensureVenv(ctx context.Context) error {
 	return nil
 }
 
-// ensureMLX installs the pinned mlx-lm into the venv and verifies it imports.
+// ensureMLX installs the pinned, hash-locked mlx-lm stack into the venv and
+// verifies it imports.
 func (p *Provisioner) ensureMLX(ctx context.Context) error {
+	// Install from the embedded, fully-resolved lock with --require-hashes, so
+	// every wheel (mlx-lm and its whole transitive tree) must match a hash baked
+	// into the binary or the install fails. This closes the gap a bare
+	// `mlx-lm==<v>` left open: version-pinning stops drift, not a compromised or
+	// republished PyPI package. uv reads the requirements from stdin ("-r -").
 	cmd := exec.CommandContext(ctx, p.Paths.UV(),
 		"pip", "install",
 		"--python", p.Paths.VenvPython(),
-		"mlx-lm=="+mlxLMVersion,
+		"--require-hashes",
+		"-r", "-",
 	)
 	cmd.Env = p.uvEnv()
+	cmd.Stdin = bytes.NewReader(mlxRequirements)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("install mlx-lm: %w: %s", err, tail(string(out), 500))
 	}
