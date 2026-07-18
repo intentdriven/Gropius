@@ -22,12 +22,14 @@
     <string>14.0</string>
     <key>NSHighResolutionCapable</key>
     <true/>
-    <!-- The client only talks to a plain-HTTP LAN server, so allow it. -->
+    <!-- The client talks to a plain-HTTP server on the LAN. NSAllowsLocalNetworking
+         permits exactly that (.local / RFC1918 / loopback cleartext) WITHOUT
+         disabling App Transport Security for public hosts. NSAllowsArbitraryLoads
+         is deliberately NOT set: it would let a mistyped public http:// address
+         send the bearer token in cleartext over the internet with no warning. -->
     <key>NSAppTransportSecurity</key>
     <dict>
         <key>NSAllowsLocalNetworking</key>
-        <true/>
-        <key>NSAllowsArbitraryLoads</key>
         <true/>
     </dict>
     <!-- Reaching a peer over the LAN triggers macOS Local Network Privacy. -->

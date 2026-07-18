@@ -8,6 +8,56 @@
 // into a .app without an Xcode project. See build.sh.
 
 import SwiftUI
+import Security
+
+// MARK: - Keychain
+
+/// Keychain-backed storage for the one secret this app holds: the server API
+/// key. Storing it in UserDefaults (as an earlier build did) leaves it in
+/// cleartext in the preferences plist, readable by any process running as the
+/// user and by anything that syncs or backs up the home directory. The Keychain
+/// gates it behind the login-keychain ACL instead.
+enum Keychain {
+    private static let service = "dev.gropius.chat"
+    private static let account = "apiKey"
+
+    private static var baseQuery: [String: Any] {
+        [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account,
+        ]
+    }
+
+    static func read() -> String {
+        var query = baseQuery
+        query[kSecReturnData as String] = true
+        query[kSecMatchLimit as String] = kSecMatchLimitOne
+        var out: CFTypeRef?
+        guard SecItemCopyMatching(query as CFDictionary, &out) == errSecSuccess,
+              let data = out as? Data,
+              let value = String(data: data, encoding: .utf8)
+        else { return "" }
+        return value
+    }
+
+    static func write(_ value: String) {
+        // Empty means "no key" — remove the item rather than store an empty secret.
+        if value.isEmpty {
+            SecItemDelete(baseQuery as CFDictionary)
+            return
+        }
+        let attrs: [String: Any] = [
+            kSecValueData as String: Data(value.utf8),
+            kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlocked,
+        ]
+        if SecItemUpdate(baseQuery as CFDictionary, attrs as CFDictionary) == errSecItemNotFound {
+            var add = baseQuery
+            add.merge(attrs) { _, new in new }
+            SecItemAdd(add as CFDictionary, nil)
+        }
+    }
+}
 
 // MARK: - Model types
 
@@ -55,8 +105,12 @@ private struct StreamChunk: Decodable {
 final class AppModel: ObservableObject {
     // Persisted connection settings.
     @AppStorage("serverURL") var serverURL: String = "http://AlicesMac.local:11535"
-    @AppStorage("apiKey") var apiKey: String = ""
     @AppStorage("selectedModel") var selectedModel: String = ""
+
+    /// The bearer token. Held in memory as @Published (so SettingsView's
+    /// SecureField binds to it) but persisted to the Keychain, never
+    /// UserDefaults. Loaded in init(); saved by SettingsView on change.
+    @Published var apiKey: String = ""
 
     @Published var conversations: [Conversation] = []
     @Published var selectedID: UUID?
@@ -78,6 +132,13 @@ final class AppModel: ObservableObject {
     private var streamTask: Task<Void, Never>?
 
     init() {
+        // Migrate a key saved by an earlier build (plaintext UserDefaults) into
+        // the Keychain, then forget the plaintext copy.
+        if let legacy = UserDefaults.standard.string(forKey: "apiKey"), !legacy.isEmpty {
+            Keychain.write(legacy)
+            UserDefaults.standard.removeObject(forKey: "apiKey")
+        }
+        apiKey = Keychain.read()
         load()
         if conversations.isEmpty {
             let c = Conversation()
@@ -146,7 +207,15 @@ final class AppModel: ObservableObject {
     }
 
     private func request(_ path: String) -> URLRequest? {
-        guard let url = URL(string: base + path) else { return nil }
+        // Require an http(s) URL with a host before attaching the bearer token.
+        // The server URL is free-text; without this guard a stray scheme
+        // (file://, ftp://) or a hostless string would still get the token
+        // attached to whatever URL resulted.
+        guard let url = URL(string: base + path),
+              let scheme = url.scheme?.lowercased(),
+              scheme == "http" || scheme == "https",
+              let host = url.host, !host.isEmpty
+        else { return nil }
         var r = URLRequest(url: url)
         r.timeoutInterval = 60
         if !apiKey.isEmpty {
@@ -250,18 +319,46 @@ final class AppModel: ObservableObject {
                 write(content: "⚠️ Server returned HTTP \(http.statusCode).")
                 return
             }
-            for try await line in bytes.lines {
-                if Task.isCancelled { break }
-                guard line.hasPrefix("data: ") else { continue }
+            // Assemble SSE lines from the raw byte stream ourselves, under hard
+            // caps, rather than using bytes.lines: a hostile or broken server can
+            // stream an unbounded body with no newline, and bytes.lines would
+            // buffer it without limit. maxLineBytes bounds a single line;
+            // maxTotalBytes bounds the whole response.
+            let maxLineBytes = 1 << 20   // 1 MiB per SSE line
+            let maxTotalBytes = 64 << 20 // 64 MiB per response
+            var lineBuf = [UInt8]()
+            var total = 0
+
+            func handle(_ line: String) -> Bool {
+                guard line.hasPrefix("data: ") else { return false }
                 let payload = String(line.dropFirst(6))
-                if payload == "[DONE]" { break }
+                if payload == "[DONE]" { return true }
                 guard let d = payload.data(using: .utf8),
                       let chunk = try? JSONDecoder().decode(StreamChunk.self, from: d),
-                      let delta = chunk.choices.first?.delta else { continue }
+                      let delta = chunk.choices.first?.delta else { return false }
                 if let c = delta.content, !c.isEmpty { write(content: c) }
                 if let r = delta.reasoning ?? delta.reasoning_content, !r.isEmpty {
                     write(reasoning: r)
                 }
+                return false
+            }
+
+            for try await b in bytes {
+                if Task.isCancelled { break }
+                total += 1
+                if total > maxTotalBytes {
+                    write(content: "\n⚠️ Response exceeded \(maxTotalBytes >> 20) MB — stopped.")
+                    break
+                }
+                if b == 0x0A { // LF: end of an SSE line
+                    if let line = String(bytes: lineBuf, encoding: .utf8), handle(line) { break }
+                    lineBuf.removeAll(keepingCapacity: true)
+                    continue
+                }
+                if b == 0x0D { continue } // ignore CR so CRLF is handled
+                // Past the per-line cap, drop bytes until the next newline rather
+                // than buffer an unbounded line.
+                if lineBuf.count < maxLineBytes { lineBuf.append(b) }
             }
             // A thinking model can exhaust its token budget before emitting a final
             // answer. Rather than show nothing, fall back to the reasoning.
@@ -618,6 +715,9 @@ struct SettingsView: View {
                 Text("API key (optional)").font(.caption).foregroundStyle(.secondary)
                 SecureField("Only if the server requires one", text: $model.apiKey)
                     .textFieldStyle(.roundedBorder)
+                    .onChange(of: model.apiKey) { _, newValue in
+                        Keychain.write(newValue)
+                    }
             }
             HStack {
                 Spacer()
