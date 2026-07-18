@@ -60,15 +60,18 @@ network):
 curl -fsSL https://raw.githubusercontent.com/REPPL/Gropius/main/install.sh | bash -s -- client
 ```
 
-> **While this repo is private**, prefix the command with an auth header and keep
-> the [GitHub CLI](https://cli.github.com) logged in (`gh auth login`):
-> ```sh
-> curl -fsSL -H "Authorization: Bearer $(gh auth token)" \
->   https://raw.githubusercontent.com/REPPL/Gropius/main/install.sh | bash
-> ```
+The installer **verifies the download's signature before installing it**, so you
+need [minisign](https://jedisct1.github.io/minisign/) on your PATH:
 
-The binaries are ad-hoc signed, not notarized; a `curl`-installed app is not
-Gatekeeper-quarantined, so it launches without a prompt. The first launch installs
+```sh
+brew install minisign
+```
+
+The release workflow signs a checksums file with a key held only in CI; the
+installer carries the matching public key and refuses to install anything that
+does not verify against it. The binaries are ad-hoc signed, not notarized; because
+the installer has already cryptographically verified the app, it clears the
+Gatekeeper quarantine so it launches without a prompt. The first launch installs
 the MLX runtime (a few minutes, shown in the control panel), then you can download
 and serve models. New here? See **[docs/getting-started.md](docs/getting-started.md)**.
 

@@ -111,22 +111,51 @@ jobs:
           ditto -c -k --keepParent client/dist/GropiusChat.app GropiusChat.app.zip
           shasum -a 256 Gropius.app.zip GropiusChat.app.zip
 
+      # Sign the checksums so install.sh can prove the downloaded .app is the one
+      # this workflow built, not one swapped onto the Release. The private key
+      # lives only in the MINISIGN_SECRET_KEY secret; install.sh carries the
+      # matching public key. Signing the SHA256SUMS.txt covers both zips with one
+      # signature. Fail closed: if the secret is unset, the release stops here
+      # rather than publishing assets install.sh will (correctly) refuse.
+      - name: Sign the release checksums (minisign)
+        env:
+          MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${MINISIGN_SECRET_KEY:-}" ]; then
+            echo "::error::MINISIGN_SECRET_KEY secret is not set — install.sh requires a signature. See install.sh for the one-time key setup." >&2
+            exit 1
+          fi
+          brew install minisign
+          shasum -a 256 Gropius.app.zip GropiusChat.app.zip > SHA256SUMS.txt
+          printf '%s\n' "$MINISIGN_SECRET_KEY" > minisign.key
+          # The key is generated passwordless (minisign -G -W), so signing needs
+          # no interactive prompt; </dev/null guards against a hang if it ever does.
+          minisign -S -s minisign.key \
+            -c "gropius release $TAG" \
+            -t "gropius $TAG checksums" \
+            -m SHA256SUMS.txt </dev/null
+          rm -f minisign.key
+          echo "Signed SHA256SUMS.txt:"; cat SHA256SUMS.txt.minisig
+
       # Create the Release if it doesn't exist yet, otherwise attach/replace the
       # assets on the existing one. --clobber makes re-runs idempotent. install.sh
       # fetches `releases/latest/download/<asset>`, so the Release must be a
       # normal (non-draft, non-prerelease) published release — which is the
-      # default for both paths here.
+      # default for both paths here. The checksums file and its .minisig ride
+      # alongside the zips; install.sh verifies the signature before installing.
       - name: Publish the Release with both apps attached
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
+          assets="Gropius.app.zip GropiusChat.app.zip SHA256SUMS.txt SHA256SUMS.txt.minisig"
           if gh release view "$TAG" >/dev/null 2>&1; then
             echo "Release $TAG exists — uploading assets."
-            gh release upload "$TAG" Gropius.app.zip GropiusChat.app.zip --clobber
+            gh release upload "$TAG" $assets --clobber
           else
             echo "Release $TAG does not exist — creating it."
-            gh release create "$TAG" Gropius.app.zip GropiusChat.app.zip \
+            gh release create "$TAG" $assets \
               --verify-tag --title "$TAG" \
               --notes "macOS build. Install with the one-liner in the README."
           fi
