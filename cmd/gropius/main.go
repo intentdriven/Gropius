@@ -170,7 +170,7 @@ func runServer(ln net.Listener, paths config.Paths, cfg config.Config, headless 
 		adv = &discovery.Advertiser{
 			Port:         cfg.Port,
 			Models:       func() int { return len(a.Registry.Ready()) },
-			AuthRequired: cfg.APIKey != "",
+			AuthRequired: func() bool { return a.Config().APIKey != "" },
 			Log:          log,
 		}
 		if err := adv.Start(context.Background()); err != nil {

@@ -261,6 +261,76 @@ func TestAcquireBoundsPerModelConcurrency(t *testing.T) {
 	rel2()
 }
 
+// Past cap(sem)+MaxQueueDepth, Acquire must fail fast with ErrBusy rather than
+// letting an unbounded backlog of queued requests pin the model (each waiter
+// counts as in-flight, blocking eviction) and pile up goroutines.
+func TestAcquireRejectsBeyondQueueDepth(t *testing.T) {
+	l := newFakeLauncher()
+	src := &fakeSource{models: map[string]int64{"org/m": 1 << 20}}
+	// cap(sem) = 2*DecodeConcurrency = 2; MaxQueueDepth = 2; so maxInFlight = 4.
+	p := newTestPool(t, l, src, PoolOptions{
+		MaxResidentBytes: 1 << 30, DecodeConcurrency: 1, MaxQueueDepth: 2,
+	})
+
+	// Two active slots, held for the duration.
+	_, rel1, err := p.Acquire(context.Background(), "org/m")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, rel2, err := p.Acquire(context.Background(), "org/m")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Two more queue on the semaphore: each increments in-flight, then blocks
+	// waiting for a slot. They fill the allowed queue depth.
+	bgCtx, bgCancel := context.WithCancel(context.Background())
+	defer bgCancel()
+	for i := 0; i < 2; i++ {
+		go func() {
+			_, rel, err := p.Acquire(bgCtx, "org/m")
+			if err == nil {
+				defer rel()
+				<-bgCtx.Done()
+			}
+		}()
+	}
+	waitInFlight(t, p, "org/m", 4)
+
+	// The fifth request is past cap(sem)+MaxQueueDepth and must be rejected at once.
+	start := time.Now()
+	_, rel5, err := p.Acquire(context.Background(), "org/m")
+	if err == nil {
+		rel5()
+		t.Fatal("Acquire past the queue-depth cap should be rejected, but succeeded")
+	}
+	if !errors.Is(err, ErrBusy) {
+		t.Fatalf("want ErrBusy past the cap, got %v", err)
+	}
+	if time.Since(start) > 50*time.Millisecond {
+		t.Errorf("rejection took %v — it should fail fast, not block", time.Since(start))
+	}
+
+	rel1()
+	rel2()
+}
+
+// waitInFlight blocks until the pool reports exactly n in-flight requests for
+// repoID, or fails the test.
+func waitInFlight(t *testing.T, p *Pool, repoID string, n int) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		for _, r := range p.Resident() {
+			if r.RepoID == repoID && r.InFlight == n {
+				return
+			}
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for in-flight==%d on %s", n, repoID)
+}
+
 func TestAcquireReusesRunningModel(t *testing.T) {
 	l := newFakeLauncher()
 	src := &fakeSource{models: map[string]int64{"org/m": 1 << 20}}

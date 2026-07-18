@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/brutella/dnssd"
 
@@ -47,13 +48,36 @@ type Advertiser struct {
 	Port int
 	// Models is the number of servable models, published in the TXT record.
 	Models func() int
-	// AuthRequired reports whether clients need a bearer token.
-	AuthRequired bool
+	// AuthRequired reports whether clients currently need a bearer token. It is a
+	// callback, not a snapshot: the API key can be set or cleared at runtime from
+	// the control panel, and the advertisement must follow — otherwise a client
+	// that trusts the hint sends no token to a now-protected server (401) or keeps
+	// sending a stale one.
+	AuthRequired func() bool
 	Log          *slog.Logger
 
 	mu     sync.Mutex
 	cancel context.CancelFunc
 	done   chan struct{}
+}
+
+// txtRecord builds the TXT map from the live callbacks.
+func (a *Advertiser) txtRecord() map[string]string {
+	auth := "none"
+	if a.AuthRequired != nil && a.AuthRequired() {
+		auth = "bearer"
+	}
+	models := 0
+	if a.Models != nil {
+		models = a.Models()
+	}
+	return map[string]string{
+		"txtvers": "1",
+		"api":     "openai",
+		"path":    "/v1",
+		"auth":    auth,
+		"models":  strconv.Itoa(models),
+	}
 }
 
 // Start begins advertising. It returns immediately; the responder runs in the
@@ -77,15 +101,6 @@ func (a *Advertiser) Start(ctx context.Context) error {
 		host = "gropius"
 	}
 
-	auth := "none"
-	if a.AuthRequired {
-		auth = "bearer"
-	}
-	models := 0
-	if a.Models != nil {
-		models = a.Models()
-	}
-
 	cfg := dnssd.Config{
 		Name: "Gropius (" + host + ")",
 		Type: ServiceType,
@@ -105,13 +120,7 @@ func (a *Advertiser) Start(ctx context.Context) error {
 		// of <LocalHostName>.local is left completely alone.
 		Host: serviceHost(host),
 		Port: a.Port,
-		Text: map[string]string{
-			"txtvers": "1",
-			"api":     "openai",
-			"path":    "/v1",
-			"auth":    auth,
-			"models":  strconv.Itoa(models),
-		},
+		Text: a.txtRecord(),
 	}
 	service, err := dnssd.NewService(cfg)
 	if err != nil {
@@ -122,7 +131,8 @@ func (a *Advertiser) Start(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("create mDNS responder: %w", err)
 	}
-	if _, err := responder.Add(service); err != nil {
+	handle, err := responder.Add(service)
+	if err != nil {
 		return fmt.Errorf("add mDNS service: %w", err)
 	}
 
@@ -139,9 +149,48 @@ func (a *Advertiser) Start(ctx context.Context) error {
 		}
 	}()
 
+	// Keep the advertised auth/model hints in step with runtime config changes.
+	go a.refresh(rctx, responder, handle, cfg.Text)
+
 	a.Log.Info("advertising on the local network",
 		"service", ServiceType, "name", cfg.Name, "port", a.Port)
 	return nil
+}
+
+// refresh periodically re-publishes the TXT record when the advertised auth
+// state or model count changes, so a runtime config change (e.g. setting an API
+// key in the control panel) is reflected to clients rather than left stale.
+func (a *Advertiser) refresh(ctx context.Context, r dnssd.Responder, h dnssd.ServiceHandle, last map[string]string) {
+	tick := time.NewTicker(15 * time.Second)
+	defer tick.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick.C:
+			cur := a.txtRecord()
+			if sameText(last, cur) {
+				continue
+			}
+			h.UpdateText(cur, r)
+			last = cur
+			a.Log.Info("updated network advertisement",
+				"auth", cur["auth"], "models", cur["models"])
+		}
+	}
+}
+
+// sameText reports whether two TXT maps are equal.
+func sameText(a, b map[string]string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k, v := range a {
+		if b[k] != v {
+			return false
+		}
+	}
+	return true
 }
 
 // Stop withdraws the advertisement.

@@ -52,6 +52,12 @@ type PoolOptions struct {
 	IdleTimeout time.Duration
 	// DecodeConcurrency is passed to each model server.
 	DecodeConcurrency int
+	// MaxQueueDepth bounds how many requests may wait for one model server
+	// beyond the batch it can actively run. Past this, Acquire fails fast rather
+	// than letting an unbounded backlog of queued requests pin the model (each
+	// waiter counts as in-flight, so it also blocks the model from being evicted)
+	// and pile up goroutines and connections. Zero uses a default.
+	MaxQueueDepth int
 	// ReadyTimeout bounds how long we wait for a model to load. Large models on
 	// a cold page cache genuinely take minutes.
 	ReadyTimeout time.Duration
@@ -126,6 +132,9 @@ func NewPool(opts PoolOptions) *Pool {
 	if opts.DecodeConcurrency < 1 {
 		opts.DecodeConcurrency = 1
 	}
+	if opts.MaxQueueDepth <= 0 {
+		opts.MaxQueueDepth = 64
+	}
 
 	p := &Pool{
 		opts:     opts,
@@ -160,6 +169,17 @@ func (p *Pool) Acquire(ctx context.Context, repoID string) (*Upstream, func(), e
 			p.mu.Unlock()
 			return nil, nil, err
 		}
+	}
+	// Refuse once the backlog for this model is already at its ceiling. Every
+	// in-flight request (running or merely queued on e.sem) pins the model, so an
+	// unbounded backlog would both peg memory and starve loads of other models
+	// that need this one evicted. Failing fast here — the gateway maps it to 503 —
+	// bounds that, and stops a flood of slow clients from piling up goroutines and
+	// connections.
+	if e.inFlight >= cap(e.sem)+p.opts.MaxQueueDepth {
+		p.mu.Unlock()
+		return nil, nil, fmt.Errorf("%s is overloaded (%d requests already in flight): %w",
+			repoID, e.inFlight, ErrBusy)
 	}
 	// Pin it *before* releasing the lock, so a concurrent Acquire for another
 	// model cannot evict this one while we are waiting for it to load.
