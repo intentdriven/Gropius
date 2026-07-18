@@ -335,6 +335,33 @@ func TestStreamingIsNotBuffered(t *testing.T) {
 	}
 }
 
+// Hop-by-hop headers from the upstream must not reach the client: the gateway
+// re-frames the streamed body itself, so forwarding Transfer-Encoding or
+// Content-Length would risk a response with conflicting framing.
+func TestHopByHopHeadersAreNotForwarded(t *testing.T) {
+	upstream := http.Header{
+		"Content-Type":      {"application/json"},
+		"Transfer-Encoding": {"chunked"},
+		"Content-Length":    {"1234"},
+		"Connection":        {"keep-alive"},
+		"X-Model-Server":    {"mlx"},
+	}
+	dst := http.Header{}
+	copyResponseHeaders(dst, upstream)
+
+	for _, drop := range []string{"Transfer-Encoding", "Content-Length", "Connection"} {
+		if dst.Get(drop) != "" {
+			t.Errorf("hop-by-hop header %q was forwarded to the client", drop)
+		}
+	}
+	if dst.Get("Content-Type") != "application/json" {
+		t.Error("end-to-end header Content-Type was dropped")
+	}
+	if dst.Get("X-Model-Server") != "mlx" {
+		t.Error("end-to-end header X-Model-Server was dropped")
+	}
+}
+
 // The upstream is released even when the client disconnects mid-stream;
 // otherwise the model would be pinned forever and could never be evicted.
 func TestUpstreamIsReleasedAfterRequest(t *testing.T) {

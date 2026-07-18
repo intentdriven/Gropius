@@ -271,13 +271,39 @@ func (g *Gateway) handleCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	defer resp.Body.Close()
 
-	for k, vs := range resp.Header {
-		for _, v := range vs {
-			w.Header().Add(k, v)
-		}
-	}
+	copyResponseHeaders(w.Header(), resp.Header)
 	w.WriteHeader(resp.StatusCode)
 	streamCopy(w, resp.Body)
+}
+
+// hopByHopHeaders are connection-scoped headers that belong to a single
+// transport hop and must not be forwarded to the client (RFC 7230 §6.1). The
+// gateway re-frames the streamed body itself, so forwarding the upstream's
+// Content-Length or Transfer-Encoding would risk a response with conflicting or
+// duplicated framing.
+var hopByHopHeaders = map[string]bool{
+	"connection":          true,
+	"keep-alive":          true,
+	"proxy-authenticate":  true,
+	"proxy-authorization": true,
+	"te":                  true,
+	"trailer":             true,
+	"transfer-encoding":   true,
+	"upgrade":             true,
+	"content-length":      true,
+}
+
+// copyResponseHeaders forwards the upstream headers to the client, dropping the
+// hop-by-hop ones so Go's own response framing stays authoritative.
+func copyResponseHeaders(dst, src http.Header) {
+	for k, vs := range src {
+		if hopByHopHeaders[strings.ToLower(k)] {
+			continue
+		}
+		for _, v := range vs {
+			dst.Add(k, v)
+		}
+	}
 }
 
 // resolveModel maps a client's model name onto a downloaded model.
