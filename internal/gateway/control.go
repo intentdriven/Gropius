@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -337,7 +338,7 @@ func (c *Control) handleDownload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := c.App.Download(model); err != nil {
-		writeError(w, http.StatusConflict, err.Error())
+		writeError(w, modelErrorStatus(err), err.Error())
 		return
 	}
 	writeJSON(w, http.StatusAccepted, map[string]any{"status": "downloading", "model": model})
@@ -361,10 +362,24 @@ func (c *Control) handleDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := c.App.Delete(model); err != nil {
-		writeError(w, http.StatusConflict, err.Error())
+		writeError(w, modelErrorStatus(err), err.Error())
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"status": "deleted", "model": model})
+}
+
+// modelErrorStatus maps a model-action error to the right HTTP status:
+// a malformed id is the caller's mistake (400), an absent model is 404, and a
+// genuine conflict (already downloading, or busy serving a request) is 409.
+func modelErrorStatus(err error) int {
+	switch {
+	case errors.Is(err, app.ErrInvalidRepoID):
+		return http.StatusBadRequest
+	case errors.Is(err, registry.ErrNotFound):
+		return http.StatusNotFound
+	default:
+		return http.StatusConflict
+	}
 }
 
 // handleLoad warms a model so the first real request is not slow.

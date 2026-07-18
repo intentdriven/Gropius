@@ -288,6 +288,34 @@ func TestDownloadRequiresModelField(t *testing.T) {
 	}
 }
 
+// A malformed model id is the caller's mistake (400), not a conflict (409).
+func TestDownloadInvalidIDIs400(t *testing.T) {
+	srv := newTestControl(t, config.Default())
+	resp, err := srv.Client().Post(srv.URL+"/api/models/download", "application/json",
+		strings.NewReader(`{"model":"not-a-valid-id"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400 for a malformed model id", resp.StatusCode)
+	}
+}
+
+// Deleting a model that isn't in the registry is 404, not 409.
+func TestDeleteUnknownModelIs404(t *testing.T) {
+	srv := newTestControl(t, config.Default())
+	resp, err := srv.Client().Post(srv.URL+"/api/models/delete", "application/json",
+		strings.NewReader(`{"model":"org/never-downloaded"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("status = %d, want 404 for deleting a model that isn't present", resp.StatusCode)
+	}
+}
+
 func TestCancelUnknownDownloadIs404(t *testing.T) {
 	srv := newTestControl(t, config.Default())
 	resp, err := srv.Client().Post(srv.URL+"/api/models/cancel", "application/json",

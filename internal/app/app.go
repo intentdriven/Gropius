@@ -185,6 +185,10 @@ func (s modelSource) Resolve(repoID string) (string, int64, error) {
 // ErrAlreadyDownloading is returned when a download is requested twice.
 var ErrAlreadyDownloading = errors.New("already downloading")
 
+// ErrInvalidRepoID is returned when a model id is not a well-formed
+// "<org>/<name>". Callers (the control plane) map it to 400, not 409.
+var ErrInvalidRepoID = errors.New("invalid model id")
+
 // Download fetches a model in the background and tracks it in the registry.
 //
 // It returns as soon as the download starts; progress is reported through the
@@ -197,7 +201,7 @@ func (a *App) Download(repoID string) error {
 	// os.RemoveAll on delete. Reject anything that isn't a clean "<org>/<name>"
 	// before it can escape the models directory.
 	if !config.ValidRepoID(repoID) {
-		return fmt.Errorf("%q is not a valid model id (expected <org>/<name>)", repoID)
+		return fmt.Errorf("%q is not a valid model id (expected <org>/<name>): %w", repoID, ErrInvalidRepoID)
 	}
 
 	a.dlMu.Lock()
@@ -325,7 +329,7 @@ func (a *App) Delete(repoID string) error {
 	// Defence in depth: never hand an un-validated id to os.RemoveAll, even one
 	// that somehow reached the registry (e.g. from an older build).
 	if !config.ValidRepoID(repoID) {
-		return fmt.Errorf("%q is not a valid model id", repoID)
+		return fmt.Errorf("%q is not a valid model id: %w", repoID, ErrInvalidRepoID)
 	}
 	// Cancel any download of this model AND wait for it to stop. Cancelling alone
 	// is not enough: the goroutine would keep writing into the directory we are
