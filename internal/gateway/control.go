@@ -407,7 +407,12 @@ func (c *Control) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 func (c *Control) handleSetSettings(w http.ResponseWriter, r *http.Request) {
 	current := c.App.Config()
 
-	var incoming config.Config
+	// Decode INTO a copy of the current config, not a fresh zero value: the
+	// settings form posts only the fields it owns, so any field it omits — e.g.
+	// Preload, or Advertise (which has no UI control) — must keep its existing
+	// value. Decoding into a zero Config and saving it wholesale silently wiped
+	// those, dropping a user's preload list on any unrelated settings change.
+	incoming := current
 	if err := json.NewDecoder(r.Body).Decode(&incoming); err != nil {
 		writeError(w, http.StatusBadRequest, "settings body is not valid JSON")
 		return

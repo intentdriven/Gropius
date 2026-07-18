@@ -347,6 +347,9 @@ $('genKey').addEventListener('click', () => {
 $('settingsForm').addEventListener('submit', async (e) => {
   e.preventDefault();
   const msg = $('settingsMsg');
+  // Only the fields this form owns. Anything omitted (advertise, preload) is
+  // preserved server-side — sending advertise:true here used to silently
+  // re-enable LAN advertising on every save.
   const body = {
     host:               $('setHost').value,
     port:               parseInt($('setPort').value, 10),
@@ -354,7 +357,6 @@ $('settingsForm').addEventListener('submit', async (e) => {
     idle_timeout_sec:   parseInt($('setIdle').value, 10) || 0,
     decode_concurrency: parseInt($('setConc').value, 10) || 1,
     hf_token:           $('setHF').value,
-    advertise:          true,
   };
   try {
     const res = await api('/api/settings', {

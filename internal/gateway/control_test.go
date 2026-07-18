@@ -153,6 +153,46 @@ func TestSecretsAreRedactedInState(t *testing.T) {
 	}
 }
 
+// The settings form posts only the fields it owns. Saving it must not wipe the
+// config fields it doesn't send — Preload (no UI control) and Advertise.
+func TestSavingSettingsPreservesUnsentFields(t *testing.T) {
+	cfg := config.Default()
+	cfg.Advertise = true // non-zero, so the old zero-value decode would visibly flip it
+	cfg.Preload = []string{"mlx-community/Qwen3-8B-4bit"}
+	srv := newTestControl(t, cfg)
+
+	// A realistic form body: host/port/etc, but NOT advertise or preload.
+	body := `{"host":"127.0.0.1","port":11535,"api_key":"","decode_concurrency":4,"idle_timeout_sec":300}`
+	resp, err := srv.Client().Post(srv.URL+"/api/settings", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+
+	stResp, err := srv.Client().Get(srv.URL + "/api/state")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stResp.Body.Close()
+	var st State
+	if err := json.NewDecoder(stResp.Body).Decode(&st); err != nil {
+		t.Fatal(err)
+	}
+	if !st.Config.Advertise {
+		t.Error("Advertise was wiped to false by a save that never mentioned it")
+	}
+	if len(st.Config.Preload) != 1 || st.Config.Preload[0] != "mlx-community/Qwen3-8B-4bit" {
+		t.Errorf("Preload was wiped by an unrelated save: got %v", st.Config.Preload)
+	}
+	// The field the form DID send must still apply.
+	if st.Config.IdleTimeoutSec != 300 {
+		t.Errorf("IdleTimeoutSec = %d, want the posted 300", st.Config.IdleTimeoutSec)
+	}
+}
+
 // The UI receives "********" for a secret. Saving the form must not then
 // overwrite the real key with literal asterisks.
 func TestSavingRedactedPlaceholderKeepsTheRealSecret(t *testing.T) {
