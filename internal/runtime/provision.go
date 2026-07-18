@@ -1,11 +1,19 @@
 package runtime
 
 import (
+	"archive/tar"
+	"bytes"
+	"compress/gzip"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	goruntime "runtime"
 	"strings"
 	"sync"
 	"time"
@@ -132,26 +140,123 @@ func (p *Provisioner) Ensure(ctx context.Context) error {
 	return nil
 }
 
-// ensureUV downloads the uv binary into the app directory.
+// uvVersion pins the exact uv release Gropius installs, and uvSHA256 the
+// expected digest of its macOS release tarball per architecture. Pinning both
+// turns "run whatever astral.sh serves today through sh" into "install these
+// exact bytes or fail": a compromised CDN, a tampered release, or a
+// truncated download all stop at the hash check instead of executing.
+const uvVersion = "0.11.29"
+
+var uvSHA256 = map[string]string{
+	"arm64": "61c04acc52a33ef0f331e494bdfbedcdb6c26c6970c022ed3699e5860f8930e3", // uv-aarch64-apple-darwin.tar.gz
+	"amd64": "c4c4de482da9ccdd076dc4fb5cfe7b740609029385c72f58606be3153602387d", // uv-x86_64-apple-darwin.tar.gz
+}
+
+// uvArch maps GOARCH onto uv's release-artifact naming.
+var uvArch = map[string]string{
+	"arm64": "aarch64",
+	"amd64": "x86_64",
+}
+
+// maxUVArchive bounds how much of the release download we are willing to
+// buffer. The real tarball is ~20 MB; anything near this limit is not uv.
+const maxUVArchive = 256 << 20
+
+// uvBaseURL is a var only so tests can point ensureUV at a local server.
+var uvBaseURL = "https://github.com/astral-sh/uv/releases/download"
+
+// ensureUV downloads the pinned uv release, verifies its SHA-256, and installs
+// the binary into the app directory. No shell, no installer script.
 func (p *Provisioner) ensureUV(ctx context.Context) error {
 	if _, err := os.Stat(p.Paths.UV()); err == nil {
 		return nil
 	}
-	// uv's installer script honours UV_UNMANAGED_INSTALL, which puts the binary
-	// exactly where we ask and skips any shell-profile modification.
-	script := `curl -LsSf https://astral.sh/uv/install.sh | sh`
-	cmd := exec.CommandContext(ctx, "sh", "-c", script)
-	cmd.Env = append(os.Environ(),
-		"UV_UNMANAGED_INSTALL="+p.Paths.Bin,
-		"UV_INSTALL_DIR="+p.Paths.Bin,
-	)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("install uv: %w: %s", err, strings.TrimSpace(string(out)))
+	arch, ok := uvArch[goruntime.GOARCH]
+	if !ok {
+		return fmt.Errorf("no pinned uv build for %s/%s", goruntime.GOOS, goruntime.GOARCH)
 	}
-	if _, err := os.Stat(p.Paths.UV()); err != nil {
-		return fmt.Errorf("uv installer finished but no binary at %s", p.Paths.UV())
+
+	url := fmt.Sprintf("%s/%s/uv-%s-apple-darwin.tar.gz", uvBaseURL, uvVersion, arch)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return err
 	}
-	return nil
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("download uv %s: %w", uvVersion, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("download uv %s: %s from %s", uvVersion, resp.Status, url)
+	}
+	archive, err := io.ReadAll(io.LimitReader(resp.Body, maxUVArchive+1))
+	if err != nil {
+		return fmt.Errorf("download uv %s: %w", uvVersion, err)
+	}
+	if len(archive) > maxUVArchive {
+		return fmt.Errorf("uv download exceeds %d bytes — refusing it", maxUVArchive)
+	}
+
+	// The hash check is the security boundary: only after the whole artifact
+	// matches the pinned digest do any of its bytes get interpreted.
+	sum := sha256.Sum256(archive)
+	if got := hex.EncodeToString(sum[:]); got != uvSHA256[goruntime.GOARCH] {
+		return fmt.Errorf("uv %s download failed SHA-256 verification (got %s) — refusing to install it", uvVersion, got)
+	}
+
+	bin, err := extractUV(archive)
+	if err != nil {
+		return fmt.Errorf("extract uv %s: %w", uvVersion, err)
+	}
+
+	// Random temp name + rename: never leave a half-written binary at the final
+	// path, and never write through a name another account could pre-plant in a
+	// shared root.
+	tmp, err := os.CreateTemp(p.Paths.Bin, ".uv-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName) // no-op once the rename succeeds
+	if err := tmp.Chmod(0o755); err != nil {
+		tmp.Close()
+		return err
+	}
+	if _, err := tmp.Write(bin); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpName, p.Paths.UV())
+}
+
+// extractUV returns the "uv" binary from the release tarball.
+func extractUV(archive []byte) ([]byte, error) {
+	gz, err := gzip.NewReader(bytes.NewReader(archive))
+	if err != nil {
+		return nil, err
+	}
+	defer gz.Close()
+	tr := tar.NewReader(gz)
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			return nil, fmt.Errorf("no uv binary in archive")
+		}
+		if err != nil {
+			return nil, err
+		}
+		if hdr.Typeflag != tar.TypeReg || filepath.Base(hdr.Name) != "uv" {
+			continue
+		}
+		bin, err := io.ReadAll(io.LimitReader(tr, maxUVArchive))
+		if err != nil {
+			return nil, err
+		}
+		return bin, nil
+	}
 }
 
 // ensureVenv creates a virtualenv on a private, pinned CPython.
