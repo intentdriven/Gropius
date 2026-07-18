@@ -96,6 +96,16 @@ func (c *Client) Download(ctx context.Context, req DownloadRequest) error {
 	if err := os.MkdirAll(req.Dest, 0o755); err != nil {
 		return fmt.Errorf("create %s: %w", req.Dest, err)
 	}
+	// Every filesystem operation below happens inside this root. os.Root
+	// resolves each path component without ever following a symlink out of the
+	// tree, so a symlinked parent directory planted in a shared, group-writable
+	// cache cannot redirect writes elsewhere — a guarantee that O_NOFOLLOW on
+	// the final component alone cannot give.
+	root, err := os.OpenRoot(req.Dest)
+	if err != nil {
+		return fmt.Errorf("open %s: %w", req.Dest, err)
+	}
+	defer root.Close()
 
 	total := TotalSize(files)
 	tracker := &progressTracker{
@@ -109,7 +119,11 @@ func (c *Client) Download(ctx context.Context, req DownloadRequest) error {
 	// Count bytes already on disk from a previous run so progress starts where
 	// it left off rather than at zero.
 	for _, f := range files {
-		if n := existingBytes(filepath.Join(req.Dest, f.Path)); n > 0 {
+		rel, err := relPath(f.Path)
+		if err != nil {
+			continue // downloadFile will refuse it with a proper error
+		}
+		if n := existingBytes(root, rel); n > 0 {
 			tracker.addCompleted(n)
 		}
 	}
@@ -140,7 +154,7 @@ func (c *Client) Download(ctx context.Context, req DownloadRequest) error {
 			}
 			defer func() { <-sem }()
 
-			if err := c.downloadFile(ctx, req, f, tracker); err != nil {
+			if err := c.downloadFile(ctx, req, root, f, tracker); err != nil {
 				errOnce.Do(func() {
 					firstErr = err
 					cancel()
@@ -164,49 +178,55 @@ func (c *Client) Download(ctx context.Context, req DownloadRequest) error {
 	return nil
 }
 
-// safeJoin joins a repo-relative file path onto dest, refusing any result that
-// escapes dest.
+// relPath validates a repo-relative file path and returns it cleaned, for use
+// inside an os.Root opened at the model directory.
 //
 // File paths come from the HuggingFace API, i.e. from a third party. A repo
 // whose tree lists "weights/../../../../.zshrc" would otherwise let a download
-// clobber files anywhere the user can write. filepath.Join cleans ".." *after*
-// joining, so the check must compare the cleaned absolute result against dest —
-// inspecting the raw path for ".." is not enough (it misses percent-encoding and
-// is easy to get subtly wrong).
-func safeJoin(dest, name string) (string, error) {
+// clobber files anywhere the user can write. os.Root confines the actual I/O
+// regardless, but validating up front turns an attack into a clear refusal
+// instead of a confusing I/O error — and keeps the check testable on its own.
+func relPath(name string) (string, error) {
 	if name == "" {
 		return "", fmt.Errorf("refusing empty file path")
 	}
-	// An absolute path in the tree listing has no legitimate use and, joined,
-	// would be silently re-rooted under dest — reject it outright so the intent
-	// is unambiguous.
+	// An absolute path in the tree listing has no legitimate use — reject it
+	// outright so the intent is unambiguous.
 	if filepath.IsAbs(filepath.FromSlash(name)) {
 		return "", fmt.Errorf("refusing file %q: absolute paths are not allowed", name)
 	}
-	cleanDest := filepath.Clean(dest)
-	joined := filepath.Join(cleanDest, filepath.FromSlash(name))
-	// joined is already Clean per filepath.Join. It is contained iff it equals
-	// dest or sits under dest + separator.
-	if joined != cleanDest && !strings.HasPrefix(joined, cleanDest+string(os.PathSeparator)) {
+	rel := filepath.Clean(filepath.FromSlash(name))
+	if rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
 		return "", fmt.Errorf("refusing file %q: it escapes the model directory", name)
 	}
-	return joined, nil
+	return rel, nil
+}
+
+// safeJoin joins a repo-relative file path onto dest, refusing any result that
+// escapes dest.
+func safeJoin(dest, name string) (string, error) {
+	rel, err := relPath(name)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(filepath.Clean(dest), rel), nil
 }
 
 // existingBytes returns the size of a completed file, or of a partial one.
-func existingBytes(dest string) int64 {
-	if fi, err := os.Stat(dest); err == nil {
+func existingBytes(root *os.Root, rel string) int64 {
+	if fi, err := root.Stat(rel); err == nil {
 		return fi.Size()
 	}
-	if fi, err := os.Stat(dest + partSuffix); err == nil {
+	if fi, err := root.Stat(rel + partSuffix); err == nil {
 		return fi.Size()
 	}
 	return 0
 }
 
-// downloadFile fetches one file, resuming if a partial exists.
-func (c *Client) downloadFile(ctx context.Context, req DownloadRequest, f File, tr *progressTracker) error {
-	final, err := safeJoin(req.Dest, f.Path)
+// downloadFile fetches one file, resuming if a partial exists. All filesystem
+// access goes through root, which confines it to the model directory.
+func (c *Client) downloadFile(ctx context.Context, req DownloadRequest, root *os.Root, f File, tr *progressTracker) error {
+	final, err := relPath(f.Path)
 	if err != nil {
 		// A repo whose file tree contains "../" escapes is either malicious or
 		// broken; either way we refuse rather than write outside the model dir.
@@ -215,27 +235,29 @@ func (c *Client) downloadFile(ctx context.Context, req DownloadRequest, f File, 
 	part := final + partSuffix
 
 	// Already complete from a previous run?
-	if fi, err := os.Stat(final); err == nil {
+	if fi, err := root.Stat(final); err == nil {
 		if f.Size == 0 || fi.Size() == f.Size {
 			return nil
 		}
 		// Size mismatch: the file is corrupt or truncated. Refetch it.
-		if err := os.Remove(final); err != nil {
+		if err := root.Remove(final); err != nil {
 			return fmt.Errorf("remove corrupt %s: %w", f.Path, err)
 		}
 		tr.addCompleted(-fi.Size())
 	}
 
-	if err := os.MkdirAll(filepath.Dir(final), 0o755); err != nil {
-		return err
+	if dir := filepath.Dir(final); dir != "." {
+		if err := root.MkdirAll(dir, 0o755); err != nil {
+			return err
+		}
 	}
 
 	var resumeAt int64
-	if fi, err := os.Stat(part); err == nil {
+	if fi, err := root.Stat(part); err == nil {
 		resumeAt = fi.Size()
 		// A .part at or beyond the expected size is not trustworthy; start over.
 		if f.Size > 0 && resumeAt >= f.Size {
-			if err := os.Remove(part); err != nil {
+			if err := root.Remove(part); err != nil {
 				return err
 			}
 			tr.addCompleted(-resumeAt)
@@ -269,11 +291,11 @@ func (c *Client) downloadFile(ctx context.Context, req DownloadRequest, f File, 
 		// Resuming as requested.
 	case http.StatusRequestedRangeNotSatisfiable:
 		// The .part is already the full length; treat as complete and verify below.
-		if err := os.Remove(part); err != nil && !os.IsNotExist(err) {
+		if err := root.Remove(part); err != nil && !os.IsNotExist(err) {
 			return err
 		}
 		tr.addCompleted(-resumeAt)
-		return c.downloadFile(ctx, req, f, tr)
+		return c.downloadFile(ctx, req, root, f, tr)
 	default:
 		return apiError(resp, u)
 	}
@@ -281,15 +303,16 @@ func (c *Client) downloadFile(ctx context.Context, req DownloadRequest, f File, 
 	// O_NOFOLLOW: refuse to write through a symlink planted at the .part path. In
 	// a shared, group-writable model cache another local account could point that
 	// predictable name at a file the downloading user can write, turning a model
-	// fetch into a write-what-where. Opening the final component without following
-	// links makes such an open fail (ELOOP) instead.
+	// fetch into a write-what-where. root already refuses links that leave the
+	// model dir; O_NOFOLLOW additionally refuses in-tree links on the final
+	// component, so such an open fails (ELOOP) instead of following.
 	flags := os.O_CREATE | os.O_WRONLY | syscall.O_NOFOLLOW
 	if resumeAt > 0 {
 		flags |= os.O_APPEND
 	} else {
 		flags |= os.O_TRUNC
 	}
-	out, err := os.OpenFile(part, flags, 0o644)
+	out, err := root.OpenFile(part, flags, 0o644)
 	if err != nil {
 		return fmt.Errorf("open %s: %w", part, err)
 	}
@@ -309,17 +332,17 @@ func (c *Client) downloadFile(ctx context.Context, req DownloadRequest, f File, 
 	}
 
 	if f.Size > 0 {
-		fi, err := os.Stat(part)
+		fi, err := root.Stat(part)
 		if err != nil {
 			return err
 		}
 		if fi.Size() != f.Size {
-			os.Remove(part)
+			root.Remove(part)
 			return fmt.Errorf("download %s: got %d bytes, expected %d", f.Path, fi.Size(), f.Size)
 		}
 	}
 
-	if err := os.Rename(part, final); err != nil {
+	if err := root.Rename(part, final); err != nil {
 		return fmt.Errorf("finalise %s: %w", f.Path, err)
 	}
 	return nil

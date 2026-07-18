@@ -135,11 +135,34 @@ func newInstanceToken() (string, error) {
 // writeInstanceToken records the token 0600 in the data root. 0600 is the crux of
 // the anti-impersonation check: in a per-user root another account cannot read it,
 // so it cannot forge a matching token when it tries to hold the port.
+//
+// The write goes through a random O_EXCL temp then rename, not straight to the
+// predictable instance.token path. In shared mode the data root is
+// group-writable, so a direct write could follow a symlink another account
+// pre-planted at instance.token and truncate a file the server user owns. A
+// rename replaces the final component without following a link there.
 func writeInstanceToken(paths config.Paths, token string) error {
 	if err := os.MkdirAll(paths.Root, 0o755); err != nil {
 		return err
 	}
-	return os.WriteFile(instanceTokenPath(paths), []byte(token), 0o600)
+	tmp, err := os.CreateTemp(paths.Root, ".instance-*.token")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName) // no-op once the rename succeeds
+	if err := tmp.Chmod(0o600); err != nil {
+		tmp.Close()
+		return err
+	}
+	if _, err := tmp.WriteString(token); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpName, instanceTokenPath(paths))
 }
 
 // readInstanceToken returns the recorded token, or "" if none.

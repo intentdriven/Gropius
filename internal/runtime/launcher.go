@@ -112,7 +112,11 @@ func (l *ExecLauncher) Launch(ctx context.Context, spec Spec) (Process, error) {
 	if err := os.MkdirAll(l.LogDir, 0o755); err != nil {
 		return nil, err
 	}
-	logFile, err := os.Create(logPath)
+	// 0600, not the 0644 os.Create would give. In shared mode LogDir sits under
+	// the group-readable /Users/Shared/Gropius, and the model server logs at
+	// INFO — request-level detail another local account has no business reading.
+	// O_TRUNC keeps the per-model log from growing without bound across restarts.
+	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 	if err != nil {
 		return nil, fmt.Errorf("create log %s: %w", logPath, err)
 	}
