@@ -117,6 +117,24 @@ func TestFilesPrefersLFSSize(t *testing.T) {
 
 // The recursive tree listing includes directory entries; they are not fetchable
 // (a GET of one 404s and aborts the whole download), so Files must drop them.
+// A tree that lists the same path twice must be de-duplicated, or two goroutines
+// race to write the same file and TotalSize double-counts it.
+func TestWantedFilesDeduplicates(t *testing.T) {
+	files := []File{
+		{Path: "model.safetensors", Size: 100},
+		{Path: "config.json", Size: 10},
+		{Path: "model.safetensors", Size: 100}, // duplicate
+		{Path: "./config.json", Size: 10},      // duplicate via a different spelling
+	}
+	got := WantedFiles(files)
+	if len(got) != 2 {
+		t.Fatalf("WantedFiles kept %d entries, want 2 deduplicated: %+v", len(got), got)
+	}
+	if n := TotalSize(got); n != 110 {
+		t.Errorf("TotalSize after dedup = %d, want 110 (a double-count keeps progress under 100%%)", n)
+	}
+}
+
 func TestFilesDropsDirectoryEntries(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprint(w, `[
@@ -356,6 +374,11 @@ type fakeHub struct {
 	// ignoreRange makes the server reply 200 with the whole body even when a
 	// Range was requested, which some CDNs and proxies do.
 	ignoreRange bool
+	// lfs maps a path to the LFS content oid (sha256) advertised in the tree.
+	lfs map[string]string
+	// badContentRange makes a 206 reply carry a Content-Range that starts at the
+	// wrong offset, simulating a misbehaving CDN/proxy.
+	badContentRange bool
 
 	mu sync.Mutex
 	// ranges records the Range header seen per file path.
@@ -387,7 +410,14 @@ func (f *fakeHub) server(t *testing.T) *httptest.Server {
 	mux.HandleFunc("/api/models/org/repo/tree/main", func(w http.ResponseWriter, r *http.Request) {
 		var entries []File
 		for p, b := range f.files {
-			entries = append(entries, File{Path: p, Size: int64(len(b))})
+			e := File{Path: p, Size: int64(len(b))}
+			if oid, ok := f.lfs[p]; ok {
+				e.LFS = &struct {
+					OID  string `json:"oid"`
+					Size int64  `json:"size"`
+				}{OID: oid, Size: int64(len(b))}
+			}
+			entries = append(entries, e)
 		}
 		json.NewEncoder(w).Encode(entries)
 	})
@@ -410,6 +440,15 @@ func (f *fakeHub) server(t *testing.T) *httptest.Server {
 			fmt.Sscanf(rng, "bytes=%d-", &start)
 			if start >= int64(len(body)) {
 				w.WriteHeader(http.StatusRequestedRangeNotSatisfiable)
+				return
+			}
+			if f.badContentRange {
+				// A misbehaving proxy: claims 206 but resumes at offset 0 and sends
+				// the WHOLE body. Appending that onto our .part overflows the size
+				// check; the client must detect the wrong range and restart instead.
+				w.Header().Set("Content-Range", fmt.Sprintf("bytes 0-%d/%d", len(body)-1, len(body)))
+				w.WriteHeader(http.StatusPartialContent)
+				w.Write(body)
 				return
 			}
 			w.Header().Set("Content-Range",

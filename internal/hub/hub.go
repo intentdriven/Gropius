@@ -416,13 +416,24 @@ func wantedFile(p string) bool {
 	return true
 }
 
-// WantedFiles filters a file tree down to what MLX needs to load the model.
+// WantedFiles filters a file tree down to what MLX needs to load the model,
+// de-duplicating by cleaned path. A tree that lists the same path twice (a
+// malformed or hostile manifest) would otherwise spawn two goroutines racing to
+// write and rename the same file, and double-count it in the size total so
+// progress never reaches 100%.
 func WantedFiles(files []File) []File {
 	out := make([]File, 0, len(files))
+	seen := make(map[string]bool, len(files))
 	for _, f := range files {
-		if wantedFile(f.Path) {
-			out = append(out, f)
+		if !wantedFile(f.Path) {
+			continue
 		}
+		key := path.Clean(f.Path)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, f)
 	}
 	return out
 }

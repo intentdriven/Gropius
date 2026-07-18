@@ -3,7 +3,10 @@ package hub
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,6 +14,104 @@ import (
 	"sync/atomic"
 	"testing"
 )
+
+func sha256Hex(b []byte) string {
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])
+}
+
+// An LFS weight file whose downloaded content matches the advertised sha256 is
+// accepted; one whose content does not match is rejected and not left on disk.
+func TestDownloadVerifiesLFSContentHash(t *testing.T) {
+	repo := standardRepo()
+
+	// Correct hash: download succeeds.
+	fh := newFakeHub(repo)
+	fh.lfs = map[string]string{"model.safetensors": sha256Hex(repo["model.safetensors"])}
+	dest := t.TempDir()
+	c := &Client{BaseURL: fh.server(t).URL, HTTP: &http.Client{}}
+	if err := c.Download(context.Background(), DownloadRequest{RepoID: "org/repo", Dest: dest}); err != nil {
+		t.Fatalf("Download with a correct LFS hash failed: %v", err)
+	}
+
+	// Wrong hash: download fails and leaves no final file.
+	fh2 := newFakeHub(standardRepo())
+	fh2.lfs = map[string]string{"model.safetensors": strings.Repeat("0", 64)}
+	dest2 := t.TempDir()
+	c2 := &Client{BaseURL: fh2.server(t).URL, HTTP: &http.Client{}}
+	err := c2.Download(context.Background(), DownloadRequest{RepoID: "org/repo", Dest: dest2})
+	if err == nil {
+		t.Fatal("Download accepted a file whose content did not match the advertised sha256")
+	}
+	if _, statErr := os.Stat(filepath.Join(dest2, "model.safetensors")); statErr == nil {
+		t.Error("a hash-mismatched file must not be left under its final name")
+	}
+}
+
+// A 206 that resumes at the wrong offset must be discarded and restarted, not
+// appended onto the partial (which would corrupt the file).
+func TestDownloadRestartsOnWrongContentRange(t *testing.T) {
+	repo := standardRepo()
+	fh := newFakeHub(repo)
+	fh.badContentRange = true
+	dest := t.TempDir()
+
+	full := repo["model.safetensors"]
+	part := filepath.Join(dest, "model.safetensors"+partSuffix)
+	if err := os.WriteFile(part, full[:1000], 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	c := &Client{BaseURL: fh.server(t).URL, HTTP: &http.Client{}}
+	if err := c.Download(context.Background(), DownloadRequest{RepoID: "org/repo", Dest: dest}); err != nil {
+		t.Fatalf("Download: %v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(dest, "model.safetensors"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, full) {
+		t.Errorf("wrong-Content-Range resume corrupted the file: got %d bytes, want %d", len(got), len(full))
+	}
+}
+
+// A size-unknown (size 0) manifest entry whose download returns nothing must be
+// rejected, not renamed into place as a valid empty file.
+func TestDownloadRejectsEmptyUnknownSizeFile(t *testing.T) {
+	// A weights file present (so HasWeights passes) plus an empty, size-unknown extra.
+	fh := newFakeHub(map[string][]byte{
+		"config.json":       []byte(`{"model_type":"x"}`),
+		"model.safetensors": weights(64),
+		"empty.txt":         {},
+	})
+	dest := t.TempDir()
+	c := &Client{BaseURL: fh.server(t).URL, HTTP: &http.Client{}}
+	err := c.Download(context.Background(), DownloadRequest{RepoID: "org/repo", Dest: dest})
+	if err == nil {
+		t.Fatal("an empty size-unknown file was accepted as a complete download")
+	}
+}
+
+func TestValidContentRange(t *testing.T) {
+	cases := []struct {
+		h        string
+		resumeAt int64
+		size     int64
+		want     bool
+	}{
+		{"bytes 1000-4095/4096", 1000, 4096, true},
+		{"bytes 1000-4095/4096", 2000, 4096, false}, // wrong start
+		{"bytes 1000-4095/5000", 1000, 4096, false}, // wrong total
+		{"bytes 1000-4095/4096", 1000, 0, true},     // unknown size: total not checked
+		{"garbage", 1000, 4096, false},
+		{"", 1000, 4096, false},
+	}
+	for _, tc := range cases {
+		if got := validContentRange(tc.h, tc.resumeAt, tc.size); got != tc.want {
+			t.Errorf("validContentRange(%q, %d, %d) = %v, want %v", tc.h, tc.resumeAt, tc.size, got, tc.want)
+		}
+	}
+}
 
 // weights makes a deterministic blob of n bytes.
 func weights(n int) []byte {

@@ -2,12 +2,15 @@ package hub
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -234,12 +237,18 @@ func (c *Client) downloadFile(ctx context.Context, req DownloadRequest, root *os
 	}
 	part := final + partSuffix
 
-	// Already complete from a previous run?
+	// Already complete from a previous run? When the manifest gives a size,
+	// require an exact match; when it does not (size 0 = unknown), accept only a
+	// non-empty file — a zero-byte "complete" file is never a real weight/config.
 	if fi, err := root.Stat(final); err == nil {
-		if f.Size == 0 || fi.Size() == f.Size {
+		complete := (f.Size > 0 && fi.Size() == f.Size) || (f.Size == 0 && fi.Size() > 0)
+		if complete {
+			// Drop any leftover .part orphaned beside a completed file, so it does
+			// not linger across every future run.
+			_ = root.Remove(part)
 			return nil
 		}
-		// Size mismatch: the file is corrupt or truncated. Refetch it.
+		// Wrong size or empty: refetch.
 		if err := root.Remove(final); err != nil {
 			return fmt.Errorf("remove corrupt %s: %w", f.Path, err)
 		}
@@ -288,7 +297,18 @@ func (c *Client) downloadFile(ctx context.Context, req DownloadRequest, root *os
 			resumeAt = 0
 		}
 	case http.StatusPartialContent:
-		// Resuming as requested.
+		// Resuming as requested — but only if the server actually resumed where we
+		// asked. A 206 whose Content-Range starts at a different offset would,
+		// appended onto our .part, produce a wrong-length-but-plausible or a
+		// silently-corrupt file. If the range is wrong or unparseable, discard the
+		// partial and restart from scratch.
+		if resumeAt > 0 && !validContentRange(resp.Header.Get("Content-Range"), resumeAt, f.Size) {
+			if err := root.Remove(part); err != nil && !os.IsNotExist(err) {
+				return err
+			}
+			tr.addCompleted(-resumeAt)
+			return c.downloadFile(ctx, req, root, f, tr)
+		}
 	case http.StatusRequestedRangeNotSatisfiable:
 		// The .part is already the full length; treat as complete and verify below.
 		if err := root.Remove(part); err != nil && !os.IsNotExist(err) {
@@ -331,19 +351,78 @@ func (c *Client) downloadFile(ctx context.Context, req DownloadRequest, root *os
 		return closeErr
 	}
 
-	if f.Size > 0 {
-		fi, err := root.Stat(part)
-		if err != nil {
-			return err
-		}
-		if fi.Size() != f.Size {
+	fi, err := root.Stat(part)
+	if err != nil {
+		return err
+	}
+	switch {
+	case f.Size > 0 && fi.Size() != f.Size:
+		root.Remove(part)
+		return fmt.Errorf("download %s: got %d bytes, expected %d", f.Path, fi.Size(), f.Size)
+	case f.Size == 0 && fi.Size() == 0:
+		// Size was unknown and the server returned nothing: a truncated/empty file
+		// is never a valid download, and with no size to check it would otherwise
+		// be renamed into place and pass as complete.
+		root.Remove(part)
+		return fmt.Errorf("download %s: server returned an empty file", f.Path)
+	}
+
+	// Content-integrity check for LFS files (the weights): LFS.OID is the sha256
+	// of the file's content, so verifying it turns "right size" into "exact
+	// bytes". Size alone cannot catch a corrupt-but-right-length body, nor
+	// corruption that predates a resume (the appended tail is size-checked, the
+	// resumed prefix is not). Non-LFS files carry a git-blob sha1, not a content
+	// hash, so they are size-checked only.
+	if f.LFS != nil && f.LFS.OID != "" {
+		if err := verifySHA256(root, part, f.LFS.OID); err != nil {
 			root.Remove(part)
-			return fmt.Errorf("download %s: got %d bytes, expected %d", f.Path, fi.Size(), f.Size)
+			return fmt.Errorf("download %s: %w", f.Path, err)
 		}
 	}
 
 	if err := root.Rename(part, final); err != nil {
 		return fmt.Errorf("finalise %s: %w", f.Path, err)
+	}
+	return nil
+}
+
+// validContentRange reports whether a 206 response's Content-Range header
+// ("bytes <start>-<end>/<total>") resumes exactly where we asked: start must
+// equal resumeAt, and — when the expected size is known — total must equal it.
+func validContentRange(h string, resumeAt, size int64) bool {
+	h = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(h), "bytes"))
+	dash := strings.IndexByte(h, '-')
+	slash := strings.IndexByte(h, '/')
+	if dash <= 0 || slash <= dash {
+		return false
+	}
+	start, err := strconv.ParseInt(strings.TrimSpace(h[:dash]), 10, 64)
+	if err != nil || start != resumeAt {
+		return false
+	}
+	if size > 0 {
+		total, err := strconv.ParseInt(strings.TrimSpace(h[slash+1:]), 10, 64)
+		if err != nil || total != size {
+			return false
+		}
+	}
+	return true
+}
+
+// verifySHA256 streams the file at name through SHA-256 and compares it to the
+// expected hex digest.
+func verifySHA256(root *os.Root, name, wantHex string) error {
+	f, err := root.Open(name)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return err
+	}
+	if got := hex.EncodeToString(h.Sum(nil)); !strings.EqualFold(got, wantHex) {
+		return fmt.Errorf("content hash mismatch: got sha256:%s, expected sha256:%s", got, wantHex)
 	}
 	return nil
 }
@@ -397,7 +476,17 @@ func (t *progressTracker) emit(path string) {
 	if t.onProgress == nil {
 		return
 	}
+	// Clamp the reported total to [0, total]. The byte accounting can briefly go
+	// out of range in a pathological pre-existing-file state (a corrupt final file
+	// plus an oversized leftover .part, each adjusted independently); that must
+	// never surface as a negative or >100% progress bar.
 	done := t.completed.Load()
+	if done < 0 {
+		done = 0
+	}
+	if t.total > 0 && done > t.total {
+		done = t.total
+	}
 	var rate int64
 	if el := time.Since(t.started).Seconds(); el > 0.5 {
 		// Only this session's bytes count toward the rate, not those resumed from disk.
