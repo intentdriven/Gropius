@@ -126,9 +126,29 @@ func (l *pidLedger) writeLocked(bootNs int64, entries []pidEntry) {
 	for _, e := range entries {
 		fmt.Fprintf(&b, "%d %d\n", e.pgid, e.startNs)
 	}
-	tmp := l.path + ".tmp"
-	if err := os.WriteFile(tmp, []byte(b.String()), 0o644); err == nil {
-		os.Rename(tmp, l.path)
+	// Write through a random O_EXCL temp, not a predictable "<path>.tmp". The
+	// ledger lives in the data root, which in shared mode is group-writable
+	// (/Users/Shared/Gropius); another local account could pre-plant
+	// "running-servers.pids.tmp" as a symlink and redirect this write to clobber
+	// a file the server user owns. os.CreateTemp uses a random name with O_EXCL
+	// and mode 0600, closing that hole — the same fix config.Save already uses.
+	dir := filepath.Dir(l.path)
+	tmp, err := os.CreateTemp(dir, "running-servers-*.pids.tmp")
+	if err != nil {
+		return
+	}
+	tmpName := tmp.Name()
+	if _, err := tmp.WriteString(b.String()); err != nil {
+		tmp.Close()
+		os.Remove(tmpName)
+		return
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmpName)
+		return
+	}
+	if err := os.Rename(tmpName, l.path); err != nil {
+		os.Remove(tmpName)
 	}
 }
 

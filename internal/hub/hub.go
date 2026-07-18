@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"path"
@@ -217,11 +218,21 @@ func (c *Client) Search(ctx context.Context, q SearchQuery) ([]Model, error) {
 		return nil, apiError(resp, u)
 	}
 	var models []Model
-	if err := json.NewDecoder(resp.Body).Decode(&models); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxJSONBody)).Decode(&models); err != nil {
 		return nil, fmt.Errorf("decode search results: %w", err)
 	}
 	return models, nil
 }
+
+// maxJSONBody caps how large a Hub JSON response we will buffer/decode. Search
+// results and a single tree page are at most a few MB; a body near this limit is
+// a broken or hostile endpoint, not a real repo listing.
+const maxJSONBody = 32 << 20
+
+// maxTreePages bounds how many pagination hops Files will follow. The tree
+// endpoint pages at 1000 entries, so this covers repos with up to ~1M files —
+// far beyond any real model — while refusing an endpoint that loops forever.
+const maxTreePages = 1000
 
 // Files lists a repo's file tree at the given revision (default "main"),
 // including sizes, which the downloader needs for progress reporting.
@@ -238,7 +249,10 @@ func (c *Client) Files(ctx context.Context, repoID, revision string) ([]File, er
 		c.baseURL(), repoID, url.PathEscape(revision))
 
 	var entries []File
-	for u != "" {
+	for page := 0; u != ""; page++ {
+		if page >= maxTreePages {
+			return nil, fmt.Errorf("file tree for %s did not terminate after %d pages", repoID, maxTreePages)
+		}
 		req, err := c.newRequest(ctx, http.MethodGet, u)
 		if err != nil {
 			return nil, err
@@ -253,15 +267,23 @@ func (c *Client) Files(ctx context.Context, repoID, revision string) ([]File, er
 			return nil, err
 		}
 
-		var page []File
-		if err := json.NewDecoder(resp.Body).Decode(&page); err != nil {
+		var pageEntries []File
+		if err := json.NewDecoder(io.LimitReader(resp.Body, maxJSONBody)).Decode(&pageEntries); err != nil {
 			resp.Body.Close()
 			return nil, fmt.Errorf("decode file tree for %s: %w", repoID, err)
 		}
 		next := nextPageURL(resp.Header.Get("Link"))
 		resp.Body.Close()
 
-		entries = append(entries, page...)
+		// The Link header is attacker-influenced (it comes from the Hub response).
+		// newRequest attaches the bearer token to whatever URL we pass, so a
+		// "rel=next" pointing at another host would leak the HuggingFace token off
+		// to it. Only follow a next-page URL on the same origin we started from.
+		if next != "" && !sameOrigin(c.baseURL(), next) {
+			return nil, fmt.Errorf("file tree for %s returned a cross-origin next page (%s) — refusing to follow it", repoID, next)
+		}
+
+		entries = append(entries, pageEntries...)
 		u = next
 	}
 
@@ -281,6 +303,20 @@ func (c *Client) Files(ctx context.Context, repoID, revision string) ([]File, er
 		out = append(out, e)
 	}
 	return out, nil
+}
+
+// sameOrigin reports whether target has the same scheme and host as base. A
+// parse failure or missing host counts as different, i.e. refuse it.
+func sameOrigin(base, target string) bool {
+	b, err := url.Parse(base)
+	if err != nil {
+		return false
+	}
+	t, err := url.Parse(target)
+	if err != nil || t.Host == "" {
+		return false
+	}
+	return strings.EqualFold(b.Scheme, t.Scheme) && strings.EqualFold(b.Host, t.Host)
 }
 
 // nextPageURL extracts the rel="next" URL from an RFC 8288 Link header, or "".

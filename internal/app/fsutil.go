@@ -3,10 +3,30 @@ package app
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
 )
+
+// readCapped reads at most max bytes from the file at path. It returns an error
+// if the file is larger than max, so a hostile oversized file is refused rather
+// than silently truncated into a parse.
+func readCapped(path string, max int64) ([]byte, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	b, err := io.ReadAll(io.LimitReader(f, max+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(b)) > max {
+		return nil, fmt.Errorf("file %s exceeds %d bytes", filepath.Base(path), max)
+	}
+	return b, nil
+}
 
 // dirSize sums the size of every regular file under dir.
 func dirSize(dir string) int64 {
@@ -33,8 +53,14 @@ func dirSize(dir string) int64 {
 // page saved as config.json, or a repo with no safetensors. The authoritative
 // check that a model *runs* is the pool's readiness probe on first use, which
 // issues a real completion.
+// maxConfigJSON caps how much of a model's config.json we read. A real config
+// is a few KB; anything approaching this is either broken or a hostile file
+// planted to make validation balloon memory. The read is bounded rather than
+// slurped whole with os.ReadFile.
+const maxConfigJSON = 8 << 20
+
 func validateModelDir(dir string) error {
-	b, err := os.ReadFile(filepath.Join(dir, "config.json"))
+	b, err := readCapped(filepath.Join(dir, "config.json"), maxConfigJSON)
 	if err != nil {
 		return fmt.Errorf("config.json is missing or unreadable: %w", err)
 	}

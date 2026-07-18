@@ -166,6 +166,35 @@ func TestFilesFollowsPagination(t *testing.T) {
 	}
 }
 
+// A rel="next" pointing at a different host must not be followed: newRequest
+// attaches the bearer token, so following it would leak the HuggingFace token
+// to the attacker-named host.
+func TestFilesRefusesCrossOriginNextPage(t *testing.T) {
+	var leaked bool
+	evil := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "" {
+			leaked = true
+		}
+		fmt.Fprint(w, `[]`)
+	}))
+	defer evil.Close()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Link", "<"+evil.URL+"/api/models/org/repo/tree/main?cursor=p2>; rel=\"next\"")
+		fmt.Fprint(w, `[{"type":"file","path":"a.safetensors","size":1,"oid":"a"}]`)
+	}))
+	defer srv.Close()
+
+	c := &Client{BaseURL: srv.URL, HTTP: srv.Client(), Token: "secret-hf-token"}
+	_, err := c.Files(context.Background(), "org/repo", "")
+	if err == nil {
+		t.Fatal("Files followed a cross-origin next page; it must refuse")
+	}
+	if leaked {
+		t.Fatal("TOKEN LEAK: the bearer token was sent to the cross-origin host")
+	}
+}
+
 func TestFilesNotFound(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "not found", http.StatusNotFound)

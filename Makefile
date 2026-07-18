@@ -75,16 +75,22 @@ allow-firewall:
 ## 4-bit costs 40 GB twice. Gropius uses /Users/Shared/Gropius automatically once
 ## it exists and is writable.
 ##
-## The mode is 3775, and both special bits matter:
+## The directory mode is 3775, and both special bits matter:
 ##   • setgid (the 2) makes new files inherit the `staff` group, so a model one
 ##     account downloads is writable by the next.
 ##   • sticky (the 1) means a file can only be deleted or renamed by its owner —
 ##     without it, any account in `staff` could replace or remove another user's
 ##     models (or config/registry files) in this group-writable directory.
+##
+## Crucially, 3775 is applied to DIRECTORIES ONLY. A recursive `chmod -R 3775`
+## also rewrites every file to 0775 (group-writable, world-readable) — which,
+## re-run after first use, would expose config.json's api_key/hf_token (the app
+## writes it 0600) and make model weights modifiable by any staff account. File
+## modes are left to the app, which writes secrets 0600 and logs 0600.
 install-shared:
 	sudo mkdir -p /Users/Shared/Gropius
 	sudo chgrp -R staff /Users/Shared/Gropius
-	sudo chmod -R 3775 /Users/Shared/Gropius
+	sudo find /Users/Shared/Gropius -type d -exec chmod 3775 {} +
 	@echo "Shared model cache ready at /Users/Shared/Gropius."
 	@echo "Restart Gropius; every account on this Mac will now share one set of models."
 

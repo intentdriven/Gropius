@@ -17,6 +17,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/intentdriven/Gropius/internal/config"
 )
 
 // State is where a model is in its lifecycle.
@@ -396,6 +398,14 @@ func (r *Registry) Rescan(modelsDir string) error {
 				continue
 			}
 			repoID := org.Name() + "/" + repo.Name()
+			// Adopt only well-formed repo ids. Every write path (Download/Delete)
+			// gates on ValidRepoID, so an id that fails it here — a directory name
+			// another account chose in the shared cache, say — would be served on
+			// /v1/models yet could never be deleted through the app. Skip it rather
+			// than create an undeletable phantom.
+			if !config.ValidRepoID(repoID) {
+				continue
+			}
 			found[repoID] = Model{
 				RepoID:  repoID,
 				Path:    dir,
