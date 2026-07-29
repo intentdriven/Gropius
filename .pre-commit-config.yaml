@@ -1,0 +1,26 @@
+# Pre-commit gates: secret scan, root-markdown hygiene, path privacy.
+# Install: pre-commit install   (https://pre-commit.com)
+#
+# The absolute-path hook exempts /Users/Shared/ — a macOS system directory that
+# is part of Gropius's shared-cache design, not a username.
+repos:
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.24.0
+    hooks:
+      - id: gitleaks
+
+  - repo: local
+    hooks:
+      - id: no-stray-root-markdown
+        name: markdown belongs under docs/
+        language: system
+        files: '^[^/]+\.md$'
+        exclude: '^(README|AGENTS|CLAUDE|GEMINI|CHANGELOG|CONTRIBUTING|SECURITY|LICENSE|ACKNOWLEDGEMENTS)\.md$'
+        entry: >-
+          bash -c 'echo "Stray markdown at repo root: $@ — file it under docs/ or .abcd/ (see AGENTS.md)"; exit 1' --
+      - id: no-absolute-paths-in-docs
+        name: no absolute local paths in markdown
+        language: system
+        files: '\.md$'
+        entry: >-
+          bash -c 'if grep -nE "/Users/[A-Za-z]|C:\\\\Users\\\\" "$@" | grep -v "/Users/Shared/"; then echo "Absolute local paths found — use repo-relative paths (AGENTS.md privacy rule)."; exit 1; fi' --

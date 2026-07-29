@@ -112,7 +112,7 @@ bound to loopback only and are never reachable from the LAN.
   API), `registry`, `discovery`, `config`, `app`.
 - [`docs/`](docs/) — getting-started guide.
 
-Design decisions and the empirical facts behind them: [`DECISIONS.md`](DECISIONS.md).
+Design decisions and the empirical facts behind them: [`DECISIONS.md`](.abcd/development/decisions/DECISIONS.md).
 
 ## Development
 

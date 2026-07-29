@@ -1,0 +1,53 @@
+{
+  "schema_version": 1,
+  "block": {
+    "file": ".abcd/development/IDENTITY.md",
+    "heading": "Identity (canonical)"
+  },
+  "severity": "warn",
+  "surfaces": [
+    {
+      "id": "readme-strapline",
+      "files": [
+        "README.md"
+      ],
+      "kind": "regexp",
+      "patterns": [
+        "(?s)<p[^>]*>(.*?)</p>",
+        "(?m)^#[^#\\n]*\\n+([^\\s<#>\\[!|*-][^\\n]*)$"
+      ],
+      "requires": [
+        "tagline"
+      ],
+      "template": "{tagline}"
+    },
+    {
+      "id": "manifest-description",
+      "files": [
+        ".claude-plugin/plugin.json",
+        "package.json"
+      ],
+      "kind": "json_field",
+      "field": "description",
+      "requires": [
+        "tagline"
+      ],
+      "template": "{tagline}"
+    },
+    {
+      "id": "conventions-opening",
+      "files": [
+        "AGENTS.md"
+      ],
+      "kind": "regexp",
+      "patterns": [
+        "(?s)<!-- END ABCD -->\\n+(.*?)(?:\\n\\n|\\z)",
+        "(?m)^#[^#\\n]*\\n+([^\\s<#>\\[!|*-][^\\n]*)$"
+      ],
+      "requires": [
+        "tagline"
+      ],
+      "template": "{tagline}"
+    }
+  ]
+}
