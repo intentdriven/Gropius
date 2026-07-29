@@ -2,7 +2,7 @@
 //
 // The registry is the source of truth for what Gropius can serve. It is
 // deliberately a thin index over the filesystem: the model directories
-// themselves are the real artefact, and the registry can always be rebuilt from
+// themselves are the real artifact, and the registry can always be rebuilt from
 // them (see Rescan).
 package registry
 

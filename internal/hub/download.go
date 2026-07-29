@@ -57,7 +57,7 @@ type DownloadRequest struct {
 	Dest string
 	// Concurrency is how many files transfer at once. Defaults to 4.
 	Concurrency int
-	// OnProgress, if set, is called as bytes arrive. Calls are serialised, so
+	// OnProgress, if set, is called as bytes arrive. Calls are serialized, so
 	// the callback need not be safe for concurrent use, but it should return
 	// promptly: it runs on the goroutine that is moving bytes.
 	OnProgress func(Progress)
@@ -446,7 +446,7 @@ type progressTracker struct {
 	completed atomic.Int64
 	filesDone atomic.Int64
 
-	// emitMu serialises calls into onProgress. Files download concurrently, so
+	// emitMu serializes calls into onProgress. Files download concurrently, so
 	// without this the caller's callback would be entered from several
 	// goroutines at once — a trap for the obvious implementations (updating a
 	// progress bar, appending to a slice).

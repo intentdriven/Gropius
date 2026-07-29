@@ -77,7 +77,7 @@ func (m Model) Name() string {
 }
 
 // Quantization extracts the quant suffix from a model name ("...-4bit" -> "4bit").
-// Returns "" when the name carries no recognisable quantization marker.
+// Returns "" when the name carries no recognizable quantization marker.
 func (m Model) Quantization() string {
 	name := strings.ToLower(m.Name())
 	// Ordered longest-first so "-4bit-dwq" wins over "-4bit".

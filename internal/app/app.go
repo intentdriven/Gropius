@@ -215,6 +215,13 @@ func (a *App) Download(repoID string) error {
 	a.dlMu.Unlock()
 
 	dest := a.Paths.ModelDir(repoID)
+	// Remember whether a ready model is already being served from dest: a
+	// failed re-download must not take away files that still validate
+	// (downloads stage into .part files and only replace a file once it
+	// completes, so an attempt that fails before any file finishes leaves
+	// the served set untouched).
+	prior, priorErr := a.Registry.Get(repoID)
+	wasReady := priorErr == nil && prior.State == registry.StateReady
 	if err := a.Registry.Put(registry.Model{
 		RepoID: repoID,
 		Path:   dest,
@@ -275,16 +282,46 @@ func (a *App) Download(repoID string) error {
 		case errors.Is(err, context.Canceled):
 			// A cancelled download leaves .part files behind on purpose: they let
 			// the next attempt resume instead of starting over.
-			a.Registry.SetState(repoID, registry.StateFailed, 0, "cancelled")
-			a.Log.Info("download cancelled", "model", repoID)
+			if a.restoreReady(repoID, dest, wasReady, prior.Bytes) {
+				a.Log.Info("download cancelled; the ready model is untouched", "model", repoID)
+			} else {
+				a.Registry.SetState(repoID, registry.StateFailed, 0, "cancelled")
+				a.Log.Info("download cancelled", "model", repoID)
+			}
 
 		default:
-			a.Registry.SetState(repoID, registry.StateFailed, 0, err.Error())
-			a.Log.Error("download failed", "model", repoID, "err", err)
+			if a.restoreReady(repoID, dest, wasReady, prior.Bytes) {
+				a.Log.Warn("download failed; the ready model is untouched", "model", repoID, "err", err)
+			} else {
+				a.Registry.SetState(repoID, registry.StateFailed, 0, err.Error())
+				a.Log.Error("download failed", "model", repoID, "err", err)
+			}
 		}
 	}()
 
 	return nil
+}
+
+// restoreReady puts a model back into the ready state after a failed or
+// cancelled download attempt, provided it was ready before the attempt and its
+// files still validate. It reports whether the model was restored. The size is
+// the one recorded while the model was ready: measuring the directory now
+// would count the failed attempt's .part leftovers.
+func (a *App) restoreReady(repoID, dest string, wasReady bool, priorBytes int64) bool {
+	if !wasReady || validateModelDir(dest) != nil {
+		return false
+	}
+	if perr := a.Registry.Put(registry.Model{
+		RepoID:   repoID,
+		Path:     dest,
+		Bytes:    priorBytes,
+		State:    registry.StateReady,
+		Progress: 100,
+	}); perr != nil {
+		a.Log.Error("could not restore the ready model record", "model", repoID, "err", perr)
+		return false
+	}
+	return true
 }
 
 func (a *App) finishDownload(repoID string) {
@@ -326,7 +363,7 @@ func (a *App) Downloading() []string {
 // Delete removes a model: it is unloaded first if it is resident, then its files
 // are deleted.
 func (a *App) Delete(repoID string) error {
-	// Defence in depth: never hand an un-validated id to os.RemoveAll, even one
+	// Defense in depth: never hand an un-validated id to os.RemoveAll, even one
 	// that somehow reached the registry (e.g. from an older build).
 	if !config.ValidRepoID(repoID) {
 		return fmt.Errorf("%q is not a valid model id: %w", repoID, ErrInvalidRepoID)

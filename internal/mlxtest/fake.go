@@ -110,7 +110,7 @@ func (s *Server) LastBody() map[string]any {
 func (s *Server) ready() bool { return !time.Now().Before(s.readyAt) }
 
 // handleHealth answers ok even while the model is still loading — this is the
-// real behaviour, and the reason a readiness probe must do a real completion.
+// real behavior, and the reason a readiness probe must do a real completion.
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	fmt.Fprint(w, `{"status": "ok"}`)

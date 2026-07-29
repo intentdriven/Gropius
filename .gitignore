@@ -41,3 +41,6 @@ go.work.sum
 # server app on a clean checkout. Only the transient iconset staging dir is ignored.
 /build/AppIcon.iconset/
 .DS_Store
+
+# Per-machine working state (the gitignored local tier described in AGENTS.md).
+/.abcd/.work.local/

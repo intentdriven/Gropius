@@ -213,7 +213,7 @@ func runServer(ln net.Listener, paths config.Paths, cfg config.Config, headless 
 
 	// AppKit requires its event loop to own the main thread, so systray.Run must
 	// be called from the main goroutine — running it in a `go` statement crashes
-	// with SIGTRAP the moment the tray initialises. Everything else is already
+	// with SIGTRAP the moment the tray initializes. Everything else is already
 	// running in the background, so blocking here is exactly right.
 	go func() {
 		<-sigs

@@ -387,7 +387,7 @@ func TestProgressAccountsForPreexistingBytes(t *testing.T) {
 	}
 }
 
-// Files download concurrently, but the progress callback must be serialised:
+// Files download concurrently, but the progress callback must be serialized:
 // callers naturally write callbacks that touch shared state (a progress bar, a
 // slice) without a lock. Run under -race, this fails if emission is unguarded.
 func TestProgressCallbackIsNeverCalledConcurrently(t *testing.T) {
@@ -399,7 +399,7 @@ func TestProgressCallbackIsNeverCalledConcurrently(t *testing.T) {
 	srv := fh.server(t)
 
 	var inCallback int32
-	var updates int // deliberately unguarded: -race proves serialisation
+	var updates int // deliberately unguarded: -race proves serialization
 	c := &Client{BaseURL: srv.URL, HTTP: srv.Client()}
 	err := c.Download(context.Background(), DownloadRequest{
 		RepoID: "org/repo", Dest: t.TempDir(), Concurrency: 8,

@@ -55,7 +55,18 @@ icon:
 	@build/mkicon.sh
 
 ## install: put the app in /Applications, allow it through the firewall, launch it
+## A running copy is quit first: `open` activates an already-running process
+## instead of launching the new binary, so an upgrade would keep the old
+## version serving while claiming success.
 install: app
+	@if pgrep -qf "/Applications/$(APP).app/Contents/MacOS/" 2>/dev/null; then \
+		echo "Quitting the running $(APP)…"; \
+		osascript -e 'quit app "$(APP)"' >/dev/null 2>&1 || true; \
+		for i in $$(seq 1 20); do \
+			pgrep -qf "/Applications/$(APP).app/Contents/MacOS/" || break; \
+			sleep 0.5; \
+		done; \
+	fi
 	rm -rf /Applications/$(APP).app
 	cp -R $(BUNDLE) /Applications/
 	$(MAKE) allow-firewall APP_BIN=/Applications/$(APP).app/Contents/MacOS/gropius

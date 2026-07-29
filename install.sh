@@ -51,7 +51,10 @@ die() {
 [ "$(uname -s)" = "Darwin" ] || die "Gropius is macOS only."
 
 # The server needs Apple Silicon (MLX runs on Metal). The client is universal.
-if [ "$mode" = "server" ] && [ "$(uname -m)" != "arm64" ]; then
+# `uname -m` reports x86_64 in a Rosetta-translated shell (common with x86_64
+# Homebrew), so also ask the kernel whether the hardware is Apple Silicon.
+if [ "$mode" = "server" ] && [ "$(uname -m)" != "arm64" ] &&
+	[ "$(sysctl -n hw.optional.arm64 2>/dev/null)" != "1" ]; then
 	die "the Gropius server needs Apple Silicon (this Mac is $(uname -m)). The GropiusChat client is universal: rerun with 'client'."
 fi
 
@@ -105,6 +108,20 @@ ditto -x -k "$zip" "$tmp/extract" || die "could not unpack $ASSET."
 # are usually not quarantined anyway, but a proxy or prior run might have tagged
 # it, which would otherwise block launch.)
 xattr -dr com.apple.quarantine "$tmp/extract/$APP.app" 2>/dev/null || true
+# Quit a running copy first. LaunchServices' `open` activates an already-running
+# process instead of launching the new binary, so an upgrade over a live app
+# would report success while the old version keeps running.
+if pgrep -qf "/Applications/$APP.app/Contents/MacOS/" 2>/dev/null; then
+	echo "Quitting the running $APP…"
+	osascript -e "quit app \"$APP\"" >/dev/null 2>&1 || true
+	for _ in $(seq 1 20); do
+		pgrep -qf "/Applications/$APP.app/Contents/MacOS/" || break
+		sleep 0.5
+	done
+	if pgrep -qf "/Applications/$APP.app/Contents/MacOS/" 2>/dev/null; then
+		echo "warning: $APP is still running; quit it and relaunch to finish the upgrade." >&2
+	fi
+fi
 rm -rf "/Applications/$APP.app"
 cp -R "$tmp/extract/$APP.app" /Applications/
 

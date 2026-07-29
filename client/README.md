@@ -28,14 +28,15 @@ open dist/GropiusChat.app
 3. Pick a model from the top-right menu and start typing. Enter sends; the arrow
    button too. The stop button interrupts a reply in progress.
 
-Thinking models (Qwen3, etc.) stream their reasoning; it shows in grey above the
-answer, so a reply that spends its whole budget reasoning is never blank.
+Thinking models (Qwen3, etc.) stream their reasoning; a grey **Thoughts** row
+above the answer expands to show it, so a reply that spends its whole budget
+reasoning is never blank.
 
 ### Chats
 
 The left **sidebar** holds your conversations. The **pencil** button in the
 toolbar starts a new chat; the toolbar's sidebar button hides or shows the
-list. Delete a chat by swiping, right-clicking, or the Delete key. Everything is
+list. Delete a chat by swiping or right-clicking it. Everything is
 saved to `~/Library/Application Support/GropiusChat/conversations.json` and
 restored on next launch — history lives on the machine running the client, not on
 the server.

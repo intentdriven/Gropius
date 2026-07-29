@@ -69,8 +69,18 @@ jobs:
           go-version: '1.25'
           cache: false
 
-      # Verify gate — mirror `make lint`: a red build, vet, or test aborts before
-      # anything is built or published.
+      # Verify gate — mirror `make lint`: a red format check, build, vet, or test
+      # aborts before anything is built or published.
+      - name: Format (gofmt)
+        run: |
+          set -euo pipefail
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "gofmt: these files are not formatted (run gofmt -w .):" >&2
+            echo "$unformatted" >&2
+            exit 1
+          fi
+
       - name: Build
         run: go build ./...
 
@@ -117,6 +127,11 @@ jobs:
       # matching public key. Signing the SHA256SUMS.txt covers both zips with one
       # signature. Fail closed: if the secret is unset, the release stops here
       # rather than publishing assets install.sh will (correctly) refuse.
+      # Install minisign in its own step so the network-fetched, unpinned brew
+      # formula never executes with the signing key in its environment.
+      - name: Install minisign
+        run: brew install minisign
+
       - name: Sign the release checksums (minisign)
         env:
           MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
@@ -126,7 +141,6 @@ jobs:
             echo "::error::MINISIGN_SECRET_KEY secret is not set — install.sh requires a signature. See install.sh for the one-time key setup." >&2
             exit 1
           fi
-          brew install minisign
           shasum -a 256 Gropius.app.zip GropiusChat.app.zip > SHA256SUMS.txt
           printf '%s\n' "$MINISIGN_SECRET_KEY" > minisign.key
           # The key is generated passwordless (minisign -G -W), so signing needs
@@ -155,7 +169,18 @@ jobs:
             gh release upload "$TAG" $assets --clobber
           else
             echo "Release $TAG does not exist — creating it."
+            # GitHub marks the most recently *created* release as "latest" by
+            # default, so re-releasing an old tag (the dispatch use case) would
+            # hijack releases/latest and silently downgrade every install.sh
+            # run. Mark this release latest only if no newer released tag
+            # exists. The listing is fetched on its own line so a failed gh
+            # call aborts the step instead of silently yielding latest=true.
+            released="$(gh release list --exclude-drafts --exclude-pre-releases \
+              --json tagName --jq '.[].tagName')"
+            newest="$(printf '%s\n%s\n' "$released" "$TAG" | sort -V | tail -n1)"
+            if [ "$newest" = "$TAG" ]; then latest=true; else latest=false; fi
+            echo "Marking $TAG with --latest=$latest (newest released tag: $newest)."
             gh release create "$TAG" $assets \
-              --verify-tag --title "$TAG" \
+              --verify-tag --title "$TAG" --latest="$latest" \
               --notes "macOS build. Install with the one-liner in the README."
           fi

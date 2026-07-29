@@ -295,6 +295,9 @@ func TestLoopbackOnlyConfigAdvertisesNoLANAddress(t *testing.T) {
 		if strings.Contains(e, "192.168.") || strings.Contains(e, "10.") {
 			t.Errorf("a loopback-bound server advertised a LAN address: %s", e)
 		}
+		if strings.Contains(e, ".local:") {
+			t.Errorf("a loopback-bound server advertised its .local name, which resolves to LAN addresses it will not answer on: %s", e)
+		}
 	}
 }
 

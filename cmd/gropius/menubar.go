@@ -19,7 +19,7 @@ func quitMenuBar() { systray.Quit() }
 //
 // It BLOCKS until the user quits, and must be called from the main goroutine:
 // AppKit's event loop has to own the main thread. Calling it with `go` crashes
-// with SIGTRAP inside cgo as soon as the tray initialises.
+// with SIGTRAP inside cgo as soon as the tray initializes.
 func runMenuBar(a *app.App, log *slog.Logger) {
 	systray.Run(func() {
 		systray.SetTemplateIcon(menuIcon, menuIcon)
