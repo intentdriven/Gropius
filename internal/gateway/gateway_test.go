@@ -1,9 +1,11 @@
 package gateway
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -111,6 +113,32 @@ func newTestGateway(t *testing.T, cfg config.Config) (*httptest.Server, *stubPoo
 	srv := httptest.NewServer(g.Handler())
 	t.Cleanup(srv.Close)
 	return srv, pool, fake
+}
+
+// A malformed request body (bad chunked framing) is a client error, not a
+// timeout: it must fail 400 immediately, not 408.
+func TestMalformedRequestBodyIsBadRequest(t *testing.T) {
+	srv, _, _ := newTestGateway(t, config.Default())
+
+	conn, err := net.Dial("tcp", srv.Listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	// "ZZZ" is not a valid chunk-size line, so the handler's body read fails
+	// with a framing error on the first chunk rather than a deadline.
+	fmt.Fprintf(conn, "POST /v1/chat/completions HTTP/1.1\r\n"+
+		"Host: gropius.test\r\nContent-Type: application/json\r\n"+
+		"Transfer-Encoding: chunked\r\n\r\nZZZ\r\n0\r\n\r\n")
+
+	resp, err := http.ReadResponse(bufio.NewReader(conn), nil)
+	if err != nil {
+		t.Fatalf("reading response: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400 for malformed chunked framing", resp.StatusCode)
+	}
 }
 
 func post(t *testing.T, srv *httptest.Server, path string, body any, hdrs map[string]string) *http.Response {

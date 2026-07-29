@@ -78,6 +78,13 @@ func TestExposedToLAN(t *testing.T) {
 		{"", true},
 		{"127.0.0.1", false},
 		{"localhost", false},
+		{"::1", false},
+		// A specific interface address is just as reachable from the LAN as
+		// the wildcard; the security warnings must not be suppressed by it.
+		{"192.168.1.10", true},
+		{"10.0.0.5", true},
+		{"fe80::1", true},
+		{"mac-studio.local", true},
 	}
 	for _, tt := range tests {
 		c := Default()

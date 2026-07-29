@@ -12,6 +12,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -185,10 +186,15 @@ func (g *Gateway) handleCompletions(w http.ResponseWriter, r *http.Request) {
 	raw, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxRequestBody))
 	if err != nil {
 		var tooLarge *http.MaxBytesError
-		if errors.As(err, &tooLarge) {
+		switch {
+		case errors.As(err, &tooLarge):
 			writeError(w, http.StatusRequestEntityTooLarge, "request body too large")
-		} else {
+		case errors.Is(err, os.ErrDeadlineExceeded):
 			writeError(w, http.StatusRequestTimeout, "timed out reading the request body")
+		default:
+			// Malformed framing (bad chunked encoding), an aborted upload, and
+			// the like are client errors, not timeouts.
+			writeError(w, http.StatusBadRequest, "failed to read the request body")
 		}
 		return
 	}

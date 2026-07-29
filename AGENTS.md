@@ -24,9 +24,10 @@ gofmt -l .                                 # must print nothing
 go vet ./...
 ```
 
-CI (`.github/workflows/ci.yml`) gates on: `go build ./...`, `go vet ./...`,
-`go test ./...`, `go test -race ./internal/...`, gitleaks (full history), and
-zizmor. `make run` starts the server headless in the foreground for development.
+CI (`.github/workflows/ci.yml`) gates on: `gofmt -l .` (must be empty),
+`go build ./...`, `go vet ./...`, `go test ./...`,
+`go test -race ./internal/...`, gitleaks (full history), and zizmor.
+`make run` starts the server headless in the foreground for development.
 
 ## Boundaries
 
@@ -68,7 +69,7 @@ zizmor. `make run` starts the server headless in the foreground for development.
   how-to, reference, or explanation), present tense only (what IS; history
   lives in git). User-facing prose in British English; identifiers, code
   comments, strings, and commit messages in US English. No stray markdown at
-  the repo root beyond README, AGENTS, CLAUDE, CHANGELOG, CONTRIBUTING,
+  the repo root beyond README, AGENTS, CLAUDE, GEMINI, CHANGELOG, CONTRIBUTING,
   SECURITY, LICENSE, ACKNOWLEDGEMENTS.
 - **Privacy:** no absolute local paths, real hostnames, usernames, emails,
   tokens, IPs, or private repository names in anything committed —

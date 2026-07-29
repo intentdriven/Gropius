@@ -445,9 +445,16 @@ func (c *Control) handleSetSettings(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	// Host and port bind the server, decode concurrency and idle timeout are
+	// pool options — all four are consumed only at startup, and SetConfig
+	// cannot apply them live.
+	restart := incoming.Port != current.Port ||
+		incoming.Host != current.Host ||
+		incoming.DecodeConcurrency != current.DecodeConcurrency ||
+		incoming.IdleTimeoutSec != current.IdleTimeoutSec
 	writeJSON(w, http.StatusOK, map[string]any{
 		"status":  "saved",
-		"restart": incoming.Port != current.Port || incoming.Host != current.Host,
+		"restart": restart,
 	})
 }
 

@@ -117,6 +117,8 @@ menu-bar app just points at it. One copy on disk, one on the GPU.
   ```sh
   make allow-firewall     # or, for the installed app:
   sudo /usr/libexec/ApplicationFirewall/socketfilterfw \
+    --add "/Applications/Gropius.app/Contents/MacOS/gropius"
+  sudo /usr/libexec/ApplicationFirewall/socketfilterfw \
     --unblockapp "/Applications/Gropius.app/Contents/MacOS/gropius"
   ```
 
@@ -134,8 +136,11 @@ menu-bar app just points at it. One copy on disk, one on the GPU.
   not blocking incoming connections for the app (System Settings → Network →
   Firewall).
 - **First request is slow.** That is the model loading into memory. Pre-load it
-  from **My Models → Load**, and raise the idle timeout in **Settings** so it
-  stays resident.
+  from **My Models → Load**. With the default settings a loaded model stays
+  resident forever; an idle timeout in **Settings** unloads it after that many
+  seconds without requests, so keep the timeout at 0 (= never unload) if you
+  want it to stay loaded. The `preload` list in `config.json` loads models at
+  startup, so the first request after a restart is fast too.
 
 ## Uninstalling
 
@@ -146,4 +151,9 @@ rm -rf ~/Library/Application\ Support/Gropius
 ```
 
 That directory holds the private Python runtime and your downloaded models —
-deleting it removes every trace.
+deleting it removes every trace. If you set up the shared cache (step 7), the
+data lives in `/Users/Shared/Gropius` instead; remove that too:
+
+```sh
+sudo rm -rf /Users/Shared/Gropius
+```

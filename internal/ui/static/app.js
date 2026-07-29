@@ -366,7 +366,7 @@ $('settingsForm').addEventListener('submit', async (e) => {
     });
     msg.className = 'msg';
     msg.textContent = res.restart
-      ? 'Saved. Restart Gropius for the new address to take effect.'
+      ? 'Saved. Restart Gropius for the change to take effect.'
       : 'Saved.';
     settingsTouched = false;
   } catch (err) {

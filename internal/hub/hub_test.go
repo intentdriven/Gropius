@@ -379,6 +379,9 @@ type fakeHub struct {
 	// badContentRange makes a 206 reply carry a Content-Range that starts at the
 	// wrong offset, simulating a misbehaving CDN/proxy.
 	badContentRange bool
+	// always416 makes every resolve request fail with 416, even a plain GET
+	// without a Range header, simulating a broken proxy or CDN edge.
+	always416 bool
 
 	mu sync.Mutex
 	// ranges records the Range header seen per file path.
@@ -435,6 +438,10 @@ func (f *fakeHub) server(t *testing.T) *httptest.Server {
 			f.ranges[name] = rng
 		}
 		f.mu.Unlock()
+		if f.always416 {
+			w.WriteHeader(http.StatusRequestedRangeNotSatisfiable)
+			return
+		}
 		if rng != "" && !f.ignoreRange {
 			var start int64
 			fmt.Sscanf(rng, "bytes=%d-", &start)

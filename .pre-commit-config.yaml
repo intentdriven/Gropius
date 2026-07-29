@@ -5,7 +5,7 @@
 # is part of Gropius's shared-cache design, not a username.
 repos:
   - repo: https://github.com/gitleaks/gitleaks
-    rev: v8.24.0
+    rev: v8.24.3
     hooks:
       - id: gitleaks
 

@@ -22,8 +22,9 @@ permissions:
 jobs:
   # Format + build + vet + test on macOS. Race-enabled unit tests over the
   # platform-independent internal packages catch data races a plain `go test`
-  # would miss; cmd/gropius is excluded from the race leg because its systray/
-  # AppKit cgo does not play well under the race detector.
+  # would miss; the race leg is scoped to internal/... to keep this gate fast —
+  # full-module race coverage (including cmd/gropius) runs in `make test`
+  # locally and in the release workflow's gate.
   check:
     timeout-minutes: 20
     runs-on: macos-latest

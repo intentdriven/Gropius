@@ -288,6 +288,55 @@ func TestRescanSkipsPartialDownloads(t *testing.T) {
 	}
 }
 
+// Downloads can create nested files (a repo manifest may include
+// subdirectories), so the rescan must walk the whole tree: nested bytes count
+// toward the size that feeds the memory budget, and a nested .part still
+// marks the download as incomplete.
+func TestRescanCountsNestedFiles(t *testing.T) {
+	r, dir := newTestRegistry(t)
+	models := filepath.Join(dir, "models")
+	md := writeModelDir(t, models, "org", "nested", 1024)
+	sub := filepath.Join(md, "processor")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sub, "tokenizer.json"), make([]byte, 100), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := r.Rescan(models); err != nil {
+		t.Fatal(err)
+	}
+	m, err := r.Get("org/nested")
+	if err != nil {
+		t.Fatalf("Rescan did not adopt the model: %v", err)
+	}
+	// config.json (2) + weights (1024) + nested tokenizer.json (100)
+	if m.Bytes != 1126 {
+		t.Errorf("Bytes = %d, want 1126 (nested files must be counted)", m.Bytes)
+	}
+}
+
+func TestRescanSkipsNestedPartialDownloads(t *testing.T) {
+	r, dir := newTestRegistry(t)
+	models := filepath.Join(dir, "models")
+	md := writeModelDir(t, models, "org", "half-nested", 512)
+	sub := filepath.Join(md, "processor")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sub, "weights.safetensors.gropius-part"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := r.Rescan(models); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Get("org/half-nested"); !errors.Is(err, ErrNotFound) {
+		t.Error("Rescan adopted a model whose nested download is incomplete")
+	}
+}
+
 func TestRescanDoesNotClobberInFlightDownload(t *testing.T) {
 	r, dir := newTestRegistry(t)
 	models := filepath.Join(dir, "models")

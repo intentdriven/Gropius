@@ -3,7 +3,7 @@ BUNDLE  := dist/$(APP).app
 BIN     := bin/gropius
 PKG     := ./cmd/gropius
 
-.PHONY: all test build app install run clean fmt vet lint
+.PHONY: all test build app icon install run clean fmt vet lint allow-firewall install-shared
 
 all: test build
 
@@ -21,10 +21,12 @@ vet:
 lint: fmt vet test
 
 ## build: the plain binary. LDFLAGS is empty for dev builds (keeps debug symbols
-## for delve); the app/release build overrides it to strip.
+## for delve); the app/release build overrides it to strip. VERSION is stamped
+## into `gropius -version`; the release workflow passes the tag explicitly.
 LDFLAGS ?=
+VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 build:
-	go build -ldflags "$(LDFLAGS)" -o $(BIN) $(PKG)
+	go build -ldflags "$(LDFLAGS) -X main.version=$(VERSION)" -o $(BIN) $(PKG)
 
 ## app: a real .app bundle (menu-bar app, LAN + Bonjour entitlements).
 ## Strips debug info (-s -w): a distributed binary needs no DWARF, and it roughly
@@ -34,6 +36,9 @@ app: build icon
 	rm -rf $(BUNDLE)
 	mkdir -p $(BUNDLE)/Contents/MacOS $(BUNDLE)/Contents/Resources
 	cp build/Info.plist $(BUNDLE)/Contents/Info.plist
+	# Stamp the bundle version (VERSION without a leading v) so Finder's Get
+	# Info matches what the binary reports, before the bundle is signed.
+	/usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $(patsubst v%,%,$(VERSION))" $(BUNDLE)/Contents/Info.plist
 	cp $(BIN)           $(BUNDLE)/Contents/MacOS/gropius
 	cp build/AppIcon.icns $(BUNDLE)/Contents/Resources/AppIcon.icns
 	# A stable signing identifier matters: Go's linker ad-hoc-signs every binary
@@ -98,5 +103,9 @@ install-shared:
 run: build
 	$(BIN) -headless
 
+## clean removes build outputs only. build/AppIcon.icns is a committed asset
+## whose 1024px source PNG is deliberately not in the repo (see .gitignore), so
+## deleting it would break `make app` on every machine but the one holding the
+## source art.
 clean:
-	rm -rf bin dist build/AppIcon.icns build/AppIcon.iconset
+	rm -rf bin dist build/AppIcon.iconset

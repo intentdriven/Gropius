@@ -462,26 +462,38 @@ func (r *Registry) Rescan(modelsDir string) error {
 }
 
 // inspectModelDir reports whether dir holds a loadable model, and its size.
+// It walks the whole tree: downloads may create nested files, whose bytes
+// must count toward the size that feeds the memory budget and whose .part
+// markers still mean the download is incomplete. The loadability signals
+// (config.json, weights) stay top-level, matching what mlx_lm.server loads.
 func inspectModelDir(dir string) (complete bool, size int64) {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return false, 0
-	}
 	var hasConfig, hasWeights, partial bool
-	for _, e := range entries {
-		name := e.Name()
+	err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if d.IsDir() {
+			return nil
+		}
+		name := d.Name()
 		if strings.HasSuffix(name, ".gropius-part") {
 			partial = true
 		}
-		if name == "config.json" {
-			hasConfig = true
+		if filepath.Dir(path) == dir {
+			if name == "config.json" {
+				hasConfig = true
+			}
+			if strings.HasSuffix(name, ".safetensors") {
+				hasWeights = true
+			}
 		}
-		if strings.HasSuffix(name, ".safetensors") {
-			hasWeights = true
-		}
-		if info, err := e.Info(); err == nil && !e.IsDir() {
+		if info, err := d.Info(); err == nil {
 			size += info.Size()
 		}
+		return nil
+	})
+	if err != nil {
+		return false, 0
 	}
 	return hasConfig && hasWeights && !partial, size
 }

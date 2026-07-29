@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -204,8 +205,17 @@ func (c Config) Validate() error {
 }
 
 // ExposedToLAN reports whether the bind address accepts non-loopback traffic.
+// Anything that is not loopback counts: a specific interface address exposes
+// the gateway to the LAN just as the wildcard does, and must trigger the same
+// security warnings.
 func (c Config) ExposedToLAN() bool {
-	return c.Host == "0.0.0.0" || c.Host == "::" || c.Host == ""
+	if c.Host == "localhost" {
+		return false
+	}
+	if ip := net.ParseIP(c.Host); ip != nil {
+		return !ip.IsLoopback()
+	}
+	return true
 }
 
 // Load reads config from path, returning defaults if the file does not exist.

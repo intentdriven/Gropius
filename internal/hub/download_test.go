@@ -258,6 +258,26 @@ func TestDownloadSkipsAlreadyCompleteFiles(t *testing.T) {
 	}
 }
 
+// A server (broken proxy, captive portal, misbehaving CDN edge) that answers
+// 416 to a plain GET must fail the download cleanly: with no resume offset
+// there is no partial file to discard, so retrying can never succeed.
+func TestDownloadFailsCleanlyOn416WithoutResumeOffset(t *testing.T) {
+	repo := standardRepo()
+	fh := newFakeHub(repo)
+	fh.always416 = true
+	srv := fh.server(t)
+	dest := t.TempDir()
+
+	c := &Client{BaseURL: srv.URL, HTTP: srv.Client()}
+	err := c.Download(context.Background(), DownloadRequest{RepoID: "org/repo", Dest: dest})
+	if err == nil {
+		t.Fatal("Download succeeded against a server that 416s every request")
+	}
+	if hits := fh.hitsFor("model.safetensors"); hits > 2 {
+		t.Errorf("client made %d requests against an unconditional 416, want at most 2", hits)
+	}
+}
+
 // A file whose size does not match the manifest is corrupt and must be refetched.
 func TestDownloadRefetchesTruncatedFile(t *testing.T) {
 	repo := standardRepo()

@@ -81,7 +81,7 @@ jobs:
         run: go test -race ./...
 
       - name: Build the server app (Gropius.app, arm64, ad-hoc signed)
-        run: make app
+        run: make app VERSION="$TAG"
 
       - name: Build the client app (GropiusChat.app, universal)
         run: client/build.sh

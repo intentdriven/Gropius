@@ -310,7 +310,12 @@ func (c *Client) downloadFile(ctx context.Context, req DownloadRequest, root *os
 			return c.downloadFile(ctx, req, root, f, tr)
 		}
 	case http.StatusRequestedRangeNotSatisfiable:
-		// The .part is already the full length; treat as complete and verify below.
+		// The .part is already the full length; treat as complete and verify
+		// below. Only a request that sent a Range can mean that: a 416 to a
+		// plain GET is a server error, and retrying it would recurse forever.
+		if resumeAt == 0 {
+			return apiError(resp, u)
+		}
 		if err := root.Remove(part); err != nil && !os.IsNotExist(err) {
 			return err
 		}

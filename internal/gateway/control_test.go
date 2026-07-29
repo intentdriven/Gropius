@@ -227,6 +227,29 @@ func TestSavingRedactedPlaceholderKeepsTheRealSecret(t *testing.T) {
 	}
 }
 
+// Decode concurrency and idle timeout are only read when the pool is built at
+// startup; saving a change to them must tell the user a restart is needed.
+func TestSavingRestartOnlyFieldsReportsRestart(t *testing.T) {
+	srv := newTestControl(t, config.Default())
+
+	// Same host/port as the defaults; decode_concurrency changed from 4 to 8.
+	body := `{"host":"0.0.0.0","port":11535,"api_key":"","decode_concurrency":8,"idle_timeout_sec":0}`
+	resp, err := srv.Client().Post(srv.URL+"/api/settings", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var out struct {
+		Restart bool `json:"restart"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	if !out.Restart {
+		t.Error("changing decode_concurrency reported restart=false; the pool only reads it at startup")
+	}
+}
+
 func TestSettingsRejectsInvalidPort(t *testing.T) {
 	srv := newTestControl(t, config.Default())
 

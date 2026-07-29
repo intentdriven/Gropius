@@ -33,8 +33,8 @@ answer, so a reply that spends its whole budget reasoning is never blank.
 
 ### Chats
 
-The left **sidebar** holds your conversations. The **＋** button (or the pencil in
-the sidebar) starts a new chat; the toolbar's sidebar button hides or shows the
+The left **sidebar** holds your conversations. The **pencil** button in the
+toolbar starts a new chat; the toolbar's sidebar button hides or shows the
 list. Delete a chat by swiping, right-clicking, or the Delete key. Everything is
 saved to `~/Library/Application Support/GropiusChat/conversations.json` and
 restored on next launch — history lives on the machine running the client, not on
@@ -67,4 +67,5 @@ prompt the user to approve on first connect.
 - `Info.plist` — bundle metadata + local-network entitlements.
 - `build.sh` — compiles with `swiftc` and assembles the `.app`.
 
-Settings (server URL, API key, chosen model) persist in `UserDefaults`.
+Settings persist across launches: the server URL and chosen model in
+`UserDefaults`, the API key in the macOS Keychain.
