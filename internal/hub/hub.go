@@ -400,7 +400,8 @@ func wantedFile(p string) bool {
 	if base == ".gitattributes" {
 		return false
 	}
-	// Skip anything nested under a docs/assets folder.
+	// Skip hidden entries and anything under a hidden top-level folder
+	// (".gitignore", ".cache/…") — repo metadata, never model content.
 	if strings.HasPrefix(p, ".") {
 		return false
 	}
