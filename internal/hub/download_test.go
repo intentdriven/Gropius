@@ -529,3 +529,66 @@ func TestDownloadCreatesNestedDirectories(t *testing.T) {
 		t.Errorf("nested file was not written: %v", err)
 	}
 }
+
+// In the shared cache the models directory is setgid group-writable so a model
+// one account downloads is writable by the next. The directories a download
+// creates inside it must carry that on: plain MkdirAll(0o755) would leave the
+// org/name directories closed to every other account, and a later account's
+// downloads would fail EACCES.
+func TestDownloadCreatesGroupWritableDirsUnderSetgidModelsDir(t *testing.T) {
+	fh := newFakeHub(map[string][]byte{
+		"config.json":            []byte("{}"),
+		"model.safetensors":      weights(128),
+		"subdir/extra_file.json": []byte(`{"nested":true}`),
+	})
+	srv := fh.server(t)
+	models := t.TempDir()
+	if err := os.Chmod(models, 0o775|os.ModeSetgid|os.ModeSticky); err != nil {
+		t.Fatal(err)
+	}
+	dest := filepath.Join(models, "org", "repo")
+
+	c := &Client{BaseURL: srv.URL, HTTP: srv.Client()}
+	if err := c.Download(context.Background(), DownloadRequest{RepoID: "org/repo", Dest: dest}); err != nil {
+		t.Fatalf("Download: %v", err)
+	}
+	for _, d := range []string{
+		filepath.Join(models, "org"),
+		dest,
+		filepath.Join(dest, "subdir"),
+	} {
+		fi, err := os.Stat(d)
+		if err != nil {
+			t.Fatalf("stat %s: %v", d, err)
+		}
+		if fi.Mode()&0o020 == 0 || fi.Mode()&os.ModeSetgid == 0 {
+			t.Errorf("%s mode = %v, want group-writable setgid so a later account can write it", d, fi.Mode())
+		}
+	}
+}
+
+// Outside the shared cache nothing is widened: a per-user models directory has
+// no setgid bit, and the created directories stay 0755.
+func TestDownloadKeepsPerUserDirsPrivate(t *testing.T) {
+	fh := newFakeHub(map[string][]byte{
+		"config.json":       []byte("{}"),
+		"model.safetensors": weights(128),
+	})
+	srv := fh.server(t)
+	models := t.TempDir()
+	dest := filepath.Join(models, "org", "repo")
+
+	c := &Client{BaseURL: srv.URL, HTTP: srv.Client()}
+	if err := c.Download(context.Background(), DownloadRequest{RepoID: "org/repo", Dest: dest}); err != nil {
+		t.Fatalf("Download: %v", err)
+	}
+	for _, d := range []string{filepath.Join(models, "org"), dest} {
+		fi, err := os.Stat(d)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if fi.Mode()&0o020 != 0 {
+			t.Errorf("%s mode = %v, want no group-write in a per-user install", d, fi.Mode())
+		}
+	}
+}
