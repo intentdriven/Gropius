@@ -3,6 +3,7 @@
 package gateway
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/subtle"
@@ -279,7 +280,90 @@ func (g *Gateway) handleCompletions(w http.ResponseWriter, r *http.Request) {
 
 	copyResponseHeaders(w.Header(), resp.Header)
 	w.WriteHeader(resp.StatusCode)
-	streamCopy(w, resp.Body)
+	relayRewritingModel(w, resp, up.ModelArg, requested)
+}
+
+// relayRewritingModel forwards the upstream response body, mapping the
+// backend's "model" value — the absolute --model path the request rewrite put
+// there — back to the name the client asked for. mlx-lm echoes the request's
+// model field into every response and SSE chunk, and the path is a
+// backend-internal load instruction that, in a per-user install, contains the
+// account's home directory; it must not reach network clients.
+func relayRewritingModel(w http.ResponseWriter, resp *http.Response, modelArg, requested string) {
+	ct := resp.Header.Get("Content-Type")
+	switch {
+	case strings.HasPrefix(ct, "text/event-stream"):
+		streamRewriteSSE(w, resp.Body, modelArg, requested)
+	case strings.HasPrefix(ct, "application/json"):
+		// Non-streaming completions are a single bounded JSON object; buffering
+		// it is fine, and the Content-Length header is already dropped as
+		// hop-by-hop, so the length change is invisible to framing.
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return // relay what was written; the connection is already committed
+		}
+		_, _ = w.Write(rewriteModelField(body, modelArg, requested))
+	default:
+		streamCopy(w, resp.Body)
+	}
+}
+
+// rewriteModelField returns b with a top-level "model" field equal to modelArg
+// replaced by requested. Anything that does not parse, or a model value other
+// than modelArg, passes through untouched — error bodies stay verbatim.
+func rewriteModelField(b []byte, modelArg, requested string) []byte {
+	var payload map[string]json.RawMessage
+	if err := json.Unmarshal(b, &payload); err != nil {
+		return b
+	}
+	raw, ok := payload["model"]
+	if !ok {
+		return b
+	}
+	var m string
+	if err := json.Unmarshal(raw, &m); err != nil || m != modelArg {
+		return b
+	}
+	rewritten, err := json.Marshal(requested)
+	if err != nil {
+		return b
+	}
+	payload["model"] = rewritten
+	out, err := json.Marshal(payload)
+	if err != nil {
+		return b
+	}
+	return out
+}
+
+// streamRewriteSSE relays an SSE body line by line, rewriting the "model"
+// field inside each "data: {...}" event and flushing per line so tokens keep
+// streaming. Non-JSON events (notably "data: [DONE]") and non-data lines pass
+// through byte-for-byte. Chunk boundaries do not align with event boundaries,
+// so a plain streamCopy could not rewrite safely; lines are the unit mlx-lm
+// actually emits.
+func streamRewriteSSE(w http.ResponseWriter, src io.Reader, modelArg, requested string) {
+	rc := http.NewResponseController(w)
+	br := bufio.NewReader(src)
+	for {
+		line, err := br.ReadBytes('\n')
+		if len(line) > 0 {
+			if payload, ok := bytes.CutPrefix(bytes.TrimSuffix(line, []byte("\n")), []byte("data: ")); ok {
+				out := rewriteModelField(payload, modelArg, requested)
+				if _, werr := fmt.Fprintf(w, "data: %s\n", out); werr != nil {
+					return // client went away
+				}
+			} else if _, werr := w.Write(line); werr != nil {
+				return
+			}
+			// A flush error means the connection does not support flushing; the
+			// data is still written, so keep going rather than truncating.
+			_ = rc.Flush()
+		}
+		if err != nil {
+			return
+		}
+	}
 }
 
 // hopByHopHeaders are connection-scoped headers that belong to a single
