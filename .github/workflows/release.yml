@@ -94,7 +94,7 @@ jobs:
         run: make app VERSION="$TAG"
 
       - name: Build the client app (GropiusChat.app, universal)
-        run: client/build.sh
+        run: VERSION="$TAG" client/build.sh
 
       # Sanity-check the architectures before shipping: the server must be arm64
       # (MLX is Metal-only) and the client must be universal so it runs on Intel

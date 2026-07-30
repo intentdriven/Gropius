@@ -10,7 +10,9 @@ machine: just this one app.
 ## Build
 
 Requires the Xcode command-line tools (`xcode-select --install`) on the Mac you
-build on. No Xcode project — one Swift file, one script:
+build on, with the **macOS 26 SDK**: the app's Liquid Glass button styles exist
+only there, so the build fails against an older SDK even though the built app
+runs on macOS 14 or later. No Xcode project — one Swift file, one script:
 
 ```sh
 ./build.sh

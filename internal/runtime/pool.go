@@ -309,6 +309,29 @@ func (p *Pool) waitReady(e *entry) {
 		_ = e.proc.Stop(stopCtx)
 		stopCancel()
 	}
+	if err == nil && e.proc != nil {
+		go p.watchExit(e)
+	}
+}
+
+// watchExit removes a model whose server process exits after it became ready —
+// a crash mid-serving (GPU memory exhaustion during a long generation, a Python
+// fault, a manual kill). Without it the dead entry would stay in the pool
+// forever: Acquire would keep returning its port, so every request to that
+// model gets a 502 with nothing to reap it (the default idle timeout is zero,
+// and each failed request refreshes lastUsed), while the corpse keeps counting
+// against the memory budget. Removing the entry lets the next Acquire relaunch.
+//
+// Guard on identity, like the failure path in waitReady: on a normal stop
+// (evict, Unload, Close) the entry is already gone from the map, and a new
+// entry may exist under the same key.
+func (p *Pool) watchExit(e *entry) {
+	<-e.proc.Done()
+	p.mu.Lock()
+	if p.entries[e.repoID] == e {
+		delete(p.entries, e.repoID)
+	}
+	p.mu.Unlock()
 }
 
 // probeReady waits for the model to serve a real one-token completion.

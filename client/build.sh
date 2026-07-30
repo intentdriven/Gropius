@@ -34,6 +34,14 @@ fi
 
 cp Info.plist "$BUNDLE/Contents/Info.plist"
 
+# Stamp the bundle version (VERSION without a leading v) so Finder's Get Info
+# distinguishes client releases, same as the server bundle. Unset keeps the
+# plist's default for local dev builds; the release workflow passes the tag.
+if [ -n "${VERSION:-}" ]; then
+    /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString ${VERSION#v}" \
+        "$BUNDLE/Contents/Info.plist"
+fi
+
 # App icon. Regenerate the .icns from the source art if it is missing.
 if [ ! -f icon/AppIcon.icns ]; then ./mkicon.sh; fi
 cp icon/AppIcon.icns "$RES/AppIcon.icns"

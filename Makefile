@@ -66,6 +66,9 @@ install: app
 			pgrep -qf "/Applications/$(APP).app/Contents/MacOS/" || break; \
 			sleep 0.5; \
 		done; \
+		if pgrep -qf "/Applications/$(APP).app/Contents/MacOS/" 2>/dev/null; then \
+			echo "warning: $(APP) is still running; quit it and relaunch to finish the upgrade." >&2; \
+		fi; \
 	fi
 	rm -rf /Applications/$(APP).app
 	cp -R $(BUNDLE) /Applications/

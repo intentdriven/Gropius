@@ -130,6 +130,12 @@ func (l *fakeLauncher) serverFor(repoID string) *mlxtest.Server {
 	return l.servers[repoID]
 }
 
+func (l *fakeLauncher) procFor(repoID string) *fakeProc {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.procs[repoID]
+}
+
 // portRewriter routes the pool's http://127.0.0.1:<allocated-port> probes to
 // whichever httptest server the fake launcher actually stood up.
 type portRewriter struct {
@@ -423,6 +429,46 @@ func TestFailedModelIsRemovedFromPool(t *testing.T) {
 
 	if len(p.Resident()) != 0 {
 		t.Errorf("a model that failed to load is still resident: %v", p.Resident())
+	}
+}
+
+// A model server that exits after becoming ready (a crash mid-serving: GPU
+// memory exhaustion, a Python fault, a manual kill) must be removed from the
+// pool. Otherwise Acquire keeps returning the dead port — every request a 502,
+// with nothing to reap the corpse under the default idle timeout of zero —
+// while it still counts against the memory budget.
+func TestServerThatDiesAfterReadyIsRemovedAndRelaunched(t *testing.T) {
+	l := newFakeLauncher()
+	src := &fakeSource{models: map[string]int64{"org/m": 1 << 20}}
+	p := newTestPool(t, l, src, PoolOptions{MaxResidentBytes: 1 << 30})
+
+	_, release, err := p.Acquire(context.Background(), "org/m")
+	if err != nil {
+		t.Fatalf("Acquire: %v", err)
+	}
+	release()
+
+	// The server crashes on its own, after it already served requests.
+	proc := l.procFor("org/m")
+	proc.once.Do(func() { proc.srv.Close(); close(proc.done); close(proc.stopped) })
+
+	// The pool must notice the exit and drop the dead entry.
+	deadline := time.Now().Add(5 * time.Second)
+	for len(p.Resident()) != 0 {
+		if time.Now().After(deadline) {
+			t.Fatalf("dead model server still resident: %v", p.Resident())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// The next Acquire must relaunch rather than route to the corpse.
+	_, release2, err := p.Acquire(context.Background(), "org/m")
+	if err != nil {
+		t.Fatalf("Acquire after crash: %v", err)
+	}
+	defer release2()
+	if got := l.launchCount(); got != 2 {
+		t.Errorf("launched %d processes, want 2 (a relaunch after the crash)", got)
 	}
 }
 

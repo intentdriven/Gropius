@@ -38,8 +38,12 @@ func New() *Client {
 		BaseURL: DefaultBaseURL,
 		HTTP: &http.Client{
 			// No overall timeout: model downloads legitimately take many
-			// minutes. Per-request deadlines come from the caller's context,
-			// and stalled reads are caught by the transport's own timeouts.
+			// minutes. Cancellation comes from the caller's context. The
+			// transport timeouts below cover only the handshake and response
+			// headers; a dead connection mid-body surfaces as a read error
+			// via TCP keepalives (the zero net.Dialer enables them), and a
+			// live-but-silent peer is recovered by the user's Cancel, after
+			// which the .part resumes on retry.
 			Transport: &http.Transport{
 				Proxy:                 http.ProxyFromEnvironment,
 				MaxIdleConnsPerHost:   8,
