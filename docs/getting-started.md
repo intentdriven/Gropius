@@ -135,6 +135,12 @@ menu-bar app just points at it. One copy on disk, one on the GPU.
   Connect tab. Make sure both machines are on the same network and that macOS is
   not blocking incoming connections for the app (System Settings → Network →
   Firewall).
+- **The server worked, then later looks down from other machines.** The serving
+  Mac has gone to sleep — a sleeping Mac does not wake for network traffic, so
+  remote clients see it as down even though it answers on `localhost` the
+  moment you wake it. Keep the serving Mac awake while it serves: prevent
+  automatic sleeping in **System Settings → Energy** (on a laptop, **Battery →
+  Options**), or run `caffeinate` in a terminal for a headless session.
 - **First request is slow.** That is the model loading into memory. Pre-load it
   from **My Models → Load**. With the default settings a loaded model stays
   resident forever; an idle timeout in **Settings** unloads it after that many
