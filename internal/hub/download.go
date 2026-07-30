@@ -215,15 +215,20 @@ func safeJoin(dest, name string) (string, error) {
 	return filepath.Join(filepath.Clean(dest), rel), nil
 }
 
-// existingBytes returns the size of a completed file, or of a partial one.
+// existingBytes returns how many bytes are already on disk for a target: the sum
+// of any completed file and any leftover partial. Both are counted because the
+// two can coexist — a wrong-sized final file beside a resumable .part — and
+// downloadFile's per-file accounting expects the pre-download tally to have
+// credited each of them, uncounting whichever it later discards.
 func existingBytes(root *os.Root, rel string) int64 {
+	var n int64
 	if fi, err := root.Stat(rel); err == nil {
-		return fi.Size()
+		n += fi.Size()
 	}
 	if fi, err := root.Stat(rel + partSuffix); err == nil {
-		return fi.Size()
+		n += fi.Size()
 	}
-	return 0
+	return n
 }
 
 // downloadFile fetches one file, resuming if a partial exists. All filesystem
@@ -244,7 +249,12 @@ func (c *Client) downloadFile(ctx context.Context, req DownloadRequest, root *os
 		complete := (f.Size > 0 && fi.Size() == f.Size) || (f.Size == 0 && fi.Size() > 0)
 		if complete {
 			// Drop any leftover .part orphaned beside a completed file, so it does
-			// not linger across every future run.
+			// not linger across every future run. Its bytes were added to the
+			// pre-download tally (existingBytes sums final + .part), so uncount them
+			// here or the total would overshoot.
+			if pfi, perr := root.Stat(part); perr == nil {
+				tr.addCompleted(-pfi.Size())
+			}
 			_ = root.Remove(part)
 			return nil
 		}

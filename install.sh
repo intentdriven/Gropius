@@ -104,7 +104,7 @@ echo "Installing $APP.app to /Applications…"
 ditto -x -k "$zip" "$tmp/extract" || die "could not unpack $ASSET."
 [ -d "$tmp/extract/$APP.app" ] || die "$ASSET did not contain $APP.app."
 # Safe to clear the quarantine now: we have cryptographically verified this .app
-# is the exact artefact the release workflow built and signed. (curl downloads
+# is the exact artifact the release workflow built and signed. (curl downloads
 # are usually not quarantined anyway, but a proxy or prior run might have tagged
 # it, which would otherwise block launch.)
 xattr -dr com.apple.quarantine "$tmp/extract/$APP.app" 2>/dev/null || true

@@ -387,6 +387,57 @@ func TestProgressAccountsForPreexistingBytes(t *testing.T) {
 	}
 }
 
+// A wrong-sized final file can sit beside a resumable .part for the same target
+// (a half-copied directory, or another local account writing into the shared
+// cache). downloadFile removes the corrupt final and resumes from the .part, so
+// the pre-download tally must have counted the .part's bytes too — otherwise the
+// resumed prefix goes uncredited and a successful download stops short of 100%.
+func TestProgressReaches100WithWrongFinalBesidePart(t *testing.T) {
+	repo := standardRepo()
+	fh := newFakeHub(repo)
+	srv := fh.server(t)
+	dest := t.TempDir()
+
+	full := repo["model.safetensors"]
+	// A wrong-sized file under the final name...
+	if err := os.WriteFile(filepath.Join(dest, "model.safetensors"), []byte("corrupt"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// ...beside a valid partial prefix of the real content.
+	part := filepath.Join(dest, "model.safetensors"+partSuffix)
+	if err := os.WriteFile(part, full[:1000], 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var mu sync.Mutex
+	var maxCompleted int64
+	c := &Client{BaseURL: srv.URL, HTTP: srv.Client()}
+	err := c.Download(context.Background(), DownloadRequest{
+		RepoID: "org/repo", Dest: dest,
+		OnProgress: func(p Progress) {
+			mu.Lock()
+			defer mu.Unlock()
+			if p.Completed > maxCompleted {
+				maxCompleted = p.Completed
+			}
+			if p.Percent() > 100.001 {
+				t.Errorf("progress exceeded 100%%: %.2f%% (%d/%d)", p.Percent(), p.Completed, p.Total)
+			}
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	total := TotalSize([]File{
+		{Size: int64(len(repo["config.json"]))},
+		{Size: int64(len(repo["model.safetensors"]))},
+		{Size: int64(len(repo["tokenizer.json"]))},
+	})
+	if maxCompleted != total {
+		t.Errorf("final Completed = %d, want %d (progress must reach 100%%)", maxCompleted, total)
+	}
+}
+
 // Files download concurrently, but the progress callback must be serialized:
 // callers naturally write callbacks that touch shared state (a progress bar, a
 // slice) without a lock. Run under -race, this fails if emission is unguarded.

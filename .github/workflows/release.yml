@@ -4,7 +4,7 @@ name: release
 # runner — NOT from a developer's Mac. Large uploads from the author's network
 # were being corrupted in transit ("tls: bad record MAC" / broken pipe), so the
 # server binary never reached the Release. Building and uploading from a macOS
-# runner sidesteps that entirely: the artefacts are created and attached inside
+# runner sidesteps that entirely: the artifacts are created and attached inside
 # GitHub's infrastructure.
 #
 # Two entry points, one job:

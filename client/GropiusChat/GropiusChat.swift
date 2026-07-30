@@ -620,7 +620,7 @@ struct MessageRow: View {
     // answer text yet.
     private var isThinking: Bool { !isUser && displayText.isEmpty }
 
-    // Bubble colours, independent of the system accent (which may be anything):
+    // Bubble colors, independent of the system accent (which may be anything):
     // iMessage blue for sent, green for replies.
     private static let sentBlue = Color(red: 0.039, green: 0.518, blue: 1.0)
     private static let replyGreen = Color(red: 0.204, green: 0.780, blue: 0.349)
