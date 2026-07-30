@@ -25,13 +25,12 @@ func TestNoGUIToolkitInInternalPackages(t *testing.T) {
 	if err != nil {
 		t.Fatalf("go list: %v\n%s", err, out)
 	}
-	// Now list each package's full dependency set.
-	out, err = exec.Command("go", "list", "-deps",
-		"github.com/intentdriven/Gropius/internal/app",
-		"github.com/intentdriven/Gropius/internal/gateway",
-		"github.com/intentdriven/Gropius/internal/runtime",
-		"github.com/intentdriven/Gropius/internal/discovery",
-	).CombinedOutput()
+	// Now list every listed package's full dependency set. Rooting the scan on
+	// the enumeration above keeps each internal package covered even when — like
+	// internal/ui, imported only by cmd/gropius — it is in no other internal
+	// package's dependency closure.
+	roots := strings.Fields(string(out))
+	out, err = exec.Command("go", append([]string{"list", "-deps"}, roots...)...).CombinedOutput()
 	if err != nil {
 		t.Fatalf("go list -deps: %v\n%s", err, out)
 	}
