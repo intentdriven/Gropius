@@ -209,7 +209,7 @@ func (p *execProcess) Stop(ctx context.Context) error {
 	case <-p.done:
 		return nil
 	case <-time.After(deadline):
-		// A model server wedged mid-generation will not honour SIGTERM. Do not
+		// A model server wedged mid-generation will not honor SIGTERM. Do not
 		// leave it holding gigabytes of GPU memory.
 		_ = syscall.Kill(pgid, syscall.SIGKILL)
 		select {

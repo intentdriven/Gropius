@@ -357,7 +357,7 @@ func TestNewAdoptsModelsAlreadyOnDisk(t *testing.T) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	os.WriteFile(filepath.Join(dir, "config.json"), []byte("{}"), 0o644)
+	os.WriteFile(filepath.Join(dir, "config.json"), []byte(`{"model_type":"test"}`), 0o644)
 	os.WriteFile(filepath.Join(dir, "model.safetensors"), make([]byte, 512), 0o644)
 
 	a, err := New(Options{Paths: paths, Config: config.Default()})

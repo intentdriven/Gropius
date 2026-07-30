@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -215,7 +216,7 @@ func writeModelDir(t *testing.T, root, org, name string, weightBytes int) string
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(`{}`), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(`{"model_type":"test"}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(dir, "model.safetensors"), make([]byte, weightBytes), 0o644); err != nil {
@@ -245,9 +246,9 @@ func TestRescanAdoptsExistingModelDirectories(t *testing.T) {
 	if !m.Ready() {
 		t.Errorf("adopted model should be ready, got %s", m.State)
 	}
-	// config.json (2 bytes) + weights (1024)
-	if m.Bytes != 1026 {
-		t.Errorf("Bytes = %d, want 1026", m.Bytes)
+	// config.json (21 bytes) + weights (1024)
+	if m.Bytes != 1045 {
+		t.Errorf("Bytes = %d, want 1045", m.Bytes)
 	}
 }
 
@@ -311,9 +312,9 @@ func TestRescanCountsNestedFiles(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Rescan did not adopt the model: %v", err)
 	}
-	// config.json (2) + weights (1024) + nested tokenizer.json (100)
-	if m.Bytes != 1126 {
-		t.Errorf("Bytes = %d, want 1126 (nested files must be counted)", m.Bytes)
+	// config.json (21) + weights (1024) + nested tokenizer.json (100)
+	if m.Bytes != 1145 {
+		t.Errorf("Bytes = %d, want 1145 (nested files must be counted)", m.Bytes)
 	}
 }
 
@@ -451,6 +452,188 @@ func TestConcurrentAccessIsSafe(t *testing.T) {
 		}(i)
 	}
 	wg.Wait()
+}
+
+// writeShardedModelDir creates a model directory whose
+// model.safetensors.index.json names two weight shards, with only the given
+// shards actually present — the on-disk shape a partially downloaded or
+// partially failed sharded model leaves behind.
+func writeShardedModelDir(t *testing.T, root, org, name string, shards ...string) string {
+	t.Helper()
+	dir := filepath.Join(root, org, name)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	files := map[string]string{
+		"config.json": `{"model_type":"test"}`,
+		"model.safetensors.index.json": `{"weight_map":{` +
+			`"a":"model-00001-of-00002.safetensors",` +
+			`"b":"model-00002-of-00002.safetensors"}}`,
+	}
+	for _, s := range shards {
+		files[s] = "weights"
+	}
+	for name, content := range files {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return dir
+}
+
+// A verification failure removes the failed file's .part, so a sharded model
+// missing a weight shard can sit on disk with no .part marker at all. Rescan
+// must not promote its failed record to ready: the shard manifest proves the
+// directory incomplete, and the recorded error is the user's only diagnostic.
+func TestRescanDoesNotPromoteFailedShardIncompleteModel(t *testing.T) {
+	r, dir := newTestRegistry(t)
+	models := filepath.Join(dir, "models")
+	md := writeShardedModelDir(t, models, "org", "half", "model-00001-of-00002.safetensors")
+	r.Put(Model{
+		RepoID: "org/half",
+		Path:   md,
+		State:  StateFailed,
+		Err:    "download model-00002-of-00002.safetensors: content hash mismatch",
+	})
+
+	if err := r.Rescan(models); err != nil {
+		t.Fatal(err)
+	}
+	m, err := r.Get("org/half")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if m.State != StateFailed {
+		t.Errorf("Rescan promoted a shard-incomplete failed model to %q", m.State)
+	}
+	if m.Err == "" {
+		t.Error("Rescan wiped the failure diagnostic from a still-broken model")
+	}
+}
+
+func TestRescanDoesNotAdoptShardIncompleteDir(t *testing.T) {
+	r, dir := newTestRegistry(t)
+	models := filepath.Join(dir, "models")
+	writeShardedModelDir(t, models, "org", "half", "model-00001-of-00002.safetensors")
+
+	if err := r.Rescan(models); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Get("org/half"); !errors.Is(err, ErrNotFound) {
+		t.Error("Rescan adopted a directory missing a weight shard named by its manifest")
+	}
+}
+
+// A byte-complete download can still fail structural validation (an HTML error
+// page saved as config.json, say); the app records it failed with zero .part
+// files on disk. Rescan must not overrule that verdict.
+func TestRescanDoesNotPromoteJunkConfigModel(t *testing.T) {
+	r, dir := newTestRegistry(t)
+	models := filepath.Join(dir, "models")
+	md := filepath.Join(models, "org", "junk")
+	if err := os.MkdirAll(md, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	os.WriteFile(filepath.Join(md, "config.json"), []byte(`<!DOCTYPE html><html>404</html>`), 0o644)
+	os.WriteFile(filepath.Join(md, "model.safetensors"), []byte("weights"), 0o644)
+	r.Put(Model{
+		RepoID: "org/junk",
+		Path:   md,
+		State:  StateFailed,
+		Err:    "downloaded but not a usable MLX model",
+	})
+
+	if err := r.Rescan(models); err != nil {
+		t.Fatal(err)
+	}
+	m, err := r.Get("org/junk")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if m.State != StateFailed || m.Err == "" {
+		t.Errorf("Rescan promoted a structurally invalid model: state=%q err=%q", m.State, m.Err)
+	}
+}
+
+// The flip side, pinning the shared-cache promise: once the directory really is
+// complete (another account finished the download), a failed record must be
+// promoted to ready.
+func TestRescanPromotesFailedModelOnceDirComplete(t *testing.T) {
+	r, dir := newTestRegistry(t)
+	models := filepath.Join(dir, "models")
+	md := writeShardedModelDir(t, models, "org", "whole",
+		"model-00001-of-00002.safetensors", "model-00002-of-00002.safetensors")
+	r.Put(Model{RepoID: "org/whole", Path: md, State: StateFailed, Err: "content hash mismatch"})
+
+	if err := r.Rescan(models); err != nil {
+		t.Fatal(err)
+	}
+	m, err := r.Get("org/whole")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if m.State != StateReady {
+		t.Errorf("a genuinely complete directory should promote the failed record, got %q", m.State)
+	}
+	if m.Err != "" {
+		t.Errorf("promotion should clear the stale error, got %q", m.Err)
+	}
+}
+
+// In the shared cache another account can plant a FIFO (or a symlink to one)
+// under a manifest name. Opening it for the completeness check would block
+// until a writer appears — never, for a hostile plant — wedging the startup
+// rescan for every account. Rescan must skip it and finish.
+func TestRescanDoesNotBlockOnFIFOManifest(t *testing.T) {
+	r, dir := newTestRegistry(t)
+	models := filepath.Join(dir, "models")
+	md := filepath.Join(models, "org", "hostile")
+	if err := os.MkdirAll(md, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Mkfifo(filepath.Join(md, "config.json"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	os.WriteFile(filepath.Join(md, "model.safetensors"), []byte("weights"), 0o644)
+
+	done := make(chan error, 1)
+	go func() { done <- r.Rescan(models) }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Rescan: %v", err)
+		}
+	case <-timeoutAfterSeconds(5):
+		t.Fatal("Rescan blocked on a FIFO planted as config.json")
+	}
+	if _, err := r.Get("org/hostile"); !errors.Is(err, ErrNotFound) {
+		t.Error("a directory whose config.json is not a regular file must not be adopted")
+	}
+}
+
+// A symlinked manifest is never something the downloader wrote; following it
+// would probe files outside the model directory with this account's
+// privileges. The completeness check must refuse it.
+func TestRescanDoesNotFollowSymlinkedManifest(t *testing.T) {
+	r, dir := newTestRegistry(t)
+	models := filepath.Join(dir, "models")
+	md := filepath.Join(models, "org", "linked")
+	if err := os.MkdirAll(md, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(dir, "outside-config.json")
+	os.WriteFile(outside, []byte(`{"model_type":"test"}`), 0o644)
+	if err := os.Symlink(outside, filepath.Join(md, "config.json")); err != nil {
+		t.Fatal(err)
+	}
+	os.WriteFile(filepath.Join(md, "model.safetensors"), []byte("weights"), 0o644)
+
+	if err := r.Rescan(models); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Get("org/linked"); !errors.Is(err, ErrNotFound) {
+		t.Error("a directory whose config.json is a symlink must not be adopted")
+	}
 }
 
 func timeoutAfterSeconds(n int) <-chan time.Time {

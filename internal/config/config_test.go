@@ -190,7 +190,7 @@ func TestLoadCorruptFileReturnsError(t *testing.T) {
 	}
 }
 
-func TestDefaultRootHonoursEnvOverride(t *testing.T) {
+func TestDefaultRootHonorsEnvOverride(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("GROPIUS_ROOT", dir)
 

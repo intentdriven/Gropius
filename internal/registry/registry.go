@@ -10,12 +10,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/intentdriven/Gropius/internal/config"
@@ -365,9 +367,11 @@ func (r *Registry) broadcast(snapshot []Model) {
 // complete model directory it finds — which is what makes a shared cache work:
 // a second user account sees models the first account downloaded.
 //
-// A directory counts as a model when it holds a config.json and at least one
-// .safetensors file. Anything mid-download (a .gropius-part file present) is
-// skipped rather than adopted as ready.
+// A directory counts as a model when it holds a plausible model config.json,
+// at least one .safetensors file, and every weight shard its
+// model.safetensors.index.json names. Anything mid-download (a .gropius-part
+// file present) or incomplete is skipped rather than adopted as ready — and an
+// existing failed record for it keeps its state and diagnostic.
 func (r *Registry) Rescan(modelsDir string) error {
 	found := map[string]Model{}
 
@@ -466,6 +470,14 @@ func (r *Registry) Rescan(modelsDir string) error {
 // must count toward the size that feeds the memory budget and whose .part
 // markers still mean the download is incomplete. The loadability signals
 // (config.json, weights) stay top-level, matching what mlx_lm.server loads.
+//
+// Presence alone is not completeness: a verification failure removes its
+// .part marker, so a directory can hold config.json and some weights while
+// missing a shard or holding a junk config — and the failed record it belongs
+// to must not be resurrected as ready (nor the directory adopted) on the next
+// rescan. Two offline checks close those holes: config.json must plausibly be
+// a model config (mirroring the app layer's structural validation), and every
+// weight shard named by model.safetensors.index.json must be present.
 func inspectModelDir(dir string) (complete bool, size int64) {
 	var hasConfig, hasWeights, partial bool
 	err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, walkErr error) error {
@@ -495,5 +507,91 @@ func inspectModelDir(dir string) (complete bool, size int64) {
 	if err != nil {
 		return false, 0
 	}
-	return hasConfig && hasWeights && !partial, size
+	complete = hasConfig && hasWeights && !partial &&
+		plausibleModelConfig(dir) && shardsPresent(dir)
+	return complete, size
+}
+
+// maxManifestJSON caps how much of config.json or the shard index we read. A
+// real file is a few KB (the index a few hundred KB for very large models);
+// anything approaching this cap is broken or hostile, and reading it whole
+// would balloon memory during a scan.
+const maxManifestJSON = 8 << 20
+
+// readManifest reads a capped JSON file from dir into v. It reports false when
+// the file is missing, not a regular file, oversized, or not valid JSON.
+//
+// In the shared cache another account can plant a FIFO — or a symlink to one —
+// under a manifest name, and a plain Open would block until a writer appears,
+// wedging the startup rescan for every account. Opening with O_NONBLOCK makes
+// the open itself unblockable, O_NOFOLLOW refuses symlinks outright (the
+// downloader only ever writes manifests as regular files, and following a
+// link would probe files outside the model directory with this account's
+// privileges), and the fstat on the opened handle (not the path, so a swap
+// between check and open cannot be raced in) refuses anything but a regular
+// file before any read.
+func readManifest(dir, name string, v any) bool {
+	f, err := os.OpenFile(filepath.Join(dir, name), os.O_RDONLY|syscall.O_NONBLOCK|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil || !info.Mode().IsRegular() {
+		return false
+	}
+	b, err := io.ReadAll(io.LimitReader(f, maxManifestJSON+1))
+	if err != nil || int64(len(b)) > maxManifestJSON {
+		return false
+	}
+	return json.Unmarshal(b, v) == nil
+}
+
+// plausibleModelConfig reports whether dir's config.json can be a model
+// config. The criteria match the app layer's structural validation (mlx-lm
+// keys off model_type, or architectures for some models), so a download that
+// failed that validation cannot be re-adopted as ready by a rescan.
+func plausibleModelConfig(dir string) bool {
+	var cfg map[string]any
+	if !readManifest(dir, "config.json", &cfg) {
+		return false
+	}
+	return cfg["model_type"] != nil || cfg["architectures"] != nil
+}
+
+// shardsPresent reports whether every weight shard named by
+// model.safetensors.index.json exists in dir. Single-file models have no
+// index, which counts as complete. A present-but-unreadable index counts as
+// incomplete: we cannot attest the shard set, and "not complete" only means
+// the directory is skipped or a failed record keeps its state — never that a
+// ready model is dropped.
+func shardsPresent(dir string) bool {
+	const indexName = "model.safetensors.index.json"
+	if _, err := os.Stat(filepath.Join(dir, indexName)); errors.Is(err, fs.ErrNotExist) {
+		return true
+	}
+	var index struct {
+		WeightMap map[string]string `json:"weight_map"`
+	}
+	if !readManifest(dir, indexName, &index) {
+		return false
+	}
+	seen := map[string]bool{}
+	for _, shard := range index.WeightMap {
+		// A shard entry that is not a plain filename is not something the
+		// downloader would have produced; refuse to attest completeness.
+		// (filepath.Base passes "." and ".." through, so name them explicitly.)
+		if shard == "" || shard == "." || shard == ".." || shard != filepath.Base(shard) {
+			return false
+		}
+		if seen[shard] {
+			continue
+		}
+		seen[shard] = true
+		info, err := os.Stat(filepath.Join(dir, shard))
+		if err != nil || !info.Mode().IsRegular() {
+			return false
+		}
+	}
+	return true
 }

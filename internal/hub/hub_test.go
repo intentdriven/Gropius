@@ -365,7 +365,7 @@ func TestProgressPercentAndETA(t *testing.T) {
 }
 
 // fakeHub serves a tree endpoint and resolve endpoints for a set of files,
-// honouring Range requests the way the real Hub CDN does.
+// honoring Range requests the way the real Hub CDN does.
 //
 // Handlers run concurrently (the downloader fetches files in parallel), so the
 // bookkeeping maps are mutex-guarded.

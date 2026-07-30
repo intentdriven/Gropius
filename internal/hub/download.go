@@ -396,7 +396,7 @@ func (c *Client) downloadFile(ctx context.Context, req DownloadRequest, root *os
 	}
 
 	if err := root.Rename(part, final); err != nil {
-		return fmt.Errorf("finalise %s: %w", f.Path, err)
+		return fmt.Errorf("finalize %s: %w", f.Path, err)
 	}
 	return nil
 }

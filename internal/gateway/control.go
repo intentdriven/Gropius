@@ -173,8 +173,9 @@ func (c *Control) handleState(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, c.snapshot())
 }
 
-// redactConfig blanks secrets before they go over the wire. The control panel is
-// reachable on the LAN, so it must never echo the API key or HF token back.
+// redactConfig blanks secrets before they go over the wire. The control panel
+// is loopback-only, but loopback includes other local user accounts (see the
+// Handler comment), so it must never echo the API key or HF token back.
 func redactConfig(c config.Config) config.Config {
 	if c.APIKey != "" {
 		c.APIKey = "********"
