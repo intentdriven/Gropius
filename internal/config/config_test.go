@@ -66,6 +66,11 @@ func TestEnsureDirsWidensDataDirsUnderSetgidSharedRoot(t *testing.T) {
 		if fi.Mode()&0o020 == 0 || fi.Mode()&os.ModeSetgid == 0 {
 			t.Errorf("%s mode = %v, want group-writable setgid so a later account can write it", d, fi.Mode())
 		}
+		// The installer's sticky bit must survive the widening, or any account
+		// in the group could delete or replace another account's files here.
+		if fi.Mode()&os.ModeSticky == 0 {
+			t.Errorf("%s mode = %v, want the sticky bit preserved so only its owner can delete/rename it", d, fi.Mode())
+		}
 	}
 	// bin must NOT be widened: a group-writable bin would let one account
 	// replace the uv binary another account executes.

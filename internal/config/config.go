@@ -140,11 +140,15 @@ func (p Paths) ModelDir(repoID string) string {
 // EnsureDirs creates every directory in the layout.
 //
 // Under a setgid root — the shared cache, which the installer marks setgid
-// group-writable (mode 3775) so a model one account downloads is writable by
-// the next — the data directories are widened to match: MkdirAll can never
-// produce a group-writable directory (0o755 carries no group-write bit), so
-// without the chmod the first account to launch would own the layout 0755 and
-// every later account's downloads would fail with a permission error. bin is
+// group-writable and sticky (mode 3775) so a model one account downloads is
+// writable by the next, and only its owner can delete or rename it — the data
+// directories are widened to match: MkdirAll can never produce a
+// group-writable or sticky directory (0o755 carries neither bit), so without
+// the chmod the first account to launch would own the layout 0755 and every
+// later account's downloads would fail with a permission error. The sticky bit
+// must carry over too — dropping it would let any account in the group delete
+// or replace another account's model directories, exactly what the installer's
+// mode is chosen to prevent (see the Makefile's install-shared target). bin is
 // deliberately left 0755: it holds executables, and a group-writable bin would
 // let one account replace the uv binary another account runs. Chmod errors are
 // ignored — a directory created by another account cannot be re-moded by this
@@ -157,7 +161,7 @@ func (p Paths) EnsureDirs() error {
 	}
 	if fi, err := os.Stat(p.Root); err == nil && fi.Mode()&os.ModeSetgid != 0 {
 		for _, d := range []string{p.Models, filepath.Dir(p.HFCache), p.HFCache, p.Logs} {
-			_ = os.Chmod(d, 0o775|os.ModeSetgid)
+			_ = os.Chmod(d, 0o775|os.ModeSetgid|os.ModeSticky)
 		}
 	}
 	return nil

@@ -297,12 +297,15 @@ func relayRewritingModel(w http.ResponseWriter, resp *http.Response, modelArg, r
 	case strings.HasPrefix(ct, "application/json"):
 		// Non-streaming completions are a single bounded JSON object; buffering
 		// it is fine, and the Content-Length header is already dropped as
-		// hop-by-hop, so the length change is invisible to framing.
+		// hop-by-hop, so the length change is invisible to framing. A mid-read
+		// transport failure still leaves whatever bytes were read in body —
+		// write them (rewritten if they happen to parse) rather than dropping
+		// them, matching streamCopy's write-then-check-error behaviour below.
 		body, err := io.ReadAll(resp.Body)
-		if err != nil {
-			return // relay what was written; the connection is already committed
-		}
 		_, _ = w.Write(rewriteModelField(body, modelArg, requested))
+		if err != nil {
+			return
+		}
 	default:
 		streamCopy(w, resp.Body)
 	}
