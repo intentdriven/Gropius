@@ -25,8 +25,11 @@ open dist/GropiusChat.app
 
 1. Launch it. On first run it tries `http://AlicesMac.local:11535` automatically.
 2. If that isn't your server, click the **gear** → enter the server URL. Use the
-   Mac's `.local` name or its LAN IP, port `11535` (the Gropius **Connect** tab
-   shows the exact address). Add an API key only if that server requires one.
+   Mac's `.local` name or its LAN IP with port `11535` and no path — for
+   example `http://your-mac.local:11535`. The Gropius **Connect** tab and menu
+   bar show that address with `/v1` on the end (the form OpenAI clients want);
+   GropiusChat adds `/v1` itself, so drop the suffix when pasting. Add an API
+   key only if that server requires one.
 3. Pick a model from the top-right menu and start typing. Enter sends; the arrow
    button too. The stop button interrupts a reply in progress.
 

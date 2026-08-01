@@ -96,7 +96,7 @@ func (c *Client) Download(ctx context.Context, req DownloadRequest) error {
 		return fmt.Errorf("%s contains no .safetensors weights — it is not an MLX-loadable model", req.RepoID)
 	}
 
-	if err := os.MkdirAll(req.Dest, 0o755); err != nil {
+	if err := mkdirAllInherit(req.Dest); err != nil {
 		return fmt.Errorf("create %s: %w", req.Dest, err)
 	}
 	// Every filesystem operation below happens inside this root. os.Root
@@ -177,6 +177,47 @@ func (c *Client) Download(ctx context.Context, req DownloadRequest) error {
 	// cancellation (and any other context error) as the error it is.
 	if err := ctx.Err(); err != nil {
 		return err
+	}
+	return nil
+}
+
+// mkdirAllInherit creates dest and any missing parents, then — when the
+// nearest pre-existing ancestor is a setgid directory — widens the directories
+// it created to setgid group-writable, preserving the ancestor's sticky bit.
+// The shared cache depends on this: the installer marks the shared models root
+// setgid group-writable and sticky (3775) so a model one account downloads is
+// writable by the next, but only its owner can delete or rename it, but
+// MkdirAll can never produce a group-writable or sticky directory (0o755
+// carries neither bit, and umask would strip one anyway), which would leave
+// the org/name directories the first account creates closed to every other
+// account. Dropping the sticky bit here would let any account in the group
+// delete or replace another account's model directory — the fix must not
+// widen access at the cost of that protection. A per-user root has no setgid
+// bit and keeps plain 0755. Chmod failures are ignored: only directories this
+// call created are touched, and a download into a tree we can write must not
+// fail over modes we cannot change.
+func mkdirAllInherit(dest string) error {
+	anc := filepath.Clean(dest)
+	var created []string
+	for {
+		if _, err := os.Stat(anc); err == nil {
+			break
+		}
+		created = append(created, anc)
+		parent := filepath.Dir(anc)
+		if parent == anc {
+			break
+		}
+		anc = parent
+	}
+	if err := os.MkdirAll(dest, 0o755); err != nil {
+		return err
+	}
+	if fi, err := os.Stat(anc); err != nil || fi.Mode()&os.ModeSetgid == 0 {
+		return nil
+	}
+	for i := len(created) - 1; i >= 0; i-- {
+		_ = os.Chmod(created[i], 0o775|os.ModeSetgid|os.ModeSticky)
 	}
 	return nil
 }
@@ -269,6 +310,16 @@ func (c *Client) downloadFile(ctx context.Context, req DownloadRequest, root *os
 		if err := root.MkdirAll(dir, 0o755); err != nil {
 			return err
 		}
+		// Carry the shared cache's group-writability and sticky bit into
+		// nested directories too (see mkdirAllInherit); os.Root confines the
+		// chmod to the model directory. Re-chmodding a directory another
+		// goroutine created is idempotent, and failures on another account's
+		// directories are ignored for the same reason as above.
+		if fi, err := root.Stat("."); err == nil && fi.Mode()&os.ModeSetgid != 0 {
+			for p := dir; p != "."; p = filepath.Dir(p) {
+				_ = root.Chmod(p, 0o775|os.ModeSetgid|os.ModeSticky)
+			}
+		}
 	}
 
 	var resumeAt int64
@@ -320,9 +371,11 @@ func (c *Client) downloadFile(ctx context.Context, req DownloadRequest, root *os
 			return c.downloadFile(ctx, req, root, f, tr)
 		}
 	case http.StatusRequestedRangeNotSatisfiable:
-		// The .part is already the full length; treat as complete and verify
-		// below. Only a request that sent a Range can mean that: a 416 to a
-		// plain GET is a server error, and retrying it would recurse forever.
+		// The .part is already at (or beyond) the server's full length, so its
+		// contents cannot be trusted; discard it and refetch from scratch, so
+		// the fresh copy goes through the verification below. Only a request
+		// that sent a Range can mean that: a 416 to a plain GET is a server
+		// error, and retrying it would recurse forever.
 		if resumeAt == 0 {
 			return apiError(resp, u)
 		}

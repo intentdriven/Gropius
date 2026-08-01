@@ -45,6 +45,61 @@ func TestEnsureDirsCreatesLayout(t *testing.T) {
 	}
 }
 
+// The shared cache only works if the layout directories the first account
+// creates are writable by the next: the installer marks the shared root setgid
+// group-writable (mode 3775), and EnsureDirs must carry that on to the data
+// directories it creates, or every later account's downloads fail EACCES.
+func TestEnsureDirsWidensDataDirsUnderSetgidSharedRoot(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Chmod(root, 0o775|os.ModeSetgid|os.ModeSticky); err != nil {
+		t.Fatal(err)
+	}
+	p := NewPaths(root)
+	if err := p.EnsureDirs(); err != nil {
+		t.Fatalf("EnsureDirs: %v", err)
+	}
+	for _, d := range []string{p.Models, filepath.Dir(p.HFCache), p.HFCache, p.Logs} {
+		fi, err := os.Stat(d)
+		if err != nil {
+			t.Fatalf("stat %s: %v", d, err)
+		}
+		if fi.Mode()&0o020 == 0 || fi.Mode()&os.ModeSetgid == 0 {
+			t.Errorf("%s mode = %v, want group-writable setgid so a later account can write it", d, fi.Mode())
+		}
+		// The installer's sticky bit must survive the widening, or any account
+		// in the group could delete or replace another account's files here.
+		if fi.Mode()&os.ModeSticky == 0 {
+			t.Errorf("%s mode = %v, want the sticky bit preserved so only its owner can delete/rename it", d, fi.Mode())
+		}
+	}
+	// bin must NOT be widened: a group-writable bin would let one account
+	// replace the uv binary another account executes.
+	fi, err := os.Stat(p.Bin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Mode()&0o020 != 0 {
+		t.Errorf("bin mode = %v, must not be group-writable (it holds executables)", fi.Mode())
+	}
+}
+
+// A per-user root has no setgid bit; its layout stays private to the account.
+func TestEnsureDirsKeepsPerUserLayoutPrivate(t *testing.T) {
+	p := NewPaths(t.TempDir())
+	if err := p.EnsureDirs(); err != nil {
+		t.Fatalf("EnsureDirs: %v", err)
+	}
+	for _, d := range []string{p.Bin, p.Models, p.HFCache, p.Logs} {
+		fi, err := os.Stat(d)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if fi.Mode()&0o020 != 0 {
+			t.Errorf("%s mode = %v, want no group-write in a per-user install", d, fi.Mode())
+		}
+	}
+}
+
 func TestEnsureDirsIsIdempotent(t *testing.T) {
 	p := NewPaths(t.TempDir())
 	if err := p.EnsureDirs(); err != nil {

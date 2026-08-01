@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -198,6 +199,91 @@ func TestGatewayRewritesModelFieldToBackendPath(t *testing.T) {
 	}
 	if len(out.Choices) == 0 || out.Choices[0].Message.Content != "GROPIUS OK" {
 		t.Errorf("unexpected completion: %+v", out)
+	}
+}
+
+// The inverse of the rewrite above: mlx-lm echoes the request's model field —
+// post-rewrite, the backend's absolute --model path — into every response, and
+// in a per-user install that path contains the account's home directory. The
+// gateway must map it back to the name the client asked for.
+func TestResponseModelFieldIsNotTheBackendPath(t *testing.T) {
+	srv, _, fake := newTestGateway(t, config.Default())
+
+	resp := post(t, srv, "/v1/chat/completions", map[string]any{
+		"model":    "mlx-community/Qwen3-8B-4bit",
+		"messages": []any{map[string]string{"role": "user", "content": "hi"}},
+	}, nil)
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	var out struct {
+		Model   string `json:"model"`
+		Choices []struct {
+			Message struct{ Content string } `json:"message"`
+		} `json:"choices"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	if out.Model != "mlx-community/Qwen3-8B-4bit" {
+		t.Errorf("response model = %q, want the requested name, not the backend path %q",
+			out.Model, fake.ModelArg)
+	}
+	if len(out.Choices) == 0 || out.Choices[0].Message.Content != "GROPIUS OK" {
+		t.Errorf("rewrite mangled the completion: %+v", out)
+	}
+}
+
+// The same inverse mapping must hold for every SSE chunk of a streamed
+// completion, without disturbing the stream's framing or its [DONE] sentinel.
+func TestStreamingResponseModelFieldIsNotTheBackendPath(t *testing.T) {
+	srv, _, fake := newTestGateway(t, config.Default())
+
+	resp := post(t, srv, "/v1/chat/completions", map[string]any{
+		"model":    "mlx-community/Qwen3-8B-4bit",
+		"messages": []any{map[string]string{"role": "user", "content": "hi"}},
+		"stream":   true,
+	}, nil)
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	raw := new(strings.Builder)
+	if _, err := io.Copy(raw, resp.Body); err != nil {
+		t.Fatal(err)
+	}
+	body := raw.String()
+	if strings.Contains(body, fake.ModelArg) {
+		t.Errorf("stream leaks the backend path %q:\n%s", fake.ModelArg, body)
+	}
+	if !strings.Contains(body, "data: [DONE]") {
+		t.Errorf("stream did not end with [DONE]:\n%s", body)
+	}
+	chunks := 0
+	for _, line := range strings.Split(body, "\n") {
+		payload, ok := strings.CutPrefix(line, "data: ")
+		if !ok || payload == "[DONE]" {
+			continue
+		}
+		chunks++
+		var chunk struct {
+			Model   string `json:"model"`
+			Choices []struct {
+				Delta struct{ Content string } `json:"delta"`
+			} `json:"choices"`
+		}
+		if err := json.Unmarshal([]byte(payload), &chunk); err != nil {
+			t.Fatalf("chunk is not valid JSON after the rewrite: %v\n%s", err, payload)
+		}
+		if chunk.Model != "mlx-community/Qwen3-8B-4bit" {
+			t.Errorf("chunk model = %q, want the requested name", chunk.Model)
+		}
+	}
+	if chunks == 0 {
+		t.Error("no SSE data chunks reached the client")
 	}
 }
 
