@@ -222,10 +222,17 @@ func (a *App) Download(repoID string) error {
 	// the served set untouched).
 	prior, priorErr := a.Registry.Get(repoID)
 	wasReady := priorErr == nil && prior.State == registry.StateReady
+	// A retry or re-download of a known repo must keep its original AddedAt;
+	// only a genuinely new repo gets Put's zero-value-defaults-to-now behavior.
+	addedAt := time.Time{}
+	if priorErr == nil {
+		addedAt = prior.AddedAt
+	}
 	if err := a.Registry.Put(registry.Model{
-		RepoID: repoID,
-		Path:   dest,
-		State:  registry.StateDownloading,
+		RepoID:  repoID,
+		Path:    dest,
+		State:   registry.StateDownloading,
+		AddedAt: addedAt,
 	}); err != nil {
 		a.finishDownload(repoID)
 		return err
@@ -271,6 +278,7 @@ func (a *App) Download(repoID string) error {
 				Bytes:    dirSize(dest),
 				State:    registry.StateReady,
 				Progress: 100,
+				AddedAt:  addedAt,
 			}); perr != nil {
 				// The files are on disk; only the index write failed. Surface it —
 				// a silently unrecorded model would look missing until a rescan.
@@ -282,7 +290,7 @@ func (a *App) Download(repoID string) error {
 		case errors.Is(err, context.Canceled):
 			// A cancelled download leaves .part files behind on purpose: they let
 			// the next attempt resume instead of starting over.
-			if a.restoreReady(repoID, dest, wasReady, prior.Bytes) {
+			if a.restoreReady(repoID, dest, wasReady, prior.Bytes, prior.AddedAt) {
 				a.Log.Info("download cancelled; the ready model is untouched", "model", repoID)
 			} else {
 				a.Registry.SetState(repoID, registry.StateFailed, 0, "cancelled")
@@ -290,7 +298,7 @@ func (a *App) Download(repoID string) error {
 			}
 
 		default:
-			if a.restoreReady(repoID, dest, wasReady, prior.Bytes) {
+			if a.restoreReady(repoID, dest, wasReady, prior.Bytes, prior.AddedAt) {
 				a.Log.Warn("download failed; the ready model is untouched", "model", repoID, "err", err)
 			} else {
 				a.Registry.SetState(repoID, registry.StateFailed, 0, err.Error())
@@ -307,7 +315,7 @@ func (a *App) Download(repoID string) error {
 // files still validate. It reports whether the model was restored. The size is
 // the one recorded while the model was ready: measuring the directory now
 // would count the failed attempt's .part leftovers.
-func (a *App) restoreReady(repoID, dest string, wasReady bool, priorBytes int64) bool {
+func (a *App) restoreReady(repoID, dest string, wasReady bool, priorBytes int64, priorAddedAt time.Time) bool {
 	if !wasReady || validateModelDir(dest) != nil {
 		return false
 	}
@@ -317,6 +325,7 @@ func (a *App) restoreReady(repoID, dest string, wasReady bool, priorBytes int64)
 		Bytes:    priorBytes,
 		State:    registry.StateReady,
 		Progress: 100,
+		AddedAt:  priorAddedAt,
 	}); perr != nil {
 		a.Log.Error("could not restore the ready model record", "model", repoID, "err", perr)
 		return false
