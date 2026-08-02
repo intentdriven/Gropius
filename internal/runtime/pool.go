@@ -192,6 +192,17 @@ func (p *Pool) Acquire(ctx context.Context, repoID string) (*Upstream, func(), e
 		p.mu.Lock()
 		e.inFlight--
 		e.lastUsed = p.opts.now()
+		// evictForLocked refuses to evict an entry that is still loading (see
+		// its isReady guard), so a caller giving up mid-load must not leave
+		// the entry to sit there instead: with nobody left to wait for it,
+		// that would pin its full share of the memory budget, unkillable,
+		// for up to ReadyTimeout — one abandoned request against a large
+		// model could deny every other model from loading for minutes. Tear
+		// it down the moment the last waiter is gone. The identity check
+		// guards against a load that already failed and removed itself.
+		if e.inFlight == 0 && !isReady(e) && p.entries[e.repoID] == e {
+			p.stopEntryLocked(e)
+		}
 		p.mu.Unlock()
 	}
 
@@ -271,7 +282,7 @@ func (p *Pool) startLocked(repoID string) (*entry, error) {
 		DecodeConcurrency: p.opts.DecodeConcurrency,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("start model server for %s: %w", repoID, err)
+		return nil, fmt.Errorf("start model server for %s: %w", repoID, &LaunchError{Err: err})
 	}
 	e.proc = proc
 	p.entries[repoID] = e
@@ -406,7 +417,12 @@ func (p *Pool) evictForLocked(need int64) error {
 		// Evict the least recently used model that nobody is currently using.
 		var victim *entry
 		for _, e := range p.entries {
-			if e.inFlight > 0 {
+			// Never evict a model that is still loading: its lone waiter can have
+			// already given up (context cancelled or timed out) and dropped
+			// inFlight to 0 while waitReady keeps running in the background.
+			// Killing it here would waste the in-progress load; isReady checks
+			// without blocking. Same reasoning as reapIdle's guard below.
+			if e.inFlight > 0 || !isReady(e) {
 				continue
 			}
 			if victim == nil || e.lastUsed.Before(victim.lastUsed) {

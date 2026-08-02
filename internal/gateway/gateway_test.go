@@ -522,6 +522,44 @@ func TestPoolErrorBecomes503(t *testing.T) {
 	}
 }
 
+// A Launcher.Launch failure can embed absolute local filesystem paths (the
+// venv interpreter, the model directory, a log file) rooted under the
+// serving account's home directory. Because the default config ships with no
+// API key, that error would otherwise reach any unauthenticated LAN caller.
+func TestLaunchErrorDoesNotLeakLocalPaths(t *testing.T) {
+	fake := mlxtest.Start(mlxtest.Options{ModelArg: "/m"})
+	defer fake.Close()
+
+	models := &stubModels{models: []registry.Model{
+		{RepoID: "org/m", State: registry.StateReady},
+	}}
+	leaky := fmt.Errorf("python runtime is not installed (/Users/carol/Library/Application Support/Gropius/venv/bin/python): file does not exist")
+	pool := &stubPool{srv: fake, acquireErr: fmt.Errorf("start model server for org/m: %w", &runtime.LaunchError{Err: leaky})}
+	g := New(Options{Config: config.Default(), Pool: pool, Models: models})
+	srv := httptest.NewServer(g.Handler())
+	defer srv.Close()
+
+	resp := post(t, srv, "/v1/chat/completions", map[string]any{
+		"model":    "org/m",
+		"messages": []any{map[string]string{"role": "user", "content": "hi"}},
+	}, nil)
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Errorf("status = %d, want 503", resp.StatusCode)
+	}
+	var e struct {
+		Error struct{ Message string } `json:"error"`
+	}
+	json.NewDecoder(resp.Body).Decode(&e)
+	if strings.Contains(e.Error.Message, "/Users/") || strings.Contains(e.Error.Message, "carol") {
+		t.Errorf("launch error leaked a local path to the network caller: %q", e.Error.Message)
+	}
+	if e.Error.Message == "" {
+		t.Error("client should still get a non-empty error message")
+	}
+}
+
 // ---- auth ----
 
 func TestNoAuthByDefault(t *testing.T) {

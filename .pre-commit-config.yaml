@@ -23,4 +23,4 @@ repos:
         language: system
         files: '\.md$'
         entry: >-
-          bash -c 'if grep -nE "/Users/[A-Za-z]|C:\\\\Users\\\\" "$@" | grep -v "/Users/Shared/"; then echo "Absolute local paths found — use repo-relative paths (AGENTS.md privacy rule)."; exit 1; fi' --
+          bash -c 'm=$(grep -nEo "/Users/[A-Za-z][A-Za-z0-9_.-]*|C:\\\\Users\\\\[A-Za-z0-9_.-]*" "$@" | grep -v ":/Users/Shared$"); if [ -n "$m" ]; then echo "$m"; echo "Absolute local paths found — use repo-relative paths (AGENTS.md privacy rule)."; exit 1; fi' --

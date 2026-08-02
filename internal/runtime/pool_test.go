@@ -515,6 +515,103 @@ func TestEvictsLRUModelWhenBudgetExceeded(t *testing.T) {
 	}
 }
 
+// A model still loading, with a caller genuinely still waiting on it, must
+// never be picked as an eviction victim by a concurrent Acquire for a
+// different model — that would waste the in-progress load and error the
+// waiter still counting on it.
+func TestLoadingModelWithAnActiveWaiterIsNotEvicted(t *testing.T) {
+	l := newFakeLauncher()
+	l.loadDelay = 200 * time.Millisecond
+	src := &fakeSource{models: map[string]int64{"org/a": 100, "org/b": 100}}
+	// loadCost is 1.2x, so 100 bytes costs 120. A 200-byte budget fits exactly one.
+	p := newTestPool(t, l, src, PoolOptions{MaxResidentBytes: 200})
+
+	// org/a's caller keeps waiting for the whole (slow, simulated) load.
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, rel, err := p.Acquire(context.Background(), "org/a")
+		if err != nil {
+			t.Errorf("Acquire org/a: %v", err)
+			return
+		}
+		rel()
+	}()
+
+	// Give org/a's load a moment to start before org/b competes for the same
+	// (single-model) budget.
+	time.Sleep(20 * time.Millisecond)
+	_, _, err := p.Acquire(context.Background(), "org/b")
+	if err == nil {
+		t.Fatal("expected an error: org/a is not a legal eviction victim while it has an active waiter")
+	}
+	if !strings.Contains(err.Error(), "memory") {
+		t.Errorf("error should explain the memory pressure, got: %v", err)
+	}
+
+	// org/a's process must never have been torn down mid-load.
+	proc := l.procFor("org/a")
+	select {
+	case <-proc.stopped:
+		t.Fatal("the still-loading model was evicted and killed mid-load")
+	default:
+	}
+
+	<-done
+	res := p.Resident()
+	if len(res) != 1 || res[0].RepoID != "org/a" {
+		t.Errorf("org/a should be resident once its load completes: %v", res)
+	}
+}
+
+// An abandoned load — its last waiter gave up (context cancelled or timed
+// out) while the load keeps running in the background — must be torn down
+// promptly, not merely left immune to eviction. Immunity alone would let a
+// single dropped request pin a large model's full share of the memory
+// budget, unkillable, for up to ReadyTimeout: every other model would then
+// fail to load for minutes, from one abandoned connection.
+func TestAbandonedLoadIsTornDownPromptly(t *testing.T) {
+	l := newFakeLauncher()
+	l.loadDelay = 200 * time.Millisecond
+	src := &fakeSource{models: map[string]int64{"org/a": 100, "org/b": 100}}
+	// loadCost is 1.2x, so 100 bytes costs 120. A 200-byte budget fits exactly one.
+	p := newTestPool(t, l, src, PoolOptions{
+		MaxResidentBytes: 200,
+		ReadyTimeout:     10 * time.Minute, // must not matter: teardown is immediate.
+	})
+
+	// org/a's sole caller gives up well before the (slow, simulated) load
+	// finishes; nobody is left waiting on it.
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	_, _, err := p.Acquire(ctx, "org/a")
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Acquire org/a: got %v, want context.DeadlineExceeded", err)
+	}
+
+	// The abandoned entry must already be gone — not merely evictable in
+	// principle — so org/b can claim the budget straight away instead of
+	// failing with a memory-pressure error for up to ReadyTimeout.
+	_, relB, err := p.Acquire(context.Background(), "org/b")
+	if err != nil {
+		t.Fatalf("Acquire org/b: %v (the abandoned org/a load should have freed its budget immediately)", err)
+	}
+	relB()
+
+	res := p.Resident()
+	if len(res) != 1 || res[0].RepoID != "org/b" {
+		t.Errorf("resident model = %v, want only org/b", res)
+	}
+
+	// org/a's process must actually have been stopped, not just forgotten.
+	proc := l.procFor("org/a")
+	select {
+	case <-proc.stopped:
+	case <-time.After(time.Second):
+		t.Error("org/a's process was never stopped after its load was abandoned")
+	}
+}
+
 // Eviction must never kill a model that is mid-request.
 func TestInFlightModelIsNotEvicted(t *testing.T) {
 	l := newFakeLauncher()

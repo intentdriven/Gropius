@@ -233,6 +233,16 @@ func (g *Gateway) handleCompletions(w http.ResponseWriter, r *http.Request) {
 		if errors.Is(err, context.Canceled) {
 			return // the client hung up while the model was loading
 		}
+		var launchErr *runtime.LaunchError
+		if errors.As(err, &launchErr) {
+			// The wrapped error can carry absolute local filesystem paths (log
+			// file locations, the venv interpreter path, os.PathError from the
+			// child process) rooted under the serving account's home directory.
+			// Log it server-side; the network response stays generic.
+			g.log.Error("model launch failed", "model", model, "err", err)
+			writeError(w, http.StatusServiceUnavailable, "the model could not be started")
+			return
+		}
 		writeError(w, http.StatusServiceUnavailable, err.Error())
 		return
 	}
