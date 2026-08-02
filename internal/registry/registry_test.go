@@ -375,6 +375,33 @@ func TestRescanDropsModelsDeletedOutsideTheApp(t *testing.T) {
 	}
 }
 
+// A stat failure that is not "the directory does not exist" — a permission
+// hiccup, a transient I/O error — is not proof a model was deleted, and must
+// not be treated as one: only a confirmed fs.ErrNotExist means "gone".
+func TestRescanKeepsModelWhenStatFailsForReasonOtherThanNotExist(t *testing.T) {
+	r, dir := newTestRegistry(t)
+	models := filepath.Join(dir, "models")
+	if err := os.MkdirAll(models, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// A regular file standing in for a directory component makes any os.Stat of
+	// a path beneath it fail with ENOTDIR, not ENOENT — a stat failure that is
+	// unambiguously not "the directory was deleted".
+	blocker := filepath.Join(dir, "blocker")
+	if err := os.WriteFile(blocker, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	unstatable := filepath.Join(blocker, "org", "model")
+	r.Put(Model{RepoID: "org/model", Path: unstatable, State: StateReady})
+
+	if err := r.Rescan(models); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Get("org/model"); err != nil {
+		t.Errorf("a model whose directory could not be statted for a reason other than ENOENT must not be dropped: %v", err)
+	}
+}
+
 // If the models root itself is unreachable — an unmounted external volume, a
 // shared directory that is not available to this account — Rescan must leave the
 // index alone. Treating "root missing" as "everything was deleted" would wipe

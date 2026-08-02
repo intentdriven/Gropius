@@ -253,6 +253,14 @@ func (p *Pool) startLocked(repoID string) (*entry, error) {
 			"%s needs about %s of memory but the limit is %s — raise the memory budget or choose a smaller quantization",
 			repoID, humanBytes(need), humanBytes(p.opts.MaxResidentBytes))
 	}
+	// Check cheap launch preconditions before evicting anything. Eviction is not
+	// reversible (stopEntryLocked's Stop cannot be undone), so if we evicted
+	// first and Launch failed moments later — a missing venv, or this repoID's
+	// own directory vanishing in a race with a concurrent delete — a healthy,
+	// unrelated resident model would be torn down for zero benefit.
+	if err := p.opts.Launcher.Precheck(Spec{RepoID: repoID, ModelPath: path}); err != nil {
+		return nil, fmt.Errorf("start model server for %s: %w", repoID, &LaunchError{Err: err})
+	}
 	if err := p.evictForLocked(need); err != nil {
 		return nil, err
 	}

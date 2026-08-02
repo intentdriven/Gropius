@@ -370,3 +370,26 @@ func TestEventStreamIsSSE(t *testing.T) {
 		t.Errorf("Content-Type = %q, want text/event-stream", ct)
 	}
 }
+
+// /api/search's "limit" must be bounded: it is reachable even from a blind,
+// Origin-less cross-origin GET (loopbackOnly's Origin check never sees a
+// header on a request like <img src>), and an unbounded value turns one
+// request into an unbounded fan-out of outbound Hub lookups.
+func TestSearchLimitIsBounded(t *testing.T) {
+	cases := []struct {
+		raw  string
+		want int
+	}{
+		{"", 40},
+		{"0", 40},
+		{"-5", 40},
+		{"10", 10},
+		{"100", 100},
+		{"100000", 100},
+	}
+	for _, tc := range cases {
+		if got := searchLimit(tc.raw); got != tc.want {
+			t.Errorf("searchLimit(%q) = %d, want %d", tc.raw, got, tc.want)
+		}
+	}
+}

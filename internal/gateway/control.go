@@ -230,12 +230,28 @@ func lanIPs() []string {
 	return out
 }
 
-func (c *Control) handleSearch(w http.ResponseWriter, r *http.Request) {
-	q := r.URL.Query().Get("q")
-	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+// maxSearchLimit bounds the "limit" query parameter on /api/search. Without a
+// ceiling, a single request turns into an unbounded fan-out of outbound
+// RepoSize lookups (internal/hub) against HuggingFace — reachable even from a
+// blind, Origin-less cross-origin GET (e.g. <img src>), since loopbackOnly's
+// Origin check only ever sees an Origin header on same-site or POST requests.
+const maxSearchLimit = 100
+
+// searchLimit parses and bounds the "limit" query parameter.
+func searchLimit(raw string) int {
+	limit, _ := strconv.Atoi(raw)
 	if limit <= 0 {
 		limit = 40
 	}
+	if limit > maxSearchLimit {
+		limit = maxSearchLimit
+	}
+	return limit
+}
+
+func (c *Control) handleSearch(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query().Get("q")
+	limit := searchLimit(r.URL.Query().Get("limit"))
 
 	// Default to the mlx-community org: it is where the MLX-converted models
 	// live, and searching all of HuggingFace returns mostly models that will not

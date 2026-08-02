@@ -55,6 +55,9 @@ type fakeLauncher struct {
 	loadDelay time.Duration
 	// failFor makes Launch fail for a repo.
 	failFor string
+	// failPrecheckFor makes Precheck fail for a repo, simulating a missing venv
+	// or a model directory that vanished before Launch runs.
+	failPrecheckFor string
 	// dieAfter makes the process exit on its own shortly after launch, as a
 	// real model server does when the weights are corrupt.
 	dieAfter map[string]bool
@@ -72,6 +75,15 @@ func newFakeLauncher() *fakeLauncher {
 		servers:  map[string]*mlxtest.Server{},
 		dieAfter: map[string]bool{},
 	}
+}
+
+func (l *fakeLauncher) Precheck(spec Spec) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.failPrecheckFor == spec.RepoID {
+		return errors.New("simulated precheck failure")
+	}
+	return nil
 }
 
 func (l *fakeLauncher) Launch(ctx context.Context, spec Spec) (Process, error) {
@@ -512,6 +524,38 @@ func TestEvictsLRUModelWhenBudgetExceeded(t *testing.T) {
 	}
 	if res[0].RepoID != "org/b" {
 		t.Errorf("resident model = %q, want org/b (org/a should have been evicted)", res[0].RepoID)
+	}
+}
+
+// A launch that was never going to succeed (missing venv, a model directory
+// that vanished in a race with a concurrent delete) must not destroy an
+// unrelated, healthy resident model on its way to failing: eviction is not
+// reversible, so evicting before Launch's own preconditions are checked
+// tears down the victim for zero benefit the moment the new load fails.
+func TestFailedLaunchPreconditionDoesNotEvictAnUnrelatedModel(t *testing.T) {
+	l := newFakeLauncher()
+	l.failPrecheckFor = "org/b"
+	src := &fakeSource{models: map[string]int64{
+		"org/a": 100,
+		"org/b": 100,
+	}}
+	// loadCost is 1.2x, so 100 bytes costs 120. A 200-byte budget fits exactly
+	// one model at a time, so loading org/b would otherwise have to evict org/a.
+	p := newTestPool(t, l, src, PoolOptions{MaxResidentBytes: 200})
+
+	_, relA, err := p.Acquire(context.Background(), "org/a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	relA() // no longer in flight, so it would be evictable
+
+	if _, _, err := p.Acquire(context.Background(), "org/b"); err == nil {
+		t.Fatal("expected the launch precondition failure to surface")
+	}
+
+	res := p.Resident()
+	if len(res) != 1 || res[0].RepoID != "org/a" {
+		t.Fatalf("org/a should still be resident after org/b's launch precondition failed, got %v", res)
 	}
 }
 

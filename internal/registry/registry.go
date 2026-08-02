@@ -450,8 +450,11 @@ func (r *Registry) Rescan(modelsDir string) error {
 			continue
 		}
 		if m.Path != "" {
-			if _, err := os.Stat(m.Path); err == nil {
-				// Directory still exists but read as incomplete — leave it alone.
+			if _, err := os.Stat(m.Path); err == nil || !errors.Is(err, fs.ErrNotExist) {
+				// Directory still exists, or the stat failed for some other reason
+				// (a permission hiccup, a transient I/O error) — that is not proof
+				// of deletion, so leave the entry alone rather than risk dropping a
+				// healthy model from the index.
 				continue
 			}
 		}

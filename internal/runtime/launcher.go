@@ -45,6 +45,12 @@ type Process interface {
 // interface so it can be tested without Python or a GPU.
 type Launcher interface {
 	Launch(ctx context.Context, spec Spec) (Process, error)
+	// Precheck reports whether Launch is likely to succeed for spec, without
+	// starting a process. The pool calls it before evicting another model to
+	// make room: an eviction is not reversible, so a launch failure caught
+	// only after the victim is gone destroys a healthy, unrelated model for
+	// nothing.
+	Precheck(spec Spec) error
 }
 
 // LaunchError wraps a Launcher.Launch failure — the process failing to start
@@ -85,15 +91,24 @@ func (l *ExecLauncher) ReapOrphans() int {
 	return l.pidLedger().reapOrphans()
 }
 
-// Launch spawns mlx_lm.server for one model.
-func (l *ExecLauncher) Launch(ctx context.Context, spec Spec) (Process, error) {
+// Precheck confirms the venv interpreter and the model directory exist.
+func (l *ExecLauncher) Precheck(spec Spec) error {
 	python := l.Paths.VenvPython()
 	if _, err := os.Stat(python); err != nil {
-		return nil, fmt.Errorf("python runtime is not installed (%s): %w", python, err)
+		return fmt.Errorf("python runtime is not installed (%s): %w", python, err)
 	}
 	if _, err := os.Stat(spec.ModelPath); err != nil {
-		return nil, fmt.Errorf("model directory is missing (%s): %w", spec.ModelPath, err)
+		return fmt.Errorf("model directory is missing (%s): %w", spec.ModelPath, err)
 	}
+	return nil
+}
+
+// Launch spawns mlx_lm.server for one model.
+func (l *ExecLauncher) Launch(ctx context.Context, spec Spec) (Process, error) {
+	if err := l.Precheck(spec); err != nil {
+		return nil, err
+	}
+	python := l.Paths.VenvPython()
 
 	// `python -m mlx_lm.server` is deprecated in 0.31; `python -m mlx_lm server`
 	// is the supported spelling.
