@@ -465,7 +465,10 @@ func HasWeights(files []File) bool {
 }
 
 func apiError(resp *http.Response, u string) error {
-	body := make([]byte, 512)
-	n, _ := resp.Body.Read(body)
-	return &APIError{StatusCode: resp.StatusCode, URL: u, Body: strings.TrimSpace(string(body[:n]))}
+	// Read, not a single resp.Body.Read call: io.Reader may legitimately
+	// return fewer bytes than the buffer even mid-body (chunked framing, TLS
+	// record boundaries), which would otherwise truncate the captured error
+	// message well before the intended 512-byte budget.
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+	return &APIError{StatusCode: resp.StatusCode, URL: u, Body: strings.TrimSpace(string(body))}
 }

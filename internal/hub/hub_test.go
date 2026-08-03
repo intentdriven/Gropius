@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -55,6 +57,42 @@ func TestSearchSurfacesHTTPError(t *testing.T) {
 	if _, err := c.Search(context.Background(), SearchQuery{}); err == nil {
 		t.Fatal("expected an error for HTTP 500")
 	}
+}
+
+// apiError must not truncate the captured error message just because the
+// response body arrives across several small reads (chunked framing, TLS
+// record boundaries) — io.Reader is explicitly allowed to return fewer bytes
+// than the buffer even mid-body, so a single Read call is not enough.
+func TestAPIErrorReadsFullBodyAcrossShortReads(t *testing.T) {
+	msg := strings.Repeat("boom ", 100) // 500 bytes, far more than one short read
+	resp := &http.Response{
+		StatusCode: http.StatusInternalServerError,
+		Body:       io.NopCloser(&shortReader{data: []byte(msg)}),
+	}
+
+	err := apiError(resp, "http://example.test")
+	apiErr, ok := err.(*APIError)
+	if !ok {
+		t.Fatalf("got %T, want *APIError", err)
+	}
+	want := strings.TrimSpace(msg)
+	if apiErr.Body != want {
+		t.Errorf("Body = %q (%d bytes), want %q (%d bytes)", apiErr.Body, len(apiErr.Body), want, len(want))
+	}
+}
+
+// shortReader never returns more than 5 bytes per Read, regardless of the
+// caller's buffer size.
+type shortReader struct{ data []byte }
+
+func (r *shortReader) Read(p []byte) (int, error) {
+	if len(r.data) == 0 {
+		return 0, io.EOF
+	}
+	n := min(5, len(p), len(r.data))
+	copy(p, r.data[:n])
+	r.data = r.data[n:]
+	return n, nil
 }
 
 func TestModelMetadataHelpers(t *testing.T) {

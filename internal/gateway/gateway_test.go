@@ -287,6 +287,81 @@ func TestStreamingResponseModelFieldIsNotTheBackendPath(t *testing.T) {
 	}
 }
 
+// max_tokens and logprobs are client-controlled and unbounded; a well-behaved
+// upstream honoring them can still produce a very large single-object
+// response. relayRewritingModel's json branch must not buffer past
+// maxResponseBody, mirroring the maxRequestBody cap on the request side.
+func TestNonStreamingResponseBodyIsCapped(t *testing.T) {
+	resp := &http.Response{
+		Header: http.Header{"Content-Type": []string{"application/json"}},
+		Body:   io.NopCloser(io.LimitReader(fillReader{}, maxResponseBody+1024)),
+	}
+	rec := httptest.NewRecorder()
+
+	relayRewritingModel(rec, resp, "backend-path", "requested-name")
+
+	if got := rec.Body.Len(); got > maxResponseBody {
+		t.Errorf("relayRewritingModel wrote %d bytes, want capped at maxResponseBody=%d", got, maxResponseBody)
+	}
+}
+
+// A response cut short by the maxResponseBody cap is no longer valid JSON, so
+// rewriteModelField's normal parse-and-replace path can't run — but modelArg,
+// the backend's absolute --model path, must still never reach the client.
+// Reproduces the leak the maxResponseBody cap introduced on its own: a
+// truncated body that still contains a literal, unredacted modelArg.
+func TestNonStreamingResponseBodyIsCappedWithoutLeakingBackendPath(t *testing.T) {
+	const modelArg = "/Users/alice/Library/Application Support/Gropius/models/mlx-community/Qwen3-8B-4bit"
+	const requested = "mlx-community/Qwen3-8B-4bit"
+
+	// mlx-lm echoes "model" near the front of the object, well before a
+	// 64 MiB cap would ever cut the body — that's what makes the leak
+	// deterministic rather than a rare transport-failure edge case.
+	prefix := `{"id":"chatcmpl-fake","object":"chat.completion","model":"` + modelArg + `","choices":[{"index":0,"message":{"role":"assistant","content":"`
+	body := io.MultiReader(strings.NewReader(prefix), io.LimitReader(fillReader{}, maxResponseBody))
+	resp := &http.Response{
+		Header: http.Header{"Content-Type": []string{"application/json"}},
+		Body:   io.NopCloser(body),
+	}
+	rec := httptest.NewRecorder()
+
+	relayRewritingModel(rec, resp, modelArg, requested)
+
+	if strings.Contains(rec.Body.String(), modelArg) {
+		t.Fatalf("capped, truncated response still contains the backend path %q", modelArg)
+	}
+}
+
+// rewriteModelField's one hard invariant — modelArg must never reach the
+// client — has to hold even when b cannot be parsed as the expected shape at
+// all (not just when it merely lacks a "model" field), which is exactly what
+// a truncated or mid-read-interrupted body looks like.
+func TestRewriteModelFieldRedactsBackendPathEvenWhenTruncated(t *testing.T) {
+	const modelArg = "/Users/alice/Library/Application Support/Gropius/models/mlx-community/Qwen3-8B-4bit"
+	const requested = "mlx-community/Qwen3-8B-4bit"
+
+	truncated := []byte(`{"id":"chatcmpl-fake","model":"` + modelArg + `","choices":[{"index":0,"message":{"role":"assistant","content":"partial tex`)
+
+	out := rewriteModelField(truncated, modelArg, requested)
+
+	if strings.Contains(string(out), modelArg) {
+		t.Fatalf("truncated body still contains the backend path %q:\n%s", modelArg, out)
+	}
+	if !strings.Contains(string(out), requested) {
+		t.Errorf("redaction dropped the requested model name entirely:\n%s", out)
+	}
+}
+
+// fillReader is an unbounded source of 'x' bytes.
+type fillReader struct{}
+
+func (fillReader) Read(p []byte) (int, error) {
+	for i := range p {
+		p[i] = 'x'
+	}
+	return len(p), nil
+}
+
 // Clients (and many OpenAI-compatible UIs) often use the short model name.
 func TestGatewayAcceptsShortModelName(t *testing.T) {
 	srv, pool, _ := newTestGateway(t, config.Default())
