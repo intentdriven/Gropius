@@ -209,6 +209,50 @@ func TestRemoveDeletesFilesFromDisk(t *testing.T) {
 	}
 }
 
+// Remove already deleted the in-memory entry by the time saveLocked can fail
+// (a disk-full, EPERM, or — in shared-cache mode — sticky-bit-blocked write),
+// so subscribers must still hear about the change; every other mutator in this
+// file broadcasts unconditionally for the same reason.
+func TestRemoveBroadcastsEvenWhenSaveFails(t *testing.T) {
+	regParent := t.TempDir()
+	regPath := filepath.Join(regParent, "sub", "registry.json")
+	r, err := Open(regPath)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	ch, unsub := r.Subscribe()
+	defer unsub()
+
+	if err := r.Put(Model{RepoID: "org/m", Path: t.TempDir(), State: StateReady}); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	<-ch // drain the Put broadcast
+
+	// Break saveLocked deterministically, without relying on permissions (the
+	// test may run as root): replace the registry's directory with a regular
+	// file, so os.MkdirAll fails with ENOTDIR instead of writing anything.
+	regDir := filepath.Dir(regPath)
+	if err := os.RemoveAll(regDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(regDir, []byte("not a directory"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := r.Remove("org/m"); err == nil {
+		t.Fatal("Remove should have failed to persist the registry")
+	}
+
+	select {
+	case snap := <-ch:
+		if len(snap) != 0 {
+			t.Errorf("snapshot after Remove = %v, want empty", snap)
+		}
+	default:
+		t.Fatal("Remove must broadcast the in-memory deletion even when saveLocked fails")
+	}
+}
+
 // writeModelDir creates a directory that looks like a complete model.
 func writeModelDir(t *testing.T, root, org, name string, weightBytes int) string {
 	t.Helper()

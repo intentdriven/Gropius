@@ -104,11 +104,30 @@ func (g *Gateway) Handler() http.Handler {
 //
 // Requests from loopback are exempt: they come from this machine, including from
 // other macOS user accounts, and requiring a key there would break every local
-// OpenAI client for no security gain.
+// OpenAI client for no security gain. But a page the user's browser visits also
+// connects from loopback, so a bare RemoteAddr check alone would let a
+// no-preflight cross-origin POST (a CORS-safelisted Content-Type needs no
+// Authorization header, so the browser sends it with no preflight at all) ride
+// this exemption straight through — even with a key configured and even with
+// Host locked to loopback, since the attack never touches either. When a key is
+// configured, a loopback request that does carry an Origin must therefore name a
+// loopback one before the exemption applies, the same guard the control plane's
+// loopbackOnly uses against the identical CSRF class. An unconfigured key (no
+// key, iss-1) leaves loopback exactly as open as it always was: that server is
+// already unauthenticated by the user's own explicit choice, key-bypass CSRF
+// included, so there is nothing here for the Origin check to protect.
 func (g *Gateway) withAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		apiKey := g.cfg().APIKey
-		if apiKey == "" || isLoopback(r.RemoteAddr) {
+		if isLoopback(r.RemoteAddr) {
+			if origin := r.Header.Get("Origin"); apiKey != "" && origin != "" && !isLoopbackOrigin(origin) {
+				writeError(w, http.StatusForbidden, "cross-origin request refused")
+				return
+			}
+			next.ServeHTTP(w, r)
+			return
+		}
+		if apiKey == "" {
 			next.ServeHTTP(w, r)
 			return
 		}

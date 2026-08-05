@@ -17,7 +17,7 @@ built separately via `client/build.sh`. `docs/` is user-facing documentation;
 
 ```sh
 make test                                  # go test -race ./...  — the full suite
-go test -race -run TestDownload ./internal/hub/   # a single test
+go test -race -run TestDownloadResumesFromPartialFile ./internal/hub/   # a single test
 make build                                 # dev binary at bin/gropius
 make app                                   # signed .app bundle in dist/
 gofmt -l .                                 # must print nothing

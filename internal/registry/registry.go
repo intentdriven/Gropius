@@ -281,6 +281,12 @@ func (r *Registry) Remove(repoID string) error {
 	err := r.saveLocked()
 	r.mu.Unlock()
 
+	// Broadcast unconditionally, like every other mutator in this file: the
+	// in-memory index is already changed by this point regardless of whether
+	// saveLocked or the file removal below succeeds, so subscribers must hear
+	// about it even on the error paths that follow.
+	r.broadcast(snapshot)
+
 	if err != nil {
 		return err
 	}
@@ -291,7 +297,6 @@ func (r *Registry) Remove(repoID string) error {
 			return fmt.Errorf("delete model files: %w", err)
 		}
 	}
-	r.broadcast(snapshot)
 	return nil
 }
 

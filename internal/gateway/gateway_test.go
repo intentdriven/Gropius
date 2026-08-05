@@ -756,6 +756,59 @@ func TestLoopbackIsExemptFromAuth(t *testing.T) {
 	}
 }
 
+// A page the victim's browser visits also connects from loopback: without an
+// Origin check, a no-preflight cross-origin POST (a CORS-safelisted
+// Content-Type needs no Authorization header, so browsers send it with no
+// preflight) would ride the loopback exemption straight through, even with a
+// key configured — the same CSRF class the control plane's loopbackOnly
+// already blocks.
+func TestLoopbackCrossOriginRequestIsRejected(t *testing.T) {
+	h := gatewayWithKey(t, "bh_secret")
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	req.RemoteAddr = "127.0.0.1:5555"
+	req.Header.Set("Origin", "https://evil.example")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Errorf("loopback request with a foreign Origin got %d, want 403", w.Code)
+	}
+}
+
+// A same-origin loopback request (what the app's own local clients send) must
+// keep working — only a foreign Origin should be refused.
+func TestLoopbackSameOriginRequestIsAllowed(t *testing.T) {
+	h := gatewayWithKey(t, "bh_secret")
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	req.RemoteAddr = "127.0.0.1:5555"
+	req.Header.Set("Origin", "http://127.0.0.1:11535")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("loopback request with a loopback Origin got %d, want 200", w.Code)
+	}
+}
+
+// With no key configured, the server is already unauthenticated by the user's
+// own explicit choice (iss-1) — the Origin check exists to protect a configured
+// key, so it must not restrict anything when there is no key to protect.
+func TestLoopbackWithNoKeyIgnoresForeignOrigin(t *testing.T) {
+	h := gatewayWithKey(t, "")
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	req.RemoteAddr = "127.0.0.1:5555"
+	req.Header.Set("Origin", "https://evil.example")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("loopback request with no key configured got %d, want 200 (no key means nothing to protect)", w.Code)
+	}
+}
+
 // The client's token is Gropius' business; the model server has no use for it.
 func TestClientTokenIsNotForwardedUpstream(t *testing.T) {
 	cfg := config.Default()
