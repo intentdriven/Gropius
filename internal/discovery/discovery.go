@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/brutella/dnssd"
 
@@ -22,12 +23,38 @@ import (
 // endpoint should not have to sift through every web server on the network.
 const ServiceType = "_gropius._tcp"
 
+// maxDNSLabel is the RFC 1035 ceiling for a single DNS label, in octets. Both
+// the host label and the service instance name must respect it: dnssd performs
+// no length validation of its own, and a message carrying an over-long label
+// fails to pack deep inside its mDNS transport — the send is silently skipped,
+// so the service advertises nothing while every API reports success. macOS
+// accepts LocalHostNames up to the full 63 characters, so the names built here
+// must be clamped, not trusted.
+const maxDNSLabel = 63
+
+// labelHeadroom keeps room for the suffix dnssd appends when it renames a
+// service to resolve a genuine mDNS name conflict, so the renamed label stays
+// within maxDNSLabel too.
+const labelHeadroom = 4
+
+// truncateLabel caps s at max bytes without splitting a UTF-8 rune, then drops
+// any hyphens left trailing (a DNS host label must not end with one, and a cut
+// can expose one).
+func truncateLabel(s string, max int) string {
+	for len(s) > max {
+		_, size := utf8.DecodeLastRuneInString(s)
+		s = s[:len(s)-size]
+	}
+	return strings.TrimRight(s, "-")
+}
+
 // serviceHost derives the name Gropius publishes its own address records under.
 //
 // It is deliberately NOT the machine's LocalHostName. See the comment on
 // dnssd.Config.Host below: claiming the machine's name makes macOS rename the
 // machine. "gropius-alicesmac.local" collides with nothing.
 func serviceHost(localHostName string) string {
+	const prefix = "gropius-"
 	safe := strings.Map(func(r rune) rune {
 		switch {
 		case r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == '-':
@@ -37,10 +64,19 @@ func serviceHost(localHostName string) string {
 		}
 		return '-'
 	}, localHostName)
+	safe = truncateLabel(safe, maxDNSLabel-len(prefix)-labelHeadroom)
 	if safe == "" {
 		safe = "host"
 	}
-	return "gropius-" + safe
+	return prefix + safe
+}
+
+// serviceName builds the human-visible service instance name. An instance name
+// is a single DNS label just like the host label, so the hostname it embeds is
+// capped to keep the whole name legal.
+func serviceName(host string) string {
+	const wrap = len("Gropius ()")
+	return "Gropius (" + truncateLabel(host, maxDNSLabel-wrap-labelHeadroom) + ")"
 }
 
 // Advertiser publishes the service on the local network.
@@ -102,7 +138,7 @@ func (a *Advertiser) Start(ctx context.Context) error {
 	}
 
 	cfg := dnssd.Config{
-		Name: "Gropius (" + host + ")",
+		Name: serviceName(host),
 		Type: ServiceType,
 
 		// Host is the name in OUR address records — and it must NEVER be the

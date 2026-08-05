@@ -17,7 +17,7 @@ You do **not** need Python installed — Gropius installs its own.
 
 ```sh
 git clone <this repo> && cd Gropius
-make install        # builds Gropius.app, copies it to /Applications, launches it
+make install        # builds Gropius.app, copies it to /Applications, launches it — needs your password, for the firewall
 ```
 
 A small icon appears in the menu bar. The first launch downloads a private Python

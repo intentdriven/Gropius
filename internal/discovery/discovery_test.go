@@ -74,13 +74,33 @@ func TestSameText(t *testing.T) {
 	}
 }
 
+// The host label and the instance name are each a single DNS label, capped at
+// 63 octets. dnssd does no length validation, and a message whose labels fail
+// to pack is silently dropped by its transport — the service advertises
+// nothing while Start and the responder both report success. macOS permits
+// LocalHostNames up to the full 63 characters, so the published names must be
+// clamped to arrive legal.
+func TestServiceNamesStayWithinOneDNSLabel(t *testing.T) {
+	long := strings.Repeat("x", 63)
+	if got := serviceHost(long); len(got) > 63 {
+		t.Errorf("serviceHost(63 chars) = %q (%d octets), over the 63-octet DNS label limit", got, len(got))
+	}
+	if got := serviceName(long); len(got) > 63 {
+		t.Errorf("serviceName(63 chars) = %q (%d octets), over the 63-octet DNS label limit", got, len(got))
+	}
+	trailing := strings.Repeat("a", 50) + "--bbbb"
+	if got := serviceHost(trailing); strings.HasSuffix(got, "-") {
+		t.Errorf("serviceHost(%q) = %q ends with a hyphen, which is not legal in a DNS host label", trailing, got)
+	}
+}
+
 func TestServiceHostIsALegalDNSLabel(t *testing.T) {
 	tests := []struct {
 		in   string
 		want string
 	}{
 		{"AlicesMac", "gropius-alicesmac"},
-		{"Alex's iMac", "gropius-alex-s-imac"},
+		{"Alice's iMac", "gropius-alice-s-imac"},
 		{"Mac-Pro-2", "gropius-mac-pro-2"},
 		{"", "gropius-host"},
 	}

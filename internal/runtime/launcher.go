@@ -186,12 +186,15 @@ func (l *ExecLauncher) Launch(ctx context.Context, spec Spec) (Process, error) {
 	return p, nil
 }
 
-// logFileName turns a repo id into a safe filename.
+// logFileName turns a repo id into a safe filename. The separator must be a
+// character ValidRepoID rejects: with one the id itself can contain (an
+// underscore, say), "a/b_c" and "a_b/c" would share a file, and launching the
+// second model would truncate the first one's live log.
 func logFileName(repoID string) string {
 	safe := make([]rune, 0, len(repoID))
 	for _, r := range repoID {
 		if r == '/' || r == ' ' {
-			r = '_'
+			r = '@'
 		}
 		safe = append(safe, r)
 	}
