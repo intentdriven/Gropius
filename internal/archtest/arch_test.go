@@ -23,11 +23,14 @@ func TestNoGUIToolkitInInternalPackages(t *testing.T) {
 	if err != nil {
 		t.Fatalf("go list: %v\n%s", err, out)
 	}
-	// Now list every listed package's full dependency set.
+	// Now list every listed package's full dependency set, including each
+	// root's own _test.go imports (-test): go list -deps alone only walks the
+	// non-test import graph, so a GUI-toolkit import confined to a package's
+	// own test file would otherwise escape this scan entirely.
 	roots := strings.Fields(string(out))
-	out, err = exec.Command("go", append([]string{"list", "-deps"}, roots...)...).CombinedOutput()
+	out, err = exec.Command("go", append([]string{"list", "-test", "-deps"}, roots...)...).CombinedOutput()
 	if err != nil {
-		t.Fatalf("go list -deps: %v\n%s", err, out)
+		t.Fatalf("go list -test -deps: %v\n%s", err, out)
 	}
 	for _, dep := range strings.Fields(string(out)) {
 		if strings.Contains(dep, "fyne.io/systray") {
@@ -88,6 +91,59 @@ func TestNoAbsolutePathsHookCatchesPathsOnAnExemptedLine(t *testing.T) {
 				t.Errorf("hook flagged=%v, want %v (output: %s)", flagged, c.wantFlags, out)
 			}
 		})
+	}
+}
+
+// go list -deps only walks a package's non-test import graph; an import
+// confined to a package's own _test.go file — like a stray GUI-toolkit import
+// slipped into an internal package's test file rather than its production
+// code — is invisible to it. This pins the exact tooling behavior the -test
+// flag on TestNoGUIToolkitInInternalPackages depends on, in a throwaway
+// fixture module, so a Go toolchain change that altered it would be caught
+// here rather than silently reopening the blind spot the flag closes.
+func TestGoListDepsRequiresTestFlagForTestOnlyImports(t *testing.T) {
+	mod := t.TempDir()
+	write := func(rel, content string) {
+		p := filepath.Join(mod, rel)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("go.mod", "module archtest.example/fixture\n\ngo 1.25\n")
+	write("marker/marker.go", "package marker\n\nconst Name = \"marker\"\n")
+	write("pkg/pkg.go", "package pkg\n")
+	write("pkg/pkg_test.go", `package pkg
+
+import (
+	"testing"
+
+	_ "archtest.example/fixture/marker"
+)
+
+func TestNothing(t *testing.T) {}
+`)
+
+	run := func(args ...string) string {
+		t.Helper()
+		cmd := exec.Command("go", args...)
+		cmd.Dir = mod
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("go %v: %v\n%s", args, err, out)
+		}
+		return string(out)
+	}
+
+	withoutTest := run("list", "-deps", "./pkg")
+	if strings.Contains(withoutTest, "fixture/marker") {
+		t.Fatal("test setup invalid: go list -deps unexpectedly saw the test-only import")
+	}
+	withTest := run("list", "-test", "-deps", "./pkg")
+	if !strings.Contains(withTest, "fixture/marker") {
+		t.Fatal("go list -test -deps did not see a _test.go-only import — the -test flag no longer does what TestNoGUIToolkitInInternalPackages relies on")
 	}
 }
 

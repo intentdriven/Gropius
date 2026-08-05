@@ -7,17 +7,39 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"syscall"
 )
 
 // readCapped reads at most max bytes from the file at path. It returns an error
 // if the file is larger than max, so a hostile oversized file is refused rather
 // than silently truncated into a parse.
+//
+// In shared-cache mode a model directory can be adopted as ready from an
+// account other than the one now running the server (registry.Rescan), and
+// that owning account keeps the ability to replace its own config.json with a
+// FIFO or a symlink at any time — the shared root's sticky bit only blocks a
+// non-owner from doing so, not the owner. A later retry of that repo reaches
+// this file via validateModelDir, and a plain Open would either block forever
+// on the FIFO (wedging the download goroutine, and with it App.Close's
+// dlWG.Wait) or follow the symlink and read an arbitrary file with this
+// account's privileges. O_NONBLOCK makes the open itself unblockable,
+// O_NOFOLLOW refuses symlinks outright, and the fstat on the opened handle
+// (not the path, so a swap between check and open cannot be raced in) refuses
+// anything but a regular file before any read — mirroring registry.go's
+// readManifest, which guards the same hazard for registry.json/config.json.
 func readCapped(path string, max int64) ([]byte, error) {
-	f, err := os.Open(path)
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK|syscall.O_NOFOLLOW, 0)
 	if err != nil {
 		return nil, err
 	}
 	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("%s is not a regular file", filepath.Base(path))
+	}
 	b, err := io.ReadAll(io.LimitReader(f, max+1))
 	if err != nil {
 		return nil, err
