@@ -707,6 +707,75 @@ func TestRescanDoesNotFollowSymlinkedManifest(t *testing.T) {
 	}
 }
 
+// A symlinked weight file is never something the downloader wrote. Adopting
+// it would serve weights from outside the model directory while the walk's
+// lstat-based size charges the memory budget the symlink's own few dozen
+// bytes instead of the gigabytes behind it, so the pool would admit the model
+// without ever evicting to make room. Rescan must skip the directory, the
+// same fail-safe treatment a symlinked model directory already gets.
+func TestRescanDoesNotAdoptSymlinkedWeights(t *testing.T) {
+	r, dir := newTestRegistry(t)
+	models := filepath.Join(dir, "models")
+	md := filepath.Join(models, "org", "linked-weights")
+	if err := os.MkdirAll(md, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	os.WriteFile(filepath.Join(md, "config.json"), []byte(`{"model_type":"test"}`), 0o644)
+	outside := filepath.Join(t.TempDir(), "real.safetensors")
+	if err := os.WriteFile(outside, make([]byte, 4096), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(md, "model.safetensors")); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := r.Rescan(models); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Get("org/linked-weights"); !errors.Is(err, ErrNotFound) {
+		t.Error("Rescan adopted a model whose weights are a symlink")
+	}
+}
+
+// A shard named by the index must be a regular file, not a symlink to one: a
+// following stat would attest the link while the downloader only ever writes
+// regular files, and a shard name without the .safetensors suffix would slip
+// past the top-level weights check entirely.
+func TestRescanDoesNotAdoptSymlinkedShard(t *testing.T) {
+	r, dir := newTestRegistry(t)
+	models := filepath.Join(dir, "models")
+	md := filepath.Join(models, "org", "linked-shard")
+	if err := os.MkdirAll(md, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	files := map[string]string{
+		"config.json": `{"model_type":"test"}`,
+		"model.safetensors.index.json": `{"weight_map":{` +
+			`"a":"model-00001-of-00002.safetensors",` +
+			`"b":"shard-00002.bin"}}`,
+		"model-00001-of-00002.safetensors": "weights",
+	}
+	for name, content := range files {
+		if err := os.WriteFile(filepath.Join(md, name), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	outside := filepath.Join(t.TempDir(), "shard-00002.bin")
+	if err := os.WriteFile(outside, make([]byte, 4096), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(md, "shard-00002.bin")); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := r.Rescan(models); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Get("org/linked-shard"); !errors.Is(err, ErrNotFound) {
+		t.Error("Rescan adopted a model whose index names a symlinked shard")
+	}
+}
+
 func timeoutAfterSeconds(n int) <-chan time.Time {
 	return time.After(time.Duration(n) * time.Second)
 }

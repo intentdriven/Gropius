@@ -100,5 +100,18 @@ func validateModelDir(dir string) error {
 	if len(weights) == 0 {
 		return fmt.Errorf("no .safetensors weights present")
 	}
+	// Weights must be regular files: the downloader only ever writes regular
+	// files, and a symlink would serve weights from outside the directory
+	// while dirSize charges the memory budget the link's own size — mirroring
+	// registry.go's inspectModelDir, which refuses the same layout on rescan.
+	for _, w := range weights {
+		info, err := os.Lstat(w)
+		if err != nil {
+			return fmt.Errorf("cannot stat %s: %w", filepath.Base(w), err)
+		}
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("%s is not a regular file", filepath.Base(w))
+		}
+	}
 	return nil
 }

@@ -98,3 +98,23 @@ func TestValidateModelDirDoesNotFollowSymlinkedConfig(t *testing.T) {
 		t.Error("a config.json that is a symlink must be rejected, not followed")
 	}
 }
+
+// Symlinked weights are likewise never something the downloader wrote: they
+// serve bytes from outside the model directory while dirSize charges the
+// memory budget only the link's own size. validateModelDir must refuse them,
+// matching registry.Rescan's treatment of the same layout.
+func TestValidateModelDirRejectsSymlinkedWeights(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "config.json"), []byte(`{"model_type":"test"}`), 0o644)
+	outside := filepath.Join(t.TempDir(), "real.safetensors")
+	if err := os.WriteFile(outside, []byte("weights"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(dir, "model.safetensors")); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := validateModelDir(dir); err == nil {
+		t.Error("weights that are a symlink must be rejected, not followed")
+	}
+}

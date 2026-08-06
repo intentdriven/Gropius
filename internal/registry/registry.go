@@ -485,9 +485,10 @@ func (r *Registry) Rescan(modelsDir string) error {
 // to must not be resurrected as ready (nor the directory adopted) on the next
 // rescan. Two offline checks close those holes: config.json must plausibly be
 // a model config (mirroring the app layer's structural validation), and every
-// weight shard named by model.safetensors.index.json must be present.
+// weight shard named by model.safetensors.index.json must be present as a
+// regular file.
 func inspectModelDir(dir string) (complete bool, size int64) {
-	var hasConfig, hasWeights, partial bool
+	var hasConfig, hasWeights, partial, irregular bool
 	err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
@@ -504,7 +505,16 @@ func inspectModelDir(dir string) (complete bool, size int64) {
 				hasConfig = true
 			}
 			if strings.HasSuffix(name, ".safetensors") {
-				hasWeights = true
+				// Weights must be regular files: the downloader only ever
+				// writes regular files, and a symlink would serve weights
+				// from outside the directory while the lstat-based size
+				// below charges the memory budget the link's own few dozen
+				// bytes instead of the target's gigabytes.
+				if d.Type().IsRegular() {
+					hasWeights = true
+				} else {
+					irregular = true
+				}
 			}
 		}
 		if info, err := d.Info(); err == nil {
@@ -515,7 +525,7 @@ func inspectModelDir(dir string) (complete bool, size int64) {
 	if err != nil {
 		return false, 0
 	}
-	complete = hasConfig && hasWeights && !partial &&
+	complete = hasConfig && hasWeights && !partial && !irregular &&
 		plausibleModelConfig(dir) && shardsPresent(dir)
 	return complete, size
 }
@@ -596,7 +606,10 @@ func shardsPresent(dir string) bool {
 			continue
 		}
 		seen[shard] = true
-		info, err := os.Stat(filepath.Join(dir, shard))
+		// Lstat, not Stat: a symlinked shard must fail the regular-file
+		// check itself, not have its target attested in its place — the
+		// downloader only ever writes regular files.
+		info, err := os.Lstat(filepath.Join(dir, shard))
 		if err != nil || !info.Mode().IsRegular() {
 			return false
 		}
