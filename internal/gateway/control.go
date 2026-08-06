@@ -249,23 +249,32 @@ func searchLimit(raw string) int {
 	return limit
 }
 
-func (c *Control) handleSearch(w http.ResponseWriter, r *http.Request) {
-	q := r.URL.Query().Get("q")
-	limit := searchLimit(r.URL.Query().Get("limit"))
-
-	// Default to the mlx-community org: it is where the MLX-converted models
-	// live, and searching all of HuggingFace returns mostly models that will not
-	// load. An explicit "author:" prefix overrides that.
-	author := "mlx-community"
-	if strings.HasPrefix(q, "author:") {
-		rest := strings.TrimPrefix(q, "author:")
-		parts := strings.SplitN(rest, " ", 2)
-		author = parts[0]
-		q = ""
-		if len(parts) > 1 {
-			q = parts[1]
-		}
+// searchAuthor parses the "author:" prefix out of a search query, returning
+// the org to restrict the search to and the remaining search term. Default to
+// the mlx-community org: it is where the MLX-converted models live, and
+// searching all of HuggingFace returns mostly models that will not load. An
+// explicit "author:name" prefix overrides that — but a bare "author:" with
+// nothing after the colon left the org filter empty rather than falling back
+// to the default, silently turning "override the org" into "search the
+// entire Hub."
+func searchAuthor(q string) (author, rest string) {
+	author = "mlx-community"
+	if !strings.HasPrefix(q, "author:") {
+		return author, q
 	}
+	parts := strings.SplitN(strings.TrimPrefix(q, "author:"), " ", 2)
+	if parts[0] != "" {
+		author = parts[0]
+	}
+	if len(parts) > 1 {
+		rest = parts[1]
+	}
+	return author, rest
+}
+
+func (c *Control) handleSearch(w http.ResponseWriter, r *http.Request) {
+	author, q := searchAuthor(r.URL.Query().Get("q"))
+	limit := searchLimit(r.URL.Query().Get("limit"))
 
 	models, err := c.App.Hub.Search(r.Context(), hub.SearchQuery{
 		Search: q,

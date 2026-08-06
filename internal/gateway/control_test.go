@@ -393,3 +393,26 @@ func TestSearchLimitIsBounded(t *testing.T) {
 		}
 	}
 }
+
+// A bare "author:" prefix with nothing after the colon must not clear the
+// default mlx-community org filter — that would silently turn "override the
+// org" into "search the entire Hub," which is reachable by simply typing
+// "author:" into the search box with nothing after it.
+func TestSearchAuthorEmptyOverrideKeepsDefault(t *testing.T) {
+	cases := []struct {
+		q, wantAuthor, wantRest string
+	}{
+		{"", "mlx-community", ""},
+		{"qwen", "mlx-community", "qwen"},
+		{"author:", "mlx-community", ""},
+		{"author: qwen", "mlx-community", "qwen"},
+		{"author:alice", "alice", ""},
+		{"author:alice qwen", "alice", "qwen"},
+	}
+	for _, tc := range cases {
+		author, rest := searchAuthor(tc.q)
+		if author != tc.wantAuthor || rest != tc.wantRest {
+			t.Errorf("searchAuthor(%q) = (%q, %q), want (%q, %q)", tc.q, author, rest, tc.wantAuthor, tc.wantRest)
+		}
+	}
+}
