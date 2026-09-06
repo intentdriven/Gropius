@@ -43,9 +43,27 @@ at start-up.
 | `min_p` | number, `0` to `1` inclusive |
 | `max_tokens` | integer, at least `0` |
 
-Gropius accepts exactly these ranges and no wider
-(`internal/config/sampling.go`, pinned by
-`TestGoRangesMatchThePinnedServerRanges`).
+### The sampler's own limits, which the request check does not cover
+
+`validate_model_parameters` is not the whole story. `mlx_lm/sample_utils.py`
+builds the sampler from the effective values and carries limits of its own:
+
+- `apply_top_k` raises `ValueError` unless `0 < top_k < vocab_size`. It is
+  reached whenever the effective temperature is non-zero and top-k is above
+  zero. So a top-k the request check waves through — 200,000, say — leaves the
+  process healthy and raises on every request that omits `top_k`.
+- `apply_min_p` raises unless `0 <= min_p <= 1`, which is the request check's
+  range exactly.
+- `apply_top_p` is applied only when `0 < top_p < 1`, so `0` and `1` are inert
+  rather than refused.
+- `categorical_sampling` divides by the temperature, and `make_sampler` short-
+  circuits to `argmax` at temperature 0, so no temperature raises.
+
+Gropius accepts these ranges and no wider, with one deliberate narrowing:
+top-k is capped at `config.MaxTopK` (1024), far below the smallest vocabulary
+an MLX model ships, because a vocabulary size is not knowable when the value
+is saved. Pinned by `TestGoRangesAreNeverWiderThanThePinnedServers` and
+`TestGoRangesAreExactlyThese`.
 
 ## The failure mode this pins
 
@@ -53,7 +71,9 @@ Gropius accepts exactly these ranges and no wider
 not stop the process starting. It surfaces later: the server takes it as the
 default for the omitted field, `validate_model_parameters` rejects the
 effective value, and *every request that omits that parameter* is answered
-`400` while requests that carry their own value still succeed. One saved
+`400` while requests that carry their own value still succeed. A value the
+sampler rather than the request check refuses — an oversized `top_k` — fails
+the same way, one layer further in. One saved
 setting would therefore break the machine for exactly the clients this
 feature exists to serve. The Go range check is what holds this, which is why
 it is pinned to this table rather than chosen.

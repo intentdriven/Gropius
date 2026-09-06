@@ -61,6 +61,19 @@ type samplingParam struct {
 // answers 400 to every request that omits the parameter, which is the whole
 // population this feature exists for. Gropius must therefore never accept a
 // value wider than the table below.
+// MaxTopK is Gropius' own ceiling on top-k, deliberately narrower than the
+// request check, which accepts any non-negative integer.
+//
+// The sampler imposes a second limit the request check does not: it refuses a
+// top-k at or above the model's vocabulary size, and it raises inside
+// generation rather than at start-up — so an oversized default leaves the
+// process healthy and fails every request that omits top_k, silently and
+// across restarts. Gropius has no vocabulary size to compare against when the
+// value is saved, so it caps top-k far below the smallest vocabulary an MLX
+// model ships (tens of thousands of tokens). Nothing is lost: keeping more
+// than a thousand candidates is indistinguishable from keeping all of them.
+const MaxTopK = 1024
+
 var samplingParams = []samplingParam{
 	{
 		bound: SamplingBound{Field: "temperature", Min: 0},
@@ -73,7 +86,7 @@ var samplingParams = []samplingParam{
 		clear: func(s *Sampling) { s.TopP = nil },
 	},
 	{
-		bound: SamplingBound{Field: "top_k", Min: 0, Integer: true},
+		bound: SamplingBound{Field: "top_k", Min: 0, Max: MaxTopK, HasMax: true, Integer: true},
 		get:   func(s Sampling) (float64, bool) { return derefInt(s.TopK) },
 		clear: func(s *Sampling) { s.TopK = nil },
 	},

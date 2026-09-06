@@ -68,11 +68,23 @@ func TestSamplingHowToMatchesTheCode(t *testing.T) {
 func TestSamplingHowToStatesTheRealRanges(t *testing.T) {
 	page := readDoc(t, "sampling-defaults.md")
 	for _, b := range config.SamplingBounds() {
-		if b.HasMax && b.Max != 1 {
-			t.Fatalf("%s has an upper bound of %v the page does not describe", b.Field, b.Max)
-		}
 		if b.Min != 0 {
 			t.Fatalf("%s has a lower bound of %v the page does not describe", b.Field, b.Min)
+		}
+		if !b.HasMax {
+			continue
+		}
+		switch {
+		case b.Max == 1:
+			// "between 0 and 1", below.
+		case b.Field == "top_k":
+			// The one bound that is not the model server's own, so the page
+			// has to give the figure and say why.
+			if !containsAll(page, "Top-k has an upper limit of 1,024") {
+				t.Errorf("the page does not give top_k's ceiling of %v", b.Max)
+			}
+		default:
+			t.Fatalf("%s has an upper bound of %v the page does not describe", b.Field, b.Max)
 		}
 	}
 	if !containsAll(page, "temperature\nis at least 0", "between 0 and 1") {

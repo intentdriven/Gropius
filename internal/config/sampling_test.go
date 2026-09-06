@@ -12,24 +12,72 @@ import (
 func f64(v float64) *float64 { return &v }
 func intp(v int) *int        { return &v }
 
+// serverBounds is what mlx-lm 0.31.3 itself accepts, read off its own source
+// and recorded in
+// .abcd/development/research/notes/2026-09-06-mlx-lm-sampling-launch-flags.md:
+// validate_model_parameters for the request check, and sample_utils for the
+// sampler's own limits.
+var serverBounds = []SamplingBound{
+	{Field: "temperature", Min: 0},
+	{Field: "top_p", Min: 0, Max: 1, HasMax: true},
+	{Field: "top_k", Min: 0, Integer: true}, // plus a sampler limit of vocab_size
+	{Field: "min_p", Min: 0, Max: 1, HasMax: true},
+	{Field: "max_tokens", Min: 0, Integer: true},
+}
+
 // The Go bounds exist to stop a saved setting from becoming a machine-wide
-// outage: the pinned server validates the *effective* value of every request,
-// so a launch flag it rejects makes every request that omits that parameter
-// fail with 400. The bounds are therefore not a design choice — they are read
-// off mlx-lm 0.31.3's own validate_model_parameters and must never be wider
-// than it. See .abcd/development/research/notes/2026-09-06-mlx-lm-sampling-launch-flags.md.
-func TestGoRangesMatchThePinnedServerRanges(t *testing.T) {
-	// Recorded from mlx_lm/server.py 0.31.3, HTTPHandler.validate_model_parameters.
+// outage: the value becomes the model server's own default, so anything it
+// refuses breaks every request that omits that parameter while requests
+// carrying their own value carry on working. The bounds are therefore not a
+// design choice, and must never be wider than the server's own.
+func TestGoRangesAreNeverWiderThanThePinnedServers(t *testing.T) {
+	got := SamplingBounds()
+	if len(got) != len(serverBounds) {
+		t.Fatalf("SamplingBounds() has %d entries, the recorded server table has %d", len(got), len(serverBounds))
+	}
+	for i, g := range got {
+		s := serverBounds[i]
+		if g.Field != s.Field || g.Integer != s.Integer {
+			t.Fatalf("bound %d = %+v, want the same parameter as %+v", i, g, s)
+		}
+		if g.Min < s.Min {
+			t.Errorf("%s accepts values down to %v, below the server's %v", g.Field, g.Min, s.Min)
+		}
+		if s.HasMax && (!g.HasMax || g.Max > s.Max) {
+			t.Errorf("%s accepts values up to %v, above the server's %v", g.Field, g.Max, s.Max)
+		}
+	}
+}
+
+// Narrower is safe; drifting is not. This pins the bounds exactly, including
+// the one place Gropius is deliberately stricter than the request check.
+func TestGoRangesAreExactlyThese(t *testing.T) {
 	want := []SamplingBound{
 		{Field: "temperature", Min: 0},
 		{Field: "top_p", Min: 0, Max: 1, HasMax: true},
-		{Field: "top_k", Min: 0, Integer: true},
+		// The request check accepts any non-negative top_k, but the sampler
+		// refuses one at or above the model's vocabulary size — and it raises
+		// inside generation, so the process starts healthy and then fails
+		// every request that omits top_k. Gropius cannot know a vocabulary
+		// size when the value is saved, so it caps top_k far below the
+		// smallest an MLX model ships.
+		{Field: "top_k", Min: 0, Max: 1024, HasMax: true, Integer: true},
 		{Field: "min_p", Min: 0, Max: 1, HasMax: true},
 		{Field: "max_tokens", Min: 0, Integer: true},
 	}
-	got := SamplingBounds()
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("SamplingBounds() = %+v\nwant %+v\n(a bound wider than the pinned server's turns one settings save into a 400 on every request that omits the parameter)", got, want)
+	if got := SamplingBounds(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("SamplingBounds() = %+v\nwant %+v", got, want)
+	}
+}
+
+// A top-k the sampler will not take must be refused at the door, not
+// discovered on the first request that omits the parameter.
+func TestTopKAboveTheSamplerCeilingIsRefused(t *testing.T) {
+	if err := (Sampling{TopK: intp(200000)}).Validate(); err == nil {
+		t.Fatal("a top_k above every model's vocabulary size was accepted; it makes the sampler raise on every request that omits top_k")
+	}
+	if err := (Sampling{TopK: intp(1024)}).Validate(); err != nil {
+		t.Errorf("top_k 1024 = %v, want it accepted", err)
 	}
 }
 
