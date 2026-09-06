@@ -1200,9 +1200,10 @@ func residencyGateway(t *testing.T, key string, resident ...runtime.Resident) ht
 
 	cfg := config.Default()
 	cfg.APIKey = key
+	added := time.Unix(1757145600, 0)
 	models := &stubModels{models: []registry.Model{
-		{RepoID: "org/warm", State: registry.StateReady, Path: "/models/org/warm"},
-		{RepoID: "org/cold", State: registry.StateReady, Path: "/models/org/cold"},
+		{RepoID: "org/warm", State: registry.StateReady, Path: "/models/org/warm", AddedAt: added},
+		{RepoID: "org/cold", State: registry.StateReady, Path: "/models/org/cold", AddedAt: added},
 	}}
 	g := New(Options{Config: cfg, Pool: &stubPool{srv: fake, resident: resident}, Models: models})
 	return g.Handler()
@@ -1264,8 +1265,8 @@ func TestListModelsReportsResidencyOnAKeyedInstall(t *testing.T) {
 	if cold["object"] != "model" || cold["owned_by"] != "gropius" {
 		t.Errorf("the pre-existing fields changed: %+v", cold)
 	}
-	if _, ok := cold["created"].(float64); !ok {
-		t.Errorf("created = %v, want a Unix timestamp", cold["created"])
+	if n, ok := cold["created"].(float64); !ok || int64(n) != 1757145600 {
+		t.Errorf("created = %v, want the model's own added-at time", cold["created"])
 	}
 }
 
