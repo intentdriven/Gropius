@@ -17,18 +17,17 @@ GitHub release notes.
   it is switched on. Some models refuse a conversation whose instructions are
   not all at the top, which breaks any assistant that repeats its instructions
   as the conversation goes on. For a model it is switched on for, Gropius
-  gathers each request's system messages into the leading one, in the order
-  they were sent and separated by a blank line, and passes every other message
-  and field on untouched. The merged message is the conversation's own leading
-  system message with its text extended, so anything else that message carries
-  stays with it. It is the one thing Gropius reads of a prompt: it reads the
-  system messages of requests to that model and nothing else, and keeps none of
-  what it reads — nothing of a request's contents reaches the log, the model
+  gathers each request's system messages into the first one, in the order they
+  were sent and separated by a blank line, and passes every other message and
+  field on untouched. The merged message is the conversation's own first system
+  message with its text extended, so anything else that message carries stays
+  with it. It is the one thing Gropius reads of a prompt: it reads the system
+  messages of requests to that model and nothing else, and keeps none of what
+  it reads — nothing of a request's contents reaches the log, the model
   server's command line or any file. A request merging cannot rebuild exactly
-  is passed on unrewritten instead: system content sent as a list of parts, as
-  JSON null, or as bytes that are not valid UTF-8, and a system message other
-  than the leading one carrying any field beyond its role and its text. The
-  rule this runs under is
+  is passed on unrewritten instead. See
+  [Merge system messages for a template-strict model](docs/system-message-merging.md);
+  the rule this runs under is
   [an architecture decision](.abcd/development/decisions/adrs/2609061610102325-the-gateway-may-rewrite-prompt-content-only-to-merge-system.md),
   and an architecture test holds the reading to the single file that does it.
 - Every ready model on `GET /v1/models` carries its maximum context in tokens,

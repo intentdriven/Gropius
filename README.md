@@ -124,9 +124,11 @@ request, and never the client's network address.
 Gropius passes a request's prompt on to the model without reading it. The one
 exception is **Merge system messages**, a per-model setting that is off unless
 you switch it on: for a model you switch it on for, Gropius gathers that
-request's system messages into one leading message, reads nothing else of the
-request, and keeps none of what it reads — the rule it runs under is written
-down as [an architecture decision](.abcd/development/decisions/adrs/2609061610102325-the-gateway-may-rewrite-prompt-content-only-to-merge-system.md).
+request's system messages into the first one, reads nothing else of the
+request, and keeps none of what it reads
+([how to switch it on](docs/system-message-merging.md); the rule it runs under
+is written down as
+[an architecture decision](.abcd/development/decisions/adrs/2609061610102325-the-gateway-may-rewrite-prompt-content-only-to-merge-system.md)).
 
 ## Layout
 

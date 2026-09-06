@@ -107,36 +107,11 @@ client.
 
 Gropius passes a request on to the model without reading what is in it. There
 is one exception, it is per model, and it is off until you switch it on:
-**Settings → Merge system messages**.
-
-Some models refuse a conversation whose instructions are not all at the top.
-That breaks any assistant which repeats its instructions as the conversation
-goes on — the model answers the first message and returns a template error on
-the next one. Tick the box beside that model in **Settings** and save. For
-requests to that model, Gropius then gathers the instruction (`system`)
-messages into the leading one, in the order they were sent and separated by a
-blank line, and passes every other message and field on untouched. An
-instruction that is empty adds nothing, so the prompt does not begin with a
-blank line.
-
-The merged message is the conversation's own first instruction message with its
-text extended, so anything else that message carries — a `name`, a cache
-directive — stays with it. Nothing is invented: the later instructions are
-added to the message that was already there.
-
-For a model you switch it on for, Gropius reads the instruction messages of
-each request and nothing else. It keeps none of what it reads: nothing of a
-request's contents reaches the log, the model server's command line, or any
-file on disk. Clear the box and save to switch it off; the next request goes
-to the model exactly as it arrives.
-
-Merging never rewrites a request it cannot rebuild exactly; such a request is
-passed on unchanged, as is every request to a model whose box is clear. That
-covers instructions that arrive as a list of content parts rather than as plain
-text, as `null`, or as bytes that are not valid text, and an instruction
-message other than the first one carrying anything beyond its role and its
-text — its words are about to be added to another message, and a `name` on it
-has nowhere honest to go.
+**Settings → Merge system messages**, for a model whose template refuses a
+conversation whose instructions are not all at the top. For a model you switch
+it on for, Gropius reads that request's instruction messages and nothing else,
+gathers them into the first one, and keeps none of what it reads. See
+[Merge system messages for a template-strict model](system-message-merging.md).
 
 ## 7. Choose what an omitted parameter means (optional)
 
@@ -189,7 +164,8 @@ and each account falls back to its own data directory.
 - **A model answers the first message, then fails with a template error once the
   assistant repeats its instructions.** That model's chat template refuses a
   system message that is not the first one. Switch on **Merge system messages**
-  for that model in **Settings** (section 6 explains exactly what it does).
+  for that model — see
+  [Merge system messages for a template-strict model](system-message-merging.md).
 - **The menu-bar icon never appears.** Run it in the foreground to see errors:
   `./dist/Gropius.app/Contents/MacOS/gropius`.
 - **A model stays "downloading" forever / fails.** Check the panel for the error.
