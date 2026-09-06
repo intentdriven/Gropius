@@ -137,6 +137,12 @@ func New(opts Options) (*App, error) {
 		// them while recording is off. Adapting here keeps internal/stats a
 		// leaf package that imports nothing of ours.
 		Observer: poolObserver{rec: a.Stats, log: opts.Log},
+		// Straight from the file, not canonicalised against the registry: the
+		// pool folds every id it matches, so a pin spelled in another case
+		// protects the model it names without a second pass here. Load has
+		// already dropped any entry that names no model at all.
+		Pinned: opts.Config.Pinned,
+		Log:    opts.Log,
 	})
 	a.Stats.SetEnabled(opts.Config.Statistics)
 
@@ -200,6 +206,10 @@ func (a *App) SetConfig(c config.Config) error {
 		return err
 	}
 	c.PerModel = perModel
+	c.Pinned = a.canonicalPinned(c.Pinned)
+	if err := a.checkPinnedFit(c.Pinned); err != nil {
+		return err
+	}
 	if err := config.Save(a.Paths.Config, c); err != nil {
 		return err
 	}
@@ -213,6 +223,58 @@ func (a *App) SetConfig(c config.Config) error {
 	a.Stats.SetEnabled(c.Statistics)
 
 	a.Hub.Token = c.HFToken
+	// Applied live, so a model already in memory is protected from the next
+	// eviction rather than from the one after a restart. The pool takes its own
+	// lock, the one both eviction paths hold while they read the set.
+	a.Pool.SetPinned(c.Pinned)
+	return nil
+}
+
+// canonicalPinned rewrites each pinned id to the registry's spelling of the
+// model it names, for the reason canonicalPerModel does: that spelling is the
+// one the operator sees everywhere else, and Settings shows this list back to
+// them. A pin for a model this machine does not have is kept as it was typed,
+// so a model can be pinned before it is downloaded.
+//
+// Unlike the per-model maps, nothing here can fail: config.Validate has already
+// refused an entry that is not a well-formed repo id and refused two spellings
+// of one model, and folding onto the registry cannot turn two distinct ids into
+// one — two ids that fold differently name different models.
+func (a *App) canonicalPinned(in []string) []string {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(in))
+	for _, id := range in {
+		out = append(out, a.canonicalPerModelKey(id))
+	}
+	return out
+}
+
+// checkPinnedFit refuses a pinned set whose models cannot all be in memory at
+// once.
+//
+// A pinned model is never evicted, so a set that overshoots the budget does not
+// fail at save time by itself — it fails later, as a refusal of every request
+// for a model that is not pinned, with no hint of why. The whole incoming
+// intention is judged at once, against the budget the pool actually enforces.
+//
+// A pinned model that is not downloaded is not counted: it has no size to
+// charge, and it protects nothing until something loads it.
+func (a *App) checkPinnedFit(pinned []string) error {
+	var sum int64
+	for _, id := range pinned {
+		m, err := a.Registry.Get(id)
+		if err != nil || !m.Ready() {
+			continue
+		}
+		sum += runtime.LoadCost(m.Bytes)
+	}
+	if budget := a.Pool.MemoryBudget(); sum > budget {
+		return fmt.Errorf(
+			"the pinned models need about %s of memory but the budget is %s — pin fewer models, or choose smaller quantizations",
+			runtime.HumanBytes(sum), runtime.HumanBytes(budget))
+	}
 	return nil
 }
 

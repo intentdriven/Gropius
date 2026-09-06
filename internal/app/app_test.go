@@ -1,6 +1,7 @@
 package app
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -8,11 +9,14 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/intentdriven/Gropius/internal/config"
 	"github.com/intentdriven/Gropius/internal/registry"
+	"github.com/intentdriven/Gropius/internal/runtime"
 )
 
 // fakeHub serves a minimal model repo.
@@ -860,5 +864,146 @@ func TestSetConfigReportsAFoldedDuplicateDeterministically(t *testing.T) {
 		if err.Error() != first {
 			t.Fatalf("the refusal names a different model from run to run:\n %s\n %s", first, err)
 		}
+	}
+}
+
+// putReady records a model as downloaded and ready, at the given size, so the
+// pin-fit check has something to measure.
+func putReady(t *testing.T, a *App, repoID string, bytes int64) {
+	t.Helper()
+	if err := a.Registry.Put(registry.Model{
+		RepoID: repoID, Path: a.Paths.ModelDir(repoID), Bytes: bytes,
+		State: registry.StateReady, Progress: 100,
+	}); err != nil {
+		t.Fatalf("Put(%s): %v", repoID, err)
+	}
+}
+
+// A pinned set larger than the memory budget makes the machine refuse work it
+// would otherwise have served by swapping, and the operator would only find
+// out at the first refused request. The save is refused instead, naming both
+// figures, and nothing is written.
+func TestSetConfigRefusesPinsThatDoNotFitTheMemoryBudget(t *testing.T) {
+	a := newTestApp(t)
+	// Far beyond any Mac's memory budget, so the check is the same on every
+	// machine this test runs on.
+	const each = int64(1) << 50
+	putReady(t, a, "org/writer", each)
+	putReady(t, a, "org/reviewer", each)
+
+	base := a.Config()
+	base.APIKey = "bh_before"
+	if err := a.SetConfig(base); err != nil {
+		t.Fatalf("SetConfig: %v", err)
+	}
+	before, err := os.ReadFile(a.Paths.Config)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	overshooting := base.Clone()
+	overshooting.Pinned = []string{"org/writer", "org/reviewer"}
+	err = a.SetConfig(overshooting)
+	if err == nil {
+		t.Fatal("SetConfig accepted a pinned set larger than the whole memory budget")
+	}
+	sum := runtime.HumanBytes(2 * runtime.LoadCost(each))
+	budget := runtime.HumanBytes(a.Pool.MemoryBudget())
+	if !strings.Contains(err.Error(), sum) || !strings.Contains(err.Error(), budget) {
+		t.Errorf("error = %q, want it to give the pinned sum %s and the budget %s", err, sum, budget)
+	}
+
+	after, err := os.ReadFile(a.Paths.Config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Error("a refused save rewrote config.json")
+	}
+	if got := a.Config().Pinned; len(got) != 0 {
+		t.Errorf("the refused pins reached the live configuration: %v", got)
+	}
+	if got := a.Pool.Pinned(); len(got) != 0 {
+		t.Errorf("the refused pins reached the pool: %v", got)
+	}
+}
+
+// A pinned set that fits is saved, and one that only fits because a model is
+// not downloaded yet is accepted: it cannot be sized, and it protects nothing
+// until something loads it.
+func TestSetConfigAcceptsPinsThatFitAndOnesNotYetDownloaded(t *testing.T) {
+	a := newTestApp(t)
+	putReady(t, a, "org/small", 1<<20)
+
+	c := a.Config()
+	c.Pinned = []string{"org/small", "org/not-downloaded"}
+	if err := a.SetConfig(c); err != nil {
+		t.Fatalf("SetConfig: %v", err)
+	}
+	if got := a.Config().Pinned; !reflect.DeepEqual(got, c.Pinned) {
+		t.Errorf("Pinned = %v, want %v", got, c.Pinned)
+	}
+}
+
+// The registry matches an id case-insensitively but answers under one
+// spelling, and that spelling is what the operator sees everywhere else. A pin
+// typed in another case is folded onto it on the way in, where the operator is
+// present; a pin for a model this machine does not have is kept as typed.
+func TestSetConfigCanonicalisesPinnedModelIDs(t *testing.T) {
+	a := newTestApp(t)
+	putReady(t, a, "org/Writer", 1<<20)
+
+	c := a.Config()
+	c.Pinned = []string{"ORG/writer", "org/not-downloaded"}
+	if err := a.SetConfig(c); err != nil {
+		t.Fatalf("SetConfig: %v", err)
+	}
+	want := []string{"org/Writer", "org/not-downloaded"}
+	if got := a.Config().Pinned; !reflect.DeepEqual(got, want) {
+		t.Errorf("Pinned = %v, want %v", got, want)
+	}
+	if got := a.Pool.Pinned(); !reflect.DeepEqual(got, want) {
+		t.Errorf("the pool holds %v, want %v", got, want)
+	}
+}
+
+// Pins apply the moment Settings is saved: the pool is told, so a model
+// already in memory is protected from the next eviction without a restart.
+func TestSetConfigAppliesPinsToThePoolWithoutARestart(t *testing.T) {
+	a := newTestApp(t)
+	putReady(t, a, "org/keeper", 1<<20)
+
+	c := a.Config()
+	c.Pinned = []string{"org/keeper"}
+	if err := a.SetConfig(c); err != nil {
+		t.Fatalf("SetConfig: %v", err)
+	}
+	if got := a.Pool.Pinned(); !reflect.DeepEqual(got, []string{"org/keeper"}) {
+		t.Errorf("the pool holds %v, want the model just pinned", got)
+	}
+
+	// And clearing the list unprotects it, again without a restart.
+	c.Pinned = nil
+	if err := a.SetConfig(c); err != nil {
+		t.Fatalf("SetConfig: %v", err)
+	}
+	if got := a.Pool.Pinned(); len(got) != 0 {
+		t.Errorf("the pool still holds %v after the pins were cleared", got)
+	}
+}
+
+// A pin only bites if the pool knows about it at startup too, not only after
+// the operator saves Settings again.
+func TestPinsFromTheSettingsFileReachThePoolAtStartup(t *testing.T) {
+	cfg := config.Default()
+	cfg.Pinned = []string{"org/keeper"}
+	a, err := New(Options{Paths: config.NewPaths(t.TempDir()), Config: cfg})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	t.Cleanup(func() { a.Close() })
+
+	if got := a.Pool.Pinned(); !reflect.DeepEqual(got, []string{"org/keeper"}) {
+		t.Errorf("the pool holds %v at startup, want the pinned model from the settings file", got)
 	}
 }

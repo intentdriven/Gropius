@@ -145,9 +145,10 @@ type Pool struct {
 	mu      sync.Mutex
 	entries map[string]*entry
 	closed  bool
-	// pinned is the protected set, keyed by folded repo id. Guarded by mu, the
-	// same lock the eviction paths that read it already hold.
-	pinned map[string]bool
+	// pinned is the protected set: folded repo id -> the spelling it was given
+	// under, so the pool can both match a pin and report one. Guarded by mu,
+	// the same lock the eviction paths that read it already hold.
+	pinned map[string]string
 
 	stopIdle chan struct{}
 	idleDone chan struct{}
@@ -239,18 +240,38 @@ func (p *Pool) SetPinned(ids []string) {
 // a pinned set fits has to be against the figure eviction actually uses.
 func (p *Pool) MemoryBudget() int64 { return p.opts.MaxResidentBytes }
 
-// pinnedSet folds a list of repo ids into the lookup the pool keys by.
-func pinnedSet(ids []string) map[string]bool {
-	set := make(map[string]bool, len(ids))
+// Pinned lists the protected models, in the spelling they were pinned under
+// and sorted, so a caller can report what is protected as well as ask.
+//
+// It is independent of what is loaded: a pinned model the pool is not holding
+// is still pinned, which is why the models list reads its pinned field from
+// here rather than from a Resident record that would only exist for a model
+// already in memory.
+func (p *Pool) Pinned() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	out := make([]string, 0, len(p.pinned))
+	for _, id := range p.pinned {
+		out = append(out, id)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// pinnedSet folds a list of repo ids into the lookup the pool keys by, keeping
+// the spelling each was given under as the value.
+func pinnedSet(ids []string) map[string]string {
+	set := make(map[string]string, len(ids))
 	for _, id := range ids {
-		set[config.FoldRepoID(id)] = true
+		set[config.FoldRepoID(id)] = id
 	}
 	return set
 }
 
 // isPinnedLocked reports whether a model is protected. Callers must hold p.mu.
 func (p *Pool) isPinnedLocked(repoID string) bool {
-	return p.pinned[config.FoldRepoID(repoID)]
+	_, ok := p.pinned[config.FoldRepoID(repoID)]
+	return ok
 }
 
 // ErrClosed is returned once the pool is shut down.
@@ -369,11 +390,11 @@ func (p *Pool) startLocked(repoID string) (*entry, error) {
 		return nil, err
 	}
 
-	need := loadCost(size)
+	need := LoadCost(size)
 	if need > p.opts.MaxResidentBytes {
 		return nil, fmt.Errorf(
 			"%s needs about %s of memory but the limit is %s — raise the memory budget or choose a smaller quantization",
-			repoID, humanBytes(need), humanBytes(p.opts.MaxResidentBytes))
+			repoID, HumanBytes(need), HumanBytes(p.opts.MaxResidentBytes))
 	}
 	// Check cheap launch preconditions before evicting anything. Eviction is not
 	// reversible (stopEntryLocked's Stop cannot be undone), so if we evicted
@@ -549,7 +570,7 @@ func (p *Pool) evictForLocked(need int64) error {
 	for {
 		var used int64
 		for _, e := range p.entries {
-			used += loadCost(e.bytes)
+			used += LoadCost(e.bytes)
 		}
 		if used+need <= p.opts.MaxResidentBytes {
 			return nil
@@ -583,10 +604,10 @@ func (p *Pool) evictForLocked(need int64) error {
 			// which models the operator chose to protect is not a client's
 			// business. The names go to this machine's own log instead.
 			p.opts.Log.Info("refused a model load: no model in memory could be freed",
-				"protected", p.pinnedResidentLocked(), "limit", humanBytes(p.opts.MaxResidentBytes))
+				"protected", p.pinnedResidentLocked(), "limit", HumanBytes(p.opts.MaxResidentBytes))
 			return fmt.Errorf(
 				"not enough memory to load another model: every model in memory is protected or serving a request (limit %s): %w",
-				humanBytes(p.opts.MaxResidentBytes), ErrBusy)
+				HumanBytes(p.opts.MaxResidentBytes), ErrBusy)
 		}
 		p.stopEntryLocked(victim, StopEvicted)
 	}
@@ -758,13 +779,17 @@ func isReady(e *entry) bool {
 	}
 }
 
-// loadCost estimates the memory a model occupies once loaded: its weights plus
-// headroom for the KV cache and activations.
-func loadCost(diskBytes int64) int64 {
+// LoadCost estimates the memory a model occupies once loaded: its weights plus
+// headroom for the KV cache and activations. It is what a model is charged
+// against the memory budget, so the check that a pinned set fits has to use
+// this figure and not the size on disk.
+func LoadCost(diskBytes int64) int64 {
 	return diskBytes + diskBytes/5 // 1.2x
 }
 
-func humanBytes(n int64) string {
+// HumanBytes renders a byte count the way the pool's own messages do, so a
+// figure quoted elsewhere reads the same as the one in a refusal.
+func HumanBytes(n int64) string {
 	const unit = 1024
 	if n < unit {
 		return fmt.Sprintf("%d B", n)

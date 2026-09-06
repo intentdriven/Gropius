@@ -518,7 +518,7 @@ func TestEvictsLRUModelWhenBudgetExceeded(t *testing.T) {
 		"org/a": 100,
 		"org/b": 100,
 	}}
-	// loadCost is 1.2x, so 100 bytes costs 120. A 200-byte budget fits exactly one.
+	// LoadCost is 1.2x, so 100 bytes costs 120. A 200-byte budget fits exactly one.
 	p := newTestPool(t, l, src, PoolOptions{MaxResidentBytes: 200})
 
 	_, relA, err := p.Acquire(context.Background(), "org/a")
@@ -554,7 +554,7 @@ func TestFailedLaunchPreconditionDoesNotEvictAnUnrelatedModel(t *testing.T) {
 		"org/a": 100,
 		"org/b": 100,
 	}}
-	// loadCost is 1.2x, so 100 bytes costs 120. A 200-byte budget fits exactly
+	// LoadCost is 1.2x, so 100 bytes costs 120. A 200-byte budget fits exactly
 	// one model at a time, so loading org/b would otherwise have to evict org/a.
 	p := newTestPool(t, l, src, PoolOptions{MaxResidentBytes: 200})
 
@@ -582,7 +582,7 @@ func TestLoadingModelWithAnActiveWaiterIsNotEvicted(t *testing.T) {
 	l := newFakeLauncher()
 	l.loadDelay = 200 * time.Millisecond
 	src := &fakeSource{models: map[string]int64{"org/a": 100, "org/b": 100}}
-	// loadCost is 1.2x, so 100 bytes costs 120. A 200-byte budget fits exactly one.
+	// LoadCost is 1.2x, so 100 bytes costs 120. A 200-byte budget fits exactly one.
 	p := newTestPool(t, l, src, PoolOptions{MaxResidentBytes: 200})
 
 	// org/a's caller keeps waiting for the whole (slow, simulated) load.
@@ -633,7 +633,7 @@ func TestAbandonedLoadIsTornDownPromptly(t *testing.T) {
 	l := newFakeLauncher()
 	l.loadDelay = 200 * time.Millisecond
 	src := &fakeSource{models: map[string]int64{"org/a": 100, "org/b": 100}}
-	// loadCost is 1.2x, so 100 bytes costs 120. A 200-byte budget fits exactly one.
+	// LoadCost is 1.2x, so 100 bytes costs 120. A 200-byte budget fits exactly one.
 	p := newTestPool(t, l, src, PoolOptions{
 		MaxResidentBytes: 200,
 		ReadyTimeout:     10 * time.Minute, // must not matter: teardown is immediate.
@@ -803,8 +803,8 @@ func TestCloseStopsEverything(t *testing.T) {
 }
 
 func TestLoadCostAddsHeadroom(t *testing.T) {
-	if got := loadCost(1000); got != 1200 {
-		t.Errorf("loadCost(1000) = %d, want 1200 (weights + KV-cache headroom)", got)
+	if got := LoadCost(1000); got != 1200 {
+		t.Errorf("LoadCost(1000) = %d, want 1200 (weights + KV-cache headroom)", got)
 	}
 }
 
@@ -818,8 +818,8 @@ func TestHumanBytes(t *testing.T) {
 		{5 << 30, "5.0 GB"},
 	}
 	for _, tt := range tests {
-		if got := humanBytes(tt.in); got != tt.want {
-			t.Errorf("humanBytes(%d) = %q, want %q", tt.in, got, tt.want)
+		if got := HumanBytes(tt.in); got != tt.want {
+			t.Errorf("HumanBytes(%d) = %q, want %q", tt.in, got, tt.want)
 		}
 	}
 }
@@ -976,7 +976,7 @@ func TestUnloadFindsTheModelWhateverTheSpelling(t *testing.T) {
 func TestPinnedModelsAreNeverEvictedAndTheRefusalNamesNoModel(t *testing.T) {
 	l := newFakeLauncher()
 	src := &fakeSource{models: map[string]int64{"org/a": 100, "org/b": 100, "org/c": 100}}
-	// loadCost is 1.2x, so 100 bytes costs 120. A 250-byte budget holds two.
+	// LoadCost is 1.2x, so 100 bytes costs 120. A 250-byte budget holds two.
 	p := newTestPool(t, l, src, PoolOptions{
 		MaxResidentBytes: 250,
 		Pinned:           []string{"org/a", "org/b"},

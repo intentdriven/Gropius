@@ -14,7 +14,7 @@ const diskHeadroom = 2 << 30 // 2 GiB
 
 // runFootprint estimates the memory a model of the given download size occupies
 // once loaded: the weights plus ~20% for the KV cache and activations. This
-// mirrors the process pool's loadCost so the "fits" filter and the pool agree —
+// mirrors the process pool's LoadCost so the "fits" filter and the pool agree —
 // a model the filter shows is one the pool will actually load.
 func runFootprint(downloadSize int64) int64 {
 	return downloadSize + downloadSize/5
