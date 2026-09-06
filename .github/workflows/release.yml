@@ -278,6 +278,35 @@ jobs:
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+  # Publish the landing page from the release this run just made. NON-GATING by
+  # construction: it `needs: release`, so it cannot start until the Release, its
+  # assets and its attestations exist, and nothing it does can change a byte of
+  # them. A site failure turns this run red — a called workflow's failure is the
+  # caller's — and the release stands.
+  #
+  # Two grants this call cannot omit. `permissions:` is the CAP on the called
+  # workflow: a job inside it can never exceed what is granted here, so a callee
+  # job asking for more than the caller allows fails to start (the lesson of
+  # PR #4). `secrets: inherit` is what conveys the secrets context at all: a
+  # called workflow resolves NO environment secret unless the context is
+  # unlocked at every level of the chain, so this line and auto-release.yml's
+  # call to this workflow are one mechanism, not two — a deploy job that
+  # declares `environment: site` would otherwise run with an empty token and
+  # fail on a credential that was never conveyed.
+  #
+  # inputs.tag on the auto-release path, github.ref_name on a tag push: the same
+  # derivation as the TAG env at the top of this file, repeated because the env
+  # context is not available in a job's `with:` block.
+  site:
+    needs: release
+    if: github.event_name != 'workflow_dispatch'
+    permissions:
+      contents: read
+    uses: ./.github/workflows/site.yml
+    with:
+      tag: ${{ inputs.tag || github.ref_name }}
+    secrets: inherit # zizmor: ignore[secrets-inherit]
+
   # The manual rehearsal (workflow_dispatch). It arms the full gate against a
   # SIMULATED changelog roll and reviewed-content commit — reproducing the
   # two-commit release-branch shape and the auto-release merge — proves the gate
