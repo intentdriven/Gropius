@@ -58,10 +58,12 @@ type samplingParam struct {
 //
 // These bounds are not a matter of taste. The server validates the *effective*
 // value of every request — the body's value where there is one, the launch
-// flag's otherwise — so a default this package accepts and the server rejects
-// answers 400 to every request that omits the parameter, which is the whole
-// population this feature exists for. Gropius must therefore never accept a
-// value wider than the table below.
+// flag's otherwise — and it does not refuse politely: the check raises
+// uncaught, so the connection is closed with no response and the gateway
+// answers 502. A default this package accepts and the server rejects therefore
+// breaks every request that omits the parameter, which is the whole population
+// this feature exists for. Gropius must never accept a value wider than the
+// table below.
 // MaxTopK is Gropius' own ceiling on top-k, deliberately narrower than the
 // request check, which accepts any non-negative integer.
 //

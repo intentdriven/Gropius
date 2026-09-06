@@ -65,9 +65,11 @@ var samplingFlags = map[string]string{
 // Out-of-range values are dropped rather than passed. The settings endpoint
 // already refuses them, but this is the last point at which one could still
 // do harm, and the harm is large: the model server takes the flag as its
-// default and checks the effective value of every request against it, so a
-// value it will not accept fails every request that omits that parameter —
-// precisely the traffic these defaults exist to serve.
+// default and checks the effective value of every request against it, and its
+// check raises uncaught — the connection closes with no response and the
+// gateway answers 502. A value it will not accept therefore breaks every
+// request that omits that parameter, precisely the traffic these defaults
+// exist to serve.
 func samplingArgs(s config.Sampling) []string {
 	sane, _ := s.Sanitised()
 	var args []string

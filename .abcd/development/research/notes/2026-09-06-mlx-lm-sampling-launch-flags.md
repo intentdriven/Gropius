@@ -68,12 +68,24 @@ is saved. Pinned by `TestGoRangesAreNeverWiderThanThePinnedServers` and
 ## The failure mode this pins
 
 `argparse` performs no range checking, so an out-of-range launch flag does
-not stop the process starting. It surfaces later: the server takes it as the
-default for the omitted field, `validate_model_parameters` rejects the
-effective value, and *every request that omits that parameter* is answered
-`400` while requests that carry their own value still succeed. A value the
-sampler rather than the request check refuses — an oversized `top_k` — fails
-the same way, one layer further in. One saved
+not stop the process starting. It surfaces later, and worse than a refusal:
+the server takes the flag as the default for the omitted field and
+`validate_model_parameters` raises a `ValueError` on the effective value —
+uncaught. `do_POST` wraps only the `Content-Length` parse in a `try`, so the
+exception escapes into `ThreadingHTTPServer`, which logs a traceback to the
+per-model log and closes the socket **without writing a response at all**.
+There is no `400`. The gateway sees a connection that answered nothing and
+returns `502 the model server did not respond`. Requests that carry their own
+value still succeed.
+
+The same is true of an explicit `null` in a request body: `body.get(key,
+default)` finds the key present, `None` fails the type check, and the
+connection drops. A parameter must be *absent* for the launch-flag default to
+apply.
+
+A value the sampler rather than the request check refuses — an oversized
+`top_k` — fails the same way, one layer further in, from inside compiled
+generation. One saved
 setting would therefore break the machine for exactly the clients this
 feature exists to serve. The Go range check is what holds this, which is why
 it is pinned to this table rather than chosen.

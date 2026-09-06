@@ -23,6 +23,10 @@ loading again — see [When a change takes effect](#when-a-change-takes-effect).
 | Min-p | `min_p` | 0, which switches min-p off |
 | Maximum completion tokens | `max_tokens`, and `max_completion_tokens` | 512 |
 
+A maximum of 0 is accepted and means every request that omits the parameter
+gets an empty answer; there is no upper limit, so a very large figure lets one
+request hold a model for as long as it keeps generating.
+
 These are the parameters the model server accepts when it starts. Anything else
 a request can carry — repetition and presence penalties, `logit_bias`,
 `logprobs`, `seed` — is a per-request field only, and cannot be given a
@@ -34,11 +38,16 @@ is not a mystery: it is the figure in the table above.
 ## A request's own value always wins
 
 A default fills a gap and nothing more. A request that sets `temperature`
-itself is served with its own value, and no request body is ever altered on
-its way to the model. Nothing here caps or overrides what a client asks for.
+itself is served with its own value, and no sampling parameter is ever added
+to or changed in a request body on its way to the model. Nothing here caps or
+overrides what a client asks for.
 
-An omitted parameter and an explicit `null` mean the same thing — use the
-default — which is what OpenAI clients expect.
+To be served with a default, leave the parameter out of the request. An
+explicit `null` is not the same thing: the model server reads the key as
+present, refuses the value, and closes the connection without answering, which
+reaches the client as `502 the model server did not respond`. Some OpenAI
+client libraries send `null` for an option that was never set — if requests
+fail that way, configure the client to omit the field instead.
 
 ## One model, its own figures
 
@@ -55,6 +64,11 @@ before saving.
 
 The override applies to that model the next time it loads. A model with no
 override is served with the machine-wide set.
+
+A blank field in an override means "use the machine-wide value", so there is
+no way to say "use the model server's own default for this one parameter while
+the machine sets one". Clear the machine-wide field instead, and give the
+models that want a figure their own.
 
 ## When a change takes effect
 
@@ -82,9 +96,12 @@ vocabulary and Gropius cannot tell what that is at the moment you save. A
 top-k above a few hundred keeps every plausible token anyway.
 
 The check matters because these values are given to the model server at
-start-up. A figure it will not accept would leave every request that omits
-that parameter failing — exactly the requests a default exists to serve — so
-Gropius never accepts one.
+start-up. A figure it will not accept does not stop the model loading: the
+server refuses the value on each request instead, and it does so by closing
+the connection rather than answering, which reaches the client as `502 the
+model server did not respond`. Every request that omits that parameter would
+fail that way — exactly the requests a default exists to serve — so Gropius
+never accepts such a figure.
 
 The same value hand-edited into `config.json` is ignored rather than fatal:
 Gropius starts normally, logs which fields it dropped, and serves as though

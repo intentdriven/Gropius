@@ -51,6 +51,14 @@ func TestSamplingHowToMatchesTheCode(t *testing.T) {
 		t.Error("the page does not state that a request's own value wins over the default")
 	}
 
+	// 2a. And what "omitted" has to mean. An explicit null is a present key to
+	// the model server: the type check fails, the connection closes with no
+	// response, and the client sees a 502. A page that says null and omitted
+	// are the same thing sends the reader's clients straight into that.
+	if !containsAll(page, "An explicit `null` is not the same thing") {
+		t.Error("the page does not warn that an explicit null is not the same as omitting the parameter")
+	}
+
 	// 3. What a blank field means.
 	if !containsAll(page, "Blank means") {
 		t.Error("the page does not say what a blank field means")
