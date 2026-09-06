@@ -32,7 +32,7 @@ func TestLoadDoesNotBlockOnFIFO(t *testing.T) {
 	unwedgeFIFO(t, path)
 
 	done := make(chan error, 1)
-	go func() { _, err := Load(path); done <- err }()
+	go func() { _, _, err := Load(path); done <- err }()
 	select {
 	case err := <-done:
 		if err == nil {
@@ -54,7 +54,7 @@ func TestLoadDoesNotFollowSymlink(t *testing.T) {
 	if err := os.Symlink(target, path); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Load(path); err == nil {
+	if _, _, err := Load(path); err == nil {
 		t.Fatal("Load followed a symlinked config.json")
 	}
 }
@@ -68,7 +68,7 @@ func TestLoadRejectsOversizedFile(t *testing.T) {
 	if err := os.WriteFile(path, []byte(big), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Load(path); err == nil {
+	if _, _, err := Load(path); err == nil {
 		t.Fatal("Load accepted a config.json larger than the cap")
 	}
 }

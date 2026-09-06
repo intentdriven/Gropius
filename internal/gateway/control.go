@@ -4,9 +4,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -451,13 +453,42 @@ func (c *Control) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 func (c *Control) handleSetSettings(w http.ResponseWriter, r *http.Request) {
 	current := c.App.Config()
 
+	// Everything saved here is written to config.json, which Load refuses to
+	// read above this size — so a larger body could only produce a file the
+	// next start cannot read, and a start that cannot read it locks the server
+	// down to loopback.
+	raw, err := io.ReadAll(http.MaxBytesReader(w, r.Body, config.MaxConfigBytes))
+	if err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			writeError(w, http.StatusBadRequest, "settings body is too large")
+		} else {
+			writeError(w, http.StatusBadRequest, "settings body could not be read")
+		}
+		return
+	}
+
 	// Decode INTO a copy of the current config, not a fresh zero value: the
 	// settings form posts only the fields it owns, so any field it omits — e.g.
 	// Preload, or Advertise (which has no UI control) — must keep its existing
 	// value. Decoding into a zero Config and saving it wholesale silently wiped
 	// those, dropping a user's preload list on any unrelated settings change.
-	incoming := current
-	if err := json.NewDecoder(r.Body).Decode(&incoming); err != nil {
+	//
+	// A deep copy, not a shallow one: encoding/json decodes straight into an
+	// existing non-nil pointer's target, so with a plain assignment a posted
+	// sampling value would land in the live configuration before Validate could
+	// look at it — and stay there when Validate refused the save.
+	incoming := current.Clone()
+	// "Keep what you did not send" is a rule about fields, not about the
+	// members of a collection. encoding/json merges into an existing map, so
+	// decoding a posted model_sampling object into the current one reinstates
+	// every override the object leaves out — which is every override the user
+	// just deleted. Naming the field means "these are the overrides", so start
+	// from nothing; omitting it still keeps what is there.
+	if namesModelSampling(raw) {
+		incoming.ModelSampling = nil
+	}
+	if err := json.Unmarshal(raw, &incoming); err != nil {
 		writeError(w, http.StatusBadRequest, "settings body is not valid JSON")
 		return
 	}
@@ -482,9 +513,48 @@ func (c *Control) handleSetSettings(w http.ResponseWriter, r *http.Request) {
 		incoming.DecodeConcurrency != current.DecodeConcurrency ||
 		incoming.IdleTimeoutSec != current.IdleTimeoutSec
 	writeJSON(w, http.StatusOK, map[string]any{
-		"status":  "saved",
-		"restart": restart,
+		"status":        "saved",
+		"restart":       restart,
+		"reload_models": samplingReloads(current, incoming, c.App.Pool.Resident()),
 	})
+}
+
+// namesModelSampling reports whether the posted body carries a model_sampling
+// field at all, however it is spelled — including as null.
+func namesModelSampling(body []byte) bool {
+	var named map[string]json.RawMessage
+	if err := json.Unmarshal(body, &named); err != nil {
+		return false
+	}
+	// Folded, because the decode this guards matches struct field names
+	// case-insensitively: an exact lookup would let one spelling skip the
+	// reset and reinstate every override the caller asked to remove.
+	for k := range named {
+		if strings.EqualFold(k, "model_sampling") {
+			return true
+		}
+	}
+	return false
+}
+
+// samplingReloads names the loaded models whose sampling defaults changed with
+// this save.
+//
+// The defaults are launch flags, so a model that is already running keeps the
+// values its process started with until it loads again. Saying which models
+// those are is the difference between "the change has not reached these yet"
+// and a change that silently appears to have done nothing. A model carrying an
+// override that shadows the changed value is not listed: nothing about how it
+// is served moved.
+func samplingReloads(before, after config.Config, resident []runtime.Resident) []string {
+	out := []string{}
+	for _, m := range resident {
+		if !before.EffectiveSampling(m.RepoID).Equal(after.EffectiveSampling(m.RepoID)) {
+			out = append(out, m.RepoID)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // handleEvents streams state snapshots to the UI over SSE, so download progress

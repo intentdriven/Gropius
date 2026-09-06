@@ -42,6 +42,9 @@ Cross-machine LAN use works; TLS and notarized distribution are not yet included
   by failure ([reference](docs/models-list.md)).
 - **Runs many models** — one process per model, with an LRU memory budget so a
   request for a second model evicts an idle one instead of OOMing the machine.
+- **Sampling defaults** — one place to say what an omitted `temperature` means
+  for the whole machine, with an optional override per model; a request that
+  sets its own value still wins.
 - **Network-shared** — bind the LAN, discoverable over Bonjour, optional API key.
 - **Multi-account** — other user accounts on the same Mac share one copy of each
   model on disk and on the GPU.
@@ -124,7 +127,7 @@ request, and never the client's network address.
 - [`internal/`](internal/) — the engine: `hub` (HuggingFace client + downloader),
   `runtime` (Python/MLX provisioning + process pool), `gateway` (OpenAI + control
   API), `registry`, `discovery`, `config`, `capability`, `ui`, `app`.
-- [`docs/`](docs/) — getting-started guide and the models-list reference.
+- [`docs/`](docs/) — getting-started guide, how-to pages and reference.
 
 Design decisions and the empirical facts behind them: [`DECISIONS.md`](.abcd/development/decisions/DECISIONS.md).
 

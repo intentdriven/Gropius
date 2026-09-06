@@ -27,6 +27,78 @@ type Spec struct {
 	// DecodeConcurrency maps to --decode-concurrency: how many requests are
 	// batched together during generation.
 	DecodeConcurrency int
+	// Sampling is the set of sampling defaults this server starts with. The
+	// server applies them to any request that omits the parameter, and a
+	// request's own value replaces them for that request alone — which is why
+	// they belong on the command line rather than in the relayed body.
+	Sampling config.Sampling
+}
+
+// samplingFlagsVerifiedAgainst is the mlx-lm release whose source the flag
+// spellings below, and the ranges in internal/config, were read from. Nothing
+// else connects them to it: a renamed flag makes argparse exit on every model
+// launch, which no test with a stand-in interpreter can see. A version bump
+// therefore has to come past
+// TestSamplingFlagsWereVerifiedAgainstThePinnedServer.
+const samplingFlagsVerifiedAgainst = "0.31.3"
+
+// samplingFlags is the model server's own spelling of each sampling
+// parameter's launch flag, read from its argument parser (see
+// .abcd/development/research/notes/2026-09-06-mlx-lm-sampling-launch-flags.md).
+var samplingFlags = map[string]string{
+	"temperature": "--temp",
+	"top_p":       "--top-p",
+	"top_k":       "--top-k",
+	"min_p":       "--min-p",
+	"max_tokens":  "--max-tokens",
+}
+
+// samplingArgs renders the sampling defaults as command-line flags.
+//
+// It walks the same table config validates against, so a parameter added
+// there without a flag here is caught by a test rather than accepted, stored
+// and never applied. Every value is re-rendered from a number, so nothing a
+// client sent and nothing a file contained reaches the argument vector as a
+// string, and each flag and its value are separate elements — there is no
+// shell here to split them.
+//
+// Out-of-range values are dropped rather than passed. The settings endpoint
+// already refuses them, but this is the last point at which one could still
+// do harm, and the harm is large: the model server takes the flag as its
+// default and checks the effective value of every request against it, and its
+// check raises uncaught — the connection closes with no response and the
+// gateway answers 502. A value it will not accept therefore breaks every
+// request that omits that parameter, precisely the traffic these defaults
+// exist to serve.
+func samplingArgs(s config.Sampling) []string {
+	sane, _ := s.Sanitized()
+	var args []string
+	for _, v := range sane.Values() {
+		flag, ok := samplingFlags[v.Field]
+		if !ok {
+			continue
+		}
+		args = append(args, flag, formatSamplingValue(v))
+	}
+	return args
+}
+
+// formatSamplingValue renders one value for the command line.
+//
+// Negative zero is the one number that passes a "must be at least zero" check
+// and still renders with a leading dash, which would read as another flag.
+func formatSamplingValue(v config.SamplingValue) string {
+	if v.Integer {
+		// From the integer field, never from the float64 the bounds are
+		// compared in: narrowing a float64 that is out of integer range is
+		// implementation-defined, and on one of Go's architectures it wraps to
+		// a negative — which argparse would accept as a token budget.
+		return strconv.Itoa(v.Int)
+	}
+	if v.Number == 0 {
+		return "0"
+	}
+	return strconv.FormatFloat(v.Number, 'f', -1, 64)
 }
 
 // Process is a running model server.
@@ -125,6 +197,7 @@ func (l *ExecLauncher) Launch(ctx context.Context, spec Spec) (Process, error) {
 		"--port", strconv.Itoa(spec.Port),
 		"--log-level", "INFO",
 	}
+	args = append(args, samplingArgs(spec.Sampling)...)
 	if spec.DecodeConcurrency > 1 {
 		args = append(args, "--decode-concurrency", strconv.Itoa(spec.DecodeConcurrency))
 	}

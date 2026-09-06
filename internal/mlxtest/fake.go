@@ -16,6 +16,7 @@ package mlxtest
 import (
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -47,6 +48,11 @@ type Options struct {
 	// while /health returns ok throughout — as the real server does.
 	LoadDelay time.Duration
 	Reply     string
+	// Port binds the fake to a specific loopback port instead of an arbitrary
+	// one. A pool hands each model server the port it allocated and then
+	// addresses it there, so a fake standing in for a launched process has to
+	// answer on that port rather than one of its own.
+	Port int
 }
 
 // Start launches a fake server. It is closed automatically via t.Cleanup by the
@@ -67,7 +73,21 @@ func Start(opts Options) *Server {
 	mux.HandleFunc("/v1/chat/completions", s.handleChat)
 	mux.HandleFunc("/v1/completions", s.handleChat)
 
-	s.httpSrv = httptest.NewServer(mux)
+	if opts.Port == 0 {
+		s.httpSrv = httptest.NewServer(mux)
+		return s
+	}
+	// Bind the port the caller was given. The real launcher has the same race
+	// between a port being found free and the child binding it, and the same
+	// consequence: a failed readiness probe.
+	l, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", opts.Port))
+	if err != nil {
+		panic(fmt.Sprintf("mlxtest: cannot bind port %d: %v", opts.Port, err))
+	}
+	s.httpSrv = httptest.NewUnstartedServer(mux)
+	s.httpSrv.Listener.Close()
+	s.httpSrv.Listener = l
+	s.httpSrv.Start()
 	return s
 }
 

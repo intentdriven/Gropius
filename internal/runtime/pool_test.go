@@ -64,13 +64,17 @@ type fakeLauncher struct {
 
 	mu       sync.Mutex
 	launched []string
-	procs    map[string]*fakeProc
+	// specs records the last Spec each model was launched with, so a test can
+	// see what the process would have been given on its command line.
+	specs map[string]Spec
+	procs map[string]*fakeProc
 	// servers maps repoID -> the fake server, so tests can inspect requests.
 	servers map[string]*mlxtest.Server
 }
 
 func newFakeLauncher() *fakeLauncher {
 	return &fakeLauncher{
+		specs:    map[string]Spec{},
 		procs:    map[string]*fakeProc{},
 		servers:  map[string]*mlxtest.Server{},
 		dieAfter: map[string]bool{},
@@ -111,6 +115,7 @@ func (l *fakeLauncher) Launch(ctx context.Context, spec Spec) (Process, error) {
 	p := &fakeProc{srv: srv, done: make(chan struct{}), stopped: make(chan struct{})}
 
 	l.launched = append(l.launched, spec.RepoID)
+	l.specs[spec.RepoID] = spec
 	l.procs[spec.RepoID] = p
 	l.servers[spec.RepoID] = srv
 
@@ -134,6 +139,12 @@ func (l *fakeLauncher) launchedRepos() []string {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return append([]string(nil), l.launched...)
+}
+
+func (l *fakeLauncher) specFor(repoID string) Spec {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.specs[repoID]
 }
 
 func (l *fakeLauncher) serverFor(repoID string) *mlxtest.Server {

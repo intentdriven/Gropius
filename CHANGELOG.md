@@ -28,6 +28,19 @@ GitHub release notes.
   and the rest of its copy from README.md and the getting-started guide, so the
   page says what the repository says. The release chain renders and deploys it;
   `make site` renders it locally.
+- Settings holds the sampling defaults the whole machine serves with —
+  temperature, top-p, top-k, min-p and a completion-token budget — with an
+  optional override per model, so a fleet of clients that never set a
+  temperature no longer has to be reconfigured one by one. A request that
+  carries its own value still wins, and no request body is touched: the
+  values are given to each model server as it starts, so a change reaches a
+  model the next time it loads and the panel names the loaded models that
+  must load again. Sampling is documented in three pages —
+  [docs/sampling-defaults.md](docs/sampling-defaults.md) for setting one,
+  [docs/sampling-reference.md](docs/sampling-reference.md) for the parameters
+  and their ranges, and
+  [docs/sampling-explained.md](docs/sampling-explained.md) for why there is no
+  seed and why reproducibility comes from a fixed temperature.
 
 ### Changed
 

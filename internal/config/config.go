@@ -142,8 +142,15 @@ func ValidRepoID(s string) bool {
 	return validRepoComponent(org) && validRepoComponent(name)
 }
 
+// MaxRepoComponent bounds each half of a repo id. HuggingFace itself allows no
+// more, and the bound is what turns "at most MaxModelSampling overrides" into a
+// bound on the size of config.json rather than only on its entry count — an
+// unbounded key would let a legal number of entries write a file Load then
+// refuses to read.
+const MaxRepoComponent = 96
+
 func validRepoComponent(s string) bool {
-	if s == "" || s == "." || s == ".." {
+	if s == "" || s == "." || s == ".." || len(s) > MaxRepoComponent {
 		return false
 	}
 	for _, r := range s {
@@ -282,6 +289,37 @@ type Config struct {
 	// best-effort — an invalid or too-large entry is logged and skipped, never
 	// blocking startup.
 	Preload []string `json:"preload,omitempty"`
+
+	// Sampling holds the machine-wide sampling defaults every model server is
+	// launched with, so a request that omits a parameter is served with them.
+	Sampling Sampling `json:"sampling,omitzero"`
+
+	// ModelSampling overrides Sampling for individual models, keyed by repo id.
+	// A model with no entry is served with the machine-wide set.
+	ModelSampling map[string]Sampling `json:"model_sampling,omitempty"`
+}
+
+// Clone returns a copy that shares no slice, map or pointer with the original.
+//
+// The settings endpoint decodes a posted body into a copy of the live config
+// so that fields the form does not own keep their values. A shallow copy is
+// not enough for that: encoding/json writes through an existing non-nil
+// pointer into its target, and reuses an existing slice's and map's storage,
+// so a posted value would reach the running configuration before Validate had
+// a chance to refuse it — and would stay there once it had.
+func (c Config) Clone() Config {
+	out := c
+	if c.Preload != nil {
+		out.Preload = append([]string(nil), c.Preload...)
+	}
+	out.Sampling = c.Sampling.Clone()
+	if c.ModelSampling != nil {
+		out.ModelSampling = make(map[string]Sampling, len(c.ModelSampling))
+		for k, v := range c.ModelSampling {
+			out.ModelSampling[k] = v.Clone()
+		}
+	}
+	return out
 }
 
 // Default returns the shipping defaults: LAN-exposed, unauthenticated.
@@ -307,7 +345,12 @@ func (c Config) Validate() error {
 	if c.DecodeConcurrency < 1 {
 		return fmt.Errorf("decode_concurrency must be >= 1, got %d", c.DecodeConcurrency)
 	}
-	return nil
+	// A sampling default becomes a launch flag on every model server, and the
+	// model server validates the effective value of every request against it:
+	// a value it rejects turns one save into a 400 on every request that omits
+	// that parameter. Load sanitizes before it validates, so this strictness
+	// only ever refuses a save, never a start-up.
+	return c.validateSampling()
 }
 
 // ExposedToLAN reports whether the bind address accepts non-loopback traffic.
@@ -328,30 +371,55 @@ func (c Config) ExposedToLAN() bool {
 // Unknown or missing fields fall back to their defaults, so a config written by
 // an older build still loads.
 //
+// The second return value names the sampling preferences that were dropped
+// because the model server would not accept them, or because they name no
+// addressable model; the caller logs them. They are dropped rather than
+// refused because a sampling value is a preference, not a serving invariant:
+// refusing the file sends main into its fail-closed loopback-only mode, which
+// is a machine-wide outage to pay for one number that could simply be
+// ignored. Everything that decides how the server is reachable is still
+// validated, and still an error.
+//
+// This covers a value out of range, not a value of the wrong shape. A
+// sampling field holding a string, or a number too large for a float64, fails
+// in the unmarshal above and is an error like any other malformed config.json
+// — sampling is not special enough to warrant a second decoding path through
+// json.RawMessage in a file another local account can write.
+//
 // The read is hardened (see OpenRegular): Load runs before the port is
 // claimed, so a FIFO planted under this name in a shared root would otherwise
 // hang startup before the fail-closed branch in main could ever run, and a
 // symlinked or oversized file is refused rather than applied. Any such refusal
 // is an error, which main treats as "lock down to loopback".
-func Load(path string) (Config, error) {
+func Load(path string) (Config, []string, error) {
 	cfg := Default()
 	b, err := ReadRegular(path, MaxConfigBytes)
 	if errors.Is(err, fs.ErrNotExist) {
-		return cfg, nil
+		return cfg, nil, nil
 	}
 	if err != nil {
-		return cfg, fmt.Errorf("read config: %w", err)
+		return cfg, nil, fmt.Errorf("read config: %w", err)
 	}
 	if err := json.Unmarshal(b, &cfg); err != nil {
-		return Default(), fmt.Errorf("parse config %s: %w", path, err)
+		return Default(), nil, fmt.Errorf("parse config %s: %w", path, err)
 	}
+	dropped := cfg.sanitizeSampling()
 	if err := cfg.Validate(); err != nil {
-		return Default(), fmt.Errorf("invalid config %s: %w", path, err)
+		return Default(), nil, fmt.Errorf("invalid config %s: %w", path, err)
 	}
-	return cfg, nil
+	return cfg, dropped, nil
 }
 
 // Save atomically writes config to path.
+//
+// A config that would not load again is refused rather than written. Load caps
+// what it will read, and a config.json over that cap is not a smaller problem
+// than a corrupt one: main falls back to loopback-only with the shipping
+// defaults, so the API key and the bind address a user set are silently
+// unused until someone edits the file by hand. The check is here rather than
+// in Validate because it is a property of the encoded bytes — MarshalIndent's
+// output is larger than the body it came from, so bounding the request that
+// carried it is not enough.
 func Save(path string, c Config) error {
 	if err := c.Validate(); err != nil {
 		return err
@@ -359,6 +427,10 @@ func Save(path string, c Config) error {
 	b, err := json.MarshalIndent(c, "", "  ")
 	if err != nil {
 		return err
+	}
+	if len(b)+1 > MaxConfigBytes {
+		return fmt.Errorf("settings are %d bytes, over the %d-byte limit config.json can be read back from",
+			len(b)+1, MaxConfigBytes)
 	}
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
