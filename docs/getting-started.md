@@ -103,7 +103,16 @@ key, as long as they are addressed to `localhost` or `127.0.0.1`. A local proxy
 or tunnel that forwards another host name must send the key like any other
 client.
 
-## 7. Sharing across user accounts (optional)
+## 7. Choose what an omitted parameter means (optional)
+
+Clients that never send a `temperature` are served with the model server's
+own default, which is 0 — greedy decoding. **Settings → Sampling defaults**
+sets that for the whole machine, and **Per-model sampling** gives one model
+its own figures. A request that sets its own value always wins, and a change
+reaches a model the next time it loads. See
+[Set default sampling parameters](sampling-defaults.md).
+
+## 8. Sharing across user accounts (optional)
 
 If several people log into this Mac, let them share one copy of each model:
 
@@ -176,7 +185,7 @@ rm -rf ~/Library/Application\ Support/Gropius
 ```
 
 That directory holds the private Python runtime and your downloaded models —
-deleting it removes every trace. If you set up the shared cache (step 7), the
+deleting it removes every trace. If you set up the shared cache (step 8), the
 data lives in `/Users/Shared/Gropius` instead; remove that too:
 
 ```sh
