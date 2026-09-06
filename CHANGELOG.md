@@ -11,6 +11,12 @@ GitHub release notes.
 
 ## [Unreleased]
 
+### Changed
+
+- The server's request log records the method, path, status and duration of a
+  request, and never the client's network address. A handler panic is reported
+  the same way, so no line the server writes identifies a caller.
+
 ## [0.1.2] - 2026-09-06
 
 ### Security
