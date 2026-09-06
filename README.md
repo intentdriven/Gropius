@@ -104,9 +104,10 @@ By default the server is **reachable by anyone on your network with no API key**
 the control panel warns you while this is so. Set a key in **Settings** to require
 `Authorization: Bearer <key>`. Same-machine clients (loopback, including other
 user accounts) never need a key. The control panel and its `/api/*` endpoints are
-bound to loopback only and are never reachable from the LAN. The server's request
-log records the method, path, status and duration of a request and never the
-client's network address.
+bound to loopback only and are never reachable from the LAN.
+
+The server's request log records the method, path, status and duration of a
+request, and never the client's network address.
 
 ## Layout
 
