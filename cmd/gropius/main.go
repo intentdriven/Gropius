@@ -20,6 +20,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"syscall"
 	"time"
 
@@ -60,7 +61,14 @@ func main() {
 	}
 	paths := config.NewPaths(rootDir)
 
-	cfg, err := config.Load(paths.Config)
+	cfg, dropped, err := config.Load(paths.Config)
+	if len(dropped) > 0 {
+		// A sampling preference the model server would refuse is ignored rather
+		// than fatal: applying it would make every request that omits that
+		// parameter fail, and refusing the file would lock the server down.
+		log.Warn("ignoring sampling settings the model server would not accept — set them again in Settings",
+			"fields", strings.Join(dropped, ", "))
+	}
 	if err != nil {
 		// config.json exists but is unreadable/corrupt (a fresh install returns no
 		// error). The shipping default is LAN-exposed with no key, so falling back

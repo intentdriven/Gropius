@@ -172,7 +172,7 @@ func TestValidateRejectsBadValues(t *testing.T) {
 }
 
 func TestLoadMissingFileReturnsDefaults(t *testing.T) {
-	cfg, err := Load(filepath.Join(t.TempDir(), "nope.json"))
+	cfg, _, err := Load(filepath.Join(t.TempDir(), "nope.json"))
 	if err != nil {
 		t.Fatalf("Load of missing file should succeed: %v", err)
 	}
@@ -191,7 +191,7 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 	if err := Save(path, want); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
-	got, err := Load(path)
+	got, _, err := Load(path)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -207,7 +207,7 @@ func TestLoadPartialFileKeepsDefaultsForMissingKeys(t *testing.T) {
 	if err := os.WriteFile(path, []byte(`{"port": 9999}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	cfg, err := Load(path)
+	cfg, _, err := Load(path)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -240,7 +240,7 @@ func TestLoadCorruptFileReturnsError(t *testing.T) {
 	if err := os.WriteFile(path, []byte("{not json"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Load(path); err == nil {
+	if _, _, err := Load(path); err == nil {
 		t.Fatal("expected error for corrupt config")
 	}
 }

@@ -282,6 +282,37 @@ type Config struct {
 	// best-effort — an invalid or too-large entry is logged and skipped, never
 	// blocking startup.
 	Preload []string `json:"preload,omitempty"`
+
+	// Sampling holds the machine-wide sampling defaults every model server is
+	// launched with, so a request that omits a parameter is served with them.
+	Sampling Sampling `json:"sampling,omitzero"`
+
+	// ModelSampling overrides Sampling for individual models, keyed by repo id.
+	// A model with no entry is served with the machine-wide set.
+	ModelSampling map[string]Sampling `json:"model_sampling,omitempty"`
+}
+
+// Clone returns a copy that shares no slice, map or pointer with the original.
+//
+// The settings endpoint decodes a posted body into a copy of the live config
+// so that fields the form does not own keep their values. A shallow copy is
+// not enough for that: encoding/json decodes straight into an existing
+// non-nil pointer's target and appends into an existing slice's array, so a
+// posted value would reach the running configuration before Validate had a
+// chance to refuse it — and would stay there once it had.
+func (c Config) Clone() Config {
+	out := c
+	if c.Preload != nil {
+		out.Preload = append([]string(nil), c.Preload...)
+	}
+	out.Sampling = c.Sampling.Clone()
+	if c.ModelSampling != nil {
+		out.ModelSampling = make(map[string]Sampling, len(c.ModelSampling))
+		for k, v := range c.ModelSampling {
+			out.ModelSampling[k] = v.Clone()
+		}
+	}
+	return out
 }
 
 // Default returns the shipping defaults: LAN-exposed, unauthenticated.
@@ -307,7 +338,12 @@ func (c Config) Validate() error {
 	if c.DecodeConcurrency < 1 {
 		return fmt.Errorf("decode_concurrency must be >= 1, got %d", c.DecodeConcurrency)
 	}
-	return nil
+	// A sampling default becomes a launch flag on every model server, and the
+	// model server validates the effective value of every request against it:
+	// a value it rejects turns one save into a 400 on every request that omits
+	// that parameter. Load sanitises before it validates, so this strictness
+	// only ever refuses a save, never a start-up.
+	return c.validateSampling()
 }
 
 // ExposedToLAN reports whether the bind address accepts non-loopback traffic.
@@ -328,27 +364,36 @@ func (c Config) ExposedToLAN() bool {
 // Unknown or missing fields fall back to their defaults, so a config written by
 // an older build still loads.
 //
+// The second return value names the sampling preferences that were dropped
+// because the model server would not accept them; the caller logs them. They
+// are dropped rather than refused because a sampling value is a preference,
+// not a serving invariant: refusing the file sends main into its fail-closed
+// loopback-only mode, which is a machine-wide outage to pay for one number
+// that could simply be ignored. Everything that decides how the server is
+// reachable is still validated, and still an error.
+//
 // The read is hardened (see OpenRegular): Load runs before the port is
 // claimed, so a FIFO planted under this name in a shared root would otherwise
 // hang startup before the fail-closed branch in main could ever run, and a
 // symlinked or oversized file is refused rather than applied. Any such refusal
 // is an error, which main treats as "lock down to loopback".
-func Load(path string) (Config, error) {
+func Load(path string) (Config, []string, error) {
 	cfg := Default()
 	b, err := ReadRegular(path, MaxConfigBytes)
 	if errors.Is(err, fs.ErrNotExist) {
-		return cfg, nil
+		return cfg, nil, nil
 	}
 	if err != nil {
-		return cfg, fmt.Errorf("read config: %w", err)
+		return cfg, nil, fmt.Errorf("read config: %w", err)
 	}
 	if err := json.Unmarshal(b, &cfg); err != nil {
-		return Default(), fmt.Errorf("parse config %s: %w", path, err)
+		return Default(), nil, fmt.Errorf("parse config %s: %w", path, err)
 	}
+	dropped := cfg.sanitiseSampling()
 	if err := cfg.Validate(); err != nil {
-		return Default(), fmt.Errorf("invalid config %s: %w", path, err)
+		return Default(), nil, fmt.Errorf("invalid config %s: %w", path, err)
 	}
-	return cfg, nil
+	return cfg, dropped, nil
 }
 
 // Save atomically writes config to path.
