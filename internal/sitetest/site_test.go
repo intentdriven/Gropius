@@ -1,0 +1,724 @@
+// Package sitetest holds the landing page to the things it makes claims about:
+// the app icon it shows, the app bundle it describes, and the canonical identity
+// block it says it renders from. It is a test-only package in the archtest and
+// mlxtest mould — no network, no browser, no running server — so `make test`
+// fails the day the page and the app disagree.
+//
+// Every check runs against a real render into t.TempDir() (or, for the property
+// that a render is not a lint, against a fixture tree with an edited identity
+// block), not against a committed copy of the output: a golden file would
+// re-state the renderer's behaviour rather than test it.
+package sitetest_test
+
+import (
+	"encoding/json"
+	"fmt"
+	"math"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"regexp"
+	"strconv"
+	"strings"
+	"testing"
+)
+
+// The repository root, from this package's directory.
+const repoRoot = "../.."
+
+// The viewport the acceptance criteria name.
+const (
+	foldWidth  = 1280.0
+	foldHeight = 800.0
+)
+
+var (
+	// The page and stylesheet rendered from the committed tree, shared by every
+	// test that does not need its own fixture.
+	page string
+	css  string
+)
+
+func TestMain(m *testing.M) {
+	dir, err := os.MkdirTemp("", "gropius-site")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	defer os.RemoveAll(dir)
+	out, err := renderTree(".", dir)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	page, css = out.page, out.css
+	os.Exit(m.Run())
+}
+
+type rendered struct {
+	page string
+	css  string
+}
+
+// renderTree runs the renderer exactly as the Makefile and the deploy workflow
+// do: root is the tree to compose from, out the directory to write into.
+func renderTree(root, out string) (rendered, error) {
+	cmd := exec.Command("go", "run", "./cmd/gropius-site", "--root", root, "--manifest", filepath.Join(root, ".abcd", "site.json"), "--out", out)
+	cmd.Dir = repoRoot
+	if b, err := cmd.CombinedOutput(); err != nil {
+		return rendered{}, fmt.Errorf("render: %v\n%s", err, b)
+	}
+	html, err := os.ReadFile(filepath.Join(out, "Gropius", "index.html"))
+	if err != nil {
+		return rendered{}, err
+	}
+	style, err := os.ReadFile(filepath.Join(out, "Gropius", "site.css"))
+	if err != nil {
+		return rendered{}, err
+	}
+	return rendered{page: string(html), css: string(style)}, nil
+}
+
+// --- Criterion 1 -----------------------------------------------------------
+//
+// "Given Alice opens the page at a 1280x800 viewport, when it has loaded, then
+// the download button and the link to the repository are both visible without
+// scrolling."
+
+func TestDownloadAndSourceSitAboveTheFold(t *testing.T) {
+	// Document order first: the two actions must precede the install section,
+	// which is where the prototype already put them.
+	actions := strings.Index(page, `id="download"`)
+	install := strings.Index(page, `id="install"`)
+	if actions < 0 || install < 0 {
+		t.Fatalf("the page has no download section (%d) or no install section (%d)", actions, install)
+	}
+	if actions > install {
+		t.Errorf("the install section precedes the action row; the download button and the source link must come first")
+	}
+	row := strings.Index(page, `class="cta-row"`)
+	if row < 0 || row > install {
+		t.Fatalf("no action row above the install section")
+	}
+
+	// Then the height of everything above the action row, at 1280px wide, from
+	// the stylesheet's own numbers. The line counts are the model's assumption
+	// and are derived from the text that is actually rendered: a line holds
+	// max-width/0.5 characters, half an em being a workable average advance for
+	// the faces this page loads.
+	total, breakdown := foldBudget(t)
+	if total > foldHeight {
+		t.Errorf("the action row starts %.0fpx down a %.0fpx viewport:\n%s", total, foldHeight, breakdown)
+	} else {
+		t.Logf("action row starts %.0fpx down a %.0fpx viewport:\n%s", total, foldHeight, breakdown)
+	}
+}
+
+func foldBudget(t *testing.T) (float64, string) {
+	t.Helper()
+	var b strings.Builder
+	total := 0.0
+	add := func(what string, px float64) {
+		total += px
+		fmt.Fprintf(&b, "  %-28s %7.1f\n", what, px)
+	}
+
+	// Top bar: its own padding, the wordmark's mark, its rule.
+	barPad := boxPx(t, decl(t, css, ".bar", "padding"))
+	add("bar padding", barPad.top+barPad.bottom)
+	add("bar wordmark", px(t, decl(t, css, ".wordmark .dot", "height")))
+	add("bar rule", px(t, firstToken(decl(t, css, ".bar", "border-bottom"))))
+
+	// Hero.
+	heroPad := boxPx(t, decl(t, css, ".hero", "padding"))
+	add("hero padding-top", heroPad.top)
+	eyebrow := px(t, decl(t, css, ".eyebrow", "font-size"))
+	add("eyebrow", eyebrow*1.5+boxPx(t, decl(t, css, ".eyebrow", "margin")).bottom)
+
+	headline := clampPx(t, decl(t, css, "h1", "font-size"), foldWidth)
+	lines := headlineLines(t)
+	add("headline", headline*num(t, decl(t, css, "h1", "line-height"))*float64(lines)+
+		boxPx(t, decl(t, css, "h1", "margin")).bottom)
+
+	id := identityBlock(t)
+	add("tagline", textHeight(t, ".lede", id.tagline))
+	add("pitch", textHeight(t, ".pitch", id.pitch)+boxPx(t, decl(t, css, ".pitch", "margin")).top)
+
+	add("hero padding-bottom", heroPad.bottom)
+	add("hero rule", px(t, firstToken(decl(t, css, ".hero", "border-bottom"))))
+
+	// The action row itself: the top of the button is what has to be reachable.
+	add("actions padding-top", boxPx(t, decl(t, css, ".actions", "padding")).top)
+	btnPad := boxPx(t, decl(t, css, ".btn", "padding"))
+	btnText := px(t, decl(t, css, ".btn", "font-size"))*num(t, decl(t, css, ".btn", "line-height")) +
+		px(t, decl(t, css, ".btn small", "font-size"))*num(t, decl(t, css, ".btn small", "line-height"))
+	add("download button", btnPad.top+btnPad.bottom+2*px(t, firstToken(decl(t, css, ".btn", "border")))+btnText)
+
+	fmt.Fprintf(&b, "  %-28s %7.1f", "total", total)
+	return total, b.String()
+}
+
+// textHeight is one paragraph's rendered height: its own type size and leading,
+// times the lines the text needs inside its max-width.
+func textHeight(t *testing.T, selector, text string) float64 {
+	t.Helper()
+	size := px(t, decl(t, css, selector, "font-size"))
+	leading := num(t, decl(t, css, selector, "line-height"))
+	width := em(t, decl(t, css, selector, "max-width"))
+	lines := math.Ceil(0.5 * float64(len([]rune(text))) / width)
+	return size * leading * lines
+}
+
+func headlineLines(t *testing.T) int {
+	t.Helper()
+	var ui struct {
+		Headline []string `json:"headline"`
+	}
+	readJSON(t, filepath.Join(repoRoot, "site-src", "ui.json"), &ui)
+	if len(ui.Headline) == 0 {
+		t.Fatal("site-src/ui.json carries no headline")
+	}
+	return len(ui.Headline)
+}
+
+// --- Criterion 2 -----------------------------------------------------------
+//
+// "Given the release marked latest is a given version, when Alice activates the
+// download button, then the browser fetches that release's Gropius.app.zip."
+
+func TestDownloadButtonResolvesTheLatestRelease(t *testing.T) {
+	href := attr(t, page, `<a class="btn btn-primary" href="([^"]+)"`)
+	want := regexp.MustCompile(`^https://[^"]+/releases/latest/download/Gropius\.app\.zip$`)
+	if !want.MatchString(href) {
+		t.Errorf("download href is %q; it must be the forge's latest-release redirect for Gropius.app.zip", href)
+	}
+	// The mechanism that keeps it true between releases: nothing on the page
+	// names a version, so there is nothing to go stale.
+	if m := regexp.MustCompile(`v[0-9]+\.[0-9]+\.[0-9]+`).FindString(page); m != "" {
+		t.Errorf("the page carries the version literal %q; a static page cannot keep one current", m)
+	}
+}
+
+func TestReleaseFactsRegionIsMarkedForItsOwner(t *testing.T) {
+	tmpl := read(t, filepath.Join(repoRoot, "site-src", "index.html.tmpl"))
+	for _, marker := range []string{"release facts: begin", "release facts: end", "itd-2609061353258535"} {
+		if !strings.Contains(tmpl, marker) {
+			t.Errorf("the template does not mark the release-facts region with %q; the record that fills it needs to find it", marker)
+		}
+	}
+}
+
+// --- Criterion 3 -----------------------------------------------------------
+//
+// "Given the page is registered as an identity surface, when the identity check
+// runs, then it reports no drift between the page and the canonical block."
+
+func TestPageIsAnIdentitySurfaceAndCarriesTheTagline(t *testing.T) {
+	var pos struct {
+		Surfaces []struct {
+			ID       string   `json:"id"`
+			Files    []string `json:"files"`
+			Kind     string   `json:"kind"`
+			Patterns []string `json:"patterns"`
+			Requires []string `json:"requires"`
+			Template string   `json:"template"`
+		} `json:"surfaces"`
+	}
+	readJSON(t, filepath.Join(repoRoot, ".abcd", "positioning.json"), &pos)
+
+	var surface *struct {
+		ID       string   `json:"id"`
+		Files    []string `json:"files"`
+		Kind     string   `json:"kind"`
+		Patterns []string `json:"patterns"`
+		Requires []string `json:"requires"`
+		Template string   `json:"template"`
+	}
+	for i := range pos.Surfaces {
+		if pos.Surfaces[i].ID == "landing-hero" {
+			surface = &pos.Surfaces[i]
+		}
+	}
+	if surface == nil {
+		t.Fatal(".abcd/positioning.json has no landing-hero surface; the page is not registered as one")
+	}
+	if len(surface.Requires) != 1 || surface.Requires[0] != "tagline" {
+		t.Errorf("landing-hero requires %v; the surfaces in this repository hold the tagline", surface.Requires)
+	}
+
+	// The identity check reports drift by pulling the surface's capture out of
+	// the file and comparing it with the block. Run the same patterns over the
+	// render, so `make test` fails before `abcd identity` would.
+	want := identityBlock(t).tagline
+	var found string
+	for _, p := range surface.Patterns {
+		re, err := regexp.Compile(p)
+		if err != nil {
+			t.Fatalf("landing-hero pattern %q does not compile: %v", p, err)
+		}
+		if m := re.FindStringSubmatch(page); m != nil {
+			found = strings.TrimSpace(m[1])
+			break
+		}
+	}
+	if found == "" {
+		t.Fatalf("no landing-hero pattern matches the rendered page; the identity check would report it absent")
+	}
+	if found != want {
+		t.Errorf("the page's tagline is\n  %q\nthe canonical block's is\n  %q", found, want)
+	}
+}
+
+// --- Criterion 4 -----------------------------------------------------------
+//
+// "Given the tagline in the canonical identity block is edited, when the page is
+// rendered again, then the page carries the new tagline."
+//
+// This is the criterion that distinguishes a render from a lint: nothing here
+// edits the page.
+
+func TestEditingTheIdentityBlockChangesThePage(t *testing.T) {
+	const altered = "A fixture tagline, to prove the page is rendered from the block rather than written into the template."
+	old := identityBlock(t).tagline
+
+	root := fixtureTree(t, func(path string, content string) string {
+		if filepath.Base(path) != "IDENTITY.md" {
+			return content
+		}
+		return strings.Replace(content, old, altered, 1)
+	})
+	out, err := renderTree(root, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.page, altered) {
+		t.Errorf("the page rendered from an edited identity block does not carry the edited tagline")
+	}
+	if strings.Contains(out.page, old) {
+		t.Errorf("the page still carries the tagline from the committed block; it is written into the page, not selected from the block")
+	}
+}
+
+// fixtureTree copies every file the manifest names into a temporary root,
+// passing each through mutate. Copying only what the manifest names is
+// deliberate: a file the fixture render needs but the manifest does not name
+// would show up here as a failure to render.
+func fixtureTree(t *testing.T, mutate func(path, content string) string) string {
+	t.Helper()
+	root := t.TempDir()
+	manifest := filepath.Join(".abcd", "site.json")
+	files := []string{manifest}
+	// Every "file": in the manifest, plus the template, the strings and the
+	// static inputs.
+	raw := read(t, filepath.Join(repoRoot, manifest))
+	for _, m := range regexp.MustCompile(`"(?:file|ui_strings|template)"\s*:\s*"([^"]+)"`).FindAllStringSubmatch(raw, -1) {
+		files = append(files, filepath.FromSlash(m[1]))
+	}
+	var man struct {
+		Static []string `json:"static"`
+	}
+	readJSON(t, filepath.Join(repoRoot, manifest), &man)
+	for _, s := range man.Static {
+		files = append(files, filepath.FromSlash(s))
+	}
+	for _, f := range files {
+		content := read(t, filepath.Join(repoRoot, f))
+		dst := filepath.Join(root, f)
+		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(dst, []byte(mutate(f, content)), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return root
+}
+
+// --- Criterion 5 -----------------------------------------------------------
+//
+// "Given the platform requirement printed on the page, when it is compared with
+// the minimum the shipped app bundle declares, then both say macOS 26."
+
+func TestPageAndBundleAgreeOnTheMinimumMacOS(t *testing.T) {
+	plist := read(t, filepath.Join(repoRoot, "build", "Info.plist"))
+	m := regexp.MustCompile(`<key>LSMinimumSystemVersion</key>\s*<string>([0-9.]+)</string>`).FindStringSubmatch(plist)
+	if m == nil {
+		t.Fatal("build/Info.plist declares no LSMinimumSystemVersion")
+	}
+	major := strings.SplitN(m[1], ".", 2)[0]
+	want := "Requires macOS " + major
+	if !strings.Contains(page, want) {
+		t.Errorf("the bundle declares LSMinimumSystemVersion %s, so the page must say %q; it does not", m[1], want)
+	}
+}
+
+// --- Criterion 6 -----------------------------------------------------------
+//
+// "Given the page rendered in its dark theme, when its four-form mark is
+// compared with the app icon source, then the arrangement and the four fill
+// colours are the same."
+//
+// Geometry is deliberately not compared: the icon lays 340px cells on a 1024
+// tile and the page's mark uses its own proportions, which is a design choice.
+// What must not differ is which shape sits in which quadrant and what colour it
+// is.
+
+func TestMarkMatchesTheAppIcon(t *testing.T) {
+	icon := shapesIn(t, read(t, filepath.Join(repoRoot, "build", "icon.svg")))
+	mark := shapesIn(t, between(t, page, `<svg class="mark"`, "</svg>"))
+
+	// The arrangement the icon is drawn in, asserted first so a change to the
+	// icon cannot quietly redefine what the page is held to.
+	for quadrant, kind := range map[string]string{
+		"top-left":     "polygon",
+		"top-right":    "rect",
+		"bottom-left":  "rect",
+		"bottom-right": "circle",
+	} {
+		if got := icon[quadrant].kind; got != kind {
+			t.Fatalf("build/icon.svg has a %s in the %s; the mark is a triangle, a grey square, a blue square and a red circle", got, quadrant)
+		}
+	}
+
+	for quadrant, want := range icon {
+		got, ok := mark[quadrant]
+		if !ok {
+			t.Errorf("the page's mark has nothing in the %s", quadrant)
+			continue
+		}
+		if got.kind != want.kind {
+			t.Errorf("%s: the icon has a %s, the page a %s", quadrant, want.kind, got.kind)
+		}
+		token := cssVar(got.fill)
+		if token == "" {
+			t.Errorf("%s: the page's fill is %q; it must be a theme token so the two themes stay separable", quadrant, got.fill)
+			continue
+		}
+		// Both dark blocks: the media query for the system setting and the
+		// explicit data-theme override. A value defined in only one of them
+		// leaves the other theme free to drift.
+		for _, block := range darkBlocks(t) {
+			value := cssValue(block.body, token)
+			if value == "" {
+				t.Errorf("%s: %s is not defined in %s", quadrant, token, block.name)
+				continue
+			}
+			if !strings.EqualFold(value, want.fill) {
+				t.Errorf("%s: %s is %s in %s; build/icon.svg fills it %s", quadrant, token, value, block.name, want.fill)
+			}
+		}
+	}
+}
+
+type shape struct {
+	kind string
+	fill string
+}
+
+// shapesIn maps each quadrant of an SVG to the shape drawn in it. A shape that
+// fills the whole tile (the icon's background) is not in a quadrant and is
+// skipped.
+func shapesIn(t *testing.T, svg string) map[string]shape {
+	t.Helper()
+	vb := regexp.MustCompile(`viewBox="0 0 ([0-9.]+) ([0-9.]+)"`).FindStringSubmatch(svg)
+	if vb == nil {
+		t.Fatal("the SVG has no viewBox")
+	}
+	w, h := num(t, vb[1]), num(t, vb[2])
+	out := map[string]shape{}
+	place := func(cx, cy float64, s shape) {
+		if cx == w/2 && cy == h/2 {
+			return // a full-tile background, not one of the four forms
+		}
+		vertical, horizontal := "top", "left"
+		if cy > h/2 {
+			vertical = "bottom"
+		}
+		if cx > w/2 {
+			horizontal = "right"
+		}
+		out[vertical+"-"+horizontal] = s
+	}
+	for _, m := range regexp.MustCompile(`<polygon points="([^"]+)"[^>]*fill="([^"]+)"`).FindAllStringSubmatch(svg, -1) {
+		var sx, sy float64
+		pts := strings.Fields(m[1])
+		for _, p := range pts {
+			xy := strings.SplitN(p, ",", 2)
+			sx += num(t, xy[0])
+			sy += num(t, xy[1])
+		}
+		place(sx/float64(len(pts)), sy/float64(len(pts)), shape{kind: "polygon", fill: m[2]})
+	}
+	for _, m := range regexp.MustCompile(`<rect ([^/>]*)/>`).FindAllStringSubmatch(svg, -1) {
+		// x and y default to 0 in SVG, and the icon's background rect omits both.
+		a := attrs(m[1])
+		place(coord(t, a["x"])+coord(t, a["width"])/2, coord(t, a["y"])+coord(t, a["height"])/2,
+			shape{kind: "rect", fill: a["fill"]})
+	}
+	for _, m := range regexp.MustCompile(`<circle ([^/>]*)/>`).FindAllStringSubmatch(svg, -1) {
+		a := attrs(m[1])
+		place(coord(t, a["cx"]), coord(t, a["cy"]), shape{kind: "circle", fill: a["fill"]})
+	}
+	if len(out) != 4 {
+		t.Fatalf("expected four forms, one per quadrant; found %d: %v", len(out), out)
+	}
+	return out
+}
+
+type namedBlock struct {
+	name string
+	body string
+}
+
+func darkBlocks(t *testing.T) []namedBlock {
+	t.Helper()
+	media := blockAfter(t, css, "@media (prefers-color-scheme: dark)")
+	return []namedBlock{
+		{name: `@media (prefers-color-scheme: dark)`, body: blockAfter(t, media, `:root:not([data-theme="light"])`)},
+		{name: `:root[data-theme="dark"]`, body: blockAfter(t, css, `:root[data-theme="dark"]`)},
+	}
+}
+
+// --- Criterion 7 -----------------------------------------------------------
+//
+// "Given the page is viewed at a 375-pixel-wide viewport, when it renders, then
+// nothing scrolls horizontally and the download button is the first action."
+
+func TestNothingScrollsSidewaysOnAPhone(t *testing.T) {
+	if !strings.Contains(page, `<meta name="viewport" content="width=device-width, initial-scale=1">`) {
+		t.Error("the page has no viewport meta; a phone would render it at desktop width and scale it down")
+	}
+	if got := decl(t, css, ".snippet", "overflow-x"); got != "auto" {
+		t.Errorf(".snippet overflow-x is %q; the install one-liner is wider than a phone and must scroll inside its own box", got)
+	}
+	if got := decl(t, css, "img", "max-width"); got != "100%" {
+		t.Errorf("img max-width is %q; an image wider than the viewport would push the page sideways", got)
+	}
+	// A fixed width above a phone's viewport is the other way a page starts
+	// scrolling. max-width is a ceiling, not a floor, so it is not one.
+	for _, m := range regexp.MustCompile(`(?m)(?:^|[\s;{])(?:min-)?width:\s*([0-9.]+)px`).FindAllStringSubmatch(css, -1) {
+		if num(t, m[1]) > 390 {
+			t.Errorf("the stylesheet fixes a width of %spx; nothing above 390px may be fixed", m[1])
+		}
+	}
+	for _, m := range regexp.MustCompile(`style="[^"]*width:\s*([0-9.]+)px`).FindAllStringSubmatch(page, -1) {
+		if num(t, m[1]) > 390 {
+			t.Errorf("the page sets an inline width of %spx", m[1])
+		}
+	}
+
+	// The download button is the first thing in the action row, on every
+	// viewport: the row is source order, and the phone layout stacks it.
+	row := between(t, page, `class="cta-row"`, "</div>")
+	first := regexp.MustCompile(`(?s)<a class="([^"]+)"`).FindStringSubmatch(row)
+	if first == nil {
+		t.Fatal("the action row holds no links")
+	}
+	if !strings.Contains(first[1], "btn-primary") {
+		t.Errorf("the first action is %q; the download button comes first", first[1])
+	}
+}
+
+// --- helpers ---------------------------------------------------------------
+
+type identityLines struct {
+	title   string
+	tagline string
+	pitch   string
+}
+
+func identityBlock(t *testing.T) identityLines {
+	t.Helper()
+	var man struct {
+		Identity struct {
+			File string `json:"file"`
+		} `json:"identity"`
+	}
+	readJSON(t, filepath.Join(repoRoot, ".abcd", "site.json"), &man)
+	md := read(t, filepath.Join(repoRoot, filepath.FromSlash(man.Identity.File)))
+	get := func(name string) string {
+		m := regexp.MustCompile(`(?m)^- \*\*` + name + `:\*\*\s*(.+?)\s*$`).FindStringSubmatch(md)
+		if m == nil {
+			t.Fatalf("the identity block carries no %s", name)
+		}
+		return m[1]
+	}
+	return identityLines{title: get("Title"), tagline: get("Tagline"), pitch: get("Pitch")}
+}
+
+func read(t *testing.T, path string) string {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
+}
+
+func readJSON(t *testing.T, path string, v any) {
+	t.Helper()
+	if err := json.Unmarshal([]byte(read(t, path)), v); err != nil {
+		t.Fatalf("%s: %v", path, err)
+	}
+}
+
+func attr(t *testing.T, s, pattern string) string {
+	t.Helper()
+	m := regexp.MustCompile(pattern).FindStringSubmatch(s)
+	if m == nil {
+		t.Fatalf("no match for %s", pattern)
+	}
+	return m[1]
+}
+
+func attrs(s string) map[string]string {
+	out := map[string]string{}
+	for _, m := range regexp.MustCompile(`([a-zA-Z-]+)="([^"]*)"`).FindAllStringSubmatch(s, -1) {
+		out[m[1]] = m[2]
+	}
+	return out
+}
+
+func between(t *testing.T, s, from, to string) string {
+	t.Helper()
+	i := strings.Index(s, from)
+	if i < 0 {
+		t.Fatalf("no %q", from)
+	}
+	rest := s[i:]
+	j := strings.Index(rest, to)
+	if j < 0 {
+		t.Fatalf("no %q after %q", to, from)
+	}
+	return rest[:j+len(to)]
+}
+
+// decl returns one declaration of one top-level rule. Rules in this stylesheet
+// start at column 0, so the selector is matched at the start of a line and
+// ".bar" does not match ".bar nav".
+func decl(t *testing.T, style, selector, property string) string {
+	t.Helper()
+	body := blockAfter(t, style, selector)
+	m := regexp.MustCompile(`(?m)^\s*` + regexp.QuoteMeta(property) + `:\s*([^;]+);`).FindStringSubmatch(body)
+	if m == nil {
+		t.Fatalf("%s has no %s", selector, property)
+	}
+	return strings.TrimSpace(m[1])
+}
+
+// blockAfter returns the braced block that follows marker, brace-matched so a
+// nested rule (a media query's own contents) comes back whole.
+func blockAfter(t *testing.T, s, marker string) string {
+	t.Helper()
+	loc := regexp.MustCompile(`(?m)^\s*` + regexp.QuoteMeta(marker) + `\s*\{`).FindStringIndex(s)
+	if loc == nil {
+		t.Fatalf("no rule for %s", marker)
+	}
+	depth, start := 0, loc[1]-1
+	for i := start; i < len(s); i++ {
+		switch s[i] {
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				return s[start+1 : i]
+			}
+		}
+	}
+	t.Fatalf("unbalanced braces after %s", marker)
+	return ""
+}
+
+func cssValue(block, name string) string {
+	m := regexp.MustCompile(`(?m)^\s*` + regexp.QuoteMeta(name) + `:\s*([^;]+);`).FindStringSubmatch(block)
+	if m == nil {
+		return ""
+	}
+	return strings.TrimSpace(m[1])
+}
+
+func cssVar(fill string) string {
+	m := regexp.MustCompile(`^var\((--[a-z-]+)\)$`).FindStringSubmatch(strings.TrimSpace(fill))
+	if m == nil {
+		return ""
+	}
+	return m[1]
+}
+
+type box struct{ top, right, bottom, left float64 }
+
+// boxPx reads a padding or margin shorthand.
+func boxPx(t *testing.T, v string) box {
+	t.Helper()
+	f := strings.Fields(v)
+	get := func(i int) float64 {
+		if strings.HasSuffix(f[i], "px") {
+			return px(t, f[i])
+		}
+		return 0 // "0" and "auto" contribute nothing to the fold
+	}
+	switch len(f) {
+	case 1:
+		return box{get(0), get(0), get(0), get(0)}
+	case 2:
+		return box{get(0), get(1), get(0), get(1)}
+	case 3:
+		return box{get(0), get(1), get(2), get(1)}
+	case 4:
+		return box{get(0), get(1), get(2), get(3)}
+	}
+	t.Fatalf("cannot read the box shorthand %q", v)
+	return box{}
+}
+
+func firstToken(v string) string { return strings.Fields(v)[0] }
+
+func px(t *testing.T, v string) float64 {
+	t.Helper()
+	return num(t, strings.TrimSuffix(strings.TrimSpace(v), "px"))
+}
+
+func em(t *testing.T, v string) float64 {
+	t.Helper()
+	return num(t, strings.TrimSuffix(strings.TrimSpace(v), "em"))
+}
+
+// coord reads an SVG coordinate attribute; an absent one is 0, which is what
+// SVG itself does with a missing x or y.
+func coord(t *testing.T, v string) float64 {
+	t.Helper()
+	if strings.TrimSpace(v) == "" {
+		return 0
+	}
+	return num(t, v)
+}
+
+func num(t *testing.T, v string) float64 {
+	t.Helper()
+	f, err := strconv.ParseFloat(strings.TrimSpace(v), 64)
+	if err != nil {
+		t.Fatalf("not a number: %q", v)
+	}
+	return f
+}
+
+// clampPx evaluates clamp(min, preferred, max) at one viewport width, which is
+// what the browser does before anything else on the page has a height.
+func clampPx(t *testing.T, v string, viewport float64) float64 {
+	t.Helper()
+	m := regexp.MustCompile(`^clamp\(([^,]+),([^,]+),([^)]+)\)$`).FindStringSubmatch(strings.ReplaceAll(v, " ", ""))
+	if m == nil {
+		return px(t, v)
+	}
+	lo, hi := px(t, m[1]), px(t, m[3])
+	pref := m[2]
+	var got float64
+	switch {
+	case strings.HasSuffix(pref, "vw"):
+		got = num(t, strings.TrimSuffix(pref, "vw")) / 100 * viewport
+	default:
+		got = px(t, pref)
+	}
+	return math.Min(math.Max(got, lo), hi)
+}
