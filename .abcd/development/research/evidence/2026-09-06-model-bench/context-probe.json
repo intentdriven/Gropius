@@ -1,0 +1,148 @@
+{
+ "mlx-community/Qwen3-Coder-Next-4bit": {
+  "probes": [
+   {
+    "ok": true,
+    "prompt_tokens": 65231,
+    "prefill_s": 79.6,
+    "total_s": 79.6,
+    "target": 66048
+   },
+   {
+    "ok": true,
+    "prompt_tokens": 97308,
+    "prefill_s": 149.7,
+    "total_s": 149.7,
+    "target": 98560
+   },
+   {
+    "ok": true,
+    "prompt_tokens": 113347,
+    "prefill_s": 191.8,
+    "total_s": 191.8,
+    "target": 114816
+   },
+   {
+    "ok": true,
+    "prompt_tokens": 121366,
+    "prefill_s": 213.9,
+    "total_s": 213.9,
+    "target": 122944
+   }
+  ],
+  "load_first_call_s": 8.9,
+  "max_verified_prompt_tokens": 121366,
+  "max_target_tokens": 122944,
+  "failure_at_target": 131072,
+  "failure_error": null
+ },
+ "mlx-community/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-4bit": {
+  "probes": [
+   {
+    "ok": true,
+    "prompt_tokens": 64872,
+    "prefill_s": 58.6,
+    "total_s": 58.6,
+    "target": 66048
+   },
+   {
+    "ok": true,
+    "prompt_tokens": 96776,
+    "prefill_s": 103.6,
+    "total_s": 103.6,
+    "target": 98560
+   },
+   {
+    "ok": true,
+    "prompt_tokens": 112758,
+    "prefill_s": 127.4,
+    "total_s": 127.4,
+    "target": 114816
+   },
+   {
+    "ok": true,
+    "prompt_tokens": 120719,
+    "prefill_s": 141.1,
+    "total_s": 141.1,
+    "target": 122944
+   }
+  ],
+  "load_first_call_s": 12.9,
+  "max_verified_prompt_tokens": 120719,
+  "max_target_tokens": 122944,
+  "failure_at_target": 131072,
+  "failure_error": null
+ },
+ "mlx-community/GLM-4.7-Flash-8bit": {
+  "probes": [
+   {
+    "ok": true,
+    "prompt_tokens": 65688,
+    "prefill_s": 293.6,
+    "total_s": 293.6,
+    "target": 66048
+   },
+   {
+    "ok": true,
+    "prompt_tokens": 98056,
+    "prefill_s": 344.3,
+    "total_s": 344.3,
+    "target": 98560
+   },
+   {
+    "ok": true,
+    "prompt_tokens": 114211,
+    "prefill_s": 226.1,
+    "total_s": 226.1,
+    "target": 114816
+   },
+   {
+    "ok": true,
+    "prompt_tokens": 122347,
+    "prefill_s": 127.1,
+    "total_s": 127.1,
+    "target": 122944
+   }
+  ],
+  "load_first_call_s": 8.7,
+  "max_verified_prompt_tokens": 122347,
+  "max_target_tokens": 122944,
+  "failure_at_target": 131072,
+  "failure_error": null
+ },
+ "mlx-community/Qwen3.8-27B-8bit": {
+  "probes": [
+   {
+    "ok": true,
+    "prompt_tokens": 62481,
+    "prefill_s": 309.0,
+    "total_s": 309.0,
+    "target": 66048
+   },
+   {
+    "ok": true,
+    "prompt_tokens": 93222,
+    "prefill_s": 516.6,
+    "total_s": 516.6,
+    "target": 98560
+   },
+   {
+    "ok": false,
+    "error": "HTTP 502: {\"error\":{\"code\":502,\"message\":\"the model server did not respond\",\"type\":\"invalid_request_error\"}}\n",
+    "total_s": 600.0,
+    "target": 114816
+   },
+   {
+    "ok": false,
+    "error": "HTTP 502: {\"error\":{\"code\":502,\"message\":\"the model server did not respond\",\"type\":\"invalid_request_error\"}}\n",
+    "total_s": 600.0,
+    "target": 106688
+   }
+  ],
+  "load_first_call_s": 18.4,
+  "max_verified_prompt_tokens": 93222,
+  "max_target_tokens": 98560,
+  "failure_at_target": 106688,
+  "failure_error": "HTTP 502: {\"error\":{\"code\":502,\"message\":\"the model server did not respond\",\"type\":\"invalid_request_error\"}}\n"
+ }
+}
