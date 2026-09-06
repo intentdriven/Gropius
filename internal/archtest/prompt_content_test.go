@@ -43,8 +43,16 @@ func TestOnlyTheMergeReadsPromptContent(t *testing.T) {
 			return err
 		}
 		if d.IsDir() {
+			// Dot-directories hold no shipping Go source, and one of them can
+			// hold a whole second copy of the tree: a git worktree checked out
+			// under .claude/ would otherwise be scanned as if its files were
+			// this module's, so a branch someone else is working on could fail
+			// this test here.
+			if path != repoRoot && strings.HasPrefix(d.Name(), ".") {
+				return fs.SkipDir
+			}
 			switch d.Name() {
-			case ".git", "bin", "dist", "client", "build":
+			case "bin", "dist", "client", "build":
 				return fs.SkipDir
 			}
 			return nil
