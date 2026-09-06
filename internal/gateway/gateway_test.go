@@ -1382,8 +1382,9 @@ func TestListModelsDecidesOnTheConfigItWasAdmittedUnder(t *testing.T) {
 	g := New(Options{ConfigFunc: cfgFn, Pool: pool, Models: models})
 
 	entries, body := listModelsEntries(t, g.Handler(), "")
+	entry := entryByID(t, entries, "org/warm")
 	for _, name := range []string{"state", "in_flight", "last_used"} {
-		if _, ok := entries[0][name]; ok {
+		if _, ok := entry[name]; ok {
 			t.Errorf("a request admitted with no key configured was served %q: %s", name, body)
 		}
 	}
@@ -1391,7 +1392,7 @@ func TestListModelsDecidesOnTheConfigItWasAdmittedUnder(t *testing.T) {
 
 // The projection allow-lists the state's *value*, not only the field names.
 // Pool is an interface, so the string in Resident.State is not this package's
-// to trust: a implementation that leaves it unset would otherwise publish
+// to trust: an implementation that leaves it unset would otherwise publish
 // "state": "", a fourth value the reference page does not define and no client
 // can act on. An unrecognised state means the listing cannot say the model is
 // warm, which is exactly what not_loaded says.
@@ -1404,5 +1405,24 @@ func TestListModelsRefusesAnUnknownResidencyState(t *testing.T) {
 	entries, _ := listModelsEntries(t, h, "bh_secret")
 	if got := entryByID(t, entries, "org/warm")["state"]; got != "not_loaded" {
 		t.Errorf("state = %v for an unrecognised pool state, want %q", got, "not_loaded")
+	}
+}
+
+// last_used is the pool's record for a model it is holding, so it is there
+// exactly while the model is loaded and goes when the model does. A model that
+// was hammered a minute ago and has since been evicted carries no last-used
+// time, and a client must not be able to read that as "loaded and idle".
+func TestListModelsOmitsLastUsedForAnEvictedModel(t *testing.T) {
+	// The pool is holding nothing: org/warm has been evicted since its last
+	// request, which is the ordinary state of a model on a busy Mac.
+	h := residencyGateway(t, "bh_secret")
+
+	entries, _ := listModelsEntries(t, h, "bh_secret")
+	entry := entryByID(t, entries, "org/warm")
+	if entry["state"] != "not_loaded" {
+		t.Fatalf("state = %v, want %q", entry["state"], "not_loaded")
+	}
+	if v, ok := entry["last_used"]; ok {
+		t.Errorf("last_used = %v for a model the pool is no longer holding, want the field to be absent", v)
 	}
 }

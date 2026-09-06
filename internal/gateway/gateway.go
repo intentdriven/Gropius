@@ -233,15 +233,20 @@ func (g *Gateway) handleListModels(w http.ResponseWriter, r *http.Request) {
 			entry["max_model_len"] = m.ContextLength
 		}
 		if residency != nil {
-			res, loaded := residency[m.RepoID]
-			addResidency(entry, res, loaded)
+			addResidency(entry, residency[m.RepoID])
 		}
 		data = append(data, entry)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"object": "list", "data": data})
 }
 
-// addResidency writes the residency fields onto one models-list entry.
+// addResidency writes the residency fields onto one models-list entry, from
+// the pool's record for that model.
+//
+// A model the pool is not holding is passed the zero Resident, and every field
+// below then reports it correctly without a special case: an empty state is not
+// one of the two the pool defines and so projects as not_loaded, nothing is in
+// flight, and there is no last-used time to report.
 //
 // It is deliberately an allow-list of named fields rather than a marshalling of
 // runtime.Resident: that struct carries the model server's loopback port and
@@ -252,25 +257,24 @@ func (g *Gateway) handleListModels(w http.ResponseWriter, r *http.Request) {
 // The values are a snapshot taken while the list is built. Nothing here holds a
 // model warm on the client's behalf: by the time the client reads them another
 // client's request may have evicted the model.
-func addResidency(entry map[string]any, res runtime.Resident, loaded bool) {
+func addResidency(entry map[string]any, res runtime.Resident) {
 	// The value is allow-listed too, not only the field names. Pool is an
 	// interface, so the string in Resident.State is not this package's to
 	// trust; anything but the two the pool defines means the listing cannot
 	// say the model is warm, which is what not_loaded says.
 	state := runtime.ResidencyNotLoaded
-	if loaded {
-		switch res.State {
-		case runtime.ResidencyLoaded, runtime.ResidencyLoading:
-			state = res.State
-		}
+	switch res.State {
+	case runtime.ResidencyLoaded, runtime.ResidencyLoading:
+		state = res.State
 	}
 	entry["state"] = string(state)
 	// Zero for a model that is not loaded, which is the true count.
 	entry["in_flight"] = res.InFlight
-	// A model never used in this process has no last-used time. The field is
-	// absent rather than zero, which a client would read as 1970 rather than
-	// as "unknown".
-	if loaded && !res.LastUsed.IsZero() {
+	// The last-used time lives on the pool's entry for the model, so it is
+	// there exactly while the model is loaded and goes when the model is
+	// evicted, unloaded or reaped. Absent rather than zero, which a client
+	// would read as 1970 rather than as "unknown".
+	if !res.LastUsed.IsZero() {
 		entry["last_used"] = res.LastUsed.Unix()
 	}
 }

@@ -824,39 +824,46 @@ func TestHumanBytes(t *testing.T) {
 // neither warm nor cold: a caller told "loaded" would send work and wait for
 // the load anyway, one told "not loaded" might start a second, competing load.
 // Loading means exactly "the entry is in the pool, its readiness probe has not
-// answered yet"; the read must not block on that probe.
+// answered yet".
+//
+// The read must not wait on that probe, and an implementation that did would
+// not merely be slow: Resident holds p.mu, and waitReady needs p.mu to close
+// the ready channel, so waiting inside the lock deadlocks the pool. This test
+// therefore hangs rather than fails on that bug, and the package timeout is
+// what reports it. A wall-clock threshold here would only catch a wait taken
+// outside the lock, at the price of failing spuriously on a loaded machine.
 func TestResidentDistinguishesLoadingFromLoaded(t *testing.T) {
 	l := newFakeLauncher()
-	l.loadDelay = 300 * time.Millisecond
+	// Long enough that sampling the loading window is not a race with a
+	// scheduling stall, and still well inside newTestPool's ReadyTimeout.
+	l.loadDelay = time.Second
 	src := &fakeSource{models: map[string]int64{"org/m": 1 << 20}}
 	p := newTestPool(t, l, src, PoolOptions{MaxResidentBytes: 1 << 30})
 
-	acquired := make(chan struct{})
+	// Buffered, and the goroutine never touches t: a Fatalf below ends the
+	// test without leaving this goroutine to log after it has completed.
+	acquired := make(chan error, 1)
 	go func() {
-		defer close(acquired)
 		_, release, err := p.Acquire(context.Background(), "org/m")
-		if err != nil {
-			t.Errorf("Acquire: %v", err)
-			return
+		if err == nil {
+			release()
 		}
-		release()
+		acquired <- err
 	}()
 
-	// The load is under way and the probe has not answered.
-	deadline := time.Now().Add(2 * time.Second)
+	// The entry appears the moment Launch returns, well before the probe
+	// answers, so this samples the loading window.
+	deadline := time.Now().Add(5 * time.Second)
 	var loading []Resident
 	for time.Now().Before(deadline) {
-		start := time.Now()
-		loading = p.Resident()
-		// A read that waited on the readiness probe would be the bug: the
-		// answer is already known without it.
-		if took := time.Since(start); took > 100*time.Millisecond {
-			t.Fatalf("Resident() blocked for %s during a load", took)
-		}
-		if len(loading) == 1 {
+		if loading = p.Resident(); len(loading) == 1 {
 			break
 		}
-		time.Sleep(5 * time.Millisecond)
+		select {
+		case err := <-acquired:
+			t.Fatalf("the load finished before the pool ever reported an entry (Acquire: %v)", err)
+		case <-time.After(5 * time.Millisecond):
+		}
 	}
 	if len(loading) != 1 {
 		t.Fatalf("Resident() = %+v during a load, want the loading entry", loading)
@@ -865,7 +872,9 @@ func TestResidentDistinguishesLoadingFromLoaded(t *testing.T) {
 		t.Errorf("State = %q while the model was loading, want %q", loading[0].State, ResidencyLoading)
 	}
 
-	<-acquired
+	if err := <-acquired; err != nil {
+		t.Fatalf("Acquire: %v", err)
+	}
 
 	loaded := p.Resident()
 	if len(loaded) != 1 {

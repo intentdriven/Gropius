@@ -51,9 +51,10 @@ const (
 	ResidencyLoaded ResidencyState = "loaded"
 )
 
-// Resident describes a model the pool is holding, for the UI and for the
-// models list. An entry exists from the moment the server process is launched,
-// so State is what separates a model that can serve now from one still loading.
+// Resident describes a model the pool is holding. An entry exists from the
+// moment the server process is launched, so State is what separates a model
+// that can serve now from one still loading; the control panel shows the rest
+// of these fields on loopback and does not read State yet.
 type Resident struct {
 	RepoID   string         `json:"repo_id"`
 	State    ResidencyState `json:"state"`

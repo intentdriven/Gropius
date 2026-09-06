@@ -40,7 +40,7 @@ curl http://localhost:11535/v1/models
 | `max_model_len` | The same figure again, under the name vLLM-derived clients read. |
 | `state` | Whether the model is loaded, still loading, or not loaded. Only on an install with an API key. See below. |
 | `in_flight` | How many requests that model is already handling. Only on an install with an API key. |
-| `last_used` | Unix time of the last request for that model. Only on an install with an API key, and absent for a model no request has reached since the server started. |
+| `last_used` | Unix time of the last request for that model. Only on an install with an API key, and only while the model is loaded. |
 
 ## The context figure
 
@@ -132,9 +132,13 @@ On an install with a key, an entry reads:
 included, and is `0` for a model that is not loaded. Use it to spread work
 across two warm models rather than queueing behind one.
 
-`last_used` is Unix time in seconds, and is absent — not zero — for a model no
-request has reached since the server started. Read an absent value as
-"unknown", never as "used in 1970".
+`last_used` is Unix time in seconds. It is the loaded model's own record, so it
+is there exactly while the model is loaded and goes when the model does: a
+model that was busy a minute ago and has since been evicted reports
+`not_loaded` and no `last_used` at all. The field is absent rather than zero,
+which a client would read as 1970 rather than as "unknown". Read it as "this
+warm model was last touched then", never as "this model has not been used
+since".
 
 **A snapshot, not a reservation.** The values describe the moment the list is
 built. Reading `loaded` holds nothing warm on your behalf: another client's
@@ -150,9 +154,9 @@ Residency is worth reading because it changes, and it changes under these
 rules.
 
 - Gropius runs one model server per model and keeps as many resident as its
-  memory budget allows. The budget defaults to 60% of this Mac's physical RAM,
-  which leaves the rest for everything else on a machine whose GPU and CPU
-  share one pool of memory.
+  memory budget allows. The budget is 60% of this Mac's physical RAM, which
+  leaves the rest for everything else on a machine whose GPU and CPU share one
+  pool of memory. There is no setting for it.
 - Each loaded model is charged 1.2 times its size on disk, the weights plus
   headroom for the cache and activations a running model needs.
 - A request for a model that does not fit in what is left unloads the
