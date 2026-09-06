@@ -15,17 +15,12 @@ set -euo pipefail
 
 REPO="intentdriven/Gropius"
 
-# Public half of the minisign key the release workflow signs SHA256SUMS.txt with.
-# Safe to publish — it only verifies. The private half lives solely in the repo's
-# MINISIGN_SECRET_KEY CI secret. If this is still the placeholder, signing has not
-# been set up yet and the installer refuses rather than pretend to verify.
-#
-# One-time setup (run once, locally):
-#   minisign -G -W -p minisign.pub -s minisign.key   # -W = passwordless key for CI
-#   gh secret set MINISIGN_SECRET_KEY < minisign.key  # add the private key to the repo
-#   # then paste the SECOND line of minisign.pub (the RW... string) below, commit,
-#   # and cut a release so the signed SHA256SUMS.txt is published.
-MINISIGN_PUBKEY="RWRu9Q1BSiXUYoRkMdeRsed/fwzd+puRnJ0MvYMck3Ef3VWsuIRkXO92"
+# Trust model: the download is checked against the SHA256SUMS.txt published on
+# the same GitHub Release, and every asset carries a GitHub build-provenance
+# attestation binding it to the release workflow run. There is no offline
+# signing key. To check provenance yourself before running this script:
+#   gh attestation verify Gropius.app.zip --repo intentdriven/Gropius
+# Building from source (see the README) is the escape hatch.
 
 mode="${1:-server}"
 case "$mode" in
@@ -66,7 +61,11 @@ zip="$tmp/$ASSET"
 # first and falling back to gh (transient errors, or a private fork).
 fetch() {
 	local name="$1" dest="$2"
-	if curl -fsSL -o "$dest" "https://github.com/$REPO/releases/latest/download/$name" 2>/dev/null; then
+	# -q first: ignore any curlrc that could re-point the connection while the
+	# URL still reads github.com; --proto pins HTTPS end to end, redirects
+	# included. The asset and the checksums that verify it come from this same
+	# origin, so the transport is the thing to pin.
+	if curl -q --proto =https --proto-redir =https -fsSL -o "$dest" "https://github.com/$REPO/releases/latest/download/$name" 2>/dev/null; then
 		return 0
 	elif command -v gh >/dev/null 2>&1; then
 		echo "Direct download of $name failed — retrying via gh…"
@@ -79,26 +78,15 @@ fetch() {
 echo "Downloading $APP…"
 fetch "$ASSET" "$zip"
 
-# Verify the download is exactly what the release workflow built and signed,
-# BEFORE unpacking it, clearing its quarantine, or copying it into /Applications.
-# The chain: minisign proves SHA256SUMS.txt was signed by the repo's private key
-# (which never leaves CI); the checksum then proves this .zip matches that file.
-if [ "${MINISIGN_PUBKEY#RWQPLACEHOLDER}" = "$MINISIGN_PUBKEY" ]; then
-	command -v minisign >/dev/null 2>&1 ||
-		die "minisign is required to verify the download. Install it with: brew install minisign"
-	echo "Verifying signature…"
-	fetch "SHA256SUMS.txt" "$tmp/SHA256SUMS.txt"
-	fetch "SHA256SUMS.txt.minisig" "$tmp/SHA256SUMS.txt.minisig"
-	minisign -Vm "$tmp/SHA256SUMS.txt" -x "$tmp/SHA256SUMS.txt.minisig" -P "$MINISIGN_PUBKEY" >/dev/null 2>&1 ||
-		die "signature verification FAILED — the download does not match the repo's signing key. Refusing to install."
-	# The signature covers SHA256SUMS.txt; now confirm THIS asset's hash is the
-	# one it vouches for. --ignore-missing skips the other app's line.
-	( cd "$tmp" && shasum -a 256 -c --ignore-missing SHA256SUMS.txt ) >/dev/null 2>&1 ||
-		die "checksum mismatch for $ASSET — the download is corrupt or tampered. Refusing to install."
-	echo "Signature and checksum OK."
-else
-	die "this installer has no signing key configured yet (MINISIGN_PUBKEY is a placeholder). Set up minisign signing — see the comments at the top of install.sh — before distributing it."
-fi
+# Verify the download is exactly what the release workflow built, BEFORE
+# unpacking it, clearing its quarantine, or copying it into /Applications. The
+# checksums file comes from the same Release as the asset; --ignore-missing
+# skips the other app's line.
+echo "Verifying checksum…"
+fetch "SHA256SUMS.txt" "$tmp/SHA256SUMS.txt"
+( cd "$tmp" && shasum -a 256 -c --ignore-missing SHA256SUMS.txt ) >/dev/null 2>&1 ||
+	die "checksum mismatch for $ASSET — the download is corrupt or tampered. Refusing to install."
+echo "Checksum OK."
 
 echo "Installing $APP.app to /Applications…"
 ditto -x -k "$zip" "$tmp/extract" || die "could not unpack $ASSET."
