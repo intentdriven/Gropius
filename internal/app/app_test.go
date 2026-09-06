@@ -502,3 +502,107 @@ func TestHumanReadableErrorForMissingModel(t *testing.T) {
 		t.Errorf("error = %q, want a plain-English message", got)
 	}
 }
+
+// In shared-cache mode registry.json is created lazily in a group-writable
+// root, so another local account can plant one whose `path` names a directory
+// this account owns. Delete must never hand a stored path to os.RemoveAll; the
+// directory to remove is recomputed from the validated repo id.
+func TestDeleteNeverRemovesPathTakenFromPlantedRegistry(t *testing.T) {
+	paths := config.NewPaths(t.TempDir())
+	victim := t.TempDir()
+	keep := filepath.Join(victim, "keep.txt")
+	if err := os.WriteFile(keep, []byte("precious"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(paths.Root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	planted := fmt.Sprintf(`[{"repo_id":"org/victim","path":%q,"state":"ready","bytes":1}]`, victim)
+	if err := os.WriteFile(paths.State, []byte(planted), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	a, err := New(Options{Paths: paths, Config: config.Default()})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	t.Cleanup(func() { a.Close() })
+
+	if err := a.Delete("org/victim"); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	if _, err := os.Stat(keep); err != nil {
+		t.Fatalf("Delete followed the planted path and removed the victim directory: %v", err)
+	}
+	if _, err := a.Registry.Get("org/victim"); !errors.Is(err, registry.ErrNotFound) {
+		t.Errorf("entry still present after Delete: %v", err)
+	}
+}
+
+// A re-cased id names the same model (the Hub redirects case variants and
+// APFS aliases the directory), so a download of it must reuse the existing
+// entry rather than mint a second row over the same directory — whose later
+// removal would delete the original model's weights.
+func TestDownloadOfReCasedIDReusesExistingEntry(t *testing.T) {
+	a := newTestApp(t)
+	hub := fakeHub(t)
+	a.Hub.BaseURL = hub.URL
+	if err := a.Download("org/repo"); err != nil {
+		t.Fatalf("Download: %v", err)
+	}
+	waitFor(t, "the model to become ready", func() bool {
+		m, err := a.Registry.Get("org/repo")
+		return err == nil && m.Ready()
+	})
+
+	broken := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "gone", http.StatusNotFound)
+	}))
+	defer broken.Close()
+	a.Hub.BaseURL = broken.URL
+
+	var dlErr error
+	waitFor(t, "the re-cased download to start", func() bool {
+		dlErr = a.Download("Org/Repo")
+		return !errors.Is(dlErr, ErrAlreadyDownloading)
+	})
+	if dlErr != nil {
+		t.Fatalf("Download: %v", dlErr)
+	}
+	waitFor(t, "the attempt to settle", func() bool {
+		m, err := a.Registry.Get("org/repo")
+		return err == nil && m.State != registry.StateDownloading
+	})
+
+	got := a.Registry.List()
+	if len(got) != 1 || got[0].RepoID != "org/repo" || got[0].State != registry.StateReady {
+		t.Errorf("registry after re-cased download = %+v; want the one canonical ready entry", got)
+	}
+}
+
+// The in-flight downloads map folds case too, so a case variant of a running
+// download is refused as already downloading and is reported under the
+// canonical spelling.
+func TestDownloadRejectsCaseVariantOfInFlightDownload(t *testing.T) {
+	a := newTestApp(t)
+	release := make(chan struct{})
+	slow := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-release:
+		case <-r.Context().Done():
+		}
+		http.Error(w, "gone", http.StatusNotFound)
+	}))
+	defer slow.Close()
+	defer close(release)
+	a.Hub.BaseURL = slow.URL
+
+	if err := a.Download("org/repo"); err != nil {
+		t.Fatalf("Download: %v", err)
+	}
+	if err := a.Download("ORG/REPO"); !errors.Is(err, ErrAlreadyDownloading) {
+		t.Errorf("case variant of an in-flight download returned %v, want ErrAlreadyDownloading", err)
+	}
+	if ids := a.Downloading(); len(ids) != 1 || ids[0] != "org/repo" {
+		t.Errorf("Downloading() = %v, want [org/repo]", ids)
+	}
+}

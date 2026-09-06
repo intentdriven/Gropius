@@ -45,3 +45,9 @@ go.work.sum
 
 # Per-machine working state (the gitignored local tier described in AGENTS.md).
 /.abcd/.work.local/
+
+# BEGIN ABCD
+# abcd-managed block — do not hand-edit. Run /abcd:ahoy to refresh.
+.abcd/.work.local/
+/memory/
+# END ABCD

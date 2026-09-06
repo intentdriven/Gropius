@@ -2,8 +2,13 @@ package main
 
 import (
 	"net"
+	"os"
+	"path/filepath"
+	"syscall"
 	"testing"
 	"time"
+
+	"github.com/intentdriven/Gropius/internal/config"
 )
 
 // freeAddr returns an address that was momentarily bound and then released, so
@@ -111,5 +116,65 @@ func TestAcquireListenerGivesUpAfterWait(t *testing.T) {
 	}
 	if claimed || ln != nil {
 		t.Fatalf("claimed=%v ln=%v, want no listener after the wait expires", claimed, ln)
+	}
+}
+
+// instance.token sits in the data root, which in shared mode is group-writable
+// and where a peer can plant a FIFO (or replace its own 0600 token with one).
+// readInstanceToken runs inside acquireListener's holder probe; a blocking
+// open would turn a fast, logged "foreign holder" refusal into a silent hang
+// past the probe's deadline.
+func TestReadInstanceTokenDoesNotBlockOnFIFO(t *testing.T) {
+	paths := config.NewPaths(t.TempDir())
+	path := instanceTokenPath(paths)
+	if err := syscall.Mkfifo(path, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if fd, err := syscall.Open(path, syscall.O_WRONLY|syscall.O_NONBLOCK, 0); err == nil {
+			syscall.Close(fd)
+		}
+	})
+	done := make(chan string, 1)
+	go func() { done <- readInstanceToken(paths) }()
+	select {
+	case got := <-done:
+		if got != "" {
+			t.Errorf("a FIFO token must read as no token, got %q", got)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("readInstanceToken blocked on a FIFO planted as instance.token")
+	}
+}
+
+// A symlinked token is never something writeInstanceToken produced (it renames
+// a regular 0600 temp into place); following it would compare against a file
+// the peer chose.
+func TestReadInstanceTokenDoesNotFollowSymlink(t *testing.T) {
+	target := filepath.Join(t.TempDir(), "planted.token")
+	if err := os.WriteFile(target, []byte("deadbeef"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	paths := config.NewPaths(t.TempDir())
+	if err := os.Symlink(target, instanceTokenPath(paths)); err != nil {
+		t.Fatal(err)
+	}
+	if got := readInstanceToken(paths); got != "" {
+		t.Errorf("readInstanceToken followed a symlink: %q", got)
+	}
+}
+
+// The hardened read must still round-trip the token the server writes.
+func TestInstanceTokenRoundTrip(t *testing.T) {
+	paths := config.NewPaths(t.TempDir())
+	tok, err := newInstanceToken()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writeInstanceToken(paths, tok); err != nil {
+		t.Fatal(err)
+	}
+	if got := readInstanceToken(paths); got != tok {
+		t.Errorf("round trip = %q, want %q", got, tok)
 	}
 }

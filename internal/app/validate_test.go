@@ -118,3 +118,38 @@ func TestValidateModelDirRejectsSymlinkedWeights(t *testing.T) {
 		t.Error("weights that are a symlink must be rejected, not followed")
 	}
 }
+
+// validateModelDir must apply the same shard-completeness rule as the
+// registry's rescan: a repo whose model.safetensors.index.json names a shard
+// the tree did not contain downloads "successfully" (the hub fetches the tree
+// listing, never the index) and would otherwise be advertised as ready, then
+// fail on every load.
+func TestValidateModelDirRejectsMissingIndexedShard(t *testing.T) {
+	mk := func(files map[string]string) string {
+		dir := t.TempDir()
+		for name, content := range files {
+			if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return dir
+	}
+	index := `{"weight_map":{"a":"model-00001-of-00002.safetensors","b":"model-00002-of-00002.safetensors"}}`
+	incomplete := mk(map[string]string{
+		"config.json":                      `{"model_type":"qwen3"}`,
+		"model-00001-of-00002.safetensors": "w",
+		"model.safetensors.index.json":     index,
+	})
+	if err := validateModelDir(incomplete); err == nil {
+		t.Error("a model missing an index-named shard was validated as ready")
+	}
+	complete := mk(map[string]string{
+		"config.json":                      `{"model_type":"qwen3"}`,
+		"model-00001-of-00002.safetensors": "w",
+		"model-00002-of-00002.safetensors": "w",
+		"model.safetensors.index.json":     index,
+	})
+	if err := validateModelDir(complete); err != nil {
+		t.Errorf("a shard-complete model was rejected: %v", err)
+	}
+}

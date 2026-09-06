@@ -10,14 +10,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/intentdriven/Gropius/internal/config"
@@ -69,6 +67,14 @@ func (m Model) Name() string {
 // ErrNotFound is returned when a repo id is not in the registry.
 var ErrNotFound = errors.New("model not found")
 
+// key folds a repo id into the index key. HuggingFace resolves repo ids
+// case-insensitively (a re-cased id redirects to the same repo) and macOS's
+// default APFS volume aliases the on-disk directory the same way, so two
+// spellings are one model. Keying case-sensitively let a re-cased download
+// mint a second entry over the same directory — and removing either row
+// deleted the other's weights. Entries keep their first-seen spelling.
+func key(repoID string) string { return strings.ToLower(repoID) }
+
 // Registry is a concurrency-safe, file-backed index of local models.
 type Registry struct {
 	path string // registry.json
@@ -83,14 +89,27 @@ type Registry struct {
 	nextID int
 }
 
+// maxRegistryBytes caps how much of registry.json Open reads. Even a registry
+// of hundreds of models is well under a megabyte; the cap exists so a planted
+// file (or a link to an endless device) cannot balloon memory before the parse.
+const maxRegistryBytes = 8 << 20
+
 // Open loads the registry from path, creating an empty one if absent.
+//
+// The read is hardened (see config.OpenRegular): registry.json is created
+// lazily in the data root, which in shared-cache mode is group-writable, so a
+// FIFO planted under its name would otherwise wedge startup after the port is
+// claimed, and a symlink would load an index — whose `path` fields feed
+// `mlx_lm.server --model` — from outside the root. A non-regular or oversized file is an
+// error, not an empty index: the sticky bit means this account can never
+// replace the plant, so pretending the index is empty would only hide it.
 func Open(path string) (*Registry, error) {
 	r := &Registry{
 		path:   path,
 		models: map[string]Model{},
 		subs:   map[int]chan []Model{},
 	}
-	b, err := os.ReadFile(path)
+	b, err := config.ReadRegular(path, maxRegistryBytes)
 	if errors.Is(err, fs.ErrNotExist) {
 		return r, nil
 	}
@@ -104,7 +123,23 @@ func Open(path string) (*Registry, error) {
 		return r, nil
 	}
 	for _, m := range models {
-		r.models[m.RepoID] = m
+		// The same gate Rescan applies: every write path validates the id, so
+		// an invalid one here was planted or hand-edited, and loading it would
+		// advertise on /v1/models an entry Delete refuses to touch — an
+		// undeletable phantom.
+		if !config.ValidRepoID(m.RepoID) {
+			continue
+		}
+		// Case variants from an older index collapse onto one entry: prefer a
+		// ready one, else the first seen. Both name one directory on APFS, so
+		// dropping the record loses nothing on disk; a sideloaded
+		// case-sensitive volume holding two genuinely distinct directories
+		// collapses to one entry, which a Rescan re-adopts as the directory
+		// names dictate. Nothing is deleted here.
+		if existing, ok := r.models[key(m.RepoID)]; ok && (existing.Ready() || !m.Ready()) {
+			continue
+		}
+		r.models[key(m.RepoID)] = m
 	}
 	return r, nil
 }
@@ -113,7 +148,7 @@ func Open(path string) (*Registry, error) {
 func (r *Registry) Get(repoID string) (Model, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	m, ok := r.models[repoID]
+	m, ok := r.models[key(repoID)]
 	if !ok {
 		return Model{}, fmt.Errorf("%q: %w", repoID, ErrNotFound)
 	}
@@ -159,7 +194,13 @@ func (r *Registry) Put(m Model) error {
 		m.AddedAt = time.Now()
 	}
 	r.mu.Lock()
-	r.models[m.RepoID] = m
+	// A re-cased Put updates the existing entry but never renames it: the
+	// first-seen spelling stays the model's public name. Path is taken from
+	// the caller as before — it must be able to move when the root does.
+	if existing, ok := r.models[key(m.RepoID)]; ok {
+		m.RepoID = existing.RepoID
+	}
+	r.models[key(m.RepoID)] = m
 	snapshot := r.listLocked()
 	err := r.saveLocked()
 	r.mu.Unlock()
@@ -171,7 +212,7 @@ func (r *Registry) Put(m Model) error {
 // SetState updates a model's state (and error/progress) in place and persists.
 func (r *Registry) SetState(repoID string, state State, progress float64, errMsg string) error {
 	r.mu.Lock()
-	m, ok := r.models[repoID]
+	m, ok := r.models[key(repoID)]
 	if !ok {
 		r.mu.Unlock()
 		return fmt.Errorf("%q: %w", repoID, ErrNotFound)
@@ -179,7 +220,7 @@ func (r *Registry) SetState(repoID string, state State, progress float64, errMsg
 	m.State = state
 	m.Progress = progress
 	m.Err = errMsg
-	r.models[repoID] = m
+	r.models[key(repoID)] = m
 	snapshot := r.listLocked()
 	err := r.saveLocked()
 	r.mu.Unlock()
@@ -232,13 +273,13 @@ func (r *Registry) SetSize(repoID string, size int64) {
 		return
 	}
 	r.mu.Lock()
-	m, ok := r.models[repoID]
+	m, ok := r.models[key(repoID)]
 	if !ok || m.SizeBytes > 0 {
 		r.mu.Unlock()
 		return
 	}
 	m.SizeBytes = size
-	r.models[repoID] = m
+	r.models[key(repoID)] = m
 	snapshot := r.listLocked()
 	_ = r.saveLocked()
 	r.mu.Unlock()
@@ -255,28 +296,35 @@ func (r *Registry) SetSize(repoID string, size int64) {
 // only the disk write is skipped. State *transitions* still go through SetState.
 func (r *Registry) UpdateProgress(repoID string, progress float64) {
 	r.mu.Lock()
-	m, ok := r.models[repoID]
+	m, ok := r.models[key(repoID)]
 	if !ok {
 		r.mu.Unlock()
 		return
 	}
 	m.Progress = progress
-	r.models[repoID] = m
+	r.models[key(repoID)] = m
 	snapshot := r.listLocked()
 	r.mu.Unlock()
 
 	r.broadcast(snapshot)
 }
 
-// Remove deletes a model from the index and removes its files from disk.
-func (r *Registry) Remove(repoID string) error {
+// Remove deletes a model from the index and removes dir — its files — from
+// disk. The directory is a parameter, derived by the caller from the validated
+// repo id, and never the entry's stored Path: registry.json is created lazily
+// in the data root, which in shared-cache mode is group-writable, so another
+// local account can plant an index whose `path` names a directory this
+// account owns, and one click on Remove would then os.RemoveAll it under this
+// account's privileges. Every write path derives Path from the same root and
+// id, so recomputing loses nothing legitimate. An empty dir removes only the
+// index entry.
+func (r *Registry) Remove(repoID, dir string) error {
 	r.mu.Lock()
-	m, ok := r.models[repoID]
-	if !ok {
+	if _, ok := r.models[key(repoID)]; !ok {
 		r.mu.Unlock()
 		return fmt.Errorf("%q: %w", repoID, ErrNotFound)
 	}
-	delete(r.models, repoID)
+	delete(r.models, key(repoID))
 	snapshot := r.listLocked()
 	err := r.saveLocked()
 	r.mu.Unlock()
@@ -292,10 +340,45 @@ func (r *Registry) Remove(repoID string) error {
 	}
 	// Remove the files last: if this fails the index is still consistent, and a
 	// Rescan would simply re-adopt the directory.
-	if m.Path != "" {
-		if err := os.RemoveAll(m.Path); err != nil {
+	if dir != "" {
+		if err := removeModelDir(dir); err != nil {
 			return fmt.Errorf("delete model files: %w", err)
 		}
+	}
+	return nil
+}
+
+// removeModelDir deletes a <models>/<org>/<name> directory without following
+// a symlink at <org>. os.RemoveAll by path resolves ancestors with ordinary
+// symlink semantics, and in the shared cache any account can plant
+// models/<org> as a link to a directory the victim owns — so the removal is
+// done relative to an os.Root at the models directory, after an Lstat has
+// confirmed the org entry is a real directory. A missing org or model is not
+// an error: the index entry is already gone and there is nothing to delete.
+func removeModelDir(dir string) error {
+	name := filepath.Base(dir)
+	org := filepath.Base(filepath.Dir(dir))
+	models := filepath.Dir(filepath.Dir(dir))
+	root, err := os.OpenRoot(models)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+	fi, err := root.Lstat(org)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if !fi.IsDir() {
+		return fmt.Errorf("%s is not a directory — refusing to delete through it", filepath.Join(models, org))
+	}
+	if err := root.RemoveAll(filepath.Join(org, name)); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
 	}
 	return nil
 }
@@ -427,7 +510,7 @@ func (r *Registry) Rescan(modelsDir string) error {
 
 	r.mu.Lock()
 	for repoID, m := range found {
-		if existing, ok := r.models[repoID]; ok {
+		if existing, ok := r.models[key(repoID)]; ok {
 			// Don't clobber an in-flight download with a "ready" verdict.
 			if existing.State == StateDownloading {
 				continue
@@ -436,10 +519,14 @@ func (r *Registry) Rescan(modelsDir string) error {
 			existing.Bytes = m.Bytes
 			existing.State = StateReady
 			existing.Err = ""
-			r.models[repoID] = existing
+			r.models[key(repoID)] = existing
 			continue
 		}
-		r.models[repoID] = m
+		r.models[key(repoID)] = m
+	}
+	foundKeys := make(map[string]bool, len(found))
+	for repoID := range found {
+		foundKeys[key(repoID)] = true
 	}
 	// Drop an entry ONLY when its directory has genuinely vanished (deleted
 	// outside the app). An entry that is merely absent from `found` might just be
@@ -447,8 +534,8 @@ func (r *Registry) Rescan(modelsDir string) error {
 	// downloading it right now, so inspectModelDir transiently reports it
 	// incomplete. Dropping it then would wipe a healthy model from the index on a
 	// race. Distinguish "gone" from "incomplete" with an explicit stat.
-	for repoID, m := range r.models {
-		if _, ok := found[repoID]; ok {
+	for k, m := range r.models {
+		if foundKeys[k] {
 			continue
 		}
 		if m.State == StateDownloading {
@@ -463,7 +550,7 @@ func (r *Registry) Rescan(modelsDir string) error {
 				continue
 			}
 		}
-		delete(r.models, repoID)
+		delete(r.models, k)
 	}
 	snapshot := r.listLocked()
 	err = r.saveLocked()
@@ -526,7 +613,7 @@ func inspectModelDir(dir string) (complete bool, size int64) {
 		return false, 0
 	}
 	complete = hasConfig && hasWeights && !partial && !irregular &&
-		plausibleModelConfig(dir) && shardsPresent(dir)
+		plausibleModelConfig(dir) && CheckShards(dir) == nil
 	return complete, size
 }
 
@@ -541,28 +628,11 @@ const maxManifestJSON = 8 << 20
 //
 // In the shared cache another account can plant a FIFO — or a symlink to one —
 // under a manifest name, and a plain Open would block until a writer appears,
-// wedging the startup rescan for every account. Opening with O_NONBLOCK makes
-// the open itself unblockable, O_NOFOLLOW refuses symlinks outright (the
-// downloader only ever writes manifests as regular files, and following a
-// link would probe files outside the model directory with this account's
-// privileges), and the fstat on the opened handle (not the path, so a swap
-// between check and open cannot be raced in) refuses anything but a regular
-// file before any read.
+// wedging the startup rescan for every account; the downloader only ever
+// writes manifests as regular files. config.ReadRegular refuses both.
 func readManifest(dir, name string, v any) bool {
-	f, err := os.OpenFile(filepath.Join(dir, name), os.O_RDONLY|syscall.O_NONBLOCK|syscall.O_NOFOLLOW, 0)
-	if err != nil {
-		return false
-	}
-	defer f.Close()
-	info, err := f.Stat()
-	if err != nil || !info.Mode().IsRegular() {
-		return false
-	}
-	b, err := io.ReadAll(io.LimitReader(f, maxManifestJSON+1))
-	if err != nil || int64(len(b)) > maxManifestJSON {
-		return false
-	}
-	return json.Unmarshal(b, v) == nil
+	b, err := config.ReadRegular(filepath.Join(dir, name), maxManifestJSON)
+	return err == nil && json.Unmarshal(b, v) == nil
 }
 
 // plausibleModelConfig reports whether dir's config.json can be a model
@@ -577,22 +647,24 @@ func plausibleModelConfig(dir string) bool {
 	return cfg["model_type"] != nil || cfg["architectures"] != nil
 }
 
-// shardsPresent reports whether every weight shard named by
-// model.safetensors.index.json exists in dir. Single-file models have no
-// index, which counts as complete. A present-but-unreadable index counts as
-// incomplete: we cannot attest the shard set, and "not complete" only means
-// the directory is skipped or a failed record keeps its state — never that a
-// ready model is dropped.
-func shardsPresent(dir string) bool {
+// CheckShards reports an error unless every weight shard named by
+// model.safetensors.index.json exists in dir as a regular file. Single-file
+// models have no index, which counts as complete. A present-but-unreadable
+// index counts as incomplete: we cannot attest the shard set, and "not
+// complete" only means the directory is skipped or a failed record keeps its
+// state — never that a ready model is dropped. It is exported so the app's
+// download validation applies exactly the same rule as the rescan, rather
+// than a drifting copy.
+func CheckShards(dir string) error {
 	const indexName = "model.safetensors.index.json"
-	if _, err := os.Stat(filepath.Join(dir, indexName)); errors.Is(err, fs.ErrNotExist) {
-		return true
+	if _, err := os.Lstat(filepath.Join(dir, indexName)); errors.Is(err, fs.ErrNotExist) {
+		return nil
 	}
 	var index struct {
 		WeightMap map[string]string `json:"weight_map"`
 	}
 	if !readManifest(dir, indexName, &index) {
-		return false
+		return fmt.Errorf("%s is missing, unreadable, oversized, or not valid JSON", indexName)
 	}
 	seen := map[string]bool{}
 	for _, shard := range index.WeightMap {
@@ -600,7 +672,7 @@ func shardsPresent(dir string) bool {
 		// downloader would have produced; refuse to attest completeness.
 		// (filepath.Base passes "." and ".." through, so name them explicitly.)
 		if shard == "" || shard == "." || shard == ".." || shard != filepath.Base(shard) {
-			return false
+			return fmt.Errorf("%s names %q, which is not a plain file name", indexName, shard)
 		}
 		if seen[shard] {
 			continue
@@ -611,8 +683,8 @@ func shardsPresent(dir string) bool {
 		// downloader only ever writes regular files.
 		info, err := os.Lstat(filepath.Join(dir, shard))
 		if err != nil || !info.Mode().IsRegular() {
-			return false
+			return fmt.Errorf("%s names %s, which is missing or not a regular file", indexName, shard)
 		}
 	}
-	return true
+	return nil
 }

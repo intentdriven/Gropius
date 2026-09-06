@@ -198,7 +198,7 @@ func TestRemoveDeletesFilesFromDisk(t *testing.T) {
 	}
 	r.Put(Model{RepoID: "org/m", Path: modelDir, State: StateReady})
 
-	if err := r.Remove("org/m"); err != nil {
+	if err := r.Remove("org/m", modelDir); err != nil {
 		t.Fatalf("Remove: %v", err)
 	}
 	if _, err := r.Get("org/m"); !errors.Is(err, ErrNotFound) {
@@ -239,7 +239,7 @@ func TestRemoveBroadcastsEvenWhenSaveFails(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := r.Remove("org/m"); err == nil {
+	if err := r.Remove("org/m", ""); err == nil {
 		t.Fatal("Remove should have failed to persist the registry")
 	}
 
@@ -778,4 +778,163 @@ func TestRescanDoesNotAdoptSymlinkedShard(t *testing.T) {
 
 func timeoutAfterSeconds(n int) <-chan time.Time {
 	return time.After(time.Duration(n) * time.Second)
+}
+
+// registry.json sits in the data root, which in shared mode is group-writable
+// and where the file is created lazily; another local account can plant a
+// FIFO under its name and a blocking open would wedge startup after the port
+// is claimed. Open must not block, and must not silently adopt the plant.
+func TestOpenDoesNotBlockOnFIFOState(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "registry.json")
+	if err := syscall.Mkfifo(path, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if fd, err := syscall.Open(path, syscall.O_WRONLY|syscall.O_NONBLOCK, 0); err == nil {
+			syscall.Close(fd)
+		}
+	})
+	done := make(chan error, 1)
+	go func() { _, err := Open(path); done <- err }()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("Open of a FIFO must fail loudly rather than pretend the index is empty")
+		}
+	case <-timeoutAfterSeconds(5):
+		t.Fatal("Open blocked on a FIFO planted as registry.json")
+	}
+}
+
+// A symlinked registry.json is never something saveLocked wrote; following it
+// would load an index from outside the root — whose `path` fields later feed
+// os.RemoveAll — with this account's privileges.
+func TestOpenDoesNotFollowSymlinkedState(t *testing.T) {
+	target := filepath.Join(t.TempDir(), "planted.json")
+	if err := os.WriteFile(target, []byte(`[{"repo_id":"org/planted","path":"/nonexistent","state":"ready"}]`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "registry.json")
+	if err := os.Symlink(target, path); err != nil {
+		t.Fatal(err)
+	}
+	r, err := Open(path)
+	if err == nil {
+		if _, gerr := r.Get("org/planted"); gerr == nil {
+			t.Fatal("Open followed a symlinked registry.json and loaded its entries")
+		}
+		t.Fatal("Open of a symlinked registry.json must fail loudly")
+	}
+}
+
+// Open must apply the same ValidRepoID gate Rescan does: every write path
+// gates on it, so an invalid id in registry.json was planted (a shared root)
+// or hand-edited, and loading it would advertise an entry Delete refuses.
+func TestOpenSkipsEntriesWithInvalidRepoIDs(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "registry.json")
+	body := `[{"repo_id":"","state":"ready"},{"repo_id":"../../../../etc","path":"/","state":"ready"},{"repo_id":"noslash","state":"ready"},{"repo_id":"org/m","state":"ready"}]`
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	r, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := r.List(); len(got) != 1 || got[0].RepoID != "org/m" {
+		t.Errorf("List = %v, want only org/m", got)
+	}
+	if got := r.Ready(); len(got) != 1 {
+		t.Errorf("Ready = %v, want only org/m", got)
+	}
+}
+
+// Repo ids are case-insensitive on the Hub and map onto case-insensitive APFS
+// paths, so two spellings are one model: the index must fold them onto one
+// entry that keeps the first-seen spelling.
+func TestGetAndPutFoldRepoIDCase(t *testing.T) {
+	r, _ := newTestRegistry(t)
+	if err := r.Put(Model{RepoID: "mlx-community/Qwen3-8B-4bit", State: StateReady}); err != nil {
+		t.Fatal(err)
+	}
+	m, err := r.Get("MLX-Community/qwen3-8b-4bit")
+	if err != nil || m.RepoID != "mlx-community/Qwen3-8B-4bit" {
+		t.Fatalf("Get by case variant = %+v, %v; want the canonical entry", m, err)
+	}
+	if err := r.Put(Model{RepoID: "MLX-Community/Qwen3-8B-4bit", State: StateDownloading}); err != nil {
+		t.Fatal(err)
+	}
+	got := r.List()
+	if len(got) != 1 || got[0].RepoID != "mlx-community/Qwen3-8B-4bit" || got[0].State != StateDownloading {
+		t.Errorf("List after re-cased Put = %+v; want one entry, first-seen spelling, state updated", got)
+	}
+}
+
+func TestOpenCollapsesCaseVariantEntries(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "registry.json")
+	body := `[{"repo_id":"Org/repo","state":"failed"},{"repo_id":"org/repo","state":"ready"}]`
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	r, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := r.List()
+	if len(got) != 1 || got[0].RepoID != "org/repo" || got[0].State != StateReady {
+		t.Errorf("List = %+v; want the single ready entry", got)
+	}
+}
+
+func TestRemoveByCaseVariantRemovesThatOneEntry(t *testing.T) {
+	r, dir := newTestRegistry(t)
+	modelDir := filepath.Join(dir, "models", "org", "repo")
+	if err := os.MkdirAll(modelDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Put(Model{RepoID: "org/repo", Path: modelDir, State: StateReady}); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Remove("ORG/repo", modelDir); err != nil {
+		t.Fatalf("Remove by case variant: %v", err)
+	}
+	if got := r.List(); len(got) != 0 {
+		t.Errorf("List after Remove = %+v, want empty", got)
+	}
+	if _, err := os.Stat(modelDir); !os.IsNotExist(err) {
+		t.Error("model directory still present after Remove")
+	}
+}
+
+// Remove recomputes the directory from the id, but os.RemoveAll by path still
+// follows a symlinked ancestor: an org symlink planted in the shared models
+// tree plus a planted "ready" entry would make the victim's Remove click
+// delete an arbitrary subdirectory of the link's target. The removal must go
+// through the models root and refuse a non-directory org.
+func TestRemoveRefusesSymlinkedOrgDir(t *testing.T) {
+	r, dir := newTestRegistry(t)
+	models := filepath.Join(dir, "models")
+	if err := os.MkdirAll(models, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	victim := t.TempDir()
+	keep := filepath.Join(victim, "name", "keep.txt")
+	if err := os.MkdirAll(filepath.Dir(keep), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(keep, []byte("precious"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(victim, filepath.Join(models, "org")); err != nil {
+		t.Fatal(err)
+	}
+	modelDir := filepath.Join(models, "org", "name")
+	if err := r.Put(Model{RepoID: "org/name", Path: modelDir, State: StateReady}); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Remove("org/name", modelDir); err == nil {
+		t.Error("Remove followed a symlinked org directory")
+	}
+	if _, err := os.Stat(keep); err != nil {
+		t.Fatalf("Remove deleted through the planted org symlink: %v", err)
+	}
 }

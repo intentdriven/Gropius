@@ -1,0 +1,4 @@
+# The committed name guard is a script git EXECUTES. A checkout with
+# core.autocrlf=true would rewrite it to CRLF and its shebang would stop
+# resolving, so the guard would silently stop running.
+.githooks/* text eol=lf

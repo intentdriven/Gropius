@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -116,5 +117,70 @@ func TestSafeJoinContainsPaths(t *testing.T) {
 		if _, err := safeJoin(dest, p); err == nil {
 			t.Errorf("safeJoin(%q) allowed a path that escapes %q", p, dest)
 		}
+	}
+}
+
+// The org and name directories under the models root are created by whichever
+// account downloads first, and in the shared cache any account can create an
+// absent name there. A symlink planted at models/<org> would make every write
+// — and the registry's later delete — land under the attacker's target, since
+// os.Root confines only what is below the directory it was opened at, not the
+// path used to reach it. Creating and opening Dest relative to the models root
+// refuses the link.
+func TestDownloadRefusesSymlinkedOrgDir(t *testing.T) {
+	models := t.TempDir()
+	outside := t.TempDir()
+	if err := os.Symlink(outside, filepath.Join(models, "org")); err != nil {
+		t.Fatal(err)
+	}
+	srv := newFakeHub(map[string][]byte{
+		"config.json":       []byte(`{"model_type":"x"}`),
+		"model.safetensors": []byte("weights"),
+	}).server(t)
+	c := &Client{BaseURL: srv.URL, HTTP: srv.Client()}
+	err := c.Download(context.Background(), DownloadRequest{
+		RepoID:    "org/repo",
+		ModelsDir: models,
+		Dest:      filepath.Join(models, "org", "repo"),
+	})
+	if err == nil {
+		t.Fatal("download through a symlinked org directory succeeded; it must be refused")
+	}
+	if _, err := os.Stat(filepath.Join(outside, "repo")); !os.IsNotExist(err) {
+		t.Fatalf("SYMLINK ESCAPE: download wrote through the planted org symlink (stat err %v)", err)
+	}
+}
+
+// Two repo files whose names differ only by case cannot both exist on macOS's
+// case-insensitive default volume: at best two goroutines race over one
+// .gropius-part and the download aborts, at worst a non-LFS file finalizes
+// with interleaved content. Refuse such a repo up front, naming the pair.
+func TestDownloadRefusesCaseCollidingFiles(t *testing.T) {
+	dest := t.TempDir()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/models/org/twins/tree/main", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode([]File{
+			{Path: "tokenizer.json", Size: 5},
+			{Path: "Tokenizer.json", Size: 5},
+			{Path: "model.safetensors", Size: 5},
+		})
+	})
+	mux.HandleFunc("/org/twins/resolve/main/", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, "12345")
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	c := &Client{BaseURL: srv.URL, HTTP: srv.Client()}
+	err := c.Download(context.Background(), DownloadRequest{RepoID: "org/twins", Dest: dest})
+	if err == nil {
+		t.Fatal("a repo with case-colliding file names was accepted")
+	}
+	if !strings.Contains(err.Error(), "differ only by case") ||
+		!strings.Contains(err.Error(), "tokenizer.json") || !strings.Contains(err.Error(), "Tokenizer.json") {
+		t.Fatalf("error must name the colliding pair, got: %v", err)
+	}
+	if entries, _ := os.ReadDir(dest); len(entries) != 0 {
+		t.Errorf("refusal must happen before any file is written, found %v", entries)
 	}
 }

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -55,6 +56,12 @@ type DownloadRequest struct {
 	Revision string // defaults to "main"
 	// Dest is the directory the files land in. It is created if absent.
 	Dest string
+	// ModelsDir is the models root Dest lives under. Dest is created and
+	// opened relative to it, so a symlink planted at any ancestor between the
+	// two (models/<org>, or <org>/<name> itself) is refused rather than
+	// followed. It defaults to Dest's parent, which confines only the final
+	// component; the app always passes the real models root.
+	ModelsDir string
 	// Concurrency is how many files transfer at once. Defaults to 4.
 	Concurrency int
 	// OnProgress, if set, is called as bytes arrive. Calls are serialized, so
@@ -92,21 +99,21 @@ func (c *Client) Download(ctx context.Context, req DownloadRequest) error {
 	if len(files) == 0 {
 		return fmt.Errorf("%s has no downloadable files", req.RepoID)
 	}
+	if a, b, collide := caseCollision(files); collide {
+		return fmt.Errorf("%s contains files whose names differ only by case (%q and %q), which cannot coexist on a case-insensitive filesystem — refusing to download it", req.RepoID, a, b)
+	}
 	if !HasWeights(files) {
 		return fmt.Errorf("%s contains no .safetensors weights — it is not an MLX-loadable model", req.RepoID)
 	}
 
-	if err := mkdirAllInherit(req.Dest); err != nil {
-		return fmt.Errorf("create %s: %w", req.Dest, err)
-	}
 	// Every filesystem operation below happens inside this root. os.Root
 	// resolves each path component without ever following a symlink out of the
 	// tree, so a symlinked parent directory planted in a shared, group-writable
 	// cache cannot redirect writes elsewhere — a guarantee that O_NOFOLLOW on
 	// the final component alone cannot give.
-	root, err := os.OpenRoot(req.Dest)
+	root, err := openDest(req)
 	if err != nil {
-		return fmt.Errorf("open %s: %w", req.Dest, err)
+		return err
 	}
 	defer root.Close()
 
@@ -181,45 +188,72 @@ func (c *Client) Download(ctx context.Context, req DownloadRequest) error {
 	return nil
 }
 
-// mkdirAllInherit creates dest and any missing parents, then — when the
-// nearest pre-existing ancestor is a setgid directory — widens the directories
-// it created to setgid group-writable, preserving the ancestor's sticky bit.
-// The shared cache depends on this: the installer marks the shared models root
-// setgid group-writable and sticky (3775) so a model one account downloads is
-// writable by the next, but only its owner can delete or rename it, but
-// MkdirAll can never produce a group-writable or sticky directory (0o755
-// carries neither bit, and umask would strip one anyway), which would leave
-// the org/name directories the first account creates closed to every other
-// account. Dropping the sticky bit here would let any account in the group
-// delete or replace another account's model directory — the fix must not
-// widen access at the cost of that protection. A per-user root has no setgid
-// bit and keeps plain 0755. Chmod failures are ignored: only directories this
-// call created are touched, and a download into a tree we can write must not
-// fail over modes we cannot change.
-func mkdirAllInherit(dest string) error {
-	anc := filepath.Clean(dest)
-	var created []string
-	for {
-		if _, err := os.Stat(anc); err == nil {
-			break
+// openDest creates the destination directory and opens an os.Root at it.
+//
+// os.Root confines only what lies below the directory it was opened at; the
+// path used to reach that directory is resolved with ordinary symlink
+// semantics. In the shared cache the org and name directories under the
+// models root are created by whichever account downloads first, and any
+// account can create an absent name there — so a symlink planted at
+// models/<org> would send every write under the attacker's target. The
+// components between the models root and Dest are therefore created and
+// inspected relative to a root opened at ModelsDir, and anything that is
+// not a real directory is refused.
+//
+// The shared cache also depends on the modes of what is created here: the
+// installer marks the shared models root setgid group-writable and sticky
+// (3775) so a model one account downloads is writable by the next, but only
+// its owner can delete or rename it, and Mkdir can never produce a
+// group-writable or sticky directory (0o755 carries neither bit, and umask
+// would strip one anyway). So when the models root is setgid, each directory
+// created here is widened to match, sticky bit included — dropping it would
+// let any account in the group delete or replace another account's model
+// directory. A per-user root has no setgid bit and keeps plain 0755. Chmod
+// failures are ignored: only directories this call created are touched, and
+// a download into a tree we can write must not fail over modes we cannot
+// change.
+func openDest(req DownloadRequest) (*os.Root, error) {
+	if req.ModelsDir == "" {
+		req.ModelsDir = filepath.Dir(req.Dest)
+	}
+	rel, err := filepath.Rel(req.ModelsDir, req.Dest)
+	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+		return nil, fmt.Errorf("destination %s is not under the models directory %s", req.Dest, req.ModelsDir)
+	}
+	models, err := os.OpenRoot(req.ModelsDir)
+	if err != nil {
+		return nil, fmt.Errorf("open %s: %w", req.ModelsDir, err)
+	}
+	defer models.Close()
+	widen := false
+	if fi, err := models.Stat("."); err == nil && fi.Mode()&os.ModeSetgid != 0 {
+		widen = true
+	}
+	var partial string
+	for _, comp := range strings.Split(rel, string(os.PathSeparator)) {
+		partial = filepath.Join(partial, comp)
+		created := false
+		if err := models.Mkdir(partial, 0o755); err == nil {
+			created = true
+		} else if !errors.Is(err, fs.ErrExist) {
+			return nil, fmt.Errorf("create %s: %w", filepath.Join(req.ModelsDir, partial), err)
 		}
-		created = append(created, anc)
-		parent := filepath.Dir(anc)
-		if parent == anc {
-			break
+		fi, err := models.Lstat(partial)
+		if err != nil {
+			return nil, fmt.Errorf("inspect %s: %w", filepath.Join(req.ModelsDir, partial), err)
 		}
-		anc = parent
+		if !fi.IsDir() {
+			return nil, fmt.Errorf("%s is not a directory (something else was planted under that name) — refusing to download into it", filepath.Join(req.ModelsDir, partial))
+		}
+		if created && widen {
+			_ = models.Chmod(partial, 0o775|os.ModeSetgid|os.ModeSticky)
+		}
 	}
-	if err := os.MkdirAll(dest, 0o755); err != nil {
-		return err
+	root, err := models.OpenRoot(rel)
+	if err != nil {
+		return nil, fmt.Errorf("open %s: %w", req.Dest, err)
 	}
-	if fi, err := os.Stat(anc); err != nil || fi.Mode()&os.ModeSetgid == 0 {
-		return nil
-	}
-	for i := len(created) - 1; i >= 0; i-- {
-		_ = os.Chmod(created[i], 0o775|os.ModeSetgid|os.ModeSticky)
-	}
-	return nil
+	return root, nil
 }
 
 // relPath validates a repo-relative file path and returns it cleaned, for use

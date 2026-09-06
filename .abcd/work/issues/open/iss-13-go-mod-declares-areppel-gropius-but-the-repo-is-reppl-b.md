@@ -1,7 +1,7 @@
 ---
 schema_version: 1
 id: "iss-13"
-slug: "go-mod-declares-areppel-gropius-but-the-repo-is-reppl-gropius"
+slug: "go-mod-declares-areppel-gropius-but-the-repo-is-reppl-b"
 severity: "nitpick"
 category: "tech-debt"
 source: "agent-finding"

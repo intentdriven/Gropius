@@ -1,0 +1,7 @@
+{
+  "roots": ["docs", "README.md"],
+  "banned_tokens": [],
+  "rules": {},
+  "exempt_paths": [],
+  "exempt_if_status": []
+}

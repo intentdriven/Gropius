@@ -2,7 +2,9 @@ package runtime
 
 import (
 	"bufio"
+	"bytes"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -11,6 +13,8 @@ import (
 	"syscall"
 
 	"golang.org/x/sys/unix"
+
+	"github.com/intentdriven/Gropius/internal/config"
 )
 
 // pidFileName is where the launcher records the process groups of the model
@@ -32,8 +36,18 @@ const pidFileName = "running-servers.pids"
 // recorded pgid is stale). Verifying identity before SIGKILL prevents that.
 type pidLedger struct {
 	path string
-	mu   sync.Mutex
+	// uid is the effective uid a ledger must be owned by to be trusted. In
+	// shared-cache mode the ledger lives in a group-writable root where another
+	// local account can plant one — permanently, since the sticky bit blocks
+	// our os.Remove — and every identity check below it (boot time, start
+	// time) is readable cross-uid, so only provenance stops a planted ledger
+	// from turning the next launch into a kill of arbitrary process groups.
+	uid int
+	mu  sync.Mutex
 }
+
+// maxLedgerBytes caps the ledger read; a real ledger is a few lines.
+const maxLedgerBytes = 1 << 20
 
 // entry is one recorded process group plus the identity used to confirm, before
 // killing, that the group leader is still the process we started and not a
@@ -46,7 +60,7 @@ type pidEntry struct {
 }
 
 func newPIDLedger(dir string) *pidLedger {
-	return &pidLedger{path: filepath.Join(dir, pidFileName)}
+	return &pidLedger{path: filepath.Join(dir, pidFileName), uid: os.Geteuid()}
 }
 
 // add records a process group id together with the leader's start time and the
@@ -82,18 +96,28 @@ func (l *pidLedger) remove(pgid int) {
 	l.writeLocked(boot, kept)
 }
 
-// readLocked parses the ledger into its boot stamp and entries. A missing or
-// malformed ledger reads as empty.
+// readLocked parses the ledger into its boot stamp and entries. A missing,
+// malformed, non-regular, oversized, or foreign-owned ledger reads as empty:
+// the reaper must never kill on a ledger it cannot attribute to itself, and a
+// plain open would block forever on a FIFO planted under this name (see
+// config.OpenRegular).
 //
 // Format is one "boot <ns>" header line followed by "<pgid> <startNs>" lines.
 func (l *pidLedger) readLocked() (bootNs int64, entries []pidEntry) {
-	f, err := os.Open(l.path)
+	f, info, err := config.OpenRegular(l.path)
 	if err != nil {
 		return 0, nil
 	}
 	defer f.Close()
+	if st, ok := info.Sys().(*syscall.Stat_t); !ok || int(st.Uid) != l.uid {
+		return 0, nil
+	}
+	b, err := io.ReadAll(io.LimitReader(f, maxLedgerBytes+1))
+	if err != nil || int64(len(b)) > maxLedgerBytes {
+		return 0, nil
+	}
 
-	sc := bufio.NewScanner(f)
+	sc := bufio.NewScanner(bytes.NewReader(b))
 	for sc.Scan() {
 		fields := strings.Fields(sc.Text())
 		if len(fields) == 0 {
@@ -105,6 +129,13 @@ func (l *pidLedger) readLocked() (bootNs int64, entries []pidEntry) {
 		}
 		pgid, err := strconv.Atoi(fields[0])
 		if err != nil {
+			continue
+		}
+		// kill(-1) signals every process this uid may signal, kill(0) our own
+		// group, and a negative pgid flips sign into a single-pid kill. None can
+		// name a child we started (Setpgid gives pgid == pid > 1), so drop them
+		// here rather than let a planted line reach the SIGKILL below.
+		if pgid <= 1 {
 			continue
 		}
 		var start int64

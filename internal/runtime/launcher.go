@@ -75,6 +75,9 @@ type ExecLauncher struct {
 	Paths config.Paths
 	// LogDir receives one log file per model process.
 	LogDir string
+	// Owner is the uid the interpreter must be owned by (root is always
+	// accepted); zero means the current effective uid. See trustedExecutable.
+	Owner int
 
 	ledgerOnce sync.Once
 	ledger     *pidLedger
@@ -91,10 +94,11 @@ func (l *ExecLauncher) ReapOrphans() int {
 	return l.pidLedger().reapOrphans()
 }
 
-// Precheck confirms the venv interpreter and the model directory exist.
+// Precheck confirms the venv interpreter is present and trustworthy (see
+// trustedExecutable) and the model directory exists.
 func (l *ExecLauncher) Precheck(spec Spec) error {
 	python := l.Paths.VenvPython()
-	if _, err := os.Stat(python); err != nil {
+	if err := trustedExecutable(python, ownerOrSelf(l.Owner)); err != nil {
 		return fmt.Errorf("python runtime is not installed (%s): %w", python, err)
 	}
 	if _, err := os.Stat(spec.ModelPath); err != nil {
@@ -141,15 +145,37 @@ func (l *ExecLauncher) Launch(ctx context.Context, spec Spec) (Process, error) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
 	logPath := filepath.Join(l.LogDir, logFileName(spec.RepoID))
-	if err := os.MkdirAll(l.LogDir, 0o755); err != nil {
-		return nil, err
+	// EnsureDirs created LogDir at startup as a real directory. Re-check rather
+	// than MkdirAll: in shared mode the account that owns the logs directory can
+	// swap it for a symlink at any time, and a path-based MkdirAll would follow
+	// it and put this account's log file inside a directory it did not choose.
+	if fi, err := os.Lstat(l.LogDir); err != nil {
+		return nil, fmt.Errorf("log directory %s: %w", l.LogDir, err)
+	} else if !fi.IsDir() {
+		return nil, fmt.Errorf("log directory %s is not a directory", l.LogDir)
 	}
 	// 0600, not the 0644 os.Create would give. In shared mode LogDir sits under
 	// the group-readable /Users/Shared/Gropius, and the model server logs at
 	// INFO — request-level detail another local account has no business reading.
 	// O_TRUNC keeps the per-model log from growing without bound across restarts.
-	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	//
+	// The name is predictable and LogDir is group-writable in shared mode, so
+	// another local account can plant a symlink under it — and a truncating
+	// open that followed it would empty, then stream logs into, any file this
+	// account can write. O_NOFOLLOW refuses the link; O_NONBLOCK keeps a
+	// planted FIFO from blocking the open forever (and is inert on the regular
+	// file the fstat below guarantees); the fstat on the opened handle refuses
+	// anything else that is not a regular file.
+	logFile, err := os.OpenFile(logPath,
+		os.O_CREATE|os.O_WRONLY|os.O_TRUNC|syscall.O_NONBLOCK|syscall.O_NOFOLLOW, 0o600)
 	if err != nil {
+		return nil, fmt.Errorf("create log %s: %w", logPath, err)
+	}
+	if info, err := logFile.Stat(); err != nil || !info.Mode().IsRegular() {
+		logFile.Close()
+		if err == nil {
+			err = fmt.Errorf("not a regular file")
+		}
 		return nil, fmt.Errorf("create log %s: %w", logPath, err)
 	}
 	cmd.Stdout = logFile

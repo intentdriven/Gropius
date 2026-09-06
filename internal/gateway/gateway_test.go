@@ -745,9 +745,15 @@ func TestAPIKeyChangeTakesEffectLive(t *testing.T) {
 func TestLoopbackIsExemptFromAuth(t *testing.T) {
 	h := gatewayWithKey(t, "bh_secret")
 
-	for _, addr := range []string{"127.0.0.1:5555", "[::1]:5555"} {
+	for _, tc := range []struct{ addr, host string }{
+		{"127.0.0.1:5555", "localhost:11535"},
+		{"[::1]:5555", "[::1]:11535"},
+		{"127.0.0.1:5555", "127.0.0.1:11535"},
+	} {
+		addr := tc.addr
 		req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
 		req.RemoteAddr = addr
+		req.Host = tc.host
 		w := httptest.NewRecorder()
 		h.ServeHTTP(w, req)
 		if w.Code != http.StatusOK {
@@ -783,6 +789,7 @@ func TestLoopbackSameOriginRequestIsAllowed(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
 	req.RemoteAddr = "127.0.0.1:5555"
+	req.Host = "localhost:11535"
 	req.Header.Set("Origin", "http://127.0.0.1:11535")
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
@@ -865,5 +872,44 @@ func TestHealthEndpoint(t *testing.T) {
 	json.NewDecoder(resp.Body).Decode(&out)
 	if out["status"] != "ok" {
 		t.Errorf("health = %v", out)
+	}
+}
+
+// A DNS-rebound page reaches the gateway from loopback with a same-origin GET:
+// no Origin header, and a Host naming the attacker's domain. The loopback
+// exemption must therefore also require a loopback Host when a key is set —
+// the same guard the control plane's loopbackOnly applies. A foreign Host
+// falls through to the bearer check rather than a flat refusal, so a
+// same-machine proxy that preserves Host keeps working by sending the key.
+func TestLoopbackRebindingHostRequiresKey(t *testing.T) {
+	h := gatewayWithKey(t, "bh_secret")
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	req.RemoteAddr = "127.0.0.1:5555"
+	req.Host = "attacker.example:11535"
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("loopback GET with a foreign Host and no key got %d, want 401", w.Code)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	req.RemoteAddr = "127.0.0.1:5555"
+	req.Host = "attacker.example:11535"
+	req.Header.Set("Authorization", "Bearer bh_secret")
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Errorf("loopback GET with a foreign Host but the right key got %d, want 200", w.Code)
+	}
+
+	open := gatewayWithKey(t, "")
+	req = httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	req.RemoteAddr = "127.0.0.1:5555"
+	req.Host = "attacker.example:11535"
+	w = httptest.NewRecorder()
+	open.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Errorf("with no key configured loopback must stay open regardless of Host, got %d", w.Code)
 	}
 }

@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"os"
 	"os/exec"
@@ -17,6 +18,7 @@ import (
 	goruntime "runtime"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/intentdriven/Gropius/internal/config"
@@ -75,6 +77,10 @@ type SetupStatus struct {
 // Everything it creates lives under Paths.Root, so uninstalling Gropius is
 // `rm -rf` of one directory. It never touches the user's own Python.
 type Provisioner struct {
+	// Owner is the uid the runtime's executables must be owned by (root is
+	// always accepted). Zero means the current effective uid; tests set it to
+	// simulate files another account planted.
+	Owner int
 	Paths config.Paths
 
 	mu     sync.Mutex
@@ -104,16 +110,78 @@ func (p *Provisioner) setStatus(stage SetupStage, detail, errMsg string) {
 	p.mu.Unlock()
 }
 
+// trustedExecutable refuses an executable this account should not run: one
+// that is not a regular file (after following the venv's interpreter symlink
+// to its uv-managed target), that is writable by group or other, or that is
+// not owned by owner (the account about to execute it) or by root. In
+// shared-cache mode the runtime sits under a setgid staff root: a
+// group-writable file is one any local account can rewrite in place, and an
+// absent name there is one any account can claim first with a file of its
+// own — mode bits are not provenance, only ownership is. uv has been
+// observed to write parts of its CPython tree group-writable; lockdown strips
+// that before this check runs, so a runtime this account provisioned passes.
+// A runtime another account provisioned does not: reusing it is the design
+// decision the ledger records, and until it is made the refusal is loud.
+func trustedExecutable(path string, owner int) error {
+	fi, err := os.Stat(path)
+	if err != nil {
+		return err
+	}
+	if !fi.Mode().IsRegular() {
+		return fmt.Errorf("%s is not a regular file", path)
+	}
+	if fi.Mode().Perm()&0o022 != 0 {
+		return fmt.Errorf("%s is writable by other accounts (mode %o) — refusing to run it", path, fi.Mode().Perm())
+	}
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	if !ok {
+		return fmt.Errorf("%s: cannot determine the owner — refusing to run it", path)
+	}
+	if st.Uid != 0 && int(st.Uid) != owner {
+		return fmt.Errorf("%s is owned by another account (uid %d) — refusing to run it", path, st.Uid)
+	}
+	return nil
+}
+
+// ownerOrSelf resolves the Owner seam: zero means the current effective uid.
+func ownerOrSelf(owner int) int {
+	if owner == 0 {
+		return os.Geteuid()
+	}
+	return owner
+}
+
+// lockdown strips group and other write permission from every regular file
+// and directory under dir, following no symlinks. uv installs CPython
+// group-writable; under a setgid shared root that would hand every local
+// account write access to the interpreter each of them runs. Errors are
+// ignored — a file another account owns cannot be re-moded by this one, and
+// trustedExecutable is what decides whether the result is runnable.
+func lockdown(dir string) {
+	_ = filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d.Type()&os.ModeSymlink != 0 {
+			return nil
+		}
+		info, err := d.Info()
+		if err != nil {
+			return nil
+		}
+		if perm := info.Mode().Perm(); perm&0o022 != 0 {
+			_ = os.Chmod(path, perm&^0o022)
+		}
+		return nil
+	})
+}
+
 // installed reports whether the MLX runtime is usable.
 func (p *Provisioner) installed() bool {
-	_, err := os.Stat(p.Paths.VenvPython())
-	if err != nil {
+	if err := trustedExecutable(p.Paths.VenvPython(), ownerOrSelf(p.Owner)); err != nil {
 		return false
 	}
 	// The venv existing is not enough — a half-finished pip install leaves the
 	// interpreter in place without mlx_lm.
 	marker := filepath.Join(p.Paths.Venv, ".gropius-mlx-"+mlxLMVersion)
-	_, err = os.Stat(marker)
+	_, err := os.Stat(marker)
 	return err == nil
 }
 
@@ -127,6 +195,11 @@ func (p *Provisioner) Installed() bool {
 // Ensure installs the runtime if it is not already present. It is idempotent and
 // safe to call on every launch.
 func (p *Provisioner) Ensure(ctx context.Context) error {
+	// Close what uv may have left open before judging the install, so an
+	// existing runtime is repaired in place rather than reinstalled.
+	lockdown(p.Paths.Venv)
+	lockdown(p.Paths.Python)
+	lockdown(p.Paths.Bin)
 	if p.Installed() {
 		p.setStatus(StageReady, "MLX "+mlxLMVersion+" is installed", "")
 		return nil
@@ -151,6 +224,16 @@ func (p *Provisioner) Ensure(ctx context.Context) error {
 			p.setStatus(StageFailed, "", err.Error())
 			return fmt.Errorf("%s: %w", s.stage, err)
 		}
+	}
+	// Close what uv left open, then confirm the result is something this
+	// account may run — loudly, rather than reporting ready and refusing at
+	// every launch. A file another account owns stays as it is and fails here.
+	lockdown(p.Paths.Venv)
+	lockdown(p.Paths.Python)
+	lockdown(p.Paths.Bin)
+	if err := trustedExecutable(p.Paths.VenvPython(), ownerOrSelf(p.Owner)); err != nil {
+		p.setStatus(StageFailed, "", err.Error())
+		return err
 	}
 
 	p.setStatus(StageReady, "MLX "+mlxLMVersion+" is installed", "")
@@ -185,7 +268,7 @@ var uvBaseURL = "https://github.com/astral-sh/uv/releases/download"
 // ensureUV downloads the pinned uv release, verifies its SHA-256, and installs
 // the binary into the app directory. No shell, no installer script.
 func (p *Provisioner) ensureUV(ctx context.Context) error {
-	if _, err := os.Stat(p.Paths.UV()); err == nil {
+	if trustedExecutable(p.Paths.UV(), ownerOrSelf(p.Owner)) == nil {
 		return nil
 	}
 	arch, ok := uvArch[goruntime.GOARCH]

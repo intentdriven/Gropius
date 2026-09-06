@@ -3,16 +3,16 @@ package app
 import (
 	"encoding/json"
 	"fmt"
-	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
-	"syscall"
+
+	"github.com/intentdriven/Gropius/internal/config"
+	"github.com/intentdriven/Gropius/internal/registry"
 )
 
-// readCapped reads at most max bytes from the file at path. It returns an error
-// if the file is larger than max, so a hostile oversized file is refused rather
-// than silently truncated into a parse.
+// readCapped reads at most max bytes from the regular file at path, refusing
+// an oversized one rather than silently truncating it into a parse.
 //
 // In shared-cache mode a model directory can be adopted as ready from an
 // account other than the one now running the server (registry.Rescan), and
@@ -21,33 +21,9 @@ import (
 // non-owner from doing so, not the owner. A later retry of that repo reaches
 // this file via validateModelDir, and a plain Open would either block forever
 // on the FIFO (wedging the download goroutine, and with it App.Close's
-// dlWG.Wait) or follow the symlink and read an arbitrary file with this
-// account's privileges. O_NONBLOCK makes the open itself unblockable,
-// O_NOFOLLOW refuses symlinks outright, and the fstat on the opened handle
-// (not the path, so a swap between check and open cannot be raced in) refuses
-// anything but a regular file before any read — mirroring registry.go's
-// readManifest, which guards the same hazard for registry.json/config.json.
+// dlWG.Wait) or follow the symlink. config.ReadRegular refuses both.
 func readCapped(path string, max int64) ([]byte, error) {
-	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK|syscall.O_NOFOLLOW, 0)
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-	info, err := f.Stat()
-	if err != nil {
-		return nil, err
-	}
-	if !info.Mode().IsRegular() {
-		return nil, fmt.Errorf("%s is not a regular file", filepath.Base(path))
-	}
-	b, err := io.ReadAll(io.LimitReader(f, max+1))
-	if err != nil {
-		return nil, err
-	}
-	if int64(len(b)) > max {
-		return nil, fmt.Errorf("file %s exceeds %d bytes", filepath.Base(path), max)
-	}
-	return b, nil
+	return config.ReadRegular(path, max)
 }
 
 // dirSize sums the size of every regular file under dir.
@@ -112,6 +88,13 @@ func validateModelDir(dir string) error {
 		if !info.Mode().IsRegular() {
 			return fmt.Errorf("%s is not a regular file", filepath.Base(w))
 		}
+	}
+	// The same shard-completeness rule the rescan applies: the hub fetches the
+	// tree listing, never the index, so a repo whose index names a shard the
+	// tree lacks downloads "successfully" and would otherwise be advertised as
+	// ready only to fail on every load.
+	if err := registry.CheckShards(dir); err != nil {
+		return err
 	}
 	return nil
 }

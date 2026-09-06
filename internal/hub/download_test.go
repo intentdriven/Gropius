@@ -549,7 +549,7 @@ func TestDownloadCreatesGroupWritableDirsUnderSetgidModelsDir(t *testing.T) {
 	dest := filepath.Join(models, "org", "repo")
 
 	c := &Client{BaseURL: srv.URL, HTTP: srv.Client()}
-	if err := c.Download(context.Background(), DownloadRequest{RepoID: "org/repo", Dest: dest}); err != nil {
+	if err := c.Download(context.Background(), DownloadRequest{RepoID: "org/repo", ModelsDir: models, Dest: dest}); err != nil {
 		t.Fatalf("Download: %v", err)
 	}
 	for _, d := range []string{
@@ -584,7 +584,7 @@ func TestDownloadKeepsPerUserDirsPrivate(t *testing.T) {
 	dest := filepath.Join(models, "org", "repo")
 
 	c := &Client{BaseURL: srv.URL, HTTP: srv.Client()}
-	if err := c.Download(context.Background(), DownloadRequest{RepoID: "org/repo", Dest: dest}); err != nil {
+	if err := c.Download(context.Background(), DownloadRequest{RepoID: "org/repo", ModelsDir: models, Dest: dest}); err != nil {
 		t.Fatalf("Download: %v", err)
 	}
 	for _, d := range []string{filepath.Join(models, "org"), dest} {

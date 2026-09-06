@@ -165,9 +165,16 @@ func writeInstanceToken(paths config.Paths, token string) error {
 	return os.Rename(tmpName, instanceTokenPath(paths))
 }
 
-// readInstanceToken returns the recorded token, or "" if none.
+// maxInstanceTokenBytes caps the token read; a real token is 64 hex chars.
+const maxInstanceTokenBytes = 4096
+
+// readInstanceToken returns the recorded token, or "" if none — including when
+// the file is not a regular file this account can read: in a shared root a
+// peer can plant a FIFO under this name (turning the probe's fast "foreign
+// holder" refusal into a silent hang) or a symlink, so the read is hardened
+// (see config.OpenRegular) and any refusal reads as "no token".
 func readInstanceToken(paths config.Paths) string {
-	b, err := os.ReadFile(instanceTokenPath(paths))
+	b, err := config.ReadRegular(instanceTokenPath(paths), maxInstanceTokenBytes)
 	if err != nil {
 		return ""
 	}
