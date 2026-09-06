@@ -631,8 +631,11 @@ func (p *Pool) stopEntryLocked(e *entry, reason StopReason) {
 // ErrNotLoaded is returned by Unload when the model is not resident.
 var ErrNotLoaded = errors.New("model is not loaded")
 
-// ErrBusy is returned by Unload when the model is serving a request. Callers can
-// test for it with errors.Is rather than matching on message text.
+// ErrBusy marks every refusal that is about the machine being occupied rather
+// than about the caller's request: Unload of a model that is serving one,
+// Acquire past a model's queue ceiling, and Acquire when nothing in memory can
+// be freed to make room. Callers can test for it with errors.Is rather than
+// matching on message text.
 var ErrBusy = errors.New("model is busy")
 
 // Unload stops a model server.
