@@ -77,9 +77,12 @@
       <p>{{ range $i, $n := .InstallNote }}{{ if $i }} {{ end }}{{ $n }}{{ end }}</p>
     </div>
     <div class="release-facts">
-      <!-- release facts: begin. This region names the assets a release carries and
-           nothing else. The version, the date, each asset's size and the link to
-           the checksums are itd-2609061353258535's; it replaces this list rather
+      <!-- release facts: begin. This marker is TEMPLATE-ONLY: html/template elides
+           comments, so the rendered page carries none of it and class=
+           "release-facts" above is the only handle in the output.
+           This region names the assets a release carries and nothing else.
+           The version, the date, each asset's size and the link to the
+           checksums are itd-2609061353258535's; it replaces this list rather
            than adding a second one beside it. Nothing here may carry a version
            literal: the download button resolves the latest release at request
            time, and a stale number on the page would contradict it. -->

@@ -16,6 +16,7 @@ import (
 	"math"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -100,6 +101,16 @@ func TestDownloadAndSourceSitAboveTheFold(t *testing.T) {
 	if row < 0 || row > install {
 		t.Fatalf("no action row above the install section")
 	}
+	// Both elements the criterion names, in the one row above the fold.
+	actionRow := between(t, page, `class="cta-row"`, "</div>")
+	if !strings.Contains(actionRow, "/releases/latest/download/") {
+		t.Error("the action row holds no download button")
+	}
+	// The repository's own URL, not merely a prefix of one: the download link
+	// starts with it, so a substring test would pass with the second action gone.
+	if !strings.Contains(actionRow, `href="`+repositoryURL(t)+`"`) {
+		t.Error("the action row holds no link to the repository itself")
+	}
 
 	// Then the height of everything above the action row, at 1280px wide, from
 	// the stylesheet's own numbers. The line counts are the model's assumption
@@ -147,12 +158,18 @@ func foldBudget(t *testing.T) (float64, string) {
 	add("hero padding-bottom", heroPad.bottom)
 	add("hero rule", px(t, firstToken(decl(t, css, ".hero", "border-bottom"))))
 
-	// The action row itself: the top of the button is what has to be reachable.
+	// The action row itself. The criterion names TWO elements — the download
+	// button and the repository link — and .cta-row is `flex-wrap: wrap`, so
+	// they share a row only while they fit the column. When they do not, the
+	// second drops to a row of its own and the fold has to carry both.
 	add("actions padding-top", boxPx(t, decl(t, css, ".actions", "padding")).top)
-	btnPad := boxPx(t, decl(t, css, ".btn", "padding"))
-	btnText := px(t, decl(t, css, ".btn", "font-size"))*num(t, decl(t, css, ".btn", "line-height")) +
-		px(t, decl(t, css, ".btn small", "font-size"))*num(t, decl(t, css, ".btn small", "line-height"))
-	add("download button", btnPad.top+btnPad.bottom+2*px(t, firstToken(decl(t, css, ".btn", "border")))+btnText)
+	height := buttonHeight(t)
+	rows := actionRows(t)
+	gap := 0.0
+	if rows > 1 {
+		gap = boxGap(t, decl(t, css, ".cta-row", "gap"))
+	}
+	add(fmt.Sprintf("action row (%d row(s))", rows), float64(rows)*height+float64(rows-1)*gap)
 
 	fmt.Fprintf(&b, "  %-28s %7.1f", "total", total)
 	return total, b.String()
@@ -244,6 +261,14 @@ func TestPageIsAnIdentitySurfaceAndCarriesTheTagline(t *testing.T) {
 	}
 	if len(surface.Requires) != 1 || surface.Requires[0] != "tagline" {
 		t.Errorf("landing-hero requires %v; the surfaces in this repository hold the tagline", surface.Requires)
+	}
+	// The surface names a build artefact, so it reports absent — not adrift — on
+	// an unrendered checkout (recorded in .abcd/work/DECISIONS.md, and the
+	// reason the assertion below, not `abcd identity`, is what holds the page on
+	// every run). Bind the registration to what the build actually writes, so it
+	// cannot rot into naming a path nothing produces.
+	if want := renderedPagePath(t); len(surface.Files) != 1 || surface.Files[0] != want {
+		t.Errorf("landing-hero names %v; `make site` writes %s", surface.Files, want)
 	}
 
 	// The identity check reports drift by pulling the surface's capture out of
@@ -439,15 +464,21 @@ func shapesIn(t *testing.T, svg string) map[string]shape {
 		}
 		out[vertical+"-"+horizontal] = s
 	}
-	for _, m := range regexp.MustCompile(`<polygon points="([^"]+)"[^>]*fill="([^"]+)"`).FindAllStringSubmatch(svg, -1) {
+	for _, m := range regexp.MustCompile(`<polygon ([^/>]*)/>`).FindAllStringSubmatch(svg, -1) {
+		// Attributes are read by name, in any order: reordering points and fill
+		// is a legal, semantically identical edit to the art.
+		a := attrs(m[1])
 		var sx, sy float64
-		pts := strings.Fields(m[1])
+		pts := strings.Fields(a["points"])
+		if len(pts) == 0 {
+			t.Fatalf("a polygon has no points: %s", m[1])
+		}
 		for _, p := range pts {
 			xy := strings.SplitN(p, ",", 2)
-			sx += num(t, xy[0])
-			sy += num(t, xy[1])
+			sx += coord(t, xy[0])
+			sy += coord(t, xy[1])
 		}
-		place(sx/float64(len(pts)), sy/float64(len(pts)), shape{kind: "polygon", fill: m[2]})
+		place(sx/float64(len(pts)), sy/float64(len(pts)), shape{kind: "polygon", fill: a["fill"]})
 	}
 	for _, m := range regexp.MustCompile(`<rect ([^/>]*)/>`).FindAllStringSubmatch(svg, -1) {
 		// x and y default to 0 in SVG, and the icon's background rect omits both.
@@ -517,6 +548,128 @@ func TestNothingScrollsSidewaysOnAPhone(t *testing.T) {
 	if !strings.Contains(first[1], "btn-primary") {
 		t.Errorf("the first action is %q; the download button comes first", first[1])
 	}
+}
+
+// buttonHeight is one .btn: its padding, its border, and the two lines of text
+// inside it.
+func buttonHeight(t *testing.T) float64 {
+	t.Helper()
+	pad := boxPx(t, decl(t, css, ".btn", "padding"))
+	text := px(t, decl(t, css, ".btn", "font-size"))*num(t, decl(t, css, ".btn", "line-height")) +
+		px(t, decl(t, css, ".btn small", "font-size"))*num(t, decl(t, css, ".btn small", "line-height"))
+	return pad.top + pad.bottom + 2*px(t, firstToken(decl(t, css, ".btn", "border"))) + text
+}
+
+// actionRows is how many rows the two buttons occupy in the left column at
+// 1280px wide. The advance model is half an em per character plus whatever
+// tracking the stylesheet declares, which is what makes a wider label — or the
+// Futura fallback when the web font does not load — show up here as a second row
+// rather than as a surprise below the fold.
+func actionRows(t *testing.T) int {
+	t.Helper()
+	column := actionColumnWidth(t)
+	gap := boxGap(t, decl(t, css, ".cta-row", "gap"))
+	var total float64
+	for i, b := range buttons(t) {
+		if i > 0 {
+			total += gap
+		}
+		total += b
+	}
+	if total <= column {
+		return 1
+	}
+	return 2
+}
+
+// buttons is each action's rendered width: padding, border, the icon and its
+// gap, and the wider of the label and the note beneath it.
+func buttons(t *testing.T) []float64 {
+	t.Helper()
+	pad := boxPx(t, decl(t, css, ".btn", "padding"))
+	frame := pad.left + pad.right + 2*px(t, firstToken(decl(t, css, ".btn", "border"))) +
+		px(t, decl(t, css, ".btn svg", "width")) + boxGap(t, decl(t, css, ".btn", "gap"))
+	label := advance(t, ".btn")
+	note := advance(t, ".btn small")
+
+	var ui struct {
+		DownloadLabel   string `json:"download_label"`
+		DownloadNote    string `json:"download_note"`
+		RepositoryLabel string `json:"repository_label"`
+	}
+	readJSON(t, filepath.Join(repoRoot, "site-src", "ui.json"), &ui)
+	var man struct {
+		Forge struct {
+			Repository string `json:"repository"`
+		} `json:"forge"`
+	}
+	readJSON(t, filepath.Join(repoRoot, ".abcd", "site.json"), &man)
+
+	widest := func(label, note string, labelAdv, noteAdv float64) float64 {
+		return frame + math.Max(float64(len([]rune(label)))*labelAdv, float64(len([]rune(note)))*noteAdv)
+	}
+	return []float64{
+		widest(ui.DownloadLabel, ui.DownloadNote, label, note),
+		widest(ui.RepositoryLabel, man.Forge.Repository, label, note),
+	}
+}
+
+// advance is one character's width for a selector: half an em, plus the tracking
+// the stylesheet declares for it.
+func advance(t *testing.T, selector string) float64 {
+	t.Helper()
+	size := px(t, decl(t, css, selector, "font-size"))
+	return size * (0.5 + em(t, decl(t, css, selector, "letter-spacing")))
+}
+
+// actionColumnWidth is the left column of .actions at 1280px: the page's own
+// width and padding, then the grid's fractions and gap.
+func actionColumnWidth(t *testing.T) float64 {
+	t.Helper()
+	pagePad := boxPx(t, decl(t, css, ".page", "padding"))
+	content := math.Min(foldWidth, px(t, decl(t, css, ".page", "max-width"))) - pagePad.left - pagePad.right
+	cols := regexp.MustCompile(`([0-9.]+)fr\s+([0-9.]+)fr`).FindStringSubmatch(decl(t, css, ".actions", "grid-template-columns"))
+	if cols == nil {
+		t.Fatalf("cannot read .actions grid-template-columns")
+	}
+	left, right := num(t, cols[1]), num(t, cols[2])
+	gap := boxGap(t, decl(t, css, ".actions", "gap"))
+	return (content - gap) * left / (left + right)
+}
+
+// boxGap reads a gap shorthand, whose last value is the column gap.
+func boxGap(t *testing.T, v string) float64 {
+	t.Helper()
+	f := strings.Fields(v)
+	return px(t, f[len(f)-1])
+}
+
+func repositoryURL(t *testing.T) string {
+	t.Helper()
+	var man struct {
+		Forge struct {
+			Base       string `json:"base"`
+			Repository string `json:"repository"`
+		} `json:"forge"`
+	}
+	readJSON(t, filepath.Join(repoRoot, ".abcd", "site.json"), &man)
+	return strings.TrimSuffix(man.Forge.Base, "/") + "/" + man.Forge.Repository
+}
+
+// renderedPagePath is where `make site` puts the page: the Makefile's --out
+// directory, the manifest's out_subdir, index.html.
+func renderedPagePath(t *testing.T) string {
+	t.Helper()
+	makefile := read(t, filepath.Join(repoRoot, "Makefile"))
+	m := regexp.MustCompile(`gropius-site\s+--out\s+(\S+)`).FindStringSubmatch(makefile)
+	if m == nil {
+		t.Fatal("the Makefile has no `site` target invoking the renderer with --out")
+	}
+	var man struct {
+		OutSubdir string `json:"out_subdir"`
+	}
+	readJSON(t, filepath.Join(repoRoot, ".abcd", "site.json"), &man)
+	return path.Join(m[1], man.OutSubdir, "index.html")
 }
 
 // --- helpers ---------------------------------------------------------------

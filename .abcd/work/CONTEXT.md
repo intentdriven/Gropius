@@ -30,5 +30,12 @@ empirically verified design constraints live in
   exactly this reason.
 - **The serving Mac must never sleep** — a sleeping Mac does not wake for
   network traffic, and looks "down" to remote clients.
+- **`abcd identity` cannot see the landing page until it is rendered.** The
+  `landing-hero` surface names `site/Gropius/index.html`, which is a build
+  artefact and untracked, so on a plain checkout the surface reports *absent*
+  and the check stays green whatever the page says. Run `make site` first to
+  make it a real check. What holds the page to the identity block on every run
+  is `internal/sitetest`, which renders the page and applies that surface's own
+  patterns to the output.
 - `make test` always runs with the race detector; treat `-race` findings as
   failures, not noise.
