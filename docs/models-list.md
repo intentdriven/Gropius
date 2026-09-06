@@ -199,11 +199,11 @@ rules.
 - **Pinned models** (**Settings**) are never evicted to make room and never
   reaped by the idle timeout. A request that would need a pinned model's memory
   is refused instead.
-- **Preload** (**Settings**) loads the models it names at startup so their first
+- **Preload** (**Settings**) loads the models it names at start-up so their first
   request is fast. Preloading and pinning are separate settings and do different
   things: preloading loads a model and leaves it as evictable as any other,
   pinning protects a model but loads nothing. Name a model in both to have it
-  loaded at startup and protected from then on.
+  loaded at start-up and protected from then on.
 
 ## Compatibility
 
