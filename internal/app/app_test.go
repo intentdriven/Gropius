@@ -1301,3 +1301,62 @@ func TestOverlappingSavesLeaveThePoolAgreeingWithTheSettings(t *testing.T) {
 		t.Errorf("config.json holds %v while the running settings say %v", got, want)
 	}
 }
+
+// A pin can be set before its model is downloaded, and is kept as it was typed
+// because there is nothing yet to fold it onto. When the model arrives it has a
+// spelling of its own, and every surface that joins on the id — the panel's
+// boxes, its card marker — joins on that one. Fold the pin then, or the panel
+// shows the model unpinned while the pool protects it.
+func TestAPinTakesTheRegistrySpellingWhenItsModelArrives(t *testing.T) {
+	a := newTestApp(t)
+	hub := fakeHub(t)
+	a.Hub.BaseURL = hub.URL
+
+	c := a.Config()
+	c.Pinned = []string{"ORG/Repo"}
+	if err := a.SetConfig(c); err != nil {
+		t.Fatalf("SetConfig: %v", err)
+	}
+
+	if err := a.Download("org/repo"); err != nil {
+		t.Fatalf("Download: %v", err)
+	}
+	waitFor(t, "the download to finish", func() bool {
+		m, err := a.Registry.Get("org/repo")
+		return err == nil && m.State == registry.StateReady
+	})
+	waitFor(t, "the pin to take the registry's spelling", func() bool {
+		return reflect.DeepEqual(a.Config().Pinned, []string{"org/repo"})
+	})
+	if got := a.Pool.Pinned(); !reflect.DeepEqual(got, []string{"org/repo"}) {
+		t.Errorf("the pool holds %v, want the registry's spelling", got)
+	}
+}
+
+// Deleting a pinned model leaves its pin, charged nothing; downloading the
+// model again brings the charge back, and the set that fitted a moment ago may
+// not any more. No save happens on that path, so nothing refuses it — say so
+// where the operator can see it.
+func TestAPinnedSetThatStopsFittingIsReportedToTheOperator(t *testing.T) {
+	a := newTestApp(t)
+	putReady(t, a, "org/small", 1<<20)
+
+	c := a.Config()
+	c.Pinned = []string{"org/small", "org/enormous"}
+	if err := a.SetConfig(c); err != nil {
+		t.Fatalf("SetConfig: %v", err)
+	}
+	if w := a.PinnedFitWarning(); w != "" {
+		t.Fatalf("PinnedFitWarning = %q while the set fits", w)
+	}
+
+	// The second pin's model arrives, and it is far too large.
+	putReady(t, a, "org/enormous", 1<<50)
+	w := a.PinnedFitWarning()
+	if w == "" {
+		t.Fatal("PinnedFitWarning is empty although the pinned set no longer fits")
+	}
+	if !strings.Contains(w, runtime.HumanBytes(a.Pool.MemoryBudget())) {
+		t.Errorf("PinnedFitWarning = %q, want it to give the budget", w)
+	}
+}

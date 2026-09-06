@@ -179,6 +179,9 @@ func (c *Control) snapshot() State {
 		st.Warnings = append(st.Warnings,
 			"This server is reachable by anyone on your network and requires no API key. Set one in Settings to restrict access.")
 	}
+	if w := c.App.PinnedFitWarning(); w != "" {
+		st.Warnings = append(st.Warnings, w)
+	}
 	if !c.App.Provisioner.Installed() {
 		st.Warnings = append(st.Warnings,
 			"The MLX runtime is not installed yet — models cannot be served until setup finishes.")

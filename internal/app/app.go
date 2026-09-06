@@ -334,30 +334,32 @@ func (a *App) adoptPinned(in []string) []string {
 // for the same reason: a fit check that silently skips a model is a promise it
 // cannot keep. One already in the set is warned about, not refused.
 func (a *App) checkPinnedFit(incoming, current []string) error {
-	sum, unsized := a.pinnedCharge(incoming)
-	budget := a.Pool.MemoryBudget()
-	if len(unsized) == 0 && sum <= budget {
+	problem := a.pinnedFitProblem(incoming)
+	if problem == nil {
 		return nil
 	}
+	if addsAPin(incoming, current) {
+		return problem
+	}
+	a.Log.Warn("the pinned models cannot all be kept in memory as configured", "err", problem)
+	return nil
+}
 
-	worse := addsAPin(incoming, current)
+// pinnedFitProblem says why a pinned set cannot be held, or nil when it can.
+//
+// A model it cannot measure is reported before the sum, because a sum with a
+// model missing from it is not a figure to act on.
+func (a *App) pinnedFitProblem(pinned []string) error {
+	sum, unsized := a.pinnedCharge(pinned)
 	if len(unsized) > 0 {
-		err := fmt.Errorf(
+		return fmt.Errorf(
 			"cannot measure %s against the memory budget — this Mac does not record how large it is",
 			strings.Join(unsized, ", "))
-		if worse {
-			return err
-		}
-		a.Log.Warn("a pinned model cannot be measured against the memory budget", "err", err)
 	}
-	if sum > budget {
-		err := fmt.Errorf(
+	if budget := a.Pool.MemoryBudget(); sum > budget {
+		return fmt.Errorf(
 			"the pinned models need about %s of memory but the budget is %s — pin fewer models, or choose smaller quantizations",
 			runtime.HumanBytes(sum), runtime.HumanBytes(budget))
-		if worse {
-			return err
-		}
-		a.Log.Warn("the pinned models do not fit the memory budget", "err", err)
 	}
 	return nil
 }
@@ -403,6 +405,62 @@ var stopReasons = map[runtime.StopReason]string{
 	runtime.StopLoadFailed: stats.ReasonLoadFailed,
 	runtime.StopCrashed:    stats.ReasonCrashed,
 	runtime.StopShutdown:   stats.ReasonShutdown,
+}
+
+// PinnedFitWarning is what the control panel says when the pinned models can no
+// longer be held together, and "" when they can.
+//
+// A settings save is the only moment a pinned set is refused, and the set can
+// stop fitting without one: a pinned model that was deleted — and so charged
+// nothing — is charged in full again when it is downloaded back, and a model
+// re-downloaded at a larger quantization grows. Nothing refuses either, so the
+// panel says so instead, beside the warning about an open LAN endpoint.
+func (a *App) PinnedFitWarning() string {
+	problem := a.pinnedFitProblem(a.Config().Pinned)
+	if problem == nil {
+		return ""
+	}
+	return "The pinned models can no longer all be kept in memory: " + problem.Error() + "."
+}
+
+// adoptPinnedSpelling re-folds the pinned list onto the registry's spellings
+// once a model has arrived.
+//
+// A pin may be set before its model is downloaded, and is kept as it was typed
+// because there is nothing to fold it onto yet. Every surface that joins on the
+// id joins on the registry's spelling, so a pin left in another one shows the
+// model as unpinned on its card and draws a second, ticked box for a model
+// "not on this Mac" — while the pool, which folds, protects it.
+//
+// It changes the running settings only. config.json keeps the operator's
+// spelling until the next save, which folds it through canonicalPinned anyway;
+// writing the file from here would make this a second writer of it.
+func (a *App) adoptPinnedSpelling() {
+	a.saveMu.Lock()
+	defer a.saveMu.Unlock()
+
+	a.cfgMu.RLock()
+	pinned := append([]string(nil), a.cfg.Pinned...)
+	a.cfgMu.RUnlock()
+	if len(pinned) == 0 {
+		return
+	}
+
+	folded := make([]string, 0, len(pinned))
+	changed := false
+	for _, id := range pinned {
+		canonical := a.canonicalModelKey(id)
+		changed = changed || canonical != id
+		folded = append(folded, canonical)
+	}
+	if !changed {
+		return
+	}
+	a.cfgMu.Lock()
+	a.cfg.Pinned = folded
+	a.cfgMu.Unlock()
+	a.Pool.SetPinned(folded)
+	a.Log.Info("a pinned model arrived; its pin now names it as the registry does", "pinned", folded)
 }
 
 // pinnedCharge is what a pinned set costs the memory budget, and the names of
@@ -694,6 +752,14 @@ func (a *App) Download(repoID string) error {
 				a.Log.Error("model downloaded but could not be recorded", "model", repoID, "err", perr)
 			} else {
 				a.Log.Info("model downloaded", "model", repoID)
+			}
+			// A model arriving changes two things a save is not present for:
+			// which spelling its pin should carry, and what the pinned set
+			// costs. Neither refuses anything here — there is no save to
+			// refuse — so the second is a warning the panel repeats.
+			a.adoptPinnedSpelling()
+			if w := a.PinnedFitWarning(); w != "" {
+				a.Log.Warn("a model arrived and the pinned set no longer fits", "warning", w)
 			}
 
 		case errors.Is(err, context.Canceled):

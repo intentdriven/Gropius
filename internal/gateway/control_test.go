@@ -536,3 +536,58 @@ func TestSavingAShorterPinnedListRemovesTheRest(t *testing.T) {
 		t.Errorf("Pinned = %v after an explicit null, want none", got)
 	}
 }
+
+// A pinned set can stop fitting without a settings save: a pinned model that
+// was deleted is charged nothing until it is downloaded back. Nothing refuses
+// that, so the panel is where the operator finds out — beside the warning about
+// an open LAN endpoint, on the same surface, not only in the log.
+func TestStateWarnsWhenThePinnedSetNoLongerFits(t *testing.T) {
+	srv, a := newTestControlApp(t, config.Default())
+	if err := a.Registry.Put(registry.Model{
+		RepoID: "org/enormous", Path: a.Paths.ModelDir("org/enormous"),
+		Bytes: 1 << 50, State: registry.StateReady, Progress: 100,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if warned(t, srv) {
+		t.Fatal("the panel warns about the pinned set before anything is pinned")
+	}
+
+	// Pinned while the model was not there to be charged, as a delete and a
+	// re-download leave it.
+	cfg := a.Config()
+	cfg.Pinned = []string{"org/gone"}
+	if err := a.SetConfig(cfg); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Registry.Put(registry.Model{
+		RepoID: "org/gone", Path: a.Paths.ModelDir("org/gone"),
+		Bytes: 1 << 50, State: registry.StateReady, Progress: 100,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if !warned(t, srv) {
+		t.Error("the panel says nothing although the pinned set no longer fits")
+	}
+}
+
+// warned reports whether /api/state carries a warning about the pinned models.
+func warned(t *testing.T, srv *httptest.Server) bool {
+	t.Helper()
+	resp, err := srv.Client().Get(srv.URL + "/api/state")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var st State
+	if err := json.NewDecoder(resp.Body).Decode(&st); err != nil {
+		t.Fatal(err)
+	}
+	for _, w := range st.Warnings {
+		if strings.Contains(w, "pinned") {
+			return true
+		}
+	}
+	return false
+}
