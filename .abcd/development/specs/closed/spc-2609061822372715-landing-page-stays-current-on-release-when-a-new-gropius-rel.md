@@ -179,7 +179,7 @@ release chain's, and only within the shape spc-2609061822370424 established:
 
 ## As built (2026-09-06)
 
-Six things this record describes were built differently. They are stated here
+Seven things this record describes were built differently. They are stated here
 rather than edited into the paragraphs above, so what was planned and what
 shipped both stay readable.
 
@@ -231,3 +231,20 @@ guide has no download step: it is the build-from-source tutorial, and the
 download and the installer live in `README.md`, which is where the sentence
 went. Adding one to the guide would also have disturbed the spans the page
 composes its platform requirement from.
+
+**The election is a function in `cmd/gropius-site`, and its fixture test lives
+there rather than in `internal/sitetest`.** This record's criterion-3 paragraph
+promises "a records fixture whose newest-created entry is not the flagged one,
+asserting the flagged one is chosen", in `internal/sitetest`. That fixture exists
+and does exactly that — `TestTheFlaggedLatestIsElectedAndNotTheNewest` — but in
+`cmd/gropius-site`, because the election is a function there:
+`gropius-site select --from <list>` reads the forge's release list and returns
+the flagged release, refusing a list where nothing is flagged, one where two
+things are, and a flagged entry that is a draft, a pre-release or not a release
+tag. The workflow lists, elects through that verb, and then fetches the elected
+tag — three moves rather than the single `releases/latest` read this record's
+Approach describes, and the reason is this paragraph: an election made by the
+forge alone is correct but untestable from here, and the case the criterion names
+cannot be produced against a real forge without hand-making a stale release.
+`internal/sitetest` holds the workflow to that shape, which is all a YAML file can
+be held to.
