@@ -116,7 +116,8 @@ system content itself.
 
 ## Audit Notes
 
-_Empty. Populated by intent-auditor when intent moves to shipped/._
+<!-- abcd-review: OWED receipt=rcp-9706a6e500a3 -->
+Fidelity review OWED (receipt rcp-9706a6e500a3).
 
 ## Grounds
 
