@@ -142,6 +142,24 @@ type LaunchError struct {
 func (e *LaunchError) Error() string { return e.Err.Error() }
 func (e *LaunchError) Unwrap() error { return e.Err }
 
+// NotReadyError wraps the other half of a load going wrong: the process
+// started and then never answered a completion — it exited during startup, or
+// it was still loading when the readiness timeout ran out.
+//
+// It carries the same message it always did; the type is what lets a caller
+// tell "could not be started" from "started and never answered". The two are
+// different failures: the first is a broken installation or a vanished model
+// directory, the second is usually a model too large for this Mac or weights
+// that will not load. Its message is safe to relay, unlike a LaunchError's:
+// it comes from the process's own exit status or from the probe's timeout, not
+// from a path on this machine.
+type NotReadyError struct {
+	Err error
+}
+
+func (e *NotReadyError) Error() string { return e.Err.Error() }
+func (e *NotReadyError) Unwrap() error { return e.Err }
+
 // ExecLauncher runs the real `mlx_lm.server` out of the managed virtualenv.
 type ExecLauncher struct {
 	Paths config.Paths
