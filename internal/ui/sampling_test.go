@@ -61,31 +61,36 @@ func samplingJSONFields(t *testing.T) []string {
 	return out
 }
 
+// panelInputFor maps a sampling parameter to the machine-wide field that edits
+// it. The per-model fields deliberately show a different hint (the machine's
+// value, not the model server's), so they are not in here.
+var panelInputFor = map[string]string{
+	"temperature": "setTemp",
+	"top_p":       "setTopP",
+	"top_k":       "setTopK",
+	"min_p":       "setMinP",
+	"max_tokens":  "setMaxTokens",
+}
+
 // The placeholders tell the user what a blank field means, so they must be the
-// model server's own defaults — the ones recorded from the pinned server.
+// model server's own defaults — read off the recorded bounds rather than
+// written out here, or the panel can drift from the figure the reference page
+// gives while both tests stay green.
 func TestBlankSamplingFieldsShowTheModelServerDefaults(t *testing.T) {
 	page, err := assets.ReadFile("static/index.html")
 	if err != nil {
 		t.Fatal(err)
 	}
-	for id, want := range map[string]string{
-		"setTemp":      "0",
-		"setTopP":      "1",
-		"setTopK":      "0",
-		"setMinP":      "0",
-		"setMaxTokens": "512",
-	} {
-		idx := strings.Index(string(page), `id="`+id+`"`)
-		if idx < 0 {
-			t.Fatalf("no control with id %q", id)
+	for _, b := range config.SamplingBounds() {
+		id, ok := panelInputFor[b.Field]
+		if !ok {
+			t.Errorf("no machine-wide input is mapped for %q", b.Field)
+			continue
 		}
-		tag := string(page)[idx:]
-		if end := strings.Index(tag, ">"); end >= 0 {
-			tag = tag[:end]
-		}
-		ph := placeholderOf(tag)
-		if !strings.HasPrefix(ph, want) {
-			t.Errorf("%s placeholder is %q, want it to open with the model server's own default %q", id, ph, want)
+		ph := placeholderOf(inputTag(t, string(page), id))
+		if !strings.HasPrefix(ph, b.DefaultText()) {
+			t.Errorf("%s placeholder is %q, want it to open with the model server's own default %q",
+				id, ph, b.DefaultText())
 		}
 	}
 }

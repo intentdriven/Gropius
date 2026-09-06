@@ -30,7 +30,8 @@ type Sampling struct {
 	MaxTokens   *int     `json:"max_tokens,omitempty"`
 }
 
-// SamplingBound is the range one sampling parameter accepts.
+// SamplingBound is the range one sampling parameter accepts, and the value the
+// model server itself uses when Gropius holds none.
 type SamplingBound struct {
 	// Field is the parameter's name, as it appears in config.json and in the
 	// error a refused settings save reports.
@@ -41,7 +42,16 @@ type SamplingBound struct {
 	HasMax bool
 	// Integer reports whether the parameter is a whole number.
 	Integer bool
+	// ServerDefault is what the model server applies when it is passed no flag
+	// for this parameter — which is what a blank field in Settings means. The
+	// panel's placeholder and the reference page both have to say this figure,
+	// so it is held here rather than written out in each of them.
+	ServerDefault float64
 }
+
+// DefaultText renders the model server's own default as the panel and the
+// documentation must show it.
+func (b SamplingBound) DefaultText() string { return formatBound(b.ServerDefault, b.Integer) }
 
 // samplingParam couples one bound to the field it governs, so validation,
 // sanitizing and the range test all read the same table.
@@ -95,29 +105,30 @@ const MaxCompletionTokens = 1 << 20
 
 var samplingParams = []samplingParam{
 	{
-		bound: SamplingBound{Field: "temperature", Min: 0},
+		bound: SamplingBound{Field: "temperature", Min: 0, ServerDefault: 0},
 		get:   func(s Sampling) (float64, bool) { return deref(s.Temperature) },
 		clear: func(s *Sampling) { s.Temperature = nil },
 	},
 	{
-		bound: SamplingBound{Field: "top_p", Min: 0, Max: 1, HasMax: true},
+		bound: SamplingBound{Field: "top_p", Min: 0, Max: 1, HasMax: true, ServerDefault: 1},
 		get:   func(s Sampling) (float64, bool) { return deref(s.TopP) },
 		clear: func(s *Sampling) { s.TopP = nil },
 	},
 	{
-		bound:  SamplingBound{Field: "top_k", Min: 0, Max: MaxTopK, HasMax: true, Integer: true},
+		bound:  SamplingBound{Field: "top_k", Min: 0, Max: MaxTopK, HasMax: true, Integer: true, ServerDefault: 0},
 		get:    func(s Sampling) (float64, bool) { return derefInt(s.TopK) },
 		getInt: func(s Sampling) (int, bool) { return derefIntExact(s.TopK) },
 		clear:  func(s *Sampling) { s.TopK = nil },
 	},
 	{
-		bound: SamplingBound{Field: "min_p", Min: 0, Max: 1, HasMax: true},
+		bound: SamplingBound{Field: "min_p", Min: 0, Max: 1, HasMax: true, ServerDefault: 0},
 		get:   func(s Sampling) (float64, bool) { return deref(s.MinP) },
 		clear: func(s *Sampling) { s.MinP = nil },
 	},
 	{
 		bound: SamplingBound{
 			Field: "max_tokens", Min: 0, Max: MaxCompletionTokens, HasMax: true, Integer: true,
+			ServerDefault: 512,
 		},
 		get:    func(s Sampling) (float64, bool) { return derefInt(s.MaxTokens) },
 		getInt: func(s Sampling) (int, bool) { return derefIntExact(s.MaxTokens) },

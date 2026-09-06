@@ -20,11 +20,11 @@ func intp(v int) *int        { return &v }
 // validate_model_parameters for the request check, and sample_utils for the
 // sampler's own limits.
 var serverBounds = []SamplingBound{
-	{Field: "temperature", Min: 0},
-	{Field: "top_p", Min: 0, Max: 1, HasMax: true},
-	{Field: "top_k", Min: 0, Integer: true}, // plus a sampler limit of vocab_size
-	{Field: "min_p", Min: 0, Max: 1, HasMax: true},
-	{Field: "max_tokens", Min: 0, Integer: true},
+	{Field: "temperature", Min: 0, ServerDefault: 0},
+	{Field: "top_p", Min: 0, Max: 1, HasMax: true, ServerDefault: 1},
+	{Field: "top_k", Min: 0, Integer: true, ServerDefault: 0}, // plus a sampler limit of vocab_size
+	{Field: "min_p", Min: 0, Max: 1, HasMax: true, ServerDefault: 0},
+	{Field: "max_tokens", Min: 0, Integer: true, ServerDefault: 512},
 }
 
 // The Go bounds exist to stop a saved setting from becoming a machine-wide
@@ -42,6 +42,13 @@ func TestGoRangesAreNeverWiderThanThePinnedServers(t *testing.T) {
 		if g.Field != s.Field || g.Integer != s.Integer {
 			t.Fatalf("bound %d = %+v, want the same parameter as %+v", i, g, s)
 		}
+		// A blank field means "pass no flag", so what applies is the server's
+		// own default. Recording a different figure would make every place
+		// that shows it — the panel's placeholder, the reference page — lie.
+		if g.ServerDefault != s.ServerDefault {
+			t.Errorf("%s records the model server's default as %v, but it is %v",
+				g.Field, g.ServerDefault, s.ServerDefault)
+		}
 		if g.Min < s.Min {
 			t.Errorf("%s accepts values down to %v, below the server's %v", g.Field, g.Min, s.Min)
 		}
@@ -55,21 +62,24 @@ func TestGoRangesAreNeverWiderThanThePinnedServers(t *testing.T) {
 // the one place Gropius is deliberately stricter than the request check.
 func TestGoRangesAreExactlyThese(t *testing.T) {
 	want := []SamplingBound{
-		{Field: "temperature", Min: 0},
-		{Field: "top_p", Min: 0, Max: 1, HasMax: true},
+		{Field: "temperature", Min: 0, ServerDefault: 0},
+		{Field: "top_p", Min: 0, Max: 1, HasMax: true, ServerDefault: 1},
 		// The request check accepts any non-negative top_k, but the sampler
 		// refuses one at or above the model's vocabulary size — and it raises
 		// inside generation, so the process starts healthy and then fails
 		// every request that omits top_k. Gropius cannot know a vocabulary
 		// size when the value is saved, so it caps top_k far below the
 		// smallest an MLX model ships.
-		{Field: "top_k", Min: 0, Max: 1024, HasMax: true, Integer: true},
-		{Field: "min_p", Min: 0, Max: 1, HasMax: true},
+		{Field: "top_k", Min: 0, Max: 1024, HasMax: true, Integer: true, ServerDefault: 0},
+		{Field: "min_p", Min: 0, Max: 1, HasMax: true, ServerDefault: 0},
 		// The request check takes any non-negative budget. A default above any
 		// real context window means "generate until the model stops" on every
 		// request that omits the parameter, and it is also the value that put
 		// an integer conversion out of range.
-		{Field: "max_tokens", Min: 0, Max: MaxCompletionTokens, HasMax: true, Integer: true},
+		{
+			Field: "max_tokens", Min: 0, Max: MaxCompletionTokens, HasMax: true, Integer: true,
+			ServerDefault: 512,
+		},
 	}
 	if got := SamplingBounds(); !reflect.DeepEqual(got, want) {
 		t.Fatalf("SamplingBounds() = %+v\nwant %+v", got, want)

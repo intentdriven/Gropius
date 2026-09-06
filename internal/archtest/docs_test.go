@@ -65,9 +65,33 @@ func TestSamplingDocsMatchTheCode(t *testing.T) {
 		t.Error("the explanation does not warn that an explicit null is not the same as omitting the parameter")
 	}
 
-	// 3. What a blank field means.
+	// 3. What a blank field means — and the figure, not just the heading. This
+	//    is the one clause whose whole point is that the page is honest about
+	//    a value the reader cannot otherwise see, so the figures are read off
+	//    the recorded bounds rather than trusted.
 	if !containsAll(reference, "Blank means") {
 		t.Error("the reference does not say what a blank field means")
+	}
+	blank := map[string]string{}
+	for _, row := range table {
+		cells := strings.Split(strings.Trim(row, "|"), "|")
+		if len(cells) < 3 {
+			continue
+		}
+		for _, name := range backticked(cells[1]) {
+			blank[name] = strings.TrimSpace(cells[2])
+		}
+	}
+	for _, b := range config.SamplingBounds() {
+		cell, ok := blank[b.Field]
+		if !ok {
+			t.Errorf("the table has no blank-means cell for %q", b.Field)
+			continue
+		}
+		if !strings.HasPrefix(cell, b.DefaultText()) {
+			t.Errorf("%s: the table says a blank field means %q, but the model server's own default is %s",
+				b.Field, cell, b.DefaultText())
+		}
 	}
 
 	// 4. Reproducibility comes from a fixed temperature, because the model
