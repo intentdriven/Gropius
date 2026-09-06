@@ -40,38 +40,46 @@ curl http://localhost:11535/v1/models
 
 ## The context figure
 
-`context_length` and `max_model_len` always carry the same number. Both names
-are published so the figure lands under whichever one a client's tooling
-already looks for: `context_length` is the spelling OpenRouter- and
-Ollama-style listings use, `max_model_len` the spelling vLLM uses.
+`context_length` and `max_model_len` always carry the same number, as a JSON
+integer. Both names are published so the figure lands under whichever one a
+client's tooling already looks for: `context_length` is the spelling
+OpenRouter- and Ollama-style listings use, `max_model_len` the spelling vLLM
+uses.
 
-The number is the **architectural maximum**: the positional range the model's
-own configuration declares, which is what it was trained or scaled for.
-Gropius reads it from the model's `config.json` — `max_position_embeddings`,
-or `text_config.max_position_embeddings` for the multimodal and composite
-architectures that nest the text model's settings — and applies no scaling
-arithmetic of its own.
+**What the number is.** The architectural maximum: the positional range the
+model's own configuration declares, which is what it was trained or scaled
+for. Gropius reads it from the model's `config.json` — `max_position_embeddings`
+at the top level, or `text_config.max_position_embeddings` for the multimodal
+and composite architectures that nest the text model's settings — and applies
+no scaling arithmetic of its own.
 
-Two things follow from that.
+**What the number is not.** It is not what a given Mac can serve. The usable
+window may be smaller: a long prompt has to fit in memory alongside the
+weights, and a very long one can take minutes to process. Nor is it enforced —
+Gropius refuses no request and trims no prompt because of it. A prompt beyond
+the figure is accepted, and the model's answers degrade outside the range it
+was scaled for.
 
-- **It is a ceiling, not a promise.** The window a given Mac can serve at once
-  may be smaller: a long prompt has to fit in memory alongside the weights,
-  and a very long one can take minutes to process. Treat the figure as the
-  limit above which a prompt is outside the range the model was built for, and
-  measure what your own Mac sustains.
-- **Nothing enforces it.** Gropius does not refuse or trim a prompt because of
-  this number. A client is free to send more, and the model's answers simply
-  degrade beyond the range it was scaled for.
+**When the fields are absent.** Both are omitted, rather than sent as zero, in
+these cases:
 
-Both fields are absent, rather than zero, when the model's configuration
-declares no positional range, or declares one Gropius does not believe — a
-figure that is negative, fractional, or implausibly large. The model is listed
-and served exactly as it would be with a figure; only the context fields are
-missing. A client should therefore treat an absent figure as "unknown", never
-as "no context".
+- The configuration declares no positional range under either key.
+- The declared range is negative, zero, fractional, or not a number.
+- The declared range exceeds 8,388,608 tokens, the ceiling above which a
+  figure is treated as corrupt.
+- The top-level key is present but holds one of the values above. A bad
+  top-level key is never rescued by a good `text_config` one: the top level is
+  the authoritative key, and a configuration that contradicts itself is not
+  believed.
 
-The control panel shows the same number on each model's card, labelled
-`max context`.
+The model is listed and served exactly as it would be with a figure; only the
+context fields are missing. Treat an absent figure as "unknown", never as "no
+context".
+
+**On the model card.** The control panel shows the figure on each model's
+card, labelled `max context` and abbreviated to whole units of 1,024 rounded
+down — a model declaring 262,143 reads `max context 255K`. The models list
+carries the exact number.
 
 ## Compatibility
 

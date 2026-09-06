@@ -120,7 +120,7 @@ request, and never the client's network address.
 - [`internal/`](internal/) — the engine: `hub` (HuggingFace client + downloader),
   `runtime` (Python/MLX provisioning + process pool), `gateway` (OpenAI + control
   API), `registry`, `discovery`, `config`, `capability`, `ui`, `app`.
-- [`docs/`](docs/) — getting-started guide.
+- [`docs/`](docs/) — getting-started guide and the models-list reference.
 
 Design decisions and the empirical facts behind them: [`DECISIONS.md`](.abcd/development/decisions/DECISIONS.md).
 

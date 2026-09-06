@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -1041,8 +1042,17 @@ func TestModelsListReferenceDocumentsEveryFieldServed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("the models-list reference page is missing: %v", err)
 	}
+	// Only the "## Fields" section is the field table; another table
+	// elsewhere on the page must not be read as phantom fields.
+	_, fields, ok := strings.Cut(string(page), "\n## Fields\n")
+	if !ok {
+		t.Fatal("the reference page has no `## Fields` section")
+	}
+	if next := strings.Index(fields, "\n## "); next >= 0 {
+		fields = fields[:next]
+	}
 	documented := map[string]bool{}
-	for _, line := range strings.Split(string(page), "\n") {
+	for _, line := range strings.Split(fields, "\n") {
 		if !strings.HasPrefix(line, "| `") {
 			continue
 		}
@@ -1063,11 +1073,73 @@ func TestModelsListReferenceDocumentsEveryFieldServed(t *testing.T) {
 		}
 	}
 
-	// The two things a reader must not have to infer: what the figure is, and
-	// that it is not what this Mac can necessarily serve.
-	for _, phrase := range []string{"architectural maximum", "may be smaller"} {
+	// The things a reader must not have to infer: what the figure is, that it
+	// is not what this Mac can necessarily serve, and the ceiling above which
+	// a declared figure is refused — which the acceptance criterion calls the
+	// documented ceiling, so it has to be a number on a user-facing page and
+	// has to be the number the code enforces.
+	for _, phrase := range []string{
+		"architectural maximum",
+		"may be smaller",
+		withThousands(registry.MaxContextLength),
+	} {
 		if !strings.Contains(string(page), phrase) {
 			t.Errorf("the reference page never says %q", phrase)
 		}
 	}
+}
+
+// The acceptance criterion is written against the composed path, and every
+// test above stubs out one half of it. This one carries a real model
+// directory through a real Registry.Rescan to the bytes on the wire.
+func TestContextLengthReachesTheWireFromAModelDirectory(t *testing.T) {
+	fake := mlxtest.Start(mlxtest.Options{ModelArg: "/m"})
+	defer fake.Close()
+
+	root := t.TempDir()
+	dir := filepath.Join(root, "models", "mlx-community", "Qwen3-Coder-Next-4bit")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// A config.json of the shape mlx-community publishes.
+	if err := os.WriteFile(filepath.Join(dir, "config.json"),
+		[]byte(`{"model_type":"qwen3_next","max_position_embeddings":262144,"rope_scaling":null}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "model.safetensors"), make([]byte, 64), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	reg, err := registry.Open(filepath.Join(root, "registry.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := reg.Rescan(filepath.Join(root, "models")); err != nil {
+		t.Fatalf("Rescan: %v", err)
+	}
+
+	g := New(Options{Config: config.Default(), Pool: &stubPool{srv: fake}, Models: reg})
+	srv := httptest.NewServer(g.Handler())
+	defer srv.Close()
+
+	entry := firstModelEntry(t, srv)
+	if entry["id"] != "mlx-community/Qwen3-Coder-Next-4bit" {
+		t.Fatalf("the scanned model was not listed: %+v", entry)
+	}
+	for _, name := range []string{"context_length", "max_model_len"} {
+		if n, ok := entry[name].(float64); !ok || int64(n) != 262144 {
+			t.Errorf("%s = %v, want 262144", name, entry[name])
+		}
+	}
+}
+
+// withThousands renders n the way the documentation writes a large number,
+// so the ceiling on the reference page is checked against the constant the
+// code enforces rather than a copy that can drift.
+func withThousands(n int64) string {
+	s := strconv.FormatInt(n, 10)
+	for i := len(s) - 3; i > 0; i -= 3 {
+		s = s[:i] + "," + s[i:]
+	}
+	return s
 }
