@@ -194,3 +194,37 @@ additive read.
 - Whether `state` is also surfaced on the control panel's model cards. The
   panel already renders `Resident()` on loopback, so this is presentation only
   and needs no new plumbing.
+
+## As built (2026-09-06)
+
+Two things shipped differently from the plan above. Recorded here because a
+closed spec is the durable claim about what shipped, and the rest of this
+document says otherwise.
+
+**`withAuth` changed.** Scope says "Any change to `withAuth`, to the loopback
+exemption, or to who may call the listing at all" is out of scope, and the
+trust-boundary notes say "`withAuth` is untouched". Neither holds. An
+adversarial security pass found the API key read twice on one request — once by
+`withAuth` to admit it, once by `handleListModels` to decide whether to project
+— and the configuration is live, so a LAN request admitted while no key was
+configured could be served residency if the operator clicked Save between the
+two reads. `withAuth` now takes one reading and records on the request whether
+the install was keyed; the handler decides on that bit. What the out-of-scope
+line was protecting is intact: the loopback exemption, the Origin and Host
+guards, the constant-time compare, every status code and who is admitted or
+refused are unchanged, and the middleware makes one configuration read where it
+made one before. The bit is carried rather than the configuration, because the
+request context reaches the pool and the outbound relay request.
+
+**`pinned` is not projected.** The summary and the approach name four fields.
+Three shipped: `state`, `in_flight` and `last_used`. `Pinned` does not exist on
+`runtime.Resident` yet, and the field arrives with itd-2609061441241254, which
+adds one line to the allow-list in `addResidency` and one row to the reference
+table. The unkeyed listing's exact key-set assertion is what keeps that field
+from reaching an open server when it lands.
+
+**Also settled here, beyond the plan.** The models list folds both sides of its
+residency join, and the pool holds one entry per model whatever the case of the
+id it is asked for (iss-2609062150484966). The two key spaces disagreed, so a
+model warmed under a hand-typed `preload` id was reported cold while it was
+warm, and a later request launched a second server for the same weights.
