@@ -13,6 +13,24 @@ function bytes(n) {
   return `${n.toFixed(i === 0 ? 0 : 1)} ${u[i]}`;
 }
 
+// foldRepoID is config.FoldRepoID: the one rule for when two repo ids name the
+// same model. The panel joins pins against model ids, and a pin can be carried
+// in a spelling the registry does not use — set before the model was
+// downloaded — until the next save reconciles it, so the join folds like every
+// other join on a repo id in this project does.
+function foldRepoID(id) { return String(id ?? '').toLowerCase(); }
+
+// pinLabel is the pill a model's card carries when it is pinned: which of the
+// two things being pinned means right now, or '' when it is not. A model that
+// is protected but that nothing has loaded says so, because an operator
+// reading "pinned" would otherwise assume it was running.
+function pinLabel(m, pinned, loaded) {
+  if (m.state !== 'ready') return '';
+  const want = foldRepoID(m.repo_id);
+  if (!(pinned || []).some((id) => foldRepoID(id) === want)) return '';
+  return loaded ? 'pinned' : 'pinned, not loaded';
+}
+
 // size is bytes() for a figure that is genuinely a measurement: nothing pinned
 // is "0 B", not the em dash bytes() shows for a size it does not know. This
 // line is read before anything is ticked, so zero is its opening state.
@@ -141,11 +159,12 @@ function renderModels() {
   const list = $('modelList');
   const models = state.models || [];
   const resident = new Set((state.resident || []).map((r) => r.repo_id));
-  // The settings hold the registry's own spelling of every model this Mac has
-  // — the app folds a pin onto it when the file is read and when a save is
-  // made — so the ids match exactly. A pinned model that nothing has loaded is
-  // marked too: "pinned" is a fact about the model, not about its memory.
-  const pinned = new Set(state.config.pinned || []);
+  // The set the pool is actually enforcing, not the stored settings: those two
+  // are the same except for the moment between a model arriving and the pin
+  // for it being reconciled, and this surface is the one an operator would act
+  // on. A pinned model that nothing has loaded is marked too — "pinned" is a
+  // fact about the model, not about its memory.
+  const pinned = state.pinned || [];
 
   $('modelsEmpty').hidden = models.length > 0;
   list.innerHTML = '';
@@ -160,11 +179,8 @@ function renderModels() {
       ? '<span class="pill loaded">loaded</span>'
       : '<span class="pill ready">ready</span>';
     else if (m.state === 'failed') pill = '<span class="pill failed">failed</span>';
-    if (m.state === 'ready' && pinned.has(m.repo_id)) {
-      pill += loaded
-        ? '<span class="pill pinned">pinned</span>'
-        : '<span class="pill pinned">pinned, not loaded</span>';
-    }
+    const pinText = pinLabel(m, pinned, loaded);
+    if (pinText) pill += `<span class="pill pinned">${pinText}</span>`;
 
     const info = modelInfoLine(m);
 
@@ -447,7 +463,7 @@ function renderSettings() {
 // than at the first request Gropius has to refuse.
 function renderPinSwitches() {
   const box = $('pinList');
-  const rows = pinRows(state.models || [], state.config.pinned || []);
+  const rows = pinRows(state.models || [], state.pinned || []);
   box.innerHTML = '';
   if (!rows.length) {
     box.innerHTML = '<p class="hint">Download a model and it appears here.</p>';
@@ -480,14 +496,14 @@ function renderPinSwitches() {
 // leaves exactly that. Showing it is what makes every pin removable by the
 // form that made it.
 function pinRows(models, pinned) {
-  const want = pinned || [];
-  const have = new Set((models || []).map((m) => m.repo_id));
+  const want = (pinned || []).map(foldRepoID);
+  const have = new Set((models || []).map((m) => foldRepoID(m.repo_id)));
   const rows = (models || []).map((m) => ({
     id: m.repo_id,
-    checked: want.includes(m.repo_id),
+    checked: want.includes(foldRepoID(m.repo_id)),
     absent: false,
   }));
-  want.filter((id) => !have.has(id)).forEach((id) => {
+  (pinned || []).filter((id) => !have.has(foldRepoID(id))).forEach((id) => {
     rows.push({ id, checked: true, absent: true });
   });
   return rows;
@@ -514,8 +530,8 @@ function checkedPinModels() {
 // form does not list is carried through, because a model can be pinned before
 // it is downloaded and a form with no box for it has nothing to say about it.
 function pinnedModels(current, listed, checked) {
-  const shown = new Set(listed || []);
-  const out = (current || []).filter((id) => !shown.has(id));
+  const shown = new Set((listed || []).map(foldRepoID));
+  const out = (current || []).filter((id) => !shown.has(foldRepoID(id)));
   (checked || []).forEach((id) => out.push(id));
   return out;
 }
@@ -527,9 +543,9 @@ function pinnedModels(current, listed, checked) {
 // take when it lands. A pin naming a model this Mac does not have at all has
 // no size to charge.
 function pinnedCharge(models, pinned) {
-  const want = new Set(pinned || []);
+  const want = new Set((pinned || []).map(foldRepoID));
   return (models || []).reduce((sum, m) => {
-    if (!want.has(m.repo_id)) return sum;
+    if (!want.has(foldRepoID(m.repo_id))) return sum;
     const b = m.bytes || m.size_bytes || 0;
     return sum + b + Math.floor(b / 5);
   }, 0);
@@ -740,7 +756,7 @@ $('settingsForm').addEventListener('submit', async (e) => {
     sampling:           readSampling('input'),
     model_sampling:     overrides,
     per_model:         perModelSettings(state.config.per_model, listedMergeModels(), checkedMergeModels()),
-    pinned:            pinnedModels(state.config.pinned, listedPinModels(), checkedPinModels()),
+    pinned:            pinnedModels(state.pinned, listedPinModels(), checkedPinModels()),
   };
   try {
     const res = await api('/api/settings', {

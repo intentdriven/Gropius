@@ -139,7 +139,7 @@ func TestSettingsFormPostsThePinnedListWhole(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := evalPanelArray(t, tc.expr, "pinnedModels")
+			got := evalPanelArray(t, tc.expr, "foldRepoID", "pinnedModels")
 			if !reflect.DeepEqual(got, tc.want) {
 				t.Errorf("%s = %v, want %v", tc.expr, got, tc.want)
 			}
@@ -164,7 +164,7 @@ func TestSettingsFormChargesPinnedModelsWhatThePoolCharges(t *testing.T) {
 		{fmt.Sprintf(`pinnedCharge(%s, ["org/not-downloaded"])`, models), 0},
 	}
 	for _, tc := range cases {
-		got := evalPanelNumber(t, tc.expr, "pinnedCharge")
+		got := evalPanelNumber(t, tc.expr, "foldRepoID", "pinnedCharge")
 		if got != tc.want {
 			t.Errorf("%s = %v, want %v", tc.expr, got, tc.want)
 		}
@@ -180,7 +180,7 @@ func TestSettingsFormDrawsARowForEveryPin(t *testing.T) {
 	const models = `[{"repo_id":"org/here","bytes":10}]`
 	got := evalPanelValue(t,
 		fmt.Sprintf(`{"rows": pinRows(%s, ["org/here", "org/gone"])}`, models),
-		"pinRows")
+		"foldRepoID", "pinRows")
 	want := map[string]any{"rows": []any{
 		map[string]any{"id": "org/here", "checked": true, "absent": false},
 		map[string]any{"id": "org/gone", "checked": true, "absent": true},
@@ -196,7 +196,7 @@ func TestSettingsFormDrawsARowForEveryPin(t *testing.T) {
 // the moment the downloads land.
 func TestSettingsFormChargesADownloadItsDeclaredSize(t *testing.T) {
 	const models = `[{"repo_id":"org/incoming","bytes":0,"size_bytes":1000}]`
-	got := evalPanelNumber(t, fmt.Sprintf(`pinnedCharge(%s, ["org/incoming"])`, models), "pinnedCharge")
+	got := evalPanelNumber(t, fmt.Sprintf(`pinnedCharge(%s, ["org/incoming"])`, models), "foldRepoID", "pinnedCharge")
 	if want := float64(runtime.LoadCost(1000)); got != want {
 		t.Errorf("pinnedCharge = %v, want %v", got, want)
 	}

@@ -216,3 +216,50 @@ func evalPanelExpr(t *testing.T, expr string, functions ...string) string {
 	fmt.Fprintf(&b, "process.stdout.write(JSON.stringify(%s));", expr)
 	return evalJS(t, b.String())
 }
+
+// The pill is what the operator reads to know a model is protected, and it has
+// to tell "protected and running" from "protected but nothing has loaded it" —
+// an operator reading "pinned" on a cold model would assume it was warm. It
+// joins folded, because a pin can be carried in a spelling the registry does
+// not use until the next save reconciles it, and a pill that goes missing for
+// a model the pool is in fact protecting is the worst reading of the feature.
+func TestCardPillSaysWhetherAPinnedModelIsLoaded(t *testing.T) {
+	cases := []struct {
+		name string
+		expr string
+		want string
+	}{
+		{
+			name: "pinned and loaded",
+			expr: `pinLabel({"repo_id":"org/m","state":"ready"}, ["org/m"], true)`,
+			want: "pinned",
+		},
+		{
+			name: "pinned, nothing has loaded it",
+			expr: `pinLabel({"repo_id":"org/m","state":"ready"}, ["org/m"], false)`,
+			want: "pinned, not loaded",
+		},
+		{
+			name: "pinned under another spelling than the registry's",
+			expr: `pinLabel({"repo_id":"org/Model","state":"ready"}, ["ORG/model"], true)`,
+			want: "pinned",
+		},
+		{
+			name: "not pinned",
+			expr: `pinLabel({"repo_id":"org/m","state":"ready"}, ["org/other"], true)`,
+			want: "",
+		},
+		{
+			name: "a model that is not ready carries no pill",
+			expr: `pinLabel({"repo_id":"org/m","state":"downloading"}, ["org/m"], false)`,
+			want: "",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := evalPanel(t, c.expr, "foldRepoID", "pinLabel"); got != c.want {
+				t.Errorf("%s = %q, want %q", c.expr, got, c.want)
+			}
+		})
+	}
+}

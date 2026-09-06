@@ -139,6 +139,12 @@ type State struct {
 	Resident []runtime.Resident  `json:"resident"`
 	Setup    runtime.SetupStatus `json:"setup"`
 	Config   config.Config       `json:"config"`
+	// Pinned is the protected set the pool is enforcing, which is what the
+	// panel marks its cards and ticks its boxes from. Read from the pool rather
+	// than from Config below for the reason /v1/models does: the pool is what
+	// actually refuses an eviction, and a pin reconciled with its model after a
+	// download reaches the pool before it reaches the stored settings.
+	Pinned []string `json:"pinned"`
 	// MemoryBudget is the ceiling on the total charged size of resident
 	// models, so the panel can say what a pinned set leaves for everything
 	// else. The pool resolves it, since the default is a share of this Mac's
@@ -171,6 +177,7 @@ func (c *Control) snapshot() State {
 		Resident:     c.App.Pool.Resident(),
 		Setup:        c.App.Provisioner.Status(),
 		Config:       redactConfig(cfg),
+		Pinned:       c.App.Pool.Pinned(),
 		MemoryBudget: c.App.Pool.MemoryBudget(),
 		Endpoints:    Endpoints(cfg),
 		Hostname:     hostname(),
