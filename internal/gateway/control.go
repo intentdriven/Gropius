@@ -459,7 +459,12 @@ func (c *Control) handleSetSettings(w http.ResponseWriter, r *http.Request) {
 	// down to loopback.
 	raw, err := io.ReadAll(http.MaxBytesReader(w, r.Body, config.MaxConfigBytes))
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "settings body is too large")
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			writeError(w, http.StatusBadRequest, "settings body is too large")
+		} else {
+			writeError(w, http.StatusBadRequest, "settings body could not be read")
+		}
 		return
 	}
 
@@ -521,8 +526,15 @@ func namesModelSampling(body []byte) bool {
 	if err := json.Unmarshal(body, &named); err != nil {
 		return false
 	}
-	_, ok := named["model_sampling"]
-	return ok
+	// Folded, because the decode this guards matches struct field names
+	// case-insensitively: an exact lookup would let one spelling skip the
+	// reset and reinstate every override the caller asked to remove.
+	for k := range named {
+		if strings.EqualFold(k, "model_sampling") {
+			return true
+		}
+	}
+	return false
 }
 
 // samplingReloads names the loaded models whose sampling defaults changed with

@@ -90,7 +90,7 @@ every time, and there is no setting to add to that.
 Every field has a range, and the panel refuses a value outside it, naming the
 field and changing nothing. The ranges are the model server's own: temperature
 is at least 0, top-p and min-p are between 0 and 1, and top-k and the token
-budget are whole numbers of at least 0. Top-k has an upper limit of 1,024 as
+budget are whole numbers of at least 0. Top-k has an upper limit of 1024 as
 well, because the model server refuses a top-k as large as the model's
 vocabulary and Gropius cannot tell what that is at the moment you save. A
 top-k above a few hundred keeps every plausible token anyway.

@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"math"
 	"sort"
 	"strconv"
 	"strings"
@@ -164,6 +165,13 @@ func (s Sampling) Validate() error {
 		if !ok {
 			continue
 		}
+		// NaN passes every comparison below (NaN < min and NaN > max are both
+		// false) and an infinity passes the ones with no ceiling, so neither is
+		// caught by the bounds. JSON cannot express either today, but Sampling
+		// and Validate are exported and the guarantee must not rest on that.
+		if math.IsNaN(v) || math.IsInf(v, 0) {
+			return fmt.Errorf("sampling %s must be a real number (got %v)", p.bound.Field, v)
+		}
 		if v < p.bound.Min {
 			return fmt.Errorf("sampling %s must be at least %s (got %s)",
 				p.bound.Field, formatBound(p.bound.Min, p.bound.Integer), formatBound(v, p.bound.Integer))
@@ -195,7 +203,7 @@ func (s Sampling) Sanitised() (Sampling, []string) {
 		if !ok {
 			continue
 		}
-		if v < p.bound.Min || (p.bound.HasMax && v > p.bound.Max) {
+		if math.IsNaN(v) || math.IsInf(v, 0) || v < p.bound.Min || (p.bound.HasMax && v > p.bound.Max) {
 			p.clear(&out)
 			dropped = append(dropped, p.bound.Field)
 		}

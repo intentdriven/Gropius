@@ -323,3 +323,25 @@ func TestASaveCannotWriteAConfigTheNextStartRefuses(t *testing.T) {
 		}
 	}
 }
+
+// encoding/json matches field names case-insensitively, so the check for
+// whether the body names the override collection has to fold too — otherwise
+// one spelling skips the reset and reinstates every override the caller asked
+// to remove, which is the defect the reset exists to prevent.
+func TestOverrideRemovalIsNotDefeatedByKeyCase(t *testing.T) {
+	srv, a := newTestControlApp(t, config.Default())
+
+	resp := postJSON(t, srv, "/api/settings", `{"host":"127.0.0.1","port":11535,"decode_concurrency":4,
+		"model_sampling":{"org/a":{"temperature":0.1},"org/b":{"temperature":0.2}}}`)
+	resp.Body.Close()
+
+	resp = postJSON(t, srv, "/api/settings", `{"host":"127.0.0.1","port":11535,"decode_concurrency":4,
+		"Model_Sampling":{"org/a":{"temperature":0.1}}}`)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	if _, still := a.Config().ModelSampling["org/b"]; still {
+		t.Error("org/b survived a removal posted under a differently-cased key")
+	}
+}

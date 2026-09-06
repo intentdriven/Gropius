@@ -1,6 +1,7 @@
 package archtest_test
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -86,10 +87,13 @@ func TestSamplingHowToStatesTheRealRanges(t *testing.T) {
 		case b.Max == 1:
 			// "between 0 and 1", below.
 		case b.Field == "top_k":
-			// The one bound that is not the model server's own, so the page
-			// has to give the figure and say why.
-			if !containsAll(page, "Top-k has an upper limit of 1,024") {
-				t.Errorf("the page does not give top_k's ceiling of %v", b.Max)
+			// The one bound that is not the model server's own, so the page has
+			// to give the figure and say why — and the figure is read off the
+			// bound, not repeated here, or the page and the code drift apart
+			// while this test stays green.
+			want := fmt.Sprintf("Top-k has an upper limit of %d", int(b.Max))
+			if !containsAll(page, want) {
+				t.Errorf("the page does not say %q", want)
 			}
 		default:
 			t.Fatalf("%s has an upper bound of %v the page does not describe", b.Field, b.Max)

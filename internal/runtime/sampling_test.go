@@ -167,6 +167,14 @@ func TestNoRenderedSamplingValueLooksLikeAFlag(t *testing.T) {
 	}); len(args) != 10 {
 		t.Errorf("samplingArgs = %v, want five flags and five values", args)
 	}
+
+	// Decimal notation, not scientific: the flag is read by a person in the
+	// per-model log as often as by argparse, and "1e-05" is a poor way to
+	// report a min-p.
+	small := samplingArgs(config.Sampling{MinP: fptr(0.00001)})
+	if len(small) != 2 || small[1] != "0.00001" {
+		t.Errorf("samplingArgs = %v, want a plain decimal value", small)
+	}
 }
 
 // Every sampling parameter the configuration holds must have a launch flag, or
@@ -256,8 +264,10 @@ func TestPoolLaunchesEachModelWithItsOwnSamplingDefaults(t *testing.T) {
 	live.Sampling = config.Sampling{Temperature: fptr(1.2)}
 	mu.Unlock()
 
-	if got := l.specFor("org/plain").Sampling.Temperature; got == nil || *got != 0.7 {
-		t.Errorf("a resident model's launch arguments changed under it: %v", got)
+	// Saving must not restart anything. specFor only ever holds the snapshot
+	// taken at launch, so asserting on it could not fail; the launch count can.
+	if l.launchCount() != 2 {
+		t.Errorf("a saved change relaunched a model: %d launches, want 2", l.launchCount())
 	}
 	if err := p.Unload("org/plain"); err != nil {
 		t.Fatalf("Unload: %v", err)
@@ -267,6 +277,9 @@ func TestPoolLaunchesEachModelWithItsOwnSamplingDefaults(t *testing.T) {
 		t.Fatalf("Acquire after reload: %v", err)
 	}
 	release()
+	if l.launchCount() != 3 {
+		t.Errorf("reloading did not launch a new process: %d launches, want 3", l.launchCount())
+	}
 	if got := l.specFor("org/plain").Sampling.Temperature; got == nil || *got != 1.2 {
 		t.Errorf("temperature after reload = %v, want the saved 1.2", got)
 	}

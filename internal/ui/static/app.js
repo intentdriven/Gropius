@@ -94,6 +94,10 @@ function render() {
   renderModels();
   renderConnect();
   renderSettings();
+  // Independent of renderSettings, which returns early while the form is
+  // being edited: the list of models to choose from is live state, not a
+  // value the user is in the middle of typing.
+  refreshOverrideModels();
 }
 
 function renderWarnings() {
@@ -412,6 +416,12 @@ function renderSettings() {
 }
 
 function renderOverrides() {
+  renderOverrideList();
+  refreshOverrideModels();
+  prefillOverride();
+}
+
+function renderOverrideList() {
   const list = $('overrideList');
   list.innerHTML = '';
   Object.keys(overrides).sort().forEach((id) => {
@@ -433,6 +443,13 @@ function renderOverrides() {
     list.appendChild(row);
   });
 
+}
+
+// refreshOverrideModels rebuilds the list of models that can be given an
+// override, keeping the current selection. It runs on every state frame, not
+// only when the form is redrawn, so a model that finishes downloading while
+// the form is being edited can be chosen without reloading the page.
+function refreshOverrideModels() {
   // Offer every model on this Mac, plus any model an override already names
   // (one whose files have since been deleted still has a saved override).
   const select = $('ovModel');
@@ -447,7 +464,6 @@ function renderOverrides() {
     select.appendChild(opt);
   });
   if (chosen && ids.has(chosen)) select.value = chosen;
-  prefillOverride();
 }
 
 // prefillOverride shows what is stored for the selected model. Setting an

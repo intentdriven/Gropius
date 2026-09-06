@@ -2,6 +2,7 @@ package ui
 
 import (
 	"encoding/json"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -151,4 +152,89 @@ func TestOverrideEditorDoesNotSilentlyDiscardInput(t *testing.T) {
 	if !strings.Contains(js, `$('ovModel').addEventListener('change'`) {
 		t.Error("no change listener on the model select, so the fields never follow the selection")
 	}
+}
+
+// The panel's own numeric constraints have to admit everything the server
+// accepts. An explicit fractional step makes the browser refuse to submit the
+// whole form for a value that is not a multiple of it — so temperature 0.62 or
+// top-p 0.995, both perfectly good, would take every other setting on the form
+// down with them, without the handler ever running.
+func TestSamplingInputsDoNotBlockValuesTheServerAccepts(t *testing.T) {
+	page, err := assets.ReadFile("static/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"setTemp", "setTopP", "setMinP", "ovTemp", "ovTopP", "ovMinP"} {
+		tag := inputTag(t, string(page), id)
+		if !strings.Contains(tag, `step="any"`) {
+			t.Errorf("%s carries %q — a fractional step blocks the form for values the model server serves", id, tag)
+		}
+	}
+	// The two integer fields are whole numbers, which is the accepted set.
+	for _, id := range []string{"setTopK", "setMaxTokens", "ovTopK", "ovMaxTokens"} {
+		if tag := inputTag(t, string(page), id); !strings.Contains(tag, `step="1"`) {
+			t.Errorf("%s is a whole-number field but carries %q", id, tag)
+		}
+	}
+}
+
+// The top-k ceiling is Gropius' own, so the panel has to carry the same figure
+// the configuration enforces rather than a copy that can drift from it.
+func TestTopKInputsCarryTheConfiguredCeiling(t *testing.T) {
+	page, err := assets.ReadFile("static/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := fmt.Sprintf(`max="%d"`, config.MaxTopK)
+	for _, id := range []string{"setTopK", "ovTopK"} {
+		if tag := inputTag(t, string(page), id); !strings.Contains(tag, want) {
+			t.Errorf("%s carries %q, want %s", id, tag, want)
+		}
+	}
+}
+
+// The model select is rebuilt from the live state, so a model that finishes
+// downloading while the form is open can be given an override without a reload.
+func TestOverrideModelListFollowsNewModels(t *testing.T) {
+	script, err := assets.ReadFile("static/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	js := string(script)
+	if !strings.Contains(js, "refreshOverrideModels") {
+		t.Fatal("the model select is not refreshed independently of the form's values")
+	}
+	// It has to be called from render(), which runs on every state frame, not
+	// only from renderSettings(), which returns early while the form is dirty.
+	renderBody := between(js, "function render() {", "}")
+	if !strings.Contains(renderBody, "refreshOverrideModels()") {
+		t.Errorf("render() does not refresh the model select: %q", renderBody)
+	}
+}
+
+// inputTag returns the opening tag of the input with the given id.
+func inputTag(t *testing.T, page, id string) string {
+	t.Helper()
+	idx := strings.Index(page, `id="`+id+`"`)
+	if idx < 0 {
+		t.Fatalf("no control with id %q", id)
+	}
+	tag := page[idx:]
+	if end := strings.Index(tag, ">"); end >= 0 {
+		tag = tag[:end]
+	}
+	return tag
+}
+
+func between(s, open, close string) string {
+	i := strings.Index(s, open)
+	if i < 0 {
+		return ""
+	}
+	rest := s[i+len(open):]
+	j := strings.Index(rest, close)
+	if j < 0 {
+		return rest
+	}
+	return rest[:j]
 }

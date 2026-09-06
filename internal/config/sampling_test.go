@@ -3,6 +3,7 @@ package config
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -435,5 +436,29 @@ func TestAFullOverrideMapStillFitsTheConfigFile(t *testing.T) {
 	}
 	if len(loaded.ModelSampling) != MaxModelSampling {
 		t.Errorf("loaded %d overrides, want %d", len(loaded.ModelSampling), MaxModelSampling)
+	}
+}
+
+// Validate is exported, so its guarantee cannot rest on JSON being the only
+// way in. NaN passes every comparison — NaN < min and NaN > max are both
+// false — and would reach the model server's sampler as a launch flag.
+func TestSamplingValidateRefusesNaNAndInfinity(t *testing.T) {
+	for name, v := range map[string]float64{
+		"NaN":               math.NaN(),
+		"positive infinity": math.Inf(1),
+		"negative infinity": math.Inf(-1),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := (Sampling{Temperature: &v}).Validate(); err == nil {
+				t.Errorf("Validate accepted a temperature of %v", v)
+			}
+			s, dropped := Sampling{Temperature: &v}.Sanitised()
+			if s.Temperature != nil {
+				t.Errorf("Sanitised kept a temperature of %v", v)
+			}
+			if len(dropped) != 1 {
+				t.Errorf("dropped = %v, want the field named", dropped)
+			}
+		})
 	}
 }

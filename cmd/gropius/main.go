@@ -74,15 +74,9 @@ func main() {
 		cfg.Host = "127.0.0.1"
 		cfg.Advertise = false
 	}
-	if len(dropped) > 0 {
-		// A sampling preference the model server would refuse is ignored rather
-		// than fatal: applying it would make every request that omits that
-		// parameter fail, and refusing the file would lock the server down.
-		// Reported after the error branch, since a config that could not be
-		// read has no preferences to report.
-		log.Warn("ignoring sampling settings the model server would not accept — set them again in Settings",
-			"fields", strings.Join(dropped, ", "))
-	}
+	// Reported after the error branch, since a config that could not be read
+	// has no preferences to report.
+	warnDroppedSettings(log, dropped)
 
 	// Claim the port. Losing this race to a live server is a normal outcome, not
 	// an error: another account (or another copy of the app) is already serving.
@@ -107,6 +101,21 @@ func main() {
 		log.Error("server stopped", "err", err)
 		os.Exit(1)
 	}
+}
+
+// warnDroppedSettings reports the settings that were read but not applied.
+//
+// A sampling preference the model server would refuse is ignored rather than
+// fatal: applying it would break every request that omits that parameter, and
+// refusing the file would lock the server down to loopback. Dropping it
+// silently would be worse than either — the field simply shows as blank in the
+// panel with nothing to say where it went.
+func warnDroppedSettings(log *slog.Logger, dropped []string) {
+	if len(dropped) == 0 {
+		return
+	}
+	log.Warn("ignoring settings the model server would not accept — set them again in Settings",
+		"fields", strings.Join(dropped, ", "))
 }
 
 // runServer is the primary instance: it owns the models and the GPU.
