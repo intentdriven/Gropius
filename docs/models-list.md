@@ -90,8 +90,8 @@ list always carries the exact number.
 
 `state`, `in_flight` and `last_used` say what each model is doing right now, so
 a client can send its work to a model that is already warm instead of forcing a
-load it did not know about. Loading a large model takes minutes; picking the
-warm one costs nothing.
+load it did not know about. Loading a model takes seconds to a minute, longer
+for the largest; picking the warm one costs nothing.
 
 **They appear only when an API key is configured.** Set a key in **Settings**
 and the three fields are on every entry, for every client the key admits and
@@ -101,11 +101,12 @@ exactly the four OpenAI fields and the context figure.
 
 What that withholds is the *listing*, and only the listing. On a server left
 open, a client that never presents a key can still work out which models are
-warm by timing a one-token completion — a loaded model answers in under a
-second, a cold one takes minutes — and that probe loads the model it asks
+warm by timing a one-token completion — a loaded model answers straight away, a
+cold one takes seconds to a minute — and that probe loads the model it asks
 about, which reading the field never does. A model already at its request
 ceiling, or one that does not fit in the memory budget, is refused with a
-message that names the in-flight limit or the budget figure. So an unkeyed
+message that names how many requests are already in flight for it, or the
+budget figure. So an unkeyed
 server keeps activity off the listing; it does not keep it secret. The key is
 what protects the server.
 

@@ -197,7 +197,7 @@ additive read.
 
 ## As built (2026-09-06)
 
-Two things shipped differently from the plan above. Recorded here because a
+Three things shipped differently from the plan above. Recorded here because a
 closed spec is the durable claim about what shipped, and the rest of this
 document says otherwise.
 
