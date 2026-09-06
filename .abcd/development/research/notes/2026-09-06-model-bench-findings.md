@@ -81,3 +81,55 @@ date (outside the repository, with scripts and raw JSON):
   delta field rather than the `reasoning_content` name some clients expect.
   Relevant to the sampling-defaults intent (a machine-wide completion-token
   default) and to any docs on using reasoning models.
+
+## Context length in the model configuration
+
+Sampled on 2026-09-06 while implementing itd-2609061431463108, which defers
+the key rule to build time. Two sources: the `config.json` each of the four
+benchmarked models publishes on the Hub, and every model configuration on the
+lab Mac's HuggingFace cache. The question is which key states the model's
+architectural context length, per architecture.
+
+| Model | `model_type` | Where the range is declared | Value |
+| --- | --- | --- | --- |
+| Qwen3-Coder-Next-4bit | `qwen3_next` | top level | 262,144 |
+| NVIDIA-Nemotron-3.5-Lightning-30B-A3B-4bit | `nemotron_h` | top level | 262,144 |
+| GLM-4.7-Flash-8bit | `glm4_moe_lite` | top level | 202,752 |
+| Qwen3.8-27B-8bit | `qwen3_5` | `text_config` only | 262,144 |
+| Qwen3-Coder-30B-A3B-Instruct-4bit | `qwen3_moe` | top level | 262,144 |
+| Qwen3-1.7B-4bit | `qwen3` | top level | 40,960 |
+| Qwen3-Embedding-0.6B-4bit-DWQ | `qwen3` | top level | 32,768 |
+| Qwen2.5-Coder-1.5B-Instruct-8bit | `qwen2` | top level | 32,768 |
+| Ornith-1.0-35B-4bit | `qwen3_5_moe` | `text_config` only | 262,144 |
+| diffusiongemma-26B-A4B-it-4bit | `diffusion_gemma` | `text_config` only | 262,144 |
+| MinerU2.5-Pro-2605-1.2B | `qwen2_vl` | both, disagreeing | 32,768 top level, 8,192 nested |
+
+The rule this supports, and the one Gropius implements:
+
+- `max_position_embeddings` at the top level is authoritative. Every plain
+  causal-LM configuration in the sample declares it there.
+- Failing that, `text_config.max_position_embeddings`. Multimodal and
+  composite configurations — including the dense 27B the lab benchmarked —
+  declare no top-level range and nest the text model's settings.
+- The nested key is a fallback, never an override: one sampled configuration
+  declares both and they disagree, and a top-level key that is present but
+  implausible yields nothing rather than falling through to a figure its own
+  authoritative key contradicts.
+- No scaling arithmetic. No configuration in the sample declares a
+  `rope_scaling` factor without a pre-scaling figure; the ones that carry
+  `rope_scaling` at all carry it as `null` or as an `mrope` section with no
+  factor. Where the case does arise, the declared range is published as it
+  stands: under-reporting is the safe direction for a client that trims its
+  history to fit, whereas over-reporting hands it a number the model was never
+  scaled to.
+- Nothing in the sample declares a range Gropius would refuse. The ceiling it
+  applies is 8,388,608 tokens, about 32x the widest window sampled and 68x the
+  largest prompt the context probe verified.
+
+Consistency check against the probe in `../evidence/2026-09-06-model-bench/`:
+the three hybrid-attention MoE models reached the probe's 128K cap with no
+failure, and each declares at least 202,752 — so the declared range is not
+contradicted by measurement anywhere in the sample. The declared range is a
+larger number than any of them was measured at; that is expected, and is why
+the figure is published as the architectural maximum rather than as the window
+a given Mac can serve.

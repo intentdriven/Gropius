@@ -92,7 +92,8 @@ does not enforce but beyond which generation extrapolates.
 
 ## Audit Notes
 
-_Empty. Populated by intent-auditor when intent moves to shipped/._
+<!-- abcd-review: OWED receipt=rcp-f32e2cb0c516 -->
+Fidelity review OWED (receipt rcp-f32e2cb0c516).
 
 ## Grounds
 
