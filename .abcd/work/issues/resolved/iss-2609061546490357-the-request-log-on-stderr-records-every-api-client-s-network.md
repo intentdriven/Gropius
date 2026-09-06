@@ -9,7 +9,7 @@ found_during: "2026-09-06 planning review"
 origin: researcher-authored
 production_mode: hand-written
 found_at: "cmd/gropius/main.go"
-resolution: "The request log drops the client address: the wrapper in cmd/gropius now logs method, path, status and duration only."
+resolution: "Fixed: withLogging in cmd/gropius logs method, path, status and duration only, so no client address reaches the line. A handler panic is recovered and reported the same way, then re-panicked with http.ErrAbortHandler, so net/http's own 'panic serving <addr>' line never reaches stderr either. Tests pin the absent address, the response pass-through, and the silent abort."
 impact: fix
 ---
 
