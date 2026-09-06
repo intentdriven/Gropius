@@ -1037,6 +1037,21 @@ func TestModelsListReferenceDocumentsEveryFieldServed(t *testing.T) {
 	for k := range firstModelEntry(t, srv) {
 		served[k] = true
 	}
+	// The residency fields are served only on a keyed install, so the set the
+	// page is held to is the union of both listings — otherwise documenting
+	// them would read here as documenting a field that does not exist.
+	keyed := residencyGateway(t, "bh_secret", runtime.Resident{
+		RepoID:   "org/warm",
+		State:    runtime.ResidencyLoaded,
+		LastUsed: time.Unix(1757145600, 0),
+		InFlight: 1,
+	})
+	entries, _ := listModelsEntries(t, keyed, "bh_secret")
+	for _, entry := range entries {
+		for k := range entry {
+			served[k] = true
+		}
+	}
 
 	page, err := os.ReadFile(filepath.Join("..", "..", "docs", "models-list.md"))
 	if err != nil {
@@ -1078,10 +1093,16 @@ func TestModelsListReferenceDocumentsEveryFieldServed(t *testing.T) {
 	// a declared figure is refused — which the acceptance criterion calls the
 	// documented ceiling, so it has to be a number on a user-facing page and
 	// has to be the number the code enforces.
+	// The same for residency: what the three values mean, that the fields
+	// need a key, and that reading one reserves nothing — a client that took
+	// the snapshot for a promise would be the failure this feature invites.
 	for _, phrase := range []string{
 		"architectural maximum",
 		"may be smaller",
 		withThousands(registry.MaxContextLength),
+		"not_loaded",
+		"API key",
+		"snapshot",
 	} {
 		if !strings.Contains(string(page), phrase) {
 			t.Errorf("the reference page never says %q", phrase)
@@ -1142,4 +1163,184 @@ func withThousands(n int64) string {
 		s = s[:i] + "," + s[i:]
 	}
 	return s
+}
+
+// listModelsEntries drives the handler as a LAN client would — an off-machine
+// address, the key in a bearer header when there is one — and returns the
+// entries as raw maps beside the exact bytes served, so a test can assert both
+// what is on the wire and what is not.
+func listModelsEntries(t *testing.T, h http.Handler, key string) ([]map[string]any, string) {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	req.RemoteAddr = "192.168.1.50:9999"
+	if key != "" {
+		req.Header.Set("Authorization", "Bearer "+key)
+	}
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("GET /v1/models = %d, want 200: %s", w.Code, w.Body.String())
+	}
+	var out struct {
+		Data []map[string]any `json:"data"`
+	}
+	body := w.Body.String()
+	if err := json.Unmarshal([]byte(body), &out); err != nil {
+		t.Fatalf("decode %s: %v", body, err)
+	}
+	return out.Data, body
+}
+
+// residencyGateway wires a gateway whose registry holds two ready models and
+// whose pool is holding whichever of them the caller names as resident.
+func residencyGateway(t *testing.T, key string, resident ...runtime.Resident) http.Handler {
+	t.Helper()
+	fake := mlxtest.Start(mlxtest.Options{ModelArg: "/m"})
+	t.Cleanup(fake.Close)
+
+	cfg := config.Default()
+	cfg.APIKey = key
+	models := &stubModels{models: []registry.Model{
+		{RepoID: "org/warm", State: registry.StateReady, Path: "/models/org/warm"},
+		{RepoID: "org/cold", State: registry.StateReady, Path: "/models/org/cold"},
+	}}
+	g := New(Options{Config: cfg, Pool: &stubPool{srv: fake, resident: resident}, Models: models})
+	return g.Handler()
+}
+
+// entryByID picks one model's entry out of a listing.
+func entryByID(t *testing.T, entries []map[string]any, id string) map[string]any {
+	t.Helper()
+	for _, e := range entries {
+		if e["id"] == id {
+			return e
+		}
+	}
+	t.Fatalf("%q is not in the listing: %+v", id, entries)
+	return nil
+}
+
+// On a keyed install the listing says which models are loaded, how busy each
+// one is and when it was last used, so a client can send its work to a warm
+// model instead of triggering the multi-minute swap it never knew about. The
+// fields the list already served are untouched.
+func TestListModelsReportsResidencyOnAKeyedInstall(t *testing.T) {
+	lastUsed := time.Unix(1757145600, 0)
+	h := residencyGateway(t, "bh_secret", runtime.Resident{
+		RepoID:   "org/warm",
+		State:    runtime.ResidencyLoaded,
+		Port:     51234,
+		LastUsed: lastUsed,
+		InFlight: 3,
+	})
+
+	entries, _ := listModelsEntries(t, h, "bh_secret")
+
+	warm := entryByID(t, entries, "org/warm")
+	if warm["state"] != "loaded" {
+		t.Errorf("state = %v for a model whose probe answered, want %q", warm["state"], "loaded")
+	}
+	if n, ok := warm["in_flight"].(float64); !ok || int(n) != 3 {
+		t.Errorf("in_flight = %v, want 3", warm["in_flight"])
+	}
+	if n, ok := warm["last_used"].(float64); !ok || int64(n) != lastUsed.Unix() {
+		t.Errorf("last_used = %v, want %d (Unix seconds)", warm["last_used"], lastUsed.Unix())
+	}
+
+	cold := entryByID(t, entries, "org/cold")
+	if cold["state"] != "not_loaded" {
+		t.Errorf("state = %v for a model the pool is not holding, want %q", cold["state"], "not_loaded")
+	}
+	if n, ok := cold["in_flight"].(float64); !ok || int(n) != 0 {
+		t.Errorf("in_flight = %v for a model that is not loaded, want 0", cold["in_flight"])
+	}
+	// A model that has never been used in this process has no last-used time,
+	// and the field is absent rather than sent as a zero a client would read
+	// as 1970.
+	if v, ok := cold["last_used"]; ok {
+		t.Errorf("last_used = %v for a model never used, want the field to be absent", v)
+	}
+	// The four fields the list served before this one are unchanged.
+	if cold["object"] != "model" || cold["owned_by"] != "gropius" {
+		t.Errorf("the pre-existing fields changed: %+v", cold)
+	}
+	if _, ok := cold["created"].(float64); !ok {
+		t.Errorf("created = %v, want a Unix timestamp", cold["created"])
+	}
+}
+
+// A model whose server is up but has not answered its readiness probe is
+// neither warm nor cold, and the listing must not round it to either: a client
+// told "loaded" waits for the load anyway, one told "not loaded" may start a
+// second, competing load.
+func TestListModelsReportsALoadingModel(t *testing.T) {
+	h := residencyGateway(t, "bh_secret", runtime.Resident{
+		RepoID: "org/warm",
+		State:  runtime.ResidencyLoading,
+	})
+
+	entries, _ := listModelsEntries(t, h, "bh_secret")
+	if got := entryByID(t, entries, "org/warm")["state"]; got != "loading" {
+		t.Errorf("state = %v for a model still loading, want %q", got, "loading")
+	}
+}
+
+// With no key configured the server is open to the whole LAN, and the listing
+// stays exactly what it is without this feature: nobody learns from it what
+// this Mac is running. The key set is asserted exactly, so a field added later
+// fails here rather than shipping onto an open server.
+func TestListModelsCarriesNoResidencyWithoutAnAPIKey(t *testing.T) {
+	h := residencyGateway(t, "", runtime.Resident{
+		RepoID:   "org/warm",
+		State:    runtime.ResidencyLoaded,
+		Port:     51234,
+		LastUsed: time.Unix(1757145600, 0),
+		InFlight: 3,
+	})
+
+	entries, body := listModelsEntries(t, h, "")
+	for _, entry := range entries {
+		want := map[string]bool{"id": true, "object": true, "created": true, "owned_by": true}
+		for k := range entry {
+			if !want[k] {
+				t.Errorf("an unkeyed listing carries %q; it must be exactly today's list", k)
+			}
+		}
+		for k := range want {
+			if _, ok := entry[k]; !ok {
+				t.Errorf("field %q missing from an unkeyed listing", k)
+			}
+		}
+	}
+	// Byte-for-byte: not one of the residency names reaches an open server,
+	// under any spelling.
+	for _, name := range []string{"state", "in_flight", "last_used", "loaded", "loading", "pinned"} {
+		if strings.Contains(body, name) {
+			t.Errorf("an unkeyed listing mentions %q: %s", name, body)
+		}
+	}
+}
+
+// The residency projection is an allow-list of named fields, never the
+// runtime.Resident struct marshalled whole: that struct carries the model
+// server's loopback port, and the entry is built beside a model path that in a
+// per-user install names the serving account's home directory. Neither may
+// reach the network, and this is the standing guard on that staying true as
+// fields are added to Resident.
+func TestListModelsPublishesNoPortOrPath(t *testing.T) {
+	h := residencyGateway(t, "bh_secret", runtime.Resident{
+		RepoID:   "org/warm",
+		State:    runtime.ResidencyLoaded,
+		Port:     51234,
+		Bytes:    8 << 30,
+		LoadedAt: time.Unix(1757145600, 0),
+		LastUsed: time.Unix(1757145600, 0),
+	})
+
+	_, body := listModelsEntries(t, h, "bh_secret")
+	for _, leak := range []string{"127.0.0.1", "51234", "/models/org/warm", "bytes", "loaded_at", "port"} {
+		if strings.Contains(body, leak) {
+			t.Errorf("the models list published %q: %s", leak, body)
+		}
+	}
 }

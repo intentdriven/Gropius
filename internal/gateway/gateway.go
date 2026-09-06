@@ -183,6 +183,26 @@ func (g *Gateway) handleHealth(w http.ResponseWriter, r *http.Request) {
 // throws CacheNotFound when that directory is absent).
 func (g *Gateway) handleListModels(w http.ResponseWriter, r *http.Request) {
 	ready := g.models.Ready()
+	// Residency is reported only on an install that has a key configured. The
+	// three-state value is not itself a secret — an unauthenticated client can
+	// already learn it by timing a one-token completion, and in doing so it
+	// changes residency, which reporting never does — but the in-flight count
+	// and the last-used time say who is busy and when, and an open server
+	// discloses neither. The condition is the install's, not the request's: a
+	// loopback client exempt from the bearer check on a keyed install sees the
+	// same picture the control panel already shows it. A nil map means no key
+	// and no projection, which an empty one would not.
+	//
+	// This is a read of the configured key, not a second authorization path:
+	// withAuth still decides who may call the listing at all.
+	var residency map[string]runtime.Resident
+	if g.cfg().APIKey != "" {
+		residency = make(map[string]runtime.Resident)
+		for _, res := range g.pool.Resident() {
+			residency[res.RepoID] = res
+		}
+	}
+
 	data := make([]any, 0, len(ready))
 	for _, m := range ready {
 		entry := map[string]any{
@@ -206,9 +226,40 @@ func (g *Gateway) handleListModels(w http.ResponseWriter, r *http.Request) {
 			entry["context_length"] = m.ContextLength
 			entry["max_model_len"] = m.ContextLength
 		}
+		if residency != nil {
+			res, loaded := residency[m.RepoID]
+			addResidency(entry, res, loaded)
+		}
 		data = append(data, entry)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"object": "list", "data": data})
+}
+
+// addResidency writes the residency fields onto one models-list entry.
+//
+// It is deliberately an allow-list of named fields rather than a marshalling of
+// runtime.Resident: that struct carries the model server's loopback port and
+// its on-disk size, and a field added to it later must not reach the LAN
+// because nobody remembered to exclude it. Keeping the backend's internals off
+// the wire is the same rule relayRewritingModel exists for.
+//
+// The values are a snapshot taken while the list is built. Nothing here holds a
+// model warm on the client's behalf: by the time the client reads them another
+// client's request may have evicted the model.
+func addResidency(entry map[string]any, res runtime.Resident, loaded bool) {
+	state := runtime.ResidencyNotLoaded
+	if loaded {
+		state = res.State
+	}
+	entry["state"] = string(state)
+	// Zero for a model that is not loaded, which is the true count.
+	entry["in_flight"] = res.InFlight
+	// A model never used in this process has no last-used time. The field is
+	// absent rather than zero, which a client would read as 1970 rather than
+	// as "unknown".
+	if loaded && !res.LastUsed.IsZero() {
+		entry["last_used"] = res.LastUsed.Unix()
+	}
 }
 
 // maxRequestBody caps the size of a completion request. Prompts are text; a
