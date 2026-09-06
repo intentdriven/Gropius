@@ -10,9 +10,12 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"maps"
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
+	"strconv"
 	"strings"
 	"syscall"
 )
@@ -297,6 +300,118 @@ type Config struct {
 	// ModelSampling overrides Sampling for individual models, keyed by repo id.
 	// A model with no entry is served with the machine-wide set.
 	ModelSampling map[string]Sampling `json:"model_sampling,omitempty"`
+
+	// PerModel holds the per-model settings that are not sampling parameters,
+	// keyed by the registry's canonical repo id. A model with no entry runs on
+	// the machine-wide settings above, which is what every model does until the
+	// operator says otherwise.
+	PerModel map[string]ModelSettings `json:"per_model,omitempty"`
+}
+
+// ModelSettings are the settings of a single model that are not sampling
+// parameters, which have their own map above.
+//
+// Every field is off or zero by default, so a model gains a behavior only when
+// the operator switches it on for that model in Settings.
+//
+// A file written by a newer build still loads: a setting this build does not
+// know is ignored and the ones it does know are unaffected. It does not
+// survive a save, though — this build re-marshals what it holds, so running an
+// older build and saving settings drops a newer build's per-model fields for
+// good. That is the same bargain every field in this file has always made, and
+// it is why a rollback is a decision rather than a shrug.
+type ModelSettings struct {
+	// MergeSystemMessages folds every system-role message of a chat completion
+	// request for this model into one leading system message before the request
+	// reaches the model server, which is the shape a chat template that refuses
+	// a system message anywhere but the front will accept.
+	//
+	// It is the one case in which Gropius reads the content of a request's
+	// messages, it reads them for no other purpose, and it keeps nothing it
+	// reads (adr-2609061610102325). Off unless the operator switches it on for
+	// this model.
+	MergeSystemMessages bool `json:"merge_system_messages,omitempty"`
+}
+
+// ValidatePerModelKeys reports whether every key of a per-model settings map
+// names a model, i.e. is a well-formed "<org>/<name>" repo id.
+//
+// A key is matched against the id a request resolves to, so a key of any other
+// shape names nothing and would sit in the settings file looking effective
+// while applying to no request ever made. Refusing it at the point of saving
+// is the only moment the operator is there to see it.
+func ValidatePerModelKeys(m map[string]ModelSettings) error {
+	// Sorted, so a file with several unusable keys names the same one every
+	// time it is refused rather than whichever the map iteration reached first.
+	for _, id := range perModelKeys(m) {
+		if !ValidRepoID(id) {
+			return fmt.Errorf("per-model settings for %q: not a model id of the form <org>/<name>", id)
+		}
+	}
+	if len(m) > MaxPerModel {
+		return fmt.Errorf("per-model settings name %d models, more than the %d this holds", len(m), MaxPerModel)
+	}
+	return nil
+}
+
+// MaxPerModel bounds the per-model settings map for the same reason
+// MaxModelSampling bounds the sampling overrides beside it, and to the same
+// figure: everything saved is written to config.json, which Load refuses above
+// MaxConfigBytes, and a config.json that cannot be read sends the next start
+// into its fail-closed loopback-only branch. Two per-model maps means two
+// levers for that, so both are bounded.
+const MaxPerModel = MaxModelSampling
+
+// perModelKeys returns a per-model settings map's keys in a stable order, so
+// that a map with more than one problem in it names the same one every time
+// rather than whichever the map iteration reached first.
+func perModelKeys(m map[string]ModelSettings) []string {
+	return slices.Sorted(maps.Keys(m))
+}
+
+// sanitizePerModel drops every per-model entry this build cannot use and
+// returns what it dropped, so a settings file written by hand, restored from a
+// backup, or produced by another build still loads.
+//
+// Refusing the file instead would be worse than useless. The panel serves the
+// stored settings into its form and the form posts them back, so one unusable
+// key would return on the next save and be refused there — wedging every
+// settings change there is, the API key included, until someone edited the
+// file by hand. This is the same treatment the sampling overrides beside it
+// get, for the same reason.
+func (c *Config) sanitizePerModel() []string {
+	if len(c.PerModel) == 0 {
+		return nil
+	}
+	var dropped []string
+	kept := make(map[string]ModelSettings, len(c.PerModel))
+	seen := map[string]string{} // folded id -> the spelling kept
+	for _, id := range perModelKeys(c.PerModel) {
+		if !ValidRepoID(id) {
+			dropped = append(dropped, "per_model["+id+"]")
+			continue
+		}
+		// Two spellings of one repo id would make the effective settings
+		// depend on map iteration order. Keep the first in sorted order so the
+		// outcome is the same on every start.
+		folded := strings.ToLower(id)
+		if first, ok := seen[folded]; ok {
+			dropped = append(dropped, "per_model["+id+"] (duplicate of "+first+")")
+			continue
+		}
+		if len(kept) >= MaxPerModel {
+			dropped = append(dropped, "per_model["+id+"] (beyond the "+
+				strconv.Itoa(MaxPerModel)+"-model ceiling)")
+			continue
+		}
+		seen[folded] = id
+		kept[id] = c.PerModel[id]
+	}
+	if len(kept) == 0 {
+		kept = nil
+	}
+	c.PerModel = kept
+	return dropped
 }
 
 // Clone returns a copy that shares no slice, map or pointer with the original.
@@ -317,6 +432,12 @@ func (c Config) Clone() Config {
 		out.ModelSampling = make(map[string]Sampling, len(c.ModelSampling))
 		for k, v := range c.ModelSampling {
 			out.ModelSampling[k] = v.Clone()
+		}
+	}
+	if c.PerModel != nil {
+		out.PerModel = make(map[string]ModelSettings, len(c.PerModel))
+		for k, v := range c.PerModel {
+			out.PerModel[k] = v
 		}
 	}
 	return out
@@ -403,7 +524,7 @@ func Load(path string) (Config, []string, error) {
 	if err := json.Unmarshal(b, &cfg); err != nil {
 		return Default(), nil, fmt.Errorf("parse config %s: %w", path, err)
 	}
-	dropped := cfg.sanitizeSampling()
+	dropped := append(cfg.sanitizeSampling(), cfg.sanitizePerModel()...)
 	if err := cfg.Validate(); err != nil {
 		return Default(), nil, fmt.Errorf("invalid config %s: %w", path, err)
 	}

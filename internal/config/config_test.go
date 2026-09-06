@@ -366,3 +366,126 @@ func TestEnsureDirsFollowsSymlinkedLayoutDirOnPerUserRoot(t *testing.T) {
 		t.Fatalf("EnsureDirs refused a symlinked models directory on a per-user root: %v", err)
 	}
 }
+
+// Per-model settings survive a save and a load, so a switch the operator set in
+// Settings still applies after a restart.
+func TestSaveLoadRoundTripKeepsPerModelSettings(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	want := Default()
+	want.PerModel = map[string]ModelSettings{
+		"mlx-community/Qwen3-8B-4bit": {MergeSystemMessages: true},
+	}
+
+	if err := Save(path, want); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	got, _, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("round trip mismatch:\n got %+v\nwant %+v", got, want)
+	}
+}
+
+// A per-model entry is settings for one model, so a file written by a newer
+// build — one carrying a setting this build does not know — still loads, with
+// the settings this build does know intact.
+func TestLoadPerModelIgnoresUnknownSettings(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	body := `{"port":11535,"host":"0.0.0.0","decode_concurrency":4,` +
+		`"per_model":{"mlx-community/Qwen3-8B-4bit":{"merge_system_messages":true,"temperature":0.7}}}`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, _, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !cfg.PerModel["mlx-community/Qwen3-8B-4bit"].MergeSystemMessages {
+		t.Error("merge_system_messages was lost next to a setting this build does not know")
+	}
+}
+
+// The keys of the per-model map name models. A key that is not a well-formed
+// repo id names nothing and is refused, so the map cannot fill up with
+// entries no request can ever match.
+func TestValidatePerModelKeys(t *testing.T) {
+	cases := []struct {
+		name    string
+		key     string
+		wantErr bool
+	}{
+		{"a repo id", "mlx-community/Qwen3-8B-4bit", false},
+		{"no organisation", "Qwen3-8B-4bit", true},
+		{"a path traversal", "../../etc", true},
+		{"an empty key", "", true},
+		{"a trailing segment", "mlx-community/Qwen3/extra", true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			err := ValidatePerModelKeys(map[string]ModelSettings{c.key: {MergeSystemMessages: true}})
+			if (err != nil) != c.wantErr {
+				t.Errorf("ValidatePerModelKeys(%q) error = %v, want error: %v", c.key, err, c.wantErr)
+			}
+		})
+	}
+}
+
+// A settings file carrying a per-model key that names no model must still
+// load: the panel serves the stored settings into its form and the form posts
+// them back, so a key that is refused rather than dropped would come back on
+// the next save and refuse it — wedging every settings change there is. It is
+// dropped and reported, the way an unusable sampling override beside it is.
+func TestLoadDropsAPerModelKeyThatNamesNoModel(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	body := `{"port":11535,"host":"0.0.0.0","decode_concurrency":4,"per_model":{` +
+		`"../../etc":{"merge_system_messages":true},` +
+		`"mlx-community/Qwen3-8B-4bit":{"merge_system_messages":true}}}`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, dropped, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if _, bad := cfg.PerModel["../../etc"]; bad {
+		t.Errorf("a key that names no model survived the load: %+v", cfg.PerModel)
+	}
+	if !cfg.PerModel["mlx-community/Qwen3-8B-4bit"].MergeSystemMessages {
+		t.Errorf("the usable setting beside it was dropped too: %+v", cfg.PerModel)
+	}
+	if len(dropped) != 1 || !strings.Contains(dropped[0], "../../etc") {
+		t.Errorf("dropped = %v, want the one unusable key named", dropped)
+	}
+	// The whole point: what loaded is a config that can be saved again.
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("the loaded config does not validate: %v", err)
+	}
+	if err := ValidatePerModelKeys(cfg.PerModel); err != nil {
+		t.Errorf("the loaded config would be refused by the next settings save: %v", err)
+	}
+}
+
+// Two spellings of one model id would make the effective settings depend on
+// map iteration order, so the later one in sorted order is dropped.
+func TestLoadDropsADuplicatePerModelSpelling(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	body := `{"port":11535,"host":"0.0.0.0","decode_concurrency":4,"per_model":{` +
+		`"MLX-Community/Qwen3-8B-4bit":{"merge_system_messages":true},` +
+		`"mlx-community/Qwen3-8B-4bit":{}}}`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, dropped, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(cfg.PerModel) != 1 {
+		t.Errorf("per-model settings = %+v, want one of the two spellings", cfg.PerModel)
+	}
+	if len(dropped) != 1 || !strings.Contains(dropped[0], "duplicate") {
+		t.Errorf("dropped = %v, want the duplicate spelling named", dropped)
+	}
+}
