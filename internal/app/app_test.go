@@ -762,3 +762,105 @@ func TestSetConfigRejectsInvalidPerModelKeyAndLeavesTheFileAlone(t *testing.T) {
 		t.Errorf("the refused save reached the live config: %+v", a.Config().PerModel)
 	}
 }
+
+// A per-model setting is matched against the id a request resolves to, and the
+// settings file can be edited by hand or written by another build. Keys are
+// therefore folded to the registry's spelling when they are read, not only
+// when they are saved — otherwise a key differing only in case sits in the
+// file looking effective, shows as off in the panel, and matches no request.
+func TestNewCanonicalisesPerModelKeysFromDisk(t *testing.T) {
+	root := t.TempDir()
+	paths := config.NewPaths(root)
+
+	dir := paths.ModelDir("mlx-community/Existing-4bit")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	os.WriteFile(filepath.Join(dir, "config.json"), []byte(`{"model_type":"test"}`), 0o644)
+	os.WriteFile(filepath.Join(dir, "model.safetensors"), make([]byte, 512), 0o644)
+
+	cfg := config.Default()
+	cfg.PerModel = map[string]config.ModelSettings{
+		"MLX-Community/existing-4bit": {MergeSystemMessages: true},
+	}
+	a, err := New(Options{Paths: paths, Config: cfg})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+
+	got := a.Config().PerModel
+	if !got["mlx-community/Existing-4bit"].MergeSystemMessages {
+		t.Errorf("per-model settings = %+v, want the setting under the registry's spelling", got)
+	}
+}
+
+// A settings file carrying a key that names no model must not wedge the panel:
+// the key is echoed to the form, comes back on the next save, and every save
+// of any setting would be refused. Startup drops it and says so, the way an
+// unusable preload entry is dropped and logged.
+func TestNewDropsAPerModelKeyThatNamesNoModel(t *testing.T) {
+	paths := config.NewPaths(t.TempDir())
+	cfg := config.Default()
+	cfg.PerModel = map[string]config.ModelSettings{
+		"../../etc":                   {MergeSystemMessages: true},
+		"mlx-community/Qwen3-8B-4bit": {MergeSystemMessages: true},
+	}
+	a, err := New(Options{Paths: paths, Config: cfg})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+
+	got := a.Config().PerModel
+	if _, bad := got["../../etc"]; bad {
+		t.Errorf("a key that names no model survived startup: %+v", got)
+	}
+	if !got["mlx-community/Qwen3-8B-4bit"].MergeSystemMessages {
+		t.Errorf("the usable setting beside it was dropped too: %+v", got)
+	}
+	// The whole point: a save now goes through instead of being refused.
+	if err := a.SetConfig(a.Config()); err != nil {
+		t.Errorf("saving settings after startup dropped the bad key: %v", err)
+	}
+}
+
+// A settings map with more than one problem in it must report the same one
+// every time. Map iteration is randomised, so two independent collisions is
+// the shape that catches an unordered scan: without a stable order the refusal
+// names one pair on one run and the other pair on the next, and an operator
+// fixing what they were told sees a different complaint appear.
+func TestSetConfigReportsAFoldedDuplicateDeterministically(t *testing.T) {
+	a := newTestApp(t)
+	for _, id := range []string{"org/Repo", "org/Other"} {
+		if err := a.Registry.Put(registry.Model{
+			RepoID: id,
+			Path:   filepath.Join(a.Paths.Models, filepath.FromSlash(id)),
+			State:  registry.StateReady,
+		}); err != nil {
+			t.Fatalf("Put: %v", err)
+		}
+	}
+
+	c := a.Config()
+	c.PerModel = map[string]config.ModelSettings{
+		"ORG/repo":  {MergeSystemMessages: true},
+		"org/repo":  {},
+		"ORG/other": {MergeSystemMessages: true},
+		"org/other": {},
+	}
+	first := ""
+	for i := 0; i < 50; i++ {
+		err := a.SetConfig(c)
+		if err == nil {
+			t.Fatal("expected two keys that name the same model to be refused")
+		}
+		if first == "" {
+			first = err.Error()
+			continue
+		}
+		if err.Error() != first {
+			t.Fatalf("the refusal names a different model from run to run:\n %s\n %s", first, err)
+		}
+	}
+}

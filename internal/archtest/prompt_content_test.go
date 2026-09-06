@@ -30,9 +30,19 @@ var promptContentReaders = map[string]string{
 	"internal/mlxtest/fake.go":        "the fake mlx server tests relay to, which answers requests rather than making them",
 }
 
-// chatMessageFields are the JSON names a chat message is made of. Code that
-// reads a prompt has to name at least one of them.
-var chatMessageFields = []string{`"messages"`, `"role"`, `"content"`}
+// chatMessageFields are the ways a chat message's fields get named in Go: the
+// JSON names themselves, and the constants the merge declares for them.
+//
+// The constants matter as much as the literals. They are package-level in
+// internal/gateway — the package that owns the relay, and so the likeliest
+// place a second prompt reader would appear — so a new file there could index
+// a message by messagesField and contentField and read every prompt without
+// writing a single quoted field name. That is the cheapest way around this
+// scan and the one nearest to hand.
+var chatMessageFields = []string{
+	`"messages"`, `"role"`, `"content"`,
+	"messagesField", "roleField", "contentField",
+}
 
 // Merging is the only rewrite of prompt content Gropius performs, and the only
 // reading of it. This walks every Go source file that ships (test files

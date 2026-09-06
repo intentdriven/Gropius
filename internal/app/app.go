@@ -8,6 +8,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -129,6 +131,12 @@ func New(opts Options) (*App, error) {
 		},
 	})
 
+	// Settings read from disk have not been through SetConfig's checks: the
+	// file can be hand-edited, restored from a backup, or written by another
+	// build. Fold them onto the registry's spellings here, where the log
+	// exists to say what was dropped.
+	a.cfg.PerModel = a.adoptPerModel(a.cfg.PerModel)
+
 	if len(opts.Config.Preload) > 0 {
 		go a.preload(opts.Config.Preload)
 	}
@@ -194,8 +202,9 @@ func (a *App) SetConfig(c config.Config) error {
 	return nil
 }
 
-// canonicalPerModel checks the keys of a per-model settings map and rewrites
-// each to the registry's spelling of the model it names.
+// canonicalPerModel checks the keys of a per-model settings map submitted
+// through Settings and rewrites each to the registry's spelling of the model
+// it names.
 //
 // The registry matches an id case-insensitively but answers under one
 // spelling, and that spelling is what a request resolves to. A key stored in
@@ -203,7 +212,9 @@ func (a *App) SetConfig(c config.Config) error {
 // match no request, so the case is folded once here — on the way in, where the
 // operator is present to be told about a key that names nothing — rather than
 // on every request. A key for a model this machine does not have is kept as it
-// was typed: a model can be downloaded after its settings are set.
+// was typed, and folded onto the registry's spelling at the next startup after
+// the model arrives (see adoptPerModel), so setting a model up before
+// downloading it works whatever case it is typed in.
 func (a *App) canonicalPerModel(in map[string]config.ModelSettings) (map[string]config.ModelSettings, error) {
 	if len(in) == 0 {
 		return nil, nil
@@ -212,16 +223,66 @@ func (a *App) canonicalPerModel(in map[string]config.ModelSettings) (map[string]
 		return nil, err
 	}
 	out := make(map[string]config.ModelSettings, len(in))
-	for id, settings := range in {
-		if m, err := a.Registry.Get(id); err == nil {
-			id = m.RepoID
+	for _, id := range perModelKeys(in) {
+		canonical := a.canonicalPerModelKey(id)
+		if _, dup := out[canonical]; dup {
+			return nil, fmt.Errorf("per-model settings name %s more than once", canonical)
 		}
-		if _, dup := out[id]; dup {
-			return nil, fmt.Errorf("per-model settings name %s more than once", id)
-		}
-		out[id] = settings
+		out[canonical] = in[id]
 	}
 	return out, nil
+}
+
+// adoptPerModel is canonicalPerModel for settings read from disk rather than
+// submitted through Settings: a key it cannot use is dropped and named in the
+// log, the way an unusable preload entry is, rather than refused.
+//
+// Refusing at startup would be worse than useless. The panel serves the stored
+// settings into its form and the form posts them back, so one unusable key
+// would return on the next save and be refused — wedging every settings change
+// there is, the API key included, until someone edited the file by hand.
+func (a *App) adoptPerModel(in map[string]config.ModelSettings) map[string]config.ModelSettings {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]config.ModelSettings, len(in))
+	var dropped []string
+	for _, id := range perModelKeys(in) {
+		canonical := a.canonicalPerModelKey(id)
+		if !config.ValidRepoID(id) {
+			dropped = append(dropped, id)
+			continue
+		}
+		if _, dup := out[canonical]; dup {
+			dropped = append(dropped, id)
+			continue
+		}
+		out[canonical] = in[id]
+	}
+	if len(dropped) > 0 {
+		a.Log.Warn("dropped per-model settings whose key names no model, or names one another key already names",
+			"keys", dropped)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// canonicalPerModelKey is the registry's spelling of a model id, or the id as
+// it was given when this machine does not have that model.
+func (a *App) canonicalPerModelKey(id string) string {
+	if m, err := a.Registry.Get(id); err == nil {
+		return m.RepoID
+	}
+	return id
+}
+
+// perModelKeys returns a per-model map's keys in a stable order, so that a map
+// with more than one problem in it reports the same one every time rather than
+// whichever the map iteration reached first.
+func perModelKeys(in map[string]config.ModelSettings) []string {
+	return slices.Sorted(maps.Keys(in))
 }
 
 // modelSource adapts the registry to runtime.ModelSource.
