@@ -246,7 +246,7 @@ func (a *App) canonicalPinned(in []string) []string {
 	}
 	out := make([]string, 0, len(in))
 	for _, id := range in {
-		out = append(out, a.canonicalPerModelKey(id))
+		out = append(out, a.canonicalModelKey(id))
 	}
 	return out
 }
@@ -343,7 +343,7 @@ func (a *App) canonicalPerModel(in map[string]config.ModelSettings) (map[string]
 	}
 	out := make(map[string]config.ModelSettings, len(in))
 	for _, id := range perModelKeys(in) {
-		canonical := a.canonicalPerModelKey(id)
+		canonical := a.canonicalModelKey(id)
 		if _, dup := out[canonical]; dup {
 			return nil, fmt.Errorf("per-model settings name %s more than once", canonical)
 		}
@@ -367,7 +367,7 @@ func (a *App) adoptPerModel(in map[string]config.ModelSettings) map[string]confi
 	out := make(map[string]config.ModelSettings, len(in))
 	var dropped []string
 	for _, id := range perModelKeys(in) {
-		canonical := a.canonicalPerModelKey(id)
+		canonical := a.canonicalModelKey(id)
 		if !config.ValidRepoID(id) {
 			dropped = append(dropped, id)
 			continue
@@ -388,9 +388,11 @@ func (a *App) adoptPerModel(in map[string]config.ModelSettings) map[string]confi
 	return out
 }
 
-// canonicalPerModelKey is the registry's spelling of a model id, or the id as
-// it was given when this machine does not have that model.
-func (a *App) canonicalPerModelKey(id string) string {
+// canonicalModelKey is the registry's spelling of a model id, or the id as it
+// was given when this machine does not have that model. It is what every
+// setting keyed or listed by a model id is stored under, so that the spelling
+// the operator sees in Settings is the one a request resolves to.
+func (a *App) canonicalModelKey(id string) string {
 	if m, err := a.Registry.Get(id); err == nil {
 		return m.RepoID
 	}

@@ -38,6 +38,10 @@ never told which models are protected, or what this Mac is running.
   model, and so does quitting Gropius or a model server crashing. The pin stays
   in Settings either way, so the model is protected again the next time it
   loads.
+- **It does not go away when the model does.** Deleting a pinned model leaves
+  its pin in Settings, where there is no longer a box for it. That protects
+  nothing — there is no model to protect — but download the model again and it
+  is pinned again.
 - **It does not reserve memory.** A pinned model that is not loaded is charged
   nothing, and does not stop other models from filling the budget.
 
