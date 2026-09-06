@@ -52,9 +52,10 @@ it through the firewall, and launches it:
 curl -fsSL https://raw.githubusercontent.com/intentdriven/Gropius/main/install.sh | bash
 ```
 
-The **server needs Apple Silicon** (MLX runs on Metal). For the native chat client
-(`GropiusChat.app`, universal — runs on Intel too, talks to a server over the
-network):
+**Requires macOS 26.** Both apps declare that minimum, so an earlier system
+refuses to launch them. The **server needs Apple Silicon** (MLX runs on Metal).
+For the native chat client (`GropiusChat.app`, universal — it runs on any Mac
+that runs macOS 26, Intel included, and talks to a server over the network):
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/intentdriven/Gropius/main/install.sh | bash -s -- client

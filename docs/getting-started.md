@@ -7,7 +7,8 @@ About 15 minutes, most of it downloads.
 
 - An **Apple Silicon** Mac (M1 or later). MLX runs on Metal, so Intel Macs are
   not supported.
-- macOS 13 or later.
+- **Requires macOS 26.** The app bundle declares that minimum, so an earlier
+  system refuses to launch it.
 - Go 1.25+ and the Xcode command-line tools (`xcode-select --install`) to build.
 - An internet connection for the first run.
 
