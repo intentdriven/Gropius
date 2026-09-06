@@ -45,6 +45,15 @@ GitHub release notes.
   and the rest of its copy from README.md and the getting-started guide, so the
   page says what the repository says. The release chain renders and deploys it;
   `make site` renders it locally.
+- The page names the current release: its version, the day it was published,
+  every file it carries with that file's size, and a link to the checksums to
+  verify a download against. The release run reads the release GitHub flags as
+  latest and renders the page from it, so the facts follow the release without
+  anyone editing the page; a release that cannot be read costs the page those
+  facts and nothing else. The page still carries no version of its own, and its
+  download button still resolves the latest release. It also ships a
+  content-security policy that admits nothing but its own files and the web font
+  service.
 - Settings holds the sampling defaults the whole machine serves with —
   temperature, top-p, top-k, min-p and a completion-token budget — with an
   optional override per model, so a fleet of clients that never set a
