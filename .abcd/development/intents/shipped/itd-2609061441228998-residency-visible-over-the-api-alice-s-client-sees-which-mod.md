@@ -103,7 +103,8 @@ unchanged once clients can see what is warm.
 
 ## Audit Notes
 
-_Empty. Populated by intent-auditor when intent moves to shipped/._
+<!-- abcd-review: OWED receipt=rcp-251602005fba -->
+Fidelity review OWED (receipt rcp-251602005fba).
 
 ## Grounds
 

@@ -32,14 +32,37 @@ type Upstream struct {
 	ModelArg string
 }
 
-// Resident describes a loaded model, for the UI.
+// ResidencyState says how far a model has got towards serving a request
+// without a load.
+type ResidencyState string
+
+const (
+	// ResidencyNotLoaded is a model the pool is not holding at all. The pool
+	// never reports it — a model it does not hold is one it has nothing to
+	// say about — so it is the value a caller supplies for the models it
+	// knows about and the pool does not.
+	ResidencyNotLoaded ResidencyState = "not_loaded"
+	// ResidencyLoading is a model whose server is up but has not yet answered
+	// its readiness probe. A request for it is served, but only after the
+	// wait a request for a loaded model does not pay.
+	ResidencyLoading ResidencyState = "loading"
+	// ResidencyLoaded is a model whose server has answered its readiness
+	// probe and can serve a request straight away.
+	ResidencyLoaded ResidencyState = "loaded"
+)
+
+// Resident describes a model the pool is holding. An entry exists from the
+// moment the server process is launched, so State is what separates a model
+// that can serve now from one still loading; the control panel shows the rest
+// of these fields on loopback and does not read State yet.
 type Resident struct {
-	RepoID   string    `json:"repo_id"`
-	Port     int       `json:"port"`
-	Bytes    int64     `json:"bytes"`
-	LoadedAt time.Time `json:"loaded_at"`
-	LastUsed time.Time `json:"last_used"`
-	InFlight int       `json:"in_flight"`
+	RepoID   string         `json:"repo_id"`
+	State    ResidencyState `json:"state"`
+	Port     int            `json:"port"`
+	Bytes    int64          `json:"bytes"`
+	LoadedAt time.Time      `json:"loaded_at"`
+	LastUsed time.Time      `json:"last_used"`
+	InFlight int            `json:"in_flight"`
 }
 
 // PoolOptions configures a Pool.
@@ -169,7 +192,7 @@ func (p *Pool) Acquire(ctx context.Context, repoID string) (*Upstream, func(), e
 		return nil, nil, ErrClosed
 	}
 
-	e, ok := p.entries[repoID]
+	e, ok := p.entries[config.FoldRepoID(repoID)]
 	if !ok {
 		var err error
 		e, err = p.startLocked(repoID)
@@ -208,7 +231,7 @@ func (p *Pool) Acquire(ctx context.Context, repoID string) (*Upstream, func(), e
 		// model could deny every other model from loading for minutes. Tear
 		// it down the moment the last waiter is gone. The identity check
 		// guards against a load that already failed and removed itself.
-		if e.inFlight == 0 && !isReady(e) && p.entries[e.repoID] == e {
+		if e.inFlight == 0 && !isReady(e) && p.entries[config.FoldRepoID(e.repoID)] == e {
 			p.stopEntryLocked(e)
 		}
 		p.mu.Unlock()
@@ -306,7 +329,7 @@ func (p *Pool) startLocked(repoID string) (*entry, error) {
 		return nil, fmt.Errorf("start model server for %s: %w", repoID, &LaunchError{Err: err})
 	}
 	e.proc = proc
-	p.entries[repoID] = e
+	p.entries[config.FoldRepoID(repoID)] = e
 
 	go p.waitReady(e)
 	return e, nil
@@ -330,8 +353,8 @@ func (p *Pool) waitReady(e *entry) {
 		// same repoID key. Deleting by key alone would then orphan that healthy
 		// replacement — its process would leak and its memory would stop counting
 		// against the budget.
-		if p.entries[e.repoID] == e {
-			delete(p.entries, e.repoID)
+		if p.entries[config.FoldRepoID(e.repoID)] == e {
+			delete(p.entries, config.FoldRepoID(e.repoID))
 		}
 	}
 	p.mu.Unlock()
@@ -360,8 +383,8 @@ func (p *Pool) waitReady(e *entry) {
 func (p *Pool) watchExit(e *entry) {
 	<-e.proc.Done()
 	p.mu.Lock()
-	if p.entries[e.repoID] == e {
-		delete(p.entries, e.repoID)
+	if p.entries[config.FoldRepoID(e.repoID)] == e {
+		delete(p.entries, config.FoldRepoID(e.repoID))
 	}
 	p.mu.Unlock()
 }
@@ -461,7 +484,7 @@ func (p *Pool) evictForLocked(need int64) error {
 
 // stopEntryLocked removes an entry and stops its process. Callers must hold p.mu.
 func (p *Pool) stopEntryLocked(e *entry) {
-	delete(p.entries, e.repoID)
+	delete(p.entries, config.FoldRepoID(e.repoID))
 	proc := e.proc
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
@@ -484,7 +507,7 @@ func (p *Pool) Unload(repoID string) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	e, ok := p.entries[repoID]
+	e, ok := p.entries[config.FoldRepoID(repoID)]
 	if !ok {
 		return fmt.Errorf("%s: %w", repoID, ErrNotLoaded)
 	}
@@ -496,15 +519,25 @@ func (p *Pool) Unload(repoID string) error {
 	return nil
 }
 
-// Resident lists the loaded models, most recently used first.
+// Resident lists the models the pool is holding, most recently used first.
+// Models still loading are included, carrying ResidencyLoading; the snapshot
+// is taken under the pool's lock and reserves nothing.
 func (p *Pool) Resident() []Resident {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
 	out := make([]Resident, 0, len(p.entries))
 	for _, e := range p.entries {
+		// isReady reads the ready channel without blocking, so a model in the
+		// middle of a load is reported as loading rather than making every
+		// caller of Resident wait for it.
+		state := ResidencyLoading
+		if isReady(e) {
+			state = ResidencyLoaded
+		}
 		out = append(out, Resident{
 			RepoID:   e.repoID,
+			State:    state,
 			Port:     e.port,
 			Bytes:    e.bytes,
 			LoadedAt: e.loadedAt,

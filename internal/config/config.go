@@ -152,6 +152,35 @@ func ValidRepoID(s string) bool {
 // refuses to read.
 const MaxRepoComponent = 96
 
+// FoldRepoID maps a repo id to the single key that identifies the model it
+// names. Two ids naming the same model fold to the same string.
+//
+// This is the repository's one rule for when two repo ids are the same model,
+// and every part that keys anything by a repo id must use it: the registry's
+// index, the runtime pool's loaded entries, the models list's join between the
+// two, and the downloader's per-model serialization. It lives here, beside
+// ValidRepoID, because identity and validity are the same question about the
+// same value, and because this package is the one both the registry and the
+// runtime already depend on.
+//
+// It must stay one function rather than one rule copied into several. The
+// guarantee the pool and the models list rest on — at most one model per folded
+// id — holds only while every site folds identically. Were one site to fold
+// more loosely than the registry, two models could share a pool entry and a
+// client asking for one would be served the other's weights; were one to fold
+// more strictly, a model could be loaded twice.
+//
+// internal/archtest/repo_id_fold_test.go holds that: in the packages that key
+// by a repo id it refuses any case fold that is not on a reasoned allow-list,
+// and elsewhere under internal/ it refuses one whose argument is spelled like a
+// repo id. The first is what catches a fold hidden behind a local variable; the
+// second is a backstop, since those packages legitimately fold file names and
+// header names too.
+//
+// HuggingFace treats repo ids case-insensitively, and ValidRepoID keeps every
+// id in the registry to ASCII, so case is the whole of the rule today.
+func FoldRepoID(repoID string) string { return strings.ToLower(repoID) }
+
 func validRepoComponent(s string) bool {
 	if s == "" || s == "." || s == ".." || len(s) > MaxRepoComponent {
 		return false
@@ -394,7 +423,7 @@ func (c *Config) sanitizePerModel() []string {
 		// Two spellings of one repo id would make the effective settings
 		// depend on map iteration order. Keep the first in sorted order so the
 		// outcome is the same on every start.
-		folded := strings.ToLower(id)
+		folded := FoldRepoID(id)
 		if first, ok := seen[folded]; ok {
 			dropped = append(dropped, "per_model["+id+"] (duplicate of "+first+")")
 			continue

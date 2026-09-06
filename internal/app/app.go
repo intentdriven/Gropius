@@ -10,7 +10,6 @@ import (
 	"log/slog"
 	"maps"
 	"slices"
-	"strings"
 	"sync"
 	"time"
 
@@ -523,7 +522,7 @@ func (a *App) finishDownload(dl *download, publish func()) {
 
 // dlKey is the in-flight downloads map key: case-folded like the registry's,
 // so a case variant of a running download is seen as that download.
-func dlKey(repoID string) string { return strings.ToLower(repoID) }
+func dlKey(repoID string) string { return config.FoldRepoID(repoID) }
 
 // CancelDownload stops an in-flight download.
 //

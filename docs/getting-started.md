@@ -61,9 +61,9 @@ The first request for a model loads it (a few seconds to a minute for large
 ones); later requests are fast. You can pre-load from **My Models → Load**.
 
 `GET /v1/models` lists what this Mac can serve, and gives each model's maximum
-context so a client can size its prompts before sending. The
-[models list reference](models-list.md) describes every field, including what
-that figure does and does not promise.
+context so a client can size its prompts before sending. With an API key set it
+also says which models are loaded. The [models list reference](models-list.md)
+describes every field, including what those values do and do not promise.
 
 ## 5. Talk to it — from another machine
 
@@ -102,6 +102,10 @@ Requests from the Mac itself (including other user accounts) never need the
 key, as long as they are addressed to `localhost` or `127.0.0.1`. A local proxy
 or tunnel that forwards another host name must send the key like any other
 client.
+
+Setting a key also turns on the models list's residency fields, so a client
+holding it can see which models are loaded and pick a warm one instead of
+triggering a load — see the [models list reference](models-list.md).
 
 ### What Gropius reads of a request
 

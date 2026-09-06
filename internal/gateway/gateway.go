@@ -124,7 +124,10 @@ func (g *Gateway) Handler() http.Handler {
 // included, so there is nothing here for either check to protect.
 func (g *Gateway) withAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// One read of the live configuration per request. Everything below,
+		// and every handler beyond it, decides on this one reading.
 		apiKey := g.cfg().APIKey
+		r = withAdmittedKeyed(r, apiKey != "")
 		if apiKey == "" {
 			next.ServeHTTP(w, r)
 			return
@@ -183,6 +186,37 @@ func (g *Gateway) handleHealth(w http.ResponseWriter, r *http.Request) {
 // throws CacheNotFound when that directory is absent).
 func (g *Gateway) handleListModels(w http.ResponseWriter, r *http.Request) {
 	ready := g.models.Ready()
+	// Residency is reported only on an install that has a key configured. The
+	// three-state value is not itself a secret — an unauthenticated client can
+	// already learn it by timing a one-token completion, and in doing so it
+	// changes residency, which reporting never does — but the in-flight count
+	// and the last-used time say who is busy and when, and an open server
+	// discloses neither. The condition is the install's, not the request's: a
+	// loopback client exempt from the bearer check on a keyed install sees the
+	// same picture the control panel already shows it. A nil map means no key
+	// and no projection, which an empty one would not.
+	//
+	// This is withAuth's own admission bit, not a second authorization path:
+	// withAuth still decides who may call the listing at all. Reading the key
+	// again here would be a second reading of a live value, and a request
+	// admitted while no key was configured could then be served as if one had
+	// been.
+	var residency map[string]runtime.Resident
+	if g.admittedKeyed(r) {
+		residency = make(map[string]runtime.Resident)
+		for _, res := range g.pool.Resident() {
+			// Folded on both sides of the join, through the same rule the
+			// registry and the pool key by. The registry reports a model's
+			// canonical spelling and the pool reports whatever string reached
+			// Acquire, and they are not always the same one; joining on the raw
+			// strings would report a warm model as cold, which is the swap this
+			// listing exists to prevent. This cannot mis-attribute only because
+			// all three key by config.FoldRepoID, so the registry's "at most one
+			// model per folded id" is the pool's guarantee and this join's too.
+			residency[config.FoldRepoID(res.RepoID)] = res
+		}
+	}
+
 	data := make([]any, 0, len(ready))
 	for _, m := range ready {
 		entry := map[string]any{
@@ -206,9 +240,52 @@ func (g *Gateway) handleListModels(w http.ResponseWriter, r *http.Request) {
 			entry["context_length"] = m.ContextLength
 			entry["max_model_len"] = m.ContextLength
 		}
+		if residency != nil {
+			addResidency(entry, residency[config.FoldRepoID(m.RepoID)])
+		}
 		data = append(data, entry)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"object": "list", "data": data})
+}
+
+// addResidency writes the residency fields onto one models-list entry, from
+// the pool's record for that model.
+//
+// A model the pool is not holding is passed the zero Resident, and every field
+// below then reports it correctly without a special case: an empty state is not
+// one of the two the pool defines and so projects as not_loaded, nothing is in
+// flight, and there is no last-used time to report.
+//
+// It is deliberately an allow-list of named fields rather than a marshalling of
+// runtime.Resident: that struct carries the model server's loopback port and
+// its on-disk size, and a field added to it later must not reach the LAN
+// because nobody remembered to exclude it. Keeping the backend's internals off
+// the wire is the same rule relayRewritingModel exists for.
+//
+// The values are a snapshot taken while the list is built. Nothing here holds a
+// model warm on the client's behalf: by the time the client reads them another
+// client's request may have evicted the model.
+func addResidency(entry map[string]any, res runtime.Resident) {
+	// The value is allow-listed too, not only the field names. Pool is an
+	// interface, so the string in Resident.State is not this package's to
+	// trust; anything but the two the pool defines means the listing cannot
+	// say the model is warm, which is what not_loaded says.
+	state := runtime.ResidencyNotLoaded
+	switch res.State {
+	case runtime.ResidencyLoaded, runtime.ResidencyLoading:
+		state = res.State
+	}
+	entry["state"] = string(state)
+	// Zero for a model that is not loaded, which is the true count.
+	entry["in_flight"] = res.InFlight
+	// The last-used time lives on the pool's entry for the model, so it is
+	// there exactly while the pool is holding the model — loading or loaded —
+	// and goes when the entry does: eviction, unload, the idle reaper, a crash.
+	// Absent rather than zero, which a client would read as 1970 rather than as
+	// "unknown". state, not this, is what says whether the model is warm.
+	if !res.LastUsed.IsZero() {
+		entry["last_used"] = res.LastUsed.Unix()
+	}
 }
 
 // maxRequestBody caps the size of a completion request. Prompts are text; a

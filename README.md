@@ -40,6 +40,10 @@ Cross-machine LAN use works; TLS and notarized distribution are not yet included
 - **Context window published** — the models list gives each model's maximum
   context, so a client can size its prompts instead of discovering the limit
   by failure ([reference](docs/models-list.md)).
+- **Residency published** — with an API key set, the models list also says which
+  models are loaded, how busy each one is and when it was last used, so a client
+  picks the warm model instead of triggering a load
+  ([reference](docs/models-list.md)).
 - **Runs many models** — one process per model, with an LRU memory budget so a
   request for a second model evicts an idle one instead of OOMing the machine.
 - **Sampling defaults** — one place to say what an omitted `temperature` means
@@ -120,6 +124,12 @@ the control panel warns you while this is so. Set a key in **Settings** to requi
 `Authorization: Bearer <key>`. Same-machine clients (loopback, including other
 user accounts) never need a key. The control panel and its `/api/*` endpoints are
 bound to loopback only and are never reachable from the LAN.
+
+Setting a key also turns on the models list's residency fields, which say which
+models are loaded and how busy they are. With no key set, the list still names
+every downloaded model and says nothing about what this Mac is doing with them —
+though a client on an open server can still time a request to find out. Keeping
+activity private means setting the key, not leaving the fields off.
 
 The server's request log records the method, path, status and duration of a
 request, and never the client's network address.

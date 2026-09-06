@@ -67,6 +67,23 @@ GitHub release notes.
   and their ranges, and
   [docs/sampling-explained.md](docs/sampling-explained.md) for why there is no
   seed and why reproducibility comes from a fixed temperature.
+- On an install with an API key configured, every entry on `GET /v1/models`
+  also reports whether that model is `loaded`, `loading` or `not_loaded`, how
+  many requests are in flight for it, and when it was last used — so a client
+  can send its work to a model that is already warm instead of triggering a
+  load it did not know about. The values are a snapshot taken as the list is
+  built and reserve nothing. Where no key is set the listing is unchanged, and
+  [docs/models-list.md](docs/models-list.md) states the values, the
+  keyed-install condition, and the memory budget and eviction rules they move
+  under.
+
+### Fixed
+
+- A model named with different capitalisation than the registry records — a
+  hand-edited `preload` entry, or a call to the load endpoint — no longer
+  starts a second model server for the same weights alongside the first, each
+  charged against the memory budget. Repo ids now fold through one rule
+  everywhere they are used as a key.
 
 ### Changed
 
