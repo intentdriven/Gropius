@@ -61,9 +61,9 @@ The first request for a model loads it (a few seconds to a minute for large
 ones); later requests are fast. You can pre-load from **My Models → Load**.
 
 `GET /v1/models` lists what this Mac can serve, and gives each model's maximum
-context so a client can size its prompts before sending. The
-[models list reference](models-list.md) describes every field, including what
-that figure does and does not promise.
+context so a client can size its prompts before sending. With an API key set it
+also says which models are loaded. The [models list reference](models-list.md)
+describes every field, including what those values do and do not promise.
 
 ## 5. Talk to it — from another machine
 
@@ -87,6 +87,10 @@ instead.
 ## 6. Lock it down (optional but recommended)
 
 By default anyone on your network can use the server. To require a key:
+
+Setting a key also turns on the models list's residency fields, so an entitled
+client can see which models are loaded and pick a warm one — see the
+[models list reference](models-list.md).
 
 1. **Settings → API key → Generate a key** (or type your own), then **Save**.
 2. Clients now send it:
