@@ -310,7 +310,7 @@ jobs:
   # empty: `gh api repos/<owner>/<repo>/actions/secrets` and the organization-
   # secrets endpoint both report 0, so nothing but GITHUB_TOKEN crosses, and
   # every credential this chain uses is environment-scoped. If this repository
-  # ever gains a repository-scoped or organisation secret, revisit this line
+  # ever gains a repository-scoped or organization secret, revisit this line
   # before that secret exists: at that point `inherit` would start handing it to
   # a job the spec says holds none.
   #

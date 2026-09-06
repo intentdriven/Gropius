@@ -332,7 +332,7 @@ jobs:
           # version named in a `with:` value is invisible to dependabot's
           # github-actions ecosystem, and wrangler-action resolves it from the
           # npm registry with nothing to verify it against. Aging is therefore
-          # the whole defence: pick a version at least 7 days old at the time of
+          # the whole defense: pick a version at least 7 days old at the time of
           # the bump, mirroring dependabot's cooldown. 4.123.0 was published
           # 2026-08-13.
           wranglerVersion: '4.123.0'

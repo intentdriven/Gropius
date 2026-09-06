@@ -162,7 +162,7 @@ func TestFixtureRenders(t *testing.T) {
 		t.Error("first-sentence did not narrow the install note")
 	}
 	// The prose the page asserts about the product, each selected rather than
-	// written here: the matched sentence, the code span, the lead, the licence.
+	// written here: the matched sentence, the code span, the lead, the license.
 	for _, want := range []string{
 		"The binaries are ad-hoc signed, not notarized.",
 		"http://fixture.invalid:11535/v1",

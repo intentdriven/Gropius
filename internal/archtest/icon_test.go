@@ -10,7 +10,7 @@ import (
 	"testing"
 )
 
-// The app bundle's icon is committed art. Rasterising build/icon.svg needs
+// The app bundle's icon is committed art. Rasterizing build/icon.svg needs
 // librsvg, which no workflow installs and the GitHub macOS runner does not
 // carry, so `make app` must copy the committed AppIcon.icns and must never
 // depend on regenerating it: a release builds the bundle AFTER its tag is
@@ -46,8 +46,8 @@ func TestAppIconIsCommittedAndBuildable(t *testing.T) {
 	}
 }
 
-// The .icns is a rasterisation of build/icon.svg, and nothing at build time
-// re-derives it. mkicon.sh records the hash of the art it rasterised, so editing
+// The .icns is a rasterization of build/icon.svg, and nothing at build time
+// re-derives it. mkicon.sh records the hash of the art it rasterized, so editing
 // the SVG without rerunning `make icon` is visible here rather than in a Dock
 // icon that no longer matches the landing page's mark.
 func TestAppIconMatchesTheCommittedArt(t *testing.T) {

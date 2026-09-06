@@ -224,7 +224,7 @@ func firstSentence(text string) string {
 	return text
 }
 
-// sentenceCase capitalises the first letter. A README bullet's body continues
+// sentenceCase capitalizes the first letter. A README bullet's body continues
 // its bold lead ("**Model browser** — search the ...") and reads as a fragment;
 // on the page the lead becomes a heading and the body a sentence of its own.
 // A body that starts with anything but a lowercase letter — a code span, say —

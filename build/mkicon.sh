@@ -26,7 +26,7 @@ done
 cp icon-1024.png AppIcon.iconset/icon_512x512@2x.png
 iconutil -c icns AppIcon.iconset -o AppIcon.icns
 rm -rf AppIcon.iconset
-# The art this .icns was rasterised from. internal/archtest compares it with
+# The art this .icns was rasterized from. internal/archtest compares it with
 # icon.svg's current hash, so editing the SVG without rerunning `make icon`
 # fails the suite instead of shipping an icon nobody drew.
 shasum -a 256 icon.svg | awk '{print $1}' > AppIcon.icns.source-sha256

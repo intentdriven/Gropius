@@ -7,7 +7,7 @@
 // Every check runs against a real render into t.TempDir() (or, for the property
 // that a render is not a lint, against a fixture tree with an edited identity
 // block), not against a committed copy of the output: a golden file would
-// re-state the renderer's behaviour rather than test it.
+// re-state the renderer's behavior rather than test it.
 package sitetest_test
 
 import (
@@ -337,7 +337,7 @@ func TestPageIsAnIdentitySurfaceAndCarriesTheTagline(t *testing.T) {
 	if len(surface.Requires) != 1 || surface.Requires[0] != "tagline" {
 		t.Errorf("landing-hero requires %v; the surfaces in this repository hold the tagline", surface.Requires)
 	}
-	// The surface names a build artefact, so it reports absent — not adrift — on
+	// The surface names a build artifact, so it reports absent — not adrift — on
 	// an unrendered checkout (recorded in .abcd/work/DECISIONS.md, and the
 	// reason the assertion below, not `abcd identity`, is what holds the page on
 	// every run). Bind the registration to what the build actually writes, so it
@@ -456,11 +456,11 @@ func TestPageAndBundleAgreeOnTheMinimumMacOS(t *testing.T) {
 //
 // "Given the page rendered in its dark theme, when its four-form mark is
 // compared with the app icon source, then the arrangement and the four fill
-// colours are the same."
+// colors are the same."
 //
 // Geometry is deliberately not compared: the icon lays 340px cells on a 1024
 // tile and the page's mark uses its own proportions, which is a design choice.
-// What must not differ is which shape sits in which quadrant and what colour it
+// What must not differ is which shape sits in which quadrant and what color it
 // is.
 
 func TestMarkMatchesTheAppIcon(t *testing.T) {

@@ -344,7 +344,7 @@ func forgeLinks(m manifest) links {
 // decodeStrict reads a JSON file into v and refuses any key v does not carry.
 // Both files it is used on are allowlists — the manifest of what the page is
 // composed from, and the words the renderer may add — and an allowlist that
-// silently ignores what it does not recognise is not one.
+// silently ignores what it does not recognize is not one.
 func decodeStrict(path string, v any) error {
 	f, err := os.Open(path)
 	if err != nil {

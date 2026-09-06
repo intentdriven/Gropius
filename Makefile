@@ -38,7 +38,7 @@ build:
 ## Strips debug info (-s -w): a distributed binary needs no DWARF, and it roughly
 ## halves the download.
 ## The icon is the COMMITTED build/AppIcon.icns, and this target never
-## regenerates it: rasterising icon.svg needs librsvg, which no workflow installs
+## regenerates it: rasterizing icon.svg needs librsvg, which no workflow installs
 ## and the GitHub macOS runner does not carry, so a dependency on `icon` here
 ## would fail `make app` on a clean checkout and turn the release red after the
 ## tag was already pushed. Regeneration is `make icon`, run by hand when the art

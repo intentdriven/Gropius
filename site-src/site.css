@@ -4,7 +4,7 @@
  * it relatively ("site.css") because the site is served under a path, not a
  * domain root.
  *
- * THE FOUR MARK COLOURS ARE NOT FREE CHOICES. --mark-yellow, --mark-grey,
+ * THE FOUR MARK COLORS ARE NOT FREE CHOICES. --mark-yellow, --mark-grey,
  * --mark-blue and --mark-red in the two dark blocks below are the fills of
  * build/icon.svg, so the mark on the page and the icon in the Dock are the same
  * drawing. internal/sitetest reads both files and fails when they disagree.
@@ -28,7 +28,7 @@
   --mark-grey: #62656C;
   --mark-blue: #1E4DA1;
   --mark-red: #D93A2B;
-  /* Interface accents, taken from the mark so the page has no fifth colour. */
+  /* Interface accents, taken from the mark so the page has no fifth color. */
   --accent: var(--mark-red);
   --accent-ink: #FFFFFF;
   --rule: var(--mark-yellow);

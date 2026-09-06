@@ -28,7 +28,7 @@
   // ordinary review boundary, not a new one.
   "name": "gropius",
   "compatibility_date": "2026-09-06",
-  // A PATH ROUTE, not a custom domain: the apex is the organisation's own site
+  // A PATH ROUTE, not a custom domain: the apex is the organization's own site
   // and only /Gropius belongs to this project. The deploy asserts the route, so
   // a drifted attachment is reclaimed on the next release rather than left
   // wherever the dashboard last put it.
