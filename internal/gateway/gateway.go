@@ -604,32 +604,49 @@ const choicesField = "choices"
 const usageField = "usage"
 
 // isUsageOnly reports whether an event is the one the model server appends
-// when a streamed request asked for its token counts: an empty list of
-// choices, and the counts.
+// when a streamed request asked for its token counts: the counts, and nothing
+// about the generation.
+//
+// The pinned server writes an empty choices array; an event that omits the
+// field entirely counts too, because such an event is equally not about the
+// generation and a client that did not ask for the counts should not receive
+// either. An event whose choices field is present but not a list is left
+// alone: it is not a shape this understands, and removing an event it does not
+// understand is the one mistake here that a client would see.
 func isUsageOnly(ev map[string]json.RawMessage) bool {
 	usage, ok := ev[usageField]
 	if !ok || string(usage) == "null" {
 		return false
 	}
-	return countChoices(ev) == 0
+	raw, has := ev[choicesField]
+	if !has {
+		return true
+	}
+	choices, ok := decodeChoices(raw)
+	return ok && len(choices) == 0
 }
 
 // carriesGeneration reports whether an event is about the generation itself,
-// which is what "the client has its first chunk" means here.
-func carriesGeneration(ev map[string]json.RawMessage) bool { return countChoices(ev) > 0 }
-
-// countChoices reports how many choices an event carries, and -1 when it
-// carries no choices field at all.
-func countChoices(ev map[string]json.RawMessage) int {
+// which is what "the client has its first chunk" means here. Nothing inside a
+// choice is read: what is inside is the answer being generated, and Gropius
+// times the answer rather than reading it.
+func carriesGeneration(ev map[string]json.RawMessage) bool {
 	raw, ok := ev[choicesField]
 	if !ok {
-		return -1
+		return false
 	}
+	choices, ok := decodeChoices(raw)
+	return ok && len(choices) > 0
+}
+
+// decodeChoices parses an event's choices as a list, reporting whether it is
+// one at all. Each element's own bytes are left untouched.
+func decodeChoices(raw json.RawMessage) ([]json.RawMessage, bool) {
 	var choices []json.RawMessage
 	if err := json.Unmarshal(raw, &choices); err != nil {
-		return -1
+		return nil, false
 	}
-	return len(choices)
+	return choices, true
 }
 
 // readUsage reads the model server's token counts off an event, or returns nil

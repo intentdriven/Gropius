@@ -518,3 +518,56 @@ func TestAnAnswerCutShortIsNotRecordedAsOne(t *testing.T) {
 type errReader struct{ err error }
 
 func (r errReader) Read([]byte) (int, error) { return 0, r.err }
+
+// Which events count as the usage event Gropius asked for, and which do not.
+// Removing an event the gateway does not understand is the one mistake here a
+// client would see, so anything that is not clearly the counts-only event is
+// relayed as it stands.
+func TestOnlyTheCountsOnlyEventIsRemoved(t *testing.T) {
+	cases := []struct {
+		name  string
+		event string
+		want  bool
+	}{
+		{"the pinned server's own shape", `{"choices":[],"usage":{"prompt_tokens":1,"completion_tokens":2}}`, true},
+		{"counts with no choices field at all", `{"usage":{"prompt_tokens":1}}`, true},
+		{"a chunk of the answer", `{"choices":[{"index":0}]}`, false},
+		{"a chunk that also carries counts", `{"choices":[{"index":0}],"usage":{"prompt_tokens":1}}`, false},
+		{"a null usage", `{"choices":[],"usage":null}`, false},
+		{"choices that are not a list", `{"choices":"none","usage":{"prompt_tokens":1}}`, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			ev, ok := decodeEvent([]byte(c.event))
+			if !ok {
+				t.Fatalf("%s is not an object", c.event)
+			}
+			if got := isUsageOnly(ev); got != c.want {
+				t.Errorf("isUsageOnly(%s) = %v, want %v", c.event, got, c.want)
+			}
+		})
+	}
+}
+
+// And which events are the client's first sight of an answer, which is what a
+// time to first token measures.
+func TestTheFirstChunkOfAnAnswerIsWhatIsTimed(t *testing.T) {
+	cases := []struct {
+		event string
+		want  bool
+	}{
+		{`{"choices":[{"index":0}]}`, true},
+		{`{"choices":[]}`, false},
+		{`{"usage":{"prompt_tokens":1}}`, false},
+		{`{"choices":"none"}`, false},
+	}
+	for _, c := range cases {
+		ev, ok := decodeEvent([]byte(c.event))
+		if !ok {
+			t.Fatalf("%s is not an object", c.event)
+		}
+		if got := carriesGeneration(ev); got != c.want {
+			t.Errorf("carriesGeneration(%s) = %v, want %v", c.event, got, c.want)
+		}
+	}
+}
