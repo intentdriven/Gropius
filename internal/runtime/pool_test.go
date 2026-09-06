@@ -19,14 +19,17 @@ type fakeSource struct {
 	models map[string]int64 // repoID -> size
 }
 
+// Resolve matches the registry's case-insensitive lookup, so a differently
+// cased id resolves and launches here exactly as it does in production.
 func (s *fakeSource) Resolve(repoID string) (string, int64, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	size, ok := s.models[repoID]
-	if !ok {
-		return "", 0, fmt.Errorf("%s is not downloaded", repoID)
+	for id, size := range s.models {
+		if strings.EqualFold(id, repoID) {
+			return "/models/" + id, size, nil
+		}
 	}
-	return "/models/" + repoID, size, nil
+	return "", 0, fmt.Errorf("%s is not downloaded", repoID)
 }
 
 // fakeProc is a Process backed by an in-process fake mlx server.
@@ -826,12 +829,11 @@ func TestHumanBytes(t *testing.T) {
 // Loading means exactly "the entry is in the pool, its readiness probe has not
 // answered yet".
 //
-// The read must not wait on that probe, and an implementation that did would
-// not merely be slow: Resident holds p.mu, and waitReady needs p.mu to close
-// the ready channel, so waiting inside the lock deadlocks the pool. This test
-// therefore hangs rather than fails on that bug, and the package timeout is
-// what reports it. A wall-clock threshold here would only catch a wait taken
-// outside the lock, at the price of failing spuriously on a loaded machine.
+// The read must not wait on that probe, and the loading assertion below is what
+// says so. It is an ordering claim, not a timing one: a read that waited on the
+// probe — inside the lock or outside it — could not return "loading" at all,
+// because by the time it returned the probe would have answered. That holds on
+// any machine at any speed.
 func TestResidentDistinguishesLoadingFromLoaded(t *testing.T) {
 	l := newFakeLauncher()
 	// Long enough that sampling the loading window is not a race with a
@@ -856,7 +858,7 @@ func TestResidentDistinguishesLoadingFromLoaded(t *testing.T) {
 	deadline := time.Now().Add(5 * time.Second)
 	var loading []Resident
 	for time.Now().Before(deadline) {
-		if loading = p.Resident(); len(loading) == 1 {
+		if loading = residentWithin(t, p); len(loading) == 1 {
 			break
 		}
 		select {
@@ -876,11 +878,91 @@ func TestResidentDistinguishesLoadingFromLoaded(t *testing.T) {
 		t.Fatalf("Acquire: %v", err)
 	}
 
-	loaded := p.Resident()
+	loaded := residentWithin(t, p)
 	if len(loaded) != 1 {
 		t.Fatalf("Resident() = %+v after the load, want one entry", loaded)
 	}
 	if loaded[0].State != ResidencyLoaded {
 		t.Errorf("State = %q once the probe answered, want %q", loaded[0].State, ResidencyLoaded)
+	}
+}
+
+// residentWithin calls Resident under a ceiling, so an unbounded wait inside it
+// is reported with the requirement's own words rather than hanging the test.
+//
+// It is the second line of defence, not the first — the ordering assertion on
+// the test above is that — and it has one blind spot worth naming: a read that
+// blocks while holding p.mu deadlocks the pool, so this ceiling fires but the
+// t.Cleanup that closes the pool then blocks on the same lock and the test's
+// buffered output is never flushed. Measured: that mutation still ends as a
+// package timeout. No in-test guard can rescue it; what this one catches is a
+// read that waits on something without holding the lock.
+//
+// The ceiling is not a performance assertion. Resident is a walk of a map
+// holding a handful of entries, so no loaded machine comes near 30 s.
+func residentWithin(t *testing.T, p *Pool) []Resident {
+	t.Helper()
+	const ceiling = 30 * time.Second
+	got := make(chan []Resident, 1)
+	go func() { got <- p.Resident() }()
+	select {
+	case res := <-got:
+		return res
+	case <-time.After(ceiling):
+		t.Fatalf("Resident() blocked for %s on a loading model: the read must not wait on the readiness probe", ceiling)
+		return nil
+	}
+}
+
+// The pool must hold one entry per model, not one per spelling of its id.
+//
+// The registry looks models up case-insensitively and reports a single
+// canonical spelling, but two callers reach the pool with an id that never
+// went through it: App.preload takes them from the hand-edited config, and the
+// load and unload endpoints pass the request body's raw value. Keying on the
+// exact string handed to Acquire therefore launched a second server for the
+// same weights, charged 1.2x against the same budget — the multi-minute swap
+// the residency work exists to avoid — and left the models list reporting a
+// warm model as not loaded, because the listing joins on the registry's
+// spelling.
+func TestAcquireHoldsOneEntryPerModelWhateverTheSpelling(t *testing.T) {
+	l := newFakeLauncher()
+	src := &fakeSource{models: map[string]int64{"org/m": 1 << 20}}
+	p := newTestPool(t, l, src, PoolOptions{MaxResidentBytes: 1 << 30})
+
+	for _, id := range []string{"org/m", "ORG/M"} {
+		_, release, err := p.Acquire(context.Background(), id)
+		if err != nil {
+			t.Fatalf("Acquire(%q): %v", id, err)
+		}
+		release()
+	}
+
+	if got := p.Resident(); len(got) != 1 {
+		t.Errorf("Resident() = %+v after acquiring two spellings of one model, want one entry", got)
+	}
+	if got := l.launchCount(); got != 1 {
+		t.Errorf("launched %d model servers for one model, want 1", got)
+	}
+}
+
+// Unload names a model the same way every other caller does, so it must find
+// the entry whatever spelling it is given.
+func TestUnloadFindsTheModelWhateverTheSpelling(t *testing.T) {
+	l := newFakeLauncher()
+	src := &fakeSource{models: map[string]int64{"org/m": 1 << 20}}
+	p := newTestPool(t, l, src, PoolOptions{MaxResidentBytes: 1 << 30})
+
+	_, release, err := p.Acquire(context.Background(), "org/m")
+	if err != nil {
+		t.Fatalf("Acquire: %v", err)
+	}
+	release()
+
+	if err := p.Unload("ORG/M"); err != nil {
+		t.Fatalf("Unload with a differently cased id: %v", err)
+	}
+	if got := p.Resident(); len(got) != 0 {
+		t.Errorf("Resident() = %+v after Unload, want none", got)
 	}
 }
