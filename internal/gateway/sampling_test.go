@@ -206,3 +206,72 @@ func TestSettingsResponseCarriesReloadModels(t *testing.T) {
 		t.Error("the settings response carries no reload_models list, so the panel cannot say which models are stale")
 	}
 }
+
+// Removing an override has to actually remove it. The handler decodes into a
+// copy of the live configuration so that a field the form does not own keeps
+// its value, but a map is a collection, not a field: encoding/json leaves
+// entries the posted object does not name, so a shallow "decode into the
+// current value" silently reinstates every override the user just deleted.
+func TestRemovingAPerModelOverrideRemovesIt(t *testing.T) {
+	srv, a := newTestControlApp(t, config.Default())
+
+	resp := postJSON(t, srv, "/api/settings", `{"host":"127.0.0.1","port":11535,"decode_concurrency":4,
+		"model_sampling":{"org/a":{"temperature":0.1},"org/b":{"temperature":0.2}}}`)
+	resp.Body.Close()
+	if n := len(a.Config().ModelSampling); n != 2 {
+		t.Fatalf("saved %d overrides, want 2", n)
+	}
+
+	resp = postJSON(t, srv, "/api/settings", `{"host":"127.0.0.1","port":11535,"decode_concurrency":4,
+		"model_sampling":{"org/a":{"temperature":0.1}}}`)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	got := a.Config().ModelSampling
+	if _, still := got["org/b"]; still {
+		t.Errorf("org/b survived its removal: %+v", got)
+	}
+	if _, ok := got["org/a"]; !ok {
+		t.Errorf("org/a was removed too: %+v", got)
+	}
+
+	resp2 := postJSON(t, srv, "/api/settings", `{"host":"127.0.0.1","port":11535,"decode_concurrency":4,
+		"model_sampling":{}}`)
+	defer resp2.Body.Close()
+	if n := len(a.Config().ModelSampling); n != 0 {
+		t.Errorf("%d overrides remain after removing every one", n)
+	}
+}
+
+// A field the body does not name still keeps its value — that is what lets the
+// form post only the fields it owns.
+func TestSettingsWithoutModelSamplingKeepsTheOverrides(t *testing.T) {
+	srv, a := newTestControlApp(t, config.Default())
+
+	resp := postJSON(t, srv, "/api/settings", `{"host":"127.0.0.1","port":11535,"decode_concurrency":4,
+		"model_sampling":{"org/a":{"temperature":0.1}}}`)
+	resp.Body.Close()
+
+	resp = postJSON(t, srv, "/api/settings", `{"host":"127.0.0.1","port":11535,"decode_concurrency":4}`)
+	defer resp.Body.Close()
+	if _, ok := a.Config().ModelSampling["org/a"]; !ok {
+		t.Error("an override was dropped by a save that never mentioned model_sampling")
+	}
+}
+
+// Two spellings of one repo id would make the effective sampling depend on map
+// iteration order, so a model could load at either temperature.
+func TestCaseVariantOverrideKeysAreRefused(t *testing.T) {
+	srv, a := newTestControlApp(t, config.Default())
+
+	resp := postJSON(t, srv, "/api/settings", `{"host":"127.0.0.1","port":11535,"decode_concurrency":4,
+		"model_sampling":{"org/Model":{"temperature":0.1},"ORG/model":{"temperature":0.9}}}`)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", resp.StatusCode)
+	}
+	if len(a.Config().ModelSampling) != 0 {
+		t.Error("the ambiguous pair was saved anyway")
+	}
+}

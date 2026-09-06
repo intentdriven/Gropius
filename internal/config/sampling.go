@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -261,13 +262,28 @@ func (c Config) EffectiveSampling(repoID string) Sampling {
 		return c.Sampling.Clone()
 	}
 	want := strings.ToLower(repoID)
-	for k, v := range c.ModelSampling {
+	// Sorted, not a map range: validateSampling and sanitiseSampling both
+	// guarantee at most one entry folds to any one id, and iterating in a
+	// fixed order means a map that somehow held two could still not make one
+	// model load at different temperatures on different starts.
+	for _, k := range sortedKeys(c.ModelSampling) {
 		if strings.ToLower(k) == want {
-			return c.Sampling.merge(v)
+			return c.Sampling.merge(c.ModelSampling[k])
 		}
 	}
 	return c.Sampling.Clone()
 }
+
+// MaxModelSampling caps how many per-model overrides may be held.
+//
+// Everything saved is written to config.json, which Load refuses above
+// MaxConfigBytes — and a config.json that cannot be read sends the next start
+// into its fail-closed loopback-only branch, taking the LAN endpoint with it.
+// A bounded number of overrides keeps this field from being the lever for
+// that, whether it is filled from the control plane or by another local
+// account editing the file in shared-cache mode. Nobody has hundreds of
+// models on one Mac.
+const MaxModelSampling = 256
 
 // validateSampling checks the machine-wide set and every override, naming the
 // model an offending override belongs to.
@@ -275,10 +291,24 @@ func (c Config) validateSampling() error {
 	if err := c.Sampling.Validate(); err != nil {
 		return err
 	}
+	if len(c.ModelSampling) > MaxModelSampling {
+		return fmt.Errorf("at most %d per-model sampling overrides are allowed, got %d",
+			MaxModelSampling, len(c.ModelSampling))
+	}
+	seen := map[string]string{}
 	for _, id := range sortedKeys(c.ModelSampling) {
 		if !ValidRepoID(id) {
 			return fmt.Errorf("sampling override %q is not a well-formed model id", id)
 		}
+		// Two spellings of one repo id are two entries in the map but one
+		// model, so the effective set would depend on which the lookup reached
+		// first. sanitiseSampling drops the duplicate on the file path; here,
+		// where a human is waiting for an answer, say so instead.
+		folded := strings.ToLower(id)
+		if first, ok := seen[folded]; ok {
+			return fmt.Errorf("sampling overrides %q and %q name the same model", first, id)
+		}
+		seen[folded] = id
 		if err := c.ModelSampling[id].Validate(); err != nil {
 			return fmt.Errorf("%s: %w", id, err)
 		}
@@ -318,6 +348,11 @@ func (c *Config) sanitiseSampling() []string {
 		folded := strings.ToLower(id)
 		if first, ok := seen[folded]; ok {
 			dropped = append(dropped, "model_sampling["+id+"] (duplicate of "+first+")")
+			continue
+		}
+		if len(kept) >= MaxModelSampling {
+			dropped = append(dropped, "model_sampling["+id+"] (beyond the "+
+				strconv.Itoa(MaxModelSampling)+"-override ceiling)")
 			continue
 		}
 		seen[folded] = id

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -452,6 +453,16 @@ func (c *Control) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 func (c *Control) handleSetSettings(w http.ResponseWriter, r *http.Request) {
 	current := c.App.Config()
 
+	// Everything saved here is written to config.json, which Load refuses to
+	// read above this size — so a larger body could only produce a file the
+	// next start cannot read, and a start that cannot read it locks the server
+	// down to loopback.
+	raw, err := io.ReadAll(http.MaxBytesReader(w, r.Body, config.MaxConfigBytes))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "settings body is too large")
+		return
+	}
+
 	// Decode INTO a copy of the current config, not a fresh zero value: the
 	// settings form posts only the fields it owns, so any field it omits — e.g.
 	// Preload, or Advertise (which has no UI control) — must keep its existing
@@ -463,7 +474,16 @@ func (c *Control) handleSetSettings(w http.ResponseWriter, r *http.Request) {
 	// sampling value would land in the live configuration before Validate could
 	// look at it — and stay there when Validate refused the save.
 	incoming := current.Clone()
-	if err := json.NewDecoder(r.Body).Decode(&incoming); err != nil {
+	// "Keep what you did not send" is a rule about fields, not about the
+	// members of a collection. encoding/json merges into an existing map, so
+	// decoding a posted model_sampling object into the current one reinstates
+	// every override the object leaves out — which is every override the user
+	// just deleted. Naming the field means "these are the overrides", so start
+	// from nothing; omitting it still keeps what is there.
+	if namesModelSampling(raw) {
+		incoming.ModelSampling = nil
+	}
+	if err := json.Unmarshal(raw, &incoming); err != nil {
 		writeError(w, http.StatusBadRequest, "settings body is not valid JSON")
 		return
 	}
@@ -492,6 +512,17 @@ func (c *Control) handleSetSettings(w http.ResponseWriter, r *http.Request) {
 		"restart":       restart,
 		"reload_models": samplingReloads(current, incoming, c.App.Pool.Resident()),
 	})
+}
+
+// namesModelSampling reports whether the posted body carries a model_sampling
+// field at all, however it is spelled — including as null.
+func namesModelSampling(body []byte) bool {
+	var named map[string]json.RawMessage
+	if err := json.Unmarshal(body, &named); err != nil {
+		return false
+	}
+	_, ok := named["model_sampling"]
+	return ok
 }
 
 // samplingReloads names the loaded models whose sampling defaults changed with

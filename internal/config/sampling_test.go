@@ -2,6 +2,7 @@ package config
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -243,5 +244,58 @@ func TestBlankSamplingFieldStaysUnsetThroughJSON(t *testing.T) {
 	}
 	if strings.Contains(string(b), "sampling") {
 		t.Errorf("an unset sampling block was written to config.json: %s", b)
+	}
+}
+
+// The override map is written from a file another local account can edit in
+// shared-cache mode, and everything saved lands in config.json — which Load
+// refuses above MaxConfigBytes, sending the next start into its fail-closed
+// loopback-only branch. The count is bounded so this field cannot be the
+// lever for that.
+func TestTooManyOverridesIsRefusedAndDroppedOnLoad(t *testing.T) {
+	cfg := Default()
+	cfg.ModelSampling = map[string]Sampling{}
+	for i := range MaxModelSampling + 5 {
+		cfg.ModelSampling[fmt.Sprintf("org/m%d", i)] = Sampling{Temperature: f64(0.5)}
+	}
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("Validate accepted more overrides than the ceiling allows")
+	}
+
+	// The same file must still start the server.
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	b, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	loaded, dropped, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() = %v, want nil — an oversized override map must not lock the server down", err)
+	}
+	if len(loaded.ModelSampling) != MaxModelSampling {
+		t.Errorf("kept %d overrides, want the ceiling of %d", len(loaded.ModelSampling), MaxModelSampling)
+	}
+	if len(dropped) != 5 {
+		t.Errorf("dropped %d, want the 5 beyond the ceiling named", len(dropped))
+	}
+}
+
+// EffectiveSampling must not depend on map iteration order even if a map with
+// two spellings of one id ever reached it.
+func TestEffectiveSamplingIsDeterministic(t *testing.T) {
+	cfg := Default()
+	cfg.ModelSampling = map[string]Sampling{
+		"org/Model": {Temperature: f64(0.1)},
+		"ORG/model": {Temperature: f64(0.9)},
+	}
+	first := cfg.EffectiveSampling("org/model")
+	for range 200 {
+		if !cfg.EffectiveSampling("org/model").Equal(first) {
+			t.Fatal("EffectiveSampling returned different values across calls")
+		}
 	}
 }
