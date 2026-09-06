@@ -27,6 +27,44 @@ type Spec struct {
 	// DecodeConcurrency maps to --decode-concurrency: how many requests are
 	// batched together during generation.
 	DecodeConcurrency int
+	// Sampling is the set of sampling defaults this server starts with. The
+	// server applies them to any request that omits the parameter, and a
+	// request's own value replaces them for that request alone — which is why
+	// they belong on the command line rather than in the relayed body.
+	Sampling config.Sampling
+}
+
+// samplingArgs renders the sampling defaults as command-line flags, in the
+// order SamplingBounds records them.
+//
+// Every value is re-rendered from a number by strconv, so nothing a client
+// sent and nothing a file contained reaches the argument vector as a string,
+// and each flag and its value are separate elements — there is no shell here
+// to split them. Out-of-range values are dropped rather than passed: the
+// settings endpoint already refuses them, but this is the last point at which
+// one could still do harm, and the harm is large. The model server validates
+// the effective value of every request against its start-up default, so a
+// value it will not accept answers 400 to every request that omits that
+// parameter, which is precisely the traffic these defaults exist to serve.
+func samplingArgs(s config.Sampling) []string {
+	sane, _ := s.Sanitised()
+	var args []string
+	if sane.Temperature != nil {
+		args = append(args, "--temp", strconv.FormatFloat(*sane.Temperature, 'f', -1, 64))
+	}
+	if sane.TopP != nil {
+		args = append(args, "--top-p", strconv.FormatFloat(*sane.TopP, 'f', -1, 64))
+	}
+	if sane.TopK != nil {
+		args = append(args, "--top-k", strconv.Itoa(*sane.TopK))
+	}
+	if sane.MinP != nil {
+		args = append(args, "--min-p", strconv.FormatFloat(*sane.MinP, 'f', -1, 64))
+	}
+	if sane.MaxTokens != nil {
+		args = append(args, "--max-tokens", strconv.Itoa(*sane.MaxTokens))
+	}
+	return args
 }
 
 // Process is a running model server.
@@ -125,6 +163,7 @@ func (l *ExecLauncher) Launch(ctx context.Context, spec Spec) (Process, error) {
 		"--port", strconv.Itoa(spec.Port),
 		"--log-level", "INFO",
 	}
+	args = append(args, samplingArgs(spec.Sampling)...)
 	if spec.DecodeConcurrency > 1 {
 		args = append(args, "--decode-concurrency", strconv.Itoa(spec.DecodeConcurrency))
 	}

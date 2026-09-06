@@ -10,6 +10,8 @@ import (
 	"sort"
 	"sync"
 	"time"
+
+	"github.com/intentdriven/Gropius/internal/config"
 )
 
 // ModelSource resolves a repo id to an on-disk model. The registry implements it.
@@ -52,6 +54,12 @@ type PoolOptions struct {
 	IdleTimeout time.Duration
 	// DecodeConcurrency is passed to each model server.
 	DecodeConcurrency int
+	// SamplingFor returns the sampling defaults a model's server should be
+	// launched with. It is called when a process is started, not when the pool
+	// is built, so a default saved in Settings reaches the next load of every
+	// model without the pool being rebuilt — which is also why a change only
+	// counts once the model has loaded again. Nil means no defaults.
+	SamplingFor func(repoID string) config.Sampling
 	// MaxQueueDepth bounds how many requests may wait for one model server
 	// beyond the batch it can actively run. Past this, Acquire fails fast rather
 	// than letting an unbounded backlog of queued requests pin the model (each
@@ -283,11 +291,16 @@ func (p *Pool) startLocked(repoID string) (*entry, error) {
 		sem: make(chan struct{}, 2*p.opts.DecodeConcurrency),
 	}
 
+	var sampling config.Sampling
+	if p.opts.SamplingFor != nil {
+		sampling = p.opts.SamplingFor(repoID)
+	}
 	proc, err := p.opts.Launcher.Launch(context.Background(), Spec{
 		RepoID:            repoID,
 		ModelPath:         path,
 		Port:              port,
 		DecodeConcurrency: p.opts.DecodeConcurrency,
+		Sampling:          sampling,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("start model server for %s: %w", repoID, &LaunchError{Err: err})

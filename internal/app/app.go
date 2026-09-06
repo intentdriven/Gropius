@@ -110,6 +110,11 @@ func New(opts Options) (*App, error) {
 		Models:            modelSource{reg},
 		IdleTimeout:       time.Duration(opts.Config.IdleTimeoutSec) * time.Second,
 		DecodeConcurrency: opts.Config.DecodeConcurrency,
+		// Read live, at the moment a model server starts, so a default saved in
+		// Settings applies the next time each model loads.
+		SamplingFor: func(repoID string) config.Sampling {
+			return a.Config().EffectiveSampling(repoID)
+		},
 	})
 
 	if len(opts.Config.Preload) > 0 {
