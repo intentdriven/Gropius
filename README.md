@@ -127,7 +127,9 @@ bound to loopback only and are never reachable from the LAN.
 
 Setting a key also turns on the models list's residency fields, which say which
 models are loaded and how busy they are. With no key set, the list still names
-every downloaded model but says nothing about what this Mac is doing with them.
+every downloaded model and says nothing about what this Mac is doing with them —
+though a client on an open server can still time a request to find out. Keeping
+activity private means setting the key, not leaving the fields off.
 
 The server's request log records the method, path, status and duration of a
 request, and never the client's network address.

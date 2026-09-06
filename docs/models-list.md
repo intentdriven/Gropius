@@ -97,12 +97,21 @@ warm one costs nothing.
 and the three fields are on every entry, for every client the key admits and
 for same-machine clients that need no key. Leave the key unset — the shipping
 default, where anyone on the network may use the server — and the listing is
-exactly the four OpenAI fields and the context figure: which models this Mac
-holds is still public, but what it is doing with them right now is not.
+exactly the four OpenAI fields and the context figure.
 
-The key is one key, shared by every client that has it. A client holding it
-sees the whole machine's activity — every model's in-flight count and last-used
-time, not only its own.
+What that withholds is the *listing*, and only the listing. On a server left
+open, a client that never presents a key can still work out which models are
+warm by timing a one-token completion — a loaded model answers in under a
+second, a cold one takes minutes — and that probe loads the model it asks
+about, which reading the field never does. A model already at its request
+ceiling, or one that does not fit in the memory budget, is refused with a
+message that names the in-flight limit or the budget figure. So an unkeyed
+server keeps activity off the listing; it does not keep it secret. The key is
+what protects the server.
+
+The key is also one key, shared by every client that has it. A client holding
+it sees the whole machine's activity — every model's in-flight count and
+last-used time, not only its own.
 
 `state` carries one of three values:
 
