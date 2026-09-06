@@ -27,6 +27,9 @@
     "# server (Apple Silicon)",
     "# native chat client (universal, runs on Intel too)"
   ],
+  "release_heading": "The current release",
+  "release_published": "published",
+  "checksums_label": "Checksums for this release",
   "assets_heading": "What a release contains",
   "assets": [
     {

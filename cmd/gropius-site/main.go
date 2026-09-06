@@ -37,12 +37,13 @@ func main() {
 	root := flag.String("root", ".", "repository root; every path in the manifest is resolved against it")
 	manifestPath := flag.String("manifest", "", "composition manifest (default <root>/.abcd/site.json)")
 	out := flag.String("out", "site", "directory to render into; nothing outside it is written")
+	release := flag.String("release", "", "release record to render the release facts from; without it the page carries none")
 	flag.Parse()
 
 	if *manifestPath == "" {
 		*manifestPath = filepath.Join(*root, ".abcd", "site.json")
 	}
-	if err := render(*root, *manifestPath, *out); err != nil {
+	if err := render(*root, *manifestPath, *out, *release); err != nil {
 		fmt.Fprintln(os.Stderr, "gropius-site:", err)
 		os.Exit(1)
 	}
@@ -106,6 +107,9 @@ type uiStrings struct {
 	FactStatus        string   `json:"fact_status"`
 	InstallHeading    string   `json:"install_heading"`
 	InstallComments   []string `json:"install_comments"`
+	ReleaseHeading    string   `json:"release_heading"`
+	ReleasePublished  string   `json:"release_published"`
+	ChecksumsLabel    string   `json:"checksums_label"`
 	AssetsHeading     string   `json:"assets_heading"`
 	Assets            []struct {
 		File string `json:"file"`
@@ -160,9 +164,14 @@ type pageData struct {
 	License    template.HTML
 	Status     template.HTML
 	FooterNote template.HTML
+	// Release is the release the forge flags as latest, or nil when the render
+	// was handed no record. Nil is not an error: the page is static files, and
+	// it must serve with its download button whether or not the forge could be
+	// read when it was produced.
+	Release *releaseView
 }
 
-func render(root, manifestPath, out string) error {
+func render(root, manifestPath, out, releasePath string) error {
 	var m manifest
 	if err := decodeStrict(manifestPath, &m); err != nil {
 		return err
@@ -197,6 +206,18 @@ func render(root, manifestPath, out string) error {
 	}
 
 	data := pageData{Identity: id, UI: ui, Links: forgeLinks(m)}
+
+	// The release facts, when the caller has a record to give. Reading it here
+	// rather than through the manifest is deliberate: the record is produced by
+	// the release run and is never committed, so it is an ARGUMENT to a render
+	// and not part of the composition.
+	if releasePath != "" {
+		release, err := loadRelease(releasePath)
+		if err != nil {
+			return err
+		}
+		data.Release = release
+	}
 
 	// The three pillars are the first bullets of the README's feature list, and
 	// the template draws one of the mark's three shapes beside each. A fourth
