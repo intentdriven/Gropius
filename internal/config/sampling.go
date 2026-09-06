@@ -117,6 +117,30 @@ func derefInt(p *int) (float64, bool) {
 	return float64(*p), true
 }
 
+// SamplingValue is one sampling parameter that is set, ready to be rendered.
+type SamplingValue struct {
+	Field   string
+	Number  float64
+	Integer bool
+}
+
+// Values returns the parameters that are set, in SamplingBounds order.
+//
+// The caller renders these; iterating the same table validation and
+// sanitising use means a parameter cannot be added to the type and quietly
+// left out of the command line.
+func (s Sampling) Values() []SamplingValue {
+	out := make([]SamplingValue, 0, len(samplingParams))
+	for _, p := range samplingParams {
+		v, ok := p.get(s)
+		if !ok {
+			continue
+		}
+		out = append(out, SamplingValue{Field: p.bound.Field, Number: v, Integer: p.bound.Integer})
+	}
+	return out
+}
+
 // SamplingBounds returns the accepted range of every sampling parameter, in
 // the order the launch flags are rendered.
 func SamplingBounds() []SamplingBound {

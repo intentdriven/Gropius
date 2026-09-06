@@ -34,37 +34,65 @@ type Spec struct {
 	Sampling config.Sampling
 }
 
-// samplingArgs renders the sampling defaults as command-line flags, in the
-// order SamplingBounds records them.
+// samplingFlagsVerifiedAgainst is the mlx-lm release whose source the flag
+// spellings below, and the ranges in internal/config, were read from. Nothing
+// else connects them to it: a renamed flag makes argparse exit on every model
+// launch, which no test with a stand-in interpreter can see. A version bump
+// therefore has to come past
+// TestSamplingFlagsWereVerifiedAgainstThePinnedServer.
+const samplingFlagsVerifiedAgainst = "0.31.3"
+
+// samplingFlags is the model server's own spelling of each sampling
+// parameter's launch flag, read from its argument parser (see
+// .abcd/development/research/notes/2026-09-06-mlx-lm-sampling-launch-flags.md).
+var samplingFlags = map[string]string{
+	"temperature": "--temp",
+	"top_p":       "--top-p",
+	"top_k":       "--top-k",
+	"min_p":       "--min-p",
+	"max_tokens":  "--max-tokens",
+}
+
+// samplingArgs renders the sampling defaults as command-line flags.
 //
-// Every value is re-rendered from a number by strconv, so nothing a client
-// sent and nothing a file contained reaches the argument vector as a string,
-// and each flag and its value are separate elements — there is no shell here
-// to split them. Out-of-range values are dropped rather than passed: the
-// settings endpoint already refuses them, but this is the last point at which
-// one could still do harm, and the harm is large. The model server validates
-// the effective value of every request against its start-up default, so a
-// value it will not accept answers 400 to every request that omits that
-// parameter, which is precisely the traffic these defaults exist to serve.
+// It walks the same table config validates against, so a parameter added
+// there without a flag here is caught by a test rather than accepted, stored
+// and never applied. Every value is re-rendered from a number, so nothing a
+// client sent and nothing a file contained reaches the argument vector as a
+// string, and each flag and its value are separate elements — there is no
+// shell here to split them.
+//
+// Out-of-range values are dropped rather than passed. The settings endpoint
+// already refuses them, but this is the last point at which one could still
+// do harm, and the harm is large: the model server takes the flag as its
+// default and checks the effective value of every request against it, so a
+// value it will not accept fails every request that omits that parameter —
+// precisely the traffic these defaults exist to serve.
 func samplingArgs(s config.Sampling) []string {
 	sane, _ := s.Sanitised()
 	var args []string
-	if sane.Temperature != nil {
-		args = append(args, "--temp", strconv.FormatFloat(*sane.Temperature, 'f', -1, 64))
-	}
-	if sane.TopP != nil {
-		args = append(args, "--top-p", strconv.FormatFloat(*sane.TopP, 'f', -1, 64))
-	}
-	if sane.TopK != nil {
-		args = append(args, "--top-k", strconv.Itoa(*sane.TopK))
-	}
-	if sane.MinP != nil {
-		args = append(args, "--min-p", strconv.FormatFloat(*sane.MinP, 'f', -1, 64))
-	}
-	if sane.MaxTokens != nil {
-		args = append(args, "--max-tokens", strconv.Itoa(*sane.MaxTokens))
+	for _, v := range sane.Values() {
+		flag, ok := samplingFlags[v.Field]
+		if !ok {
+			continue
+		}
+		args = append(args, flag, formatSamplingValue(v))
 	}
 	return args
+}
+
+// formatSamplingValue renders one value for the command line.
+//
+// Negative zero is the one number that passes a "must be at least zero" check
+// and still renders with a leading dash, which would read as another flag.
+func formatSamplingValue(v config.SamplingValue) string {
+	if v.Integer {
+		return strconv.FormatInt(int64(v.Number), 10)
+	}
+	if v.Number == 0 {
+		return "0"
+	}
+	return strconv.FormatFloat(v.Number, 'f', -1, 64)
 }
 
 // Process is a running model server.

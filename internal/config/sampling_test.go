@@ -299,3 +299,64 @@ func TestEffectiveSamplingIsDeterministic(t *testing.T) {
 		}
 	}
 }
+
+// TestCloneSharesNothingWithTheOriginal names the fields it knows about, so a
+// reference-typed field added to Config later would slip past it. This walks
+// the type instead: every pointer, slice and map reachable from a Config must
+// point somewhere else after Clone, and a field this test forgets to populate
+// is reported rather than skipped.
+func TestCloneCopiesEveryReferenceInTheType(t *testing.T) {
+	cfg := Default()
+	cfg.Preload = []string{"org/one"}
+	full := Sampling{
+		Temperature: f64(0.7), TopP: f64(0.9), TopK: intp(40),
+		MinP: f64(0.05), MaxTokens: intp(4096),
+	}
+	cfg.Sampling = full.Clone()
+	cfg.ModelSampling = map[string]Sampling{"org/one": full.Clone()}
+
+	before := map[string]uintptr{}
+	collectRefs(t, "Config", reflect.ValueOf(cfg), before)
+	after := map[string]uintptr{}
+	collectRefs(t, "Config", reflect.ValueOf(cfg.Clone()), after)
+
+	if len(before) == 0 {
+		t.Fatal("no reference-typed fields were found, so this test proves nothing")
+	}
+	for path, addr := range before {
+		other, ok := after[path]
+		if !ok {
+			t.Errorf("Clone dropped %s entirely", path)
+			continue
+		}
+		if addr == other {
+			t.Errorf("Clone shares %s with the original — a rejected settings post could write through it", path)
+		}
+	}
+}
+
+// collectRefs records the address every pointer, slice and map under v refers
+// to, keyed by its path within the type.
+func collectRefs(t *testing.T, path string, v reflect.Value, out map[string]uintptr) {
+	t.Helper()
+	switch v.Kind() {
+	case reflect.Pointer, reflect.Map, reflect.Slice:
+		if v.IsNil() {
+			t.Errorf("this test leaves %s nil, so aliasing there goes untested — populate it", path)
+			return
+		}
+		out[path] = v.Pointer()
+		switch v.Kind() {
+		case reflect.Pointer:
+			collectRefs(t, path+".*", v.Elem(), out)
+		case reflect.Map:
+			for _, k := range v.MapKeys() {
+				collectRefs(t, path+"["+k.String()+"]", v.MapIndex(k), out)
+			}
+		}
+	case reflect.Struct:
+		for i := range v.NumField() {
+			collectRefs(t, path+"."+v.Type().Field(i).Name, v.Field(i), out)
+		}
+	}
+}

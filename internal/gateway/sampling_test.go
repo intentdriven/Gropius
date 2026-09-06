@@ -148,9 +148,9 @@ func TestOutOfRangeSamplingIsRefusedAndChangesNothing(t *testing.T) {
 		t.Errorf("error = %q, want it to name the offending field", errBody.Error.Message)
 	}
 
-	if !reflect.DeepEqual(before, a.Config()) {
-		t.Errorf("the running configuration changed on a refused save:\nbefore %+v\nafter  %+v",
-			*before.Sampling.Temperature, *a.Config().Sampling.Temperature)
+	if after := a.Config(); !reflect.DeepEqual(before, after) {
+		t.Errorf("the running configuration changed on a refused save:\nbefore %+v\nafter  %+v\n(sampling: %+v -> %+v)",
+			before, after, before.Sampling, after.Sampling)
 	}
 	fileAfter, err := os.ReadFile(a.Paths.Config)
 	if err != nil {

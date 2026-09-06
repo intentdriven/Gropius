@@ -296,10 +296,10 @@ type Config struct {
 //
 // The settings endpoint decodes a posted body into a copy of the live config
 // so that fields the form does not own keep their values. A shallow copy is
-// not enough for that: encoding/json decodes straight into an existing
-// non-nil pointer's target and appends into an existing slice's array, so a
-// posted value would reach the running configuration before Validate had a
-// chance to refuse it — and would stay there once it had.
+// not enough for that: encoding/json writes through an existing non-nil
+// pointer into its target, and reuses an existing slice's and map's storage,
+// so a posted value would reach the running configuration before Validate had
+// a chance to refuse it — and would stay there once it had.
 func (c Config) Clone() Config {
 	out := c
 	if c.Preload != nil {
@@ -365,12 +365,19 @@ func (c Config) ExposedToLAN() bool {
 // an older build still loads.
 //
 // The second return value names the sampling preferences that were dropped
-// because the model server would not accept them; the caller logs them. They
-// are dropped rather than refused because a sampling value is a preference,
-// not a serving invariant: refusing the file sends main into its fail-closed
-// loopback-only mode, which is a machine-wide outage to pay for one number
-// that could simply be ignored. Everything that decides how the server is
-// reachable is still validated, and still an error.
+// because the model server would not accept them, or because they name no
+// addressable model; the caller logs them. They are dropped rather than
+// refused because a sampling value is a preference, not a serving invariant:
+// refusing the file sends main into its fail-closed loopback-only mode, which
+// is a machine-wide outage to pay for one number that could simply be
+// ignored. Everything that decides how the server is reachable is still
+// validated, and still an error.
+//
+// This covers a value out of range, not a value of the wrong shape. A
+// sampling field holding a string, or a number too large for a float64, fails
+// in the unmarshal above and is an error like any other malformed config.json
+// — sampling is not special enough to warrant a second decoding path through
+// json.RawMessage in a file another local account can write.
 //
 // The read is hardened (see OpenRegular): Load runs before the port is
 // claimed, so a FIFO planted under this name in a shared root would otherwise

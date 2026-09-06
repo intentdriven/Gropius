@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -142,20 +143,71 @@ func TestLaunchDropsAnOutOfRangeSamplingValue(t *testing.T) {
 	}
 }
 
-// Every accepted value is at least zero, so no rendered value can open with a
-// dash and be read as another flag.
+// Every accepted value is at least zero, so no rendered value may open with a
+// dash and be read as another flag. Negative zero is the awkward case: it
+// passes a "must be at least zero" check and strconv renders it "-0".
 func TestNoRenderedSamplingValueLooksLikeAFlag(t *testing.T) {
-	args := samplingArgs(config.Sampling{
-		Temperature: fptr(0), TopP: fptr(1), TopK: iptr(0),
-		MinP: fptr(0), MaxTokens: iptr(0),
-	})
-	if len(args) != 10 {
-		t.Fatalf("samplingArgs = %v, want five flags and five values", args)
-	}
-	for i := 1; i < len(args); i += 2 {
-		if strings.HasPrefix(args[i], "-") {
-			t.Errorf("value %q for %s would be read as a flag", args[i], args[i-1])
+	negZero := math.Copysign(0, -1)
+	for _, s := range []config.Sampling{
+		{Temperature: fptr(0), TopP: fptr(1), TopK: iptr(0), MinP: fptr(0), MaxTokens: iptr(0)},
+		{Temperature: fptr(negZero), TopP: fptr(negZero), MinP: fptr(negZero)},
+	} {
+		args := samplingArgs(s)
+		if len(args) == 0 {
+			t.Fatalf("samplingArgs(%+v) rendered nothing", s)
 		}
+		for i := 1; i < len(args); i += 2 {
+			if strings.HasPrefix(args[i], "-") {
+				t.Errorf("value %q for %s would be read as a flag", args[i], args[i-1])
+			}
+		}
+	}
+	if args := samplingArgs(config.Sampling{
+		Temperature: fptr(0), TopP: fptr(1), TopK: iptr(0), MinP: fptr(0), MaxTokens: iptr(0),
+	}); len(args) != 10 {
+		t.Errorf("samplingArgs = %v, want five flags and five values", args)
+	}
+}
+
+// Every sampling parameter the configuration holds must have a launch flag, or
+// it is a default the panel accepts, stores and never applies — silently.
+func TestEverySamplingParameterHasALaunchFlag(t *testing.T) {
+	for _, b := range config.SamplingBounds() {
+		if _, ok := samplingFlags[b.Field]; !ok {
+			t.Errorf("the configuration holds a %q default with no launch flag, so saving it does nothing", b.Field)
+		}
+	}
+	for field := range samplingFlags {
+		found := false
+		for _, b := range config.SamplingBounds() {
+			if b.Field == field {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("a launch flag is rendered for %q, which is not a sampling default", field)
+		}
+	}
+}
+
+// The flag spellings and the accepted ranges were read off one version of the
+// model server's source. Nothing else ties them to it, and a wrong flag name
+// makes argparse exit on every model launch while the suite stays green — so
+// a version bump has to come past this test.
+func TestSamplingFlagsWereVerifiedAgainstThePinnedServer(t *testing.T) {
+	if mlxLMVersion != samplingFlagsVerifiedAgainst {
+		t.Fatalf("mlx-lm is pinned at %s but the sampling launch flags and ranges were read from %s — "+
+			"re-read that release's mlx_lm/server.py argument parser and mlx_lm/sample_utils.py, update "+
+			".abcd/development/research/notes/2026-09-06-mlx-lm-sampling-launch-flags.md, then move this constant",
+			mlxLMVersion, samplingFlagsVerifiedAgainst)
+	}
+	req, err := os.ReadFile("mlx-requirements.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(req), "mlx-lm=="+samplingFlagsVerifiedAgainst+" ") {
+		t.Errorf("mlx-requirements.txt does not pin mlx-lm==%s, which is the version the sampling flags were read from",
+			samplingFlagsVerifiedAgainst)
 	}
 }
 
