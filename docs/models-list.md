@@ -97,8 +97,12 @@ warm one costs nothing.
 and the three fields are on every entry, for every client the key admits and
 for same-machine clients that need no key. Leave the key unset — the shipping
 default, where anyone on the network may use the server — and the listing is
-exactly the four OpenAI fields and the context figure, so nobody learns from it
-what this Mac is running.
+exactly the four OpenAI fields and the context figure: which models this Mac
+holds is still public, but what it is doing with them right now is not.
+
+The key is one key, shared by every client that has it. A client holding it
+sees the whole machine's activity — every model's in-flight count and last-used
+time, not only its own.
 
 `state` carries one of three values:
 
@@ -134,10 +138,11 @@ request has reached since the server started. Read an absent value as
 
 **A snapshot, not a reservation.** The values describe the moment the list is
 built. Reading `loaded` holds nothing warm on your behalf: another client's
-request, the idle timeout, or an eviction can unload that model before your own
-request arrives. A client that lists before each request, or on a short
-schedule, keeps a picture worth acting on; one that lists once at start-up does
-not.
+request, the idle timeout, an eviction, or the model server crashing can take
+that model away before your own request arrives. Treat the values as a hint
+worth acting on, never as a promise: a request is still the thing that decides.
+A client that lists before each request, or on a short schedule, keeps a
+picture worth acting on; one that lists once at start-up does not.
 
 ## The memory budget and eviction
 

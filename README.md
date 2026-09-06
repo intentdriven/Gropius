@@ -126,8 +126,8 @@ user accounts) never need a key. The control panel and its `/api/*` endpoints ar
 bound to loopback only and are never reachable from the LAN.
 
 Setting a key also turns on the models list's residency fields, which say which
-models are loaded and how busy they are. With no key set, the list carries
-nothing about what this Mac is running.
+models are loaded and how busy they are. With no key set, the list still names
+every downloaded model but says nothing about what this Mac is doing with them.
 
 The server's request log records the method, path, status and duration of a
 request, and never the client's network address.
