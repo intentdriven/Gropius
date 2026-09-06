@@ -51,9 +51,15 @@ die() {
 # unsupported Mac is turned away rather than half-installed. The major lives in
 # this one variable; build/Info.plist is the value it must match.
 MIN_MACOS_MAJOR=26
-macos_major="$(sw_vers -productVersion 2>/dev/null | cut -d. -f1)"
+# `|| macos_version=""` is load-bearing: under `set -e` a bare assignment takes
+# the command substitution's status, so a missing sw_vers would abort the script
+# with no message at all instead of reaching the refusal below. An unreadable or
+# non-numeric version leaves the major empty or unusable, and `[` refuses then
+# too.
+macos_version="$(sw_vers -productVersion 2>/dev/null)" || macos_version=""
+macos_major="${macos_version%%.*}"
 [ "${macos_major:-0}" -ge "$MIN_MACOS_MAJOR" ] ||
-	die "Gropius requires macOS $MIN_MACOS_MAJOR (this Mac runs $(sw_vers -productVersion 2>/dev/null || echo "an older system"))."
+	die "$APP requires macOS $MIN_MACOS_MAJOR (this Mac runs ${macos_version:-an unreadable version})."
 
 # The server needs Apple Silicon (MLX runs on Metal). The client is universal.
 # `uname -m` reports x86_64 in a Rosetta-translated shell (common with x86_64
