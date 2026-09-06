@@ -413,6 +413,60 @@ function renderSettings() {
   writeSampling('input', c.sampling);
   overrides = { ...(c.model_sampling || {}) };
   renderOverrides();
+  renderMergeSwitches();
+}
+
+// renderMergeSwitches draws one box per downloaded model. Merging is per model
+// because it is a fact about that model's chat template, and because it is the
+// one setting that has Gropius read a request's instructions at all.
+function renderMergeSwitches() {
+  const box = $('mergeList');
+  const models = state.models || [];
+  const per = state.config.per_model || {};
+  box.innerHTML = '';
+  if (!models.length) {
+    box.innerHTML = '<p class="hint">Download a model and it appears here.</p>';
+    return;
+  }
+  models.forEach((m) => {
+    const row = document.createElement('label');
+    row.className = 'switch';
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.dataset.model = m.repo_id;
+    cb.checked = !!(per[m.repo_id] && per[m.repo_id].merge_system_messages);
+    cb.addEventListener('change', () => { settingsTouched = true; });
+    const name = document.createElement('span');
+    name.textContent = m.repo_id;
+    row.appendChild(cb);
+    row.appendChild(name);
+    box.appendChild(row);
+  });
+}
+
+// checkedMergeModels lists the models whose box is ticked.
+function checkedMergeModels() {
+  return Array.from(document.querySelectorAll('#mergeList input[type=checkbox]'))
+    .filter((cb) => cb.checked)
+    .map((cb) => cb.dataset.model);
+}
+
+// perModelSettings returns the whole per-model map a save posts. The server
+// replaces what it holds with this, so a model whose box is clear is simply
+// left out and its merging goes off — a map cannot be switched off by omission
+// any other way. Settings this form does not own are carried through untouched,
+// so ticking a box never wipes a model's other settings.
+function perModelSettings(current, checked) {
+  const out = {};
+  Object.keys(current || {}).forEach((id) => {
+    const rest = Object.assign({}, current[id]);
+    delete rest.merge_system_messages;
+    if (Object.keys(rest).length) out[id] = rest;
+  });
+  (checked || []).forEach((id) => {
+    out[id] = Object.assign({}, out[id] || {}, { merge_system_messages: true });
+  });
+  return out;
 }
 
 function renderOverrides() {
@@ -526,6 +580,7 @@ $('settingsForm').addEventListener('submit', async (e) => {
     // handed a flag only for a parameter that has a value.
     sampling:           readSampling('input'),
     model_sampling:     overrides,
+    per_model:         perModelSettings(state.config.per_model, checkedMergeModels()),
   };
   try {
     const res = await api('/api/settings', {
