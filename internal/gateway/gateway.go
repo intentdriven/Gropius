@@ -310,6 +310,27 @@ func (g *Gateway) handleCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	payload["model"] = rewritten
+
+	// The only rewrite of prompt content Gropius performs, and only for a model
+	// the operator switched it on for: fold the request's system messages into
+	// one leading message, which is the shape a chat template that refuses a
+	// system message anywhere but the front will accept
+	// (adr-2609061610102325). It happens here, on the body already in hand, so
+	// a streamed request takes exactly this path too and the body limit above
+	// is the only one there is. Nothing read is logged, kept or counted.
+	if r.URL.Path == chatCompletionsPath && g.cfg().PerModel[model].MergeSystemMessages {
+		if mergeSystemMessagesInto(payload) == mergeRefused {
+			// The operator switched merging on for this model and is not
+			// getting it, which is worth saying once, here, rather than
+			// leaving them to guess from a template error. Only a refusal is
+			// logged: a conversation that was already in order is the ordinary
+			// case and needs no line at all. The line names the model and
+			// nothing else — the request's content is not the log's business
+			// here or anywhere.
+			g.log.Debug("relayed a request unmerged: its messages carry something merging cannot rebuild faithfully", "model", model)
+		}
+	}
+
 	body, err := json.Marshal(payload)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "could not re-encode the request")

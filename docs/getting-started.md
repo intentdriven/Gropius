@@ -103,6 +103,16 @@ key, as long as they are addressed to `localhost` or `127.0.0.1`. A local proxy
 or tunnel that forwards another host name must send the key like any other
 client.
 
+### What Gropius reads of a request
+
+Gropius passes a request on to the model without reading what is in it. There
+is one exception, it is per model, and it is off until you switch it on:
+**Settings → Merge system messages**, for a model whose template refuses a
+conversation whose instructions are not all at the top. For a model you switch
+it on for, Gropius reads that request's instruction messages and nothing else,
+gathers them into the first one, and keeps none of what it reads. See
+[Merge system messages for a template-strict model](system-message-merging.md).
+
 ## 7. Choose what an omitted parameter means (optional)
 
 Clients that never send a `temperature` are served with the model server's
@@ -151,6 +161,11 @@ and each account falls back to its own data directory.
   connections". Only the Gropius app needs this; its Python helper only ever
   listens on loopback.
 
+- **A model answers the first message, then fails with a template error once the
+  assistant repeats its instructions.** That model's chat template refuses a
+  system message that is not the first one. Switch on **Merge system messages**
+  for that model — see
+  [Merge system messages for a template-strict model](system-message-merging.md).
 - **The menu-bar icon never appears.** Run it in the foreground to see errors:
   `./dist/Gropius.app/Contents/MacOS/gropius`.
 - **A model stays "downloading" forever / fails.** Check the panel for the error.

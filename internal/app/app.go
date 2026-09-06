@@ -8,6 +8,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -129,6 +131,12 @@ func New(opts Options) (*App, error) {
 		},
 	})
 
+	// Settings read from disk have not been through SetConfig's checks: the
+	// file can be hand-edited, restored from a backup, or written by another
+	// build. Fold them onto the registry's spellings here, where the log
+	// exists to say what was dropped.
+	a.cfg.PerModel = a.adoptPerModel(a.cfg.PerModel)
+
 	if len(opts.Config.Preload) > 0 {
 		go a.preload(opts.Config.Preload)
 	}
@@ -178,6 +186,11 @@ func (a *App) SetConfig(c config.Config) error {
 	if err := c.Validate(); err != nil {
 		return err
 	}
+	perModel, err := a.canonicalPerModel(c.PerModel)
+	if err != nil {
+		return err
+	}
+	c.PerModel = perModel
 	if err := config.Save(a.Paths.Config, c); err != nil {
 		return err
 	}
@@ -187,6 +200,89 @@ func (a *App) SetConfig(c config.Config) error {
 
 	a.Hub.Token = c.HFToken
 	return nil
+}
+
+// canonicalPerModel checks the keys of a per-model settings map submitted
+// through Settings and rewrites each to the registry's spelling of the model
+// it names.
+//
+// The registry matches an id case-insensitively but answers under one
+// spelling, and that spelling is what a request resolves to. A key stored in
+// another case would therefore name a model the operator can see and still
+// match no request, so the case is folded once here — on the way in, where the
+// operator is present to be told about a key that names nothing — rather than
+// on every request. A key for a model this machine does not have is kept as it
+// was typed, and folded onto the registry's spelling at the next startup after
+// the model arrives (see adoptPerModel), so setting a model up before
+// downloading it works whatever case it is typed in.
+func (a *App) canonicalPerModel(in map[string]config.ModelSettings) (map[string]config.ModelSettings, error) {
+	if len(in) == 0 {
+		return nil, nil
+	}
+	if err := config.ValidatePerModelKeys(in); err != nil {
+		return nil, err
+	}
+	out := make(map[string]config.ModelSettings, len(in))
+	for _, id := range perModelKeys(in) {
+		canonical := a.canonicalPerModelKey(id)
+		if _, dup := out[canonical]; dup {
+			return nil, fmt.Errorf("per-model settings name %s more than once", canonical)
+		}
+		out[canonical] = in[id]
+	}
+	return out, nil
+}
+
+// adoptPerModel is canonicalPerModel for settings read from disk rather than
+// submitted through Settings: a key it cannot use is dropped and named in the
+// log, the way an unusable preload entry is, rather than refused.
+//
+// Refusing at startup would be worse than useless. The panel serves the stored
+// settings into its form and the form posts them back, so one unusable key
+// would return on the next save and be refused — wedging every settings change
+// there is, the API key included, until someone edited the file by hand.
+func (a *App) adoptPerModel(in map[string]config.ModelSettings) map[string]config.ModelSettings {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]config.ModelSettings, len(in))
+	var dropped []string
+	for _, id := range perModelKeys(in) {
+		canonical := a.canonicalPerModelKey(id)
+		if !config.ValidRepoID(id) {
+			dropped = append(dropped, id)
+			continue
+		}
+		if _, dup := out[canonical]; dup {
+			dropped = append(dropped, id)
+			continue
+		}
+		out[canonical] = in[id]
+	}
+	if len(dropped) > 0 {
+		a.Log.Warn("dropped per-model settings whose key names no model, or names one another key already names",
+			"keys", dropped)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// canonicalPerModelKey is the registry's spelling of a model id, or the id as
+// it was given when this machine does not have that model.
+func (a *App) canonicalPerModelKey(id string) string {
+	if m, err := a.Registry.Get(id); err == nil {
+		return m.RepoID
+	}
+	return id
+}
+
+// perModelKeys returns a per-model map's keys in a stable order, so that a map
+// with more than one problem in it reports the same one every time rather than
+// whichever the map iteration reached first.
+func perModelKeys(in map[string]config.ModelSettings) []string {
+	return slices.Sorted(maps.Keys(in))
 }
 
 // modelSource adapts the registry to runtime.ModelSource.
@@ -263,7 +359,7 @@ func (a *App) Download(repoID string) error {
 		State:   registry.StateDownloading,
 		AddedAt: addedAt,
 	}); err != nil {
-		a.finishDownload(repoID)
+		a.finishDownload(dl, nil)
 		return err
 	}
 
@@ -271,7 +367,11 @@ func (a *App) Download(repoID string) error {
 	go func() {
 		defer a.dlWG.Done()
 		defer close(dl.done)
-		defer a.finishDownload(repoID)
+		// A safety net, not the normal path: every branch below deregisters
+		// itself as it publishes its final state. Deregistering twice is
+		// harmless, and leaving a download registered forever would refuse
+		// every later attempt at that model.
+		defer a.finishDownload(dl, nil)
 
 		err := a.Hub.Download(ctx, hub.DownloadRequest{
 			RepoID:      repoID,
@@ -299,22 +399,29 @@ func (a *App) Download(repoID string) error {
 			}
 		}
 
+		// Each branch publishes its final state and deregisters the download
+		// in one step (see finishDownload). Logging stays outside it: the log
+		// is not what another goroutine is waiting to see.
 		switch {
 		case err == nil:
-			// Re-derive the size from disk rather than trusting the manifest.
-			if perr := a.Registry.Put(registry.Model{
-				RepoID: repoID,
-				Path:   dest,
-				Bytes:  dirSize(dest),
-				// Read through the registry's own primitive, so the download
-				// path and the rescan apply one key rule; a model carries its
-				// context length from the moment it is ready, not only after
-				// the next startup rescan.
-				ContextLength: registry.ReadContextLength(dest),
-				State:         registry.StateReady,
-				Progress:      100,
-				AddedAt:       addedAt,
-			}); perr != nil {
+			var perr error
+			a.finishDownload(dl, func() {
+				// Re-derive the size from disk rather than trusting the manifest.
+				perr = a.Registry.Put(registry.Model{
+					RepoID: repoID,
+					Path:   dest,
+					Bytes:  dirSize(dest),
+					// Read through the registry's own primitive, so the download
+					// path and the rescan apply one key rule; a model carries its
+					// context length from the moment it is ready, not only after
+					// the next startup rescan.
+					ContextLength: registry.ReadContextLength(dest),
+					State:         registry.StateReady,
+					Progress:      100,
+					AddedAt:       addedAt,
+				})
+			})
+			if perr != nil {
 				// The files are on disk; only the index write failed. Surface it —
 				// a silently unrecorded model would look missing until a rescan.
 				a.Log.Error("model downloaded but could not be recorded", "model", repoID, "err", perr)
@@ -325,18 +432,30 @@ func (a *App) Download(repoID string) error {
 		case errors.Is(err, context.Canceled):
 			// A cancelled download leaves .part files behind on purpose: they let
 			// the next attempt resume instead of starting over.
-			if a.restoreReady(repoID, dest, wasReady, prior) {
+			var restored bool
+			a.finishDownload(dl, func() {
+				restored = a.restoreReady(repoID, dest, wasReady, prior)
+				if !restored {
+					a.Registry.SetState(repoID, registry.StateFailed, 0, "cancelled")
+				}
+			})
+			if restored {
 				a.Log.Info("download cancelled; the ready model is untouched", "model", repoID)
 			} else {
-				a.Registry.SetState(repoID, registry.StateFailed, 0, "cancelled")
 				a.Log.Info("download cancelled", "model", repoID)
 			}
 
 		default:
-			if a.restoreReady(repoID, dest, wasReady, prior) {
+			var restored bool
+			a.finishDownload(dl, func() {
+				restored = a.restoreReady(repoID, dest, wasReady, prior)
+				if !restored {
+					a.Registry.SetState(repoID, registry.StateFailed, 0, err.Error())
+				}
+			})
+			if restored {
 				a.Log.Warn("download failed; the ready model is untouched", "model", repoID, "err", err)
 			} else {
-				a.Registry.SetState(repoID, registry.StateFailed, 0, err.Error())
 				a.Log.Error("download failed", "model", repoID, "err", err)
 			}
 		}
@@ -375,10 +494,31 @@ func (a *App) restoreReady(repoID, dest string, wasReady bool, prior registry.Mo
 	return true
 }
 
-func (a *App) finishDownload(repoID string) {
+// finishDownload publishes a download's final state and deregisters it as one
+// step, then reports whether this call was the one that deregistered it.
+//
+// One step is the whole point. The registry is what everything else watches —
+// the control panel renders every change the event stream pushes, and the
+// tests wait on it — so publishing "ready" before releasing the model left a
+// window in which a caller could see the model finished and still be refused
+// its next Download with ErrAlreadyDownloading. A caller cannot observe that
+// window now: reaching the in-flight map means taking this lock, and the state
+// that says the download ended is written inside it.
+//
+// publish may be nil, for a caller that has nothing to publish.
+//
+// The identity check matters for the deferred safety-net call: by the time it
+// runs, the branch above has already deregistered this download and the id may
+// belong to a newer attempt, which must not be cancelled out from under itself.
+func (a *App) finishDownload(dl *download, publish func()) {
 	a.dlMu.Lock()
-	delete(a.downloads, dlKey(repoID))
-	a.dlMu.Unlock()
+	defer a.dlMu.Unlock()
+	if publish != nil {
+		publish()
+	}
+	if cur, ok := a.downloads[dlKey(dl.repoID)]; ok && cur == dl {
+		delete(a.downloads, dlKey(dl.repoID))
+	}
 }
 
 // dlKey is the in-flight downloads map key: case-folded like the registry's,

@@ -76,3 +76,7 @@ decision that supersedes this record.
   nothing read is kept.
 - The no-public-telemetry ADR is unaffected: nothing here leaves the machine
   or is written anywhere.
+- The merged message is the conversation's own first system message with its
+  content replaced, not a message written from `role` and `content`; that rule
+  and the shapes merging refuses rather than rewrite lossily are recorded in
+  `.abcd/work/DECISIONS.md`, 2026-09-06.

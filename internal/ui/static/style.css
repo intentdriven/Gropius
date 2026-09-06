@@ -163,6 +163,10 @@ form fieldset.group legend {
 }
 .override .name { font-weight: 600; }
 .override .values { color: var(--muted); font-size: 13px; }
+/* One row per model: the box beside the model's name rather than above it,
+   so a list of models reads as a list. */
+form label.switch { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; font-weight: 600; }
+form label.switch input { width: auto; flex: none; }
 
 .msg { font-weight: 600; color: var(--ok); }
 .msg.err { color: var(--red); }
