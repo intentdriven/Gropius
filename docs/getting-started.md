@@ -110,7 +110,8 @@ own default, which is 0 — greedy decoding. **Settings → Sampling defaults**
 sets that for the whole machine, and **Per-model sampling** gives one model
 its own figures. A request that sets its own value always wins, and a change
 reaches a model the next time it loads. See
-[Set default sampling parameters](sampling-defaults.md).
+[Set default sampling parameters](sampling-defaults.md), with the parameters
+themselves in [Reference: sampling parameters](sampling-reference.md).
 
 ## 8. Sharing across user accounts (optional)
 

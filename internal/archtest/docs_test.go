@@ -12,16 +12,21 @@ import (
 	"github.com/intentdriven/Gropius/internal/config"
 )
 
-// The sampling how-to promises a reader four things, and each of them is a
-// thing the code decides. A page that drifts from any of them is worse than
-// no page: it is a documented default that does not exist, or a precedence
-// rule the server does not follow.
-func TestSamplingHowToMatchesTheCode(t *testing.T) {
-	page := readDoc(t, "sampling-defaults.md")
+// The sampling pages promise a reader four things between them, and each of
+// the four is something the code decides. A page that drifts from any of them
+// is worse than no page: a documented default that does not exist, or a
+// precedence rule the server does not follow.
+//
+// The four live on the page that owns them, since docs/ carries one Diataxis
+// type per page: the parameter inventory and precedence are reference, the
+// mechanism is explanation.
+func TestSamplingDocsMatchTheCode(t *testing.T) {
+	reference := readDoc(t, "sampling-reference.md")
+	explanation := readDoc(t, "sampling-explained.md")
 
 	// 1. Which parameters can be defaulted — the table names every field the
 	//    configuration holds, and no field it does not.
-	table := parameterTable(t, page)
+	table := parameterTable(t, reference)
 	want := samplingFieldNames()
 	documented := map[string]bool{}
 	for _, row := range table {
@@ -48,34 +53,34 @@ func TestSamplingHowToMatchesTheCode(t *testing.T) {
 	}
 
 	// 2. A request's own value wins.
-	if !containsAll(page, "own value always wins") {
-		t.Error("the page does not state that a request's own value wins over the default")
+	if !containsAll(reference, "carries its own value", "the request's value") {
+		t.Error("the reference does not state that a request's own value wins over the default")
 	}
 
 	// 2a. And what "omitted" has to mean. An explicit null is a present key to
 	// the model server: the type check fails, the connection closes with no
-	// response, and the client sees a 502. A page that says null and omitted
-	// are the same thing sends the reader's clients straight into that.
-	if !containsAll(page, "An explicit `null` is not the same thing") {
-		t.Error("the page does not warn that an explicit null is not the same as omitting the parameter")
+	// response, and the client sees a 502. Documentation that says null and
+	// omitted are the same thing sends the reader's clients straight into that.
+	if !containsAll(explanation, "An explicit `null` is not the same thing") {
+		t.Error("the explanation does not warn that an explicit null is not the same as omitting the parameter")
 	}
 
 	// 3. What a blank field means.
-	if !containsAll(page, "Blank means") {
-		t.Error("the page does not say what a blank field means")
+	if !containsAll(reference, "Blank means") {
+		t.Error("the reference does not say what a blank field means")
 	}
 
 	// 4. Reproducibility comes from a fixed temperature, because the model
 	//    server ignores a seed.
-	if !containsAll(page, "seed", "ignores", "fixed temperature") {
-		t.Error("the page does not state that the model server ignores a seed and that reproducibility comes from a fixed temperature")
+	if !containsAll(explanation, "seed", "ignores", "temperature 0") {
+		t.Error("the explanation does not state that the model server ignores a seed and that reproducibility comes from a fixed temperature")
 	}
 }
 
-// The panel refuses a value outside these ranges, and the page tells the
+// The panel refuses a value outside these ranges, and the reference tells the
 // reader what they are — so the two must agree.
-func TestSamplingHowToStatesTheRealRanges(t *testing.T) {
-	page := readDoc(t, "sampling-defaults.md")
+func TestSamplingReferenceStatesTheRealRanges(t *testing.T) {
+	page := readDoc(t, "sampling-reference.md")
 	for _, b := range config.SamplingBounds() {
 		if b.Min != 0 {
 			t.Fatalf("%s has a lower bound of %v the page does not describe", b.Field, b.Min)
@@ -91,15 +96,37 @@ func TestSamplingHowToStatesTheRealRanges(t *testing.T) {
 		// here, or the page and the code drift apart while this test is green.
 		want := fmt.Sprintf("%d", int(b.Max))
 		if !containsAll(page, want) {
-			t.Errorf("the page does not give %s's ceiling of %s", b.Field, want)
+			t.Errorf("the reference does not give %s's ceiling of %s", b.Field, want)
 		}
 	}
-	if !containsAll(page, "temperature\nis at least 0", "between 0 and 1") {
-		t.Error("the page does not state the ranges the panel enforces")
+	if !containsAll(page, "temperature is at least 0", "between 0 and 1") {
+		t.Error("the reference does not state the ranges the panel enforces")
 	}
 	// And why the ceilings Gropius sets are not the model server's.
 	if !containsAll(page, "Top-k has an upper limit of") {
-		t.Error("the page gives top_k's ceiling without saying it is Gropius' own")
+		t.Error("the reference gives top_k's ceiling without saying it is Gropius' own")
+	}
+}
+
+// docs/ carries one Diataxis type per page. The three sampling pages are a
+// how-to, a reference and an explanation, and each must stay what it is: a
+// reference table inside the how-to is how a page becomes the catch-all the
+// convention exists to prevent.
+func TestSamplingPagesKeepTheirDiataxisType(t *testing.T) {
+	howTo := readDoc(t, "sampling-defaults.md")
+	if !strings.Contains(howTo, "\n1. ") {
+		t.Error("the how-to has no numbered procedure")
+	}
+	if strings.Contains(howTo, "| Field |") {
+		t.Error("the how-to carries a reference table; it belongs in sampling-reference.md")
+	}
+	for _, link := range []string{"sampling-reference.md", "sampling-explained.md"} {
+		if !strings.Contains(howTo, link) {
+			t.Errorf("the how-to does not link to %s", link)
+		}
+	}
+	if !strings.Contains(readDoc(t, "sampling-reference.md"), "# Reference:") {
+		t.Error("the reference page is not titled as one")
 	}
 }
 
