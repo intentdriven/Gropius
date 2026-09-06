@@ -13,6 +13,17 @@ function bytes(n) {
   return `${n.toFixed(i === 0 ? 0 : 1)} ${u[i]}`;
 }
 
+// contextLabel renders a model's architectural maximum context for its card.
+// The label says "max context" so the figure is not read as the window this
+// Mac can hold at once, which is a smaller and separate number. The result is
+// composed from a number, so it is safe in the innerHTML the card is built
+// from; anything that is not a positive number gives no label at all.
+function contextLabel(m) {
+  const n = m.context_length;
+  if (typeof n !== 'number' || !Number.isFinite(n) || n <= 0) return '';
+  return `max context ${n >= 1024 ? `${Math.round(n / 1024)}K` : n}`;
+}
+
 async function api(path, opts) {
   const res = await fetch(path, opts);
   const text = await res.text();
@@ -118,6 +129,8 @@ function renderModels() {
       info = escapeHtml(m.err || 'failed');
     } else {
       info = bytes(m.bytes);
+      const ctx = contextLabel(m);
+      if (ctx) info += ` · ${ctx}`;
     }
 
     card.innerHTML = `
