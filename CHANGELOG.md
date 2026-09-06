@@ -46,8 +46,10 @@ GitHub release notes.
   touch it; a request for a different model that would need its memory is
   refused instead, in a message that says only that there is not enough memory
   and never which models are protected. Pins apply the moment they are saved,
-  with no restart, and a save whose pinned models cannot all be in memory at
-  once is refused with both figures. Pinning is separate from preloading and
+  with no restart, and a save that pins another model when the set already
+  cannot all be in memory at once is refused with both figures. A set that
+  arrives from another Mac and no longer fits is reported rather than refused,
+  so it never stands between you and saving an unrelated setting. Pinning is separate from preloading and
   does a different thing: preloading loads a model at start-up and leaves it as
   evictable as any other, pinning protects a model but loads nothing. Your own
   Unload still works on a pinned model, and the pin stays. On an install with

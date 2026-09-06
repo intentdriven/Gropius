@@ -42,8 +42,11 @@ never told which models are protected, or what this Mac is running.
   its pin in Settings, listed as `(not on this Mac)`. It protects nothing —
   there is no model to protect — and downloading the model again brings the
   protection back. Untick it to be rid of it.
-- **It does not reserve memory.** A pinned model that is not loaded is charged
-  nothing, and does not stop other models from filling the budget.
+- **It does not reserve memory.** Memory is charged when a model is loaded, so
+  a pinned model that nothing has loaded holds none of the budget and does not
+  stop other models from filling it. (The check below is a different sum: it
+  asks what the pinned models *would* cost together, so that a set which could
+  never be held is refused before it is saved.)
 
 ## Choose how much to pin
 
@@ -61,12 +64,21 @@ the models your clients ask for occasionally.
 
 ## When a pinned set stops fitting
 
-The check runs when Settings is saved, which is the only moment the whole
-pinned set is being chosen. A settings file edited by hand can name a set that
-does not fit; Gropius applies it anyway — refusing at start-up would take the
-whole install down over one setting — and writes a warning to its log saying
-so. The symptom to recognise is every unpinned model being refused for memory
-on a Mac that plainly has some.
+The check runs when Settings is saved, and it refuses a save that makes the set
+worse — one that pins another model. A set that arrives already too large is
+applied and reported rather than refused, so that a `config.json` carried from
+a Mac with more memory never stands between you and saving an API key.
+
+A set can also stop fitting with no save at all:
+
+- A pinned model that was deleted is charged nothing until you download it
+  again, and the download brings the whole charge back.
+- Downloading a model again at a larger quantization grows what it costs.
+
+Nothing refuses either — there is no save to refuse — so Gropius says so on the
+control panel and in its log instead. The symptom to recognise, if the warning
+is missed, is every unpinned model being refused for memory on a Mac that
+plainly has some.
 
 ## Unpin a model
 

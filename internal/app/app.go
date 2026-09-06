@@ -307,7 +307,7 @@ func (a *App) adoptPinned(in []string) []string {
 		out = append(out, canonical)
 	}
 	if len(dropped) > 0 {
-		a.Log.Warn("dropped pinned models whose id names nothing, or names one another entry already names",
+		a.Log.Warn("dropped pinned models whose id is not a well-formed model id, or names one another entry already names",
 			"models", dropped)
 	}
 	if len(out) == 0 {
