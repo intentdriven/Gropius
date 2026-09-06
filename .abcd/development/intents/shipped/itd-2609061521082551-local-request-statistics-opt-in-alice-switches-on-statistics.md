@@ -111,7 +111,8 @@ one lookup rather than a second pass over the stream.
 
 ## Audit Notes
 
-_Empty. Populated by intent-auditor when intent moves to shipped/._
+<!-- abcd-review: OWED receipt=rcp-e6806ab7063d -->
+Fidelity review OWED (receipt rcp-e6806ab7063d).
 
 ## Grounds
 
