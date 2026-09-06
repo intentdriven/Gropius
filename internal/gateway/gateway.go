@@ -20,6 +20,7 @@ import (
 	"github.com/intentdriven/Gropius/internal/config"
 	"github.com/intentdriven/Gropius/internal/registry"
 	"github.com/intentdriven/Gropius/internal/runtime"
+	"github.com/intentdriven/Gropius/internal/stats"
 )
 
 // Pool is the subset of runtime.Pool the gateway needs.
@@ -50,6 +51,11 @@ type Options struct {
 	Log        *slog.Logger
 	// Transport is the HTTP transport used to reach model servers.
 	Transport http.RoundTripper
+	// Stats, when set, receives one content-free record per request — but only
+	// while the operator has the switch on, which the gateway reads live
+	// through ConfigFunc like the API key. Nil means nothing is recorded and
+	// nothing is asked of a model server on the recorder's behalf.
+	Stats *stats.Recorder
 }
 
 // Gateway routes OpenAI requests to model servers.
@@ -59,6 +65,7 @@ type Gateway struct {
 	models Models
 	log    *slog.Logger
 	tr     http.RoundTripper
+	stats  *stats.Recorder
 }
 
 // New builds a Gateway.
@@ -87,6 +94,7 @@ func New(opts Options) *Gateway {
 		models: opts.Models,
 		log:    opts.Log,
 		tr:     opts.Transport,
+		stats:  opts.Stats,
 	}
 }
 
@@ -310,11 +318,21 @@ const bodyReadTimeout = 30 * time.Second
 
 // handleCompletions proxies a chat/text completion to the right model server.
 func (g *Gateway) handleCompletions(w http.ResponseWriter, r *http.Request) {
+	// The clock starts before the body is read, so a slow upload counts
+	// against the client — which is what every comparable measurement does,
+	// and the only definition under which time to first token means what a
+	// client thinks it means.
+	started := time.Now()
+	cfg := g.cfg()
+	obs := g.observe(cfg.Statistics, started)
+	defer obs.finish(r)
+
 	rc := http.NewResponseController(w)
 	_ = rc.SetReadDeadline(time.Now().Add(bodyReadTimeout))
 
 	raw, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxRequestBody))
 	if err != nil {
+		obs.failed(stats.ClassClientError)
 		var tooLarge *http.MaxBytesError
 		switch {
 		case errors.As(err, &tooLarge):
@@ -338,6 +356,7 @@ func (g *Gateway) handleCompletions(w http.ResponseWriter, r *http.Request) {
 	// the original bytes, copied through once.
 	var payload map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &payload); err != nil {
+		obs.failed(stats.ClassClientError)
 		writeError(w, http.StatusBadRequest, "request body is not valid JSON")
 		return
 	}
@@ -347,21 +366,30 @@ func (g *Gateway) handleCompletions(w http.ResponseWriter, r *http.Request) {
 		_ = json.Unmarshal(rawModel, &requested)
 	}
 	if requested == "" {
+		obs.failed(stats.ClassClientError)
 		writeError(w, http.StatusBadRequest, `the "model" field is required`)
 		return
 	}
 
 	model, err := g.resolveModel(requested)
 	if err != nil {
+		// Recorded with no model at all rather than with the name that was
+		// asked for: that name is the client's own text, of the client's own
+		// length, and the recorder is never handed either.
+		obs.failed(stats.ClassClientError)
 		writeError(w, http.StatusNotFound, err.Error())
 		return
 	}
+	obs.resolved(model)
+	obs.streaming(streamRequested(payload))
 
 	up, release, err := g.pool.Acquire(r.Context(), model)
 	if err != nil {
 		if errors.Is(err, context.Canceled) {
+			obs.failed(stats.ClassCancelled)
 			return // the client hung up while the model was loading
 		}
+		obs.failed(classifyAcquireError(err))
 		var launchErr *runtime.LaunchError
 		if errors.As(err, &launchErr) {
 			// The wrapped error can carry absolute local filesystem paths (log
@@ -376,6 +404,7 @@ func (g *Gateway) handleCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer release()
+	obs.waited(up.Waits)
 
 	// The load-bearing rewrite. mlx-lm reads "model" as an instruction to *load*
 	// that model: anything other than the exact --model value it was started with
@@ -395,7 +424,7 @@ func (g *Gateway) handleCompletions(w http.ResponseWriter, r *http.Request) {
 	// (adr-2609061610102325). It happens here, on the body already in hand, so
 	// a streamed request takes exactly this path too and the body limit above
 	// is the only one there is. Nothing read is logged, kept or counted.
-	if r.URL.Path == chatCompletionsPath && g.cfg().PerModel[model].MergeSystemMessages {
+	if r.URL.Path == chatCompletionsPath && cfg.PerModel[model].MergeSystemMessages {
 		if mergeSystemMessagesInto(payload) == mergeRefused {
 			// The operator switched merging on for this model and is not
 			// getting it, which is worth saying once, here, rather than
@@ -406,6 +435,17 @@ func (g *Gateway) handleCompletions(w http.ResponseWriter, r *http.Request) {
 			// here or anywhere.
 			g.log.Debug("relayed a request unmerged: its messages carry something merging cannot rebuild faithfully", "model", model)
 		}
+	}
+
+	// A streamed answer carries no token counts unless the request asks for
+	// them, so with recording on Gropius asks on the client's behalf and
+	// removes the extra event on the way back if the client did not (see
+	// mergeIncludeUsage and relayOptions). A non-streamed answer already
+	// carries its counts and needs nothing.
+	relay := relayOptions{observing: obs.recording(), keepUsage: true}
+	if obs.recording() && streamRequested(payload) {
+		relay.keepUsage = clientWantsUsage(payload)
+		mergeIncludeUsage(payload)
 	}
 
 	body, err := json.Marshal(payload)
@@ -430,17 +470,25 @@ func (g *Gateway) handleCompletions(w http.ResponseWriter, r *http.Request) {
 	resp, err := g.tr.RoundTrip(req)
 	if err != nil {
 		if r.Context().Err() != nil {
+			obs.failed(stats.ClassCancelled)
 			return // client cancelled
 		}
+		obs.failed(stats.ClassUnreachable)
 		g.log.Error("upstream request failed", "model", model, "err", err)
 		writeError(w, http.StatusBadGateway, "the model server did not respond")
 		return
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode >= 300 {
+		// The model server's own refusal, relayed as it stands. It is a
+		// different fact from any of the gateway's own, and counting it as one
+		// of those would hide the model server behind the proxy in front of it.
+		obs.failed(stats.ClassUpstreamStatus)
+	}
 	copyResponseHeaders(w.Header(), resp.Header)
 	w.WriteHeader(resp.StatusCode)
-	relayRewritingModel(w, resp, up.ModelArg, requested)
+	obs.relayed(relayRewritingModel(w, resp, up.ModelArg, requested, relay))
 }
 
 // relayRewritingModel forwards the upstream response body, mapping the
@@ -449,11 +497,11 @@ func (g *Gateway) handleCompletions(w http.ResponseWriter, r *http.Request) {
 // model field into every response and SSE chunk, and the path is a
 // backend-internal load instruction that, in a per-user install, contains the
 // account's home directory; it must not reach network clients.
-func relayRewritingModel(w http.ResponseWriter, resp *http.Response, modelArg, requested string) {
+func relayRewritingModel(w http.ResponseWriter, resp *http.Response, modelArg, requested string, opts relayOptions) relayOutcome {
 	ct := resp.Header.Get("Content-Type")
 	switch {
 	case strings.HasPrefix(ct, "text/event-stream"):
-		streamRewriteSSE(w, resp.Body, modelArg, requested)
+		return streamRewriteSSE(w, resp.Body, modelArg, requested, opts)
 	case strings.HasPrefix(ct, "application/json"):
 		// Non-streaming completions are a single JSON object; buffering it is
 		// fine as long as it stays within maxResponseBody, and the
@@ -473,11 +521,21 @@ func relayRewritingModel(w http.ResponseWriter, resp *http.Response, modelArg, r
 		}
 		_, _ = w.Write(rewriteModelField(body, modelArg, requested))
 		if err != nil || tooLarge {
-			return
+			return relayOutcome{}
 		}
+		var out relayOutcome
+		if opts.observing {
+			// A non-streamed answer always carries its counts, so nothing was
+			// merged into the request to get them.
+			if ev, ok := decodeEvent(body); ok {
+				out.usage = readUsage(ev)
+			}
+		}
+		return out
 	default:
 		streamCopy(w, resp.Body)
 	}
+	return relayOutcome{}
 }
 
 // rewriteModelField returns b with a top-level "model" field equal to modelArg
@@ -490,10 +548,30 @@ func relayRewritingModel(w http.ResponseWriter, resp *http.Response, modelArg, r
 // b untouched. It is a no-op on any body that does not actually contain
 // modelArg, which is the common case for a real error body.
 func rewriteModelField(b []byte, modelArg, requested string) []byte {
-	redact := func() []byte { return bytes.ReplaceAll(b, []byte(modelArg), []byte(requested)) }
+	payload, ok := decodeEvent(b)
+	return renderEvent(b, payload, ok, modelArg, requested)
+}
 
+// decodeEvent parses one JSON object — a whole non-streamed answer, or the
+// payload of one "data:" event — into its fields, leaving each field's own
+// bytes untouched. It is separate from renderEvent below so that a relay which
+// is both rewriting and reading an event parses it once rather than twice: the
+// gateway is on the critical path of every token.
+func decodeEvent(b []byte) (map[string]json.RawMessage, bool) {
 	var payload map[string]json.RawMessage
 	if err := json.Unmarshal(b, &payload); err != nil {
+		return nil, false
+	}
+	return payload, true
+}
+
+// renderEvent produces the bytes to relay for an event decodeEvent has already
+// parsed, falling back to a literal redaction of modelArg for anything that is
+// not the expected shape.
+func renderEvent(b []byte, payload map[string]json.RawMessage, parsed bool, modelArg, requested string) []byte {
+	redact := func() []byte { return bytes.ReplaceAll(b, []byte(modelArg), []byte(requested)) }
+
+	if !parsed {
 		return redact()
 	}
 	raw, ok := payload["model"]
@@ -516,34 +594,124 @@ func rewriteModelField(b []byte, modelArg, requested string) []byte {
 	return out
 }
 
+// choicesField is the array of alternatives every completion event carries. A
+// usage-only event carries it empty; every event about the generation itself
+// carries at least one. Gropius reads whether it is empty and nothing else —
+// never what is inside it, which is the answer being generated.
+const choicesField = "choices"
+
+// usageField is the model server's own count of what a request cost.
+const usageField = "usage"
+
+// isUsageOnly reports whether an event is the one the model server appends
+// when a streamed request asked for its token counts: an empty list of
+// choices, and the counts.
+func isUsageOnly(ev map[string]json.RawMessage) bool {
+	usage, ok := ev[usageField]
+	if !ok || string(usage) == "null" {
+		return false
+	}
+	return countChoices(ev) == 0
+}
+
+// carriesGeneration reports whether an event is about the generation itself,
+// which is what "the client has its first chunk" means here.
+func carriesGeneration(ev map[string]json.RawMessage) bool { return countChoices(ev) > 0 }
+
+// countChoices reports how many choices an event carries, and -1 when it
+// carries no choices field at all.
+func countChoices(ev map[string]json.RawMessage) int {
+	raw, ok := ev[choicesField]
+	if !ok {
+		return -1
+	}
+	var choices []json.RawMessage
+	if err := json.Unmarshal(raw, &choices); err != nil {
+		return -1
+	}
+	return len(choices)
+}
+
+// readUsage reads the model server's token counts off an event, or returns nil
+// when it carries none.
+func readUsage(ev map[string]json.RawMessage) *usageCounts {
+	raw, ok := ev[usageField]
+	if !ok {
+		return nil
+	}
+	var counts struct {
+		PromptTokens     int `json:"prompt_tokens"`
+		CompletionTokens int `json:"completion_tokens"`
+	}
+	if err := json.Unmarshal(raw, &counts); err != nil {
+		return nil
+	}
+	return &usageCounts{Prompt: counts.PromptTokens, Completion: counts.CompletionTokens}
+}
+
 // streamRewriteSSE relays an SSE body line by line, rewriting the "model"
 // field inside each "data: {...}" event and flushing per line so tokens keep
 // streaming. Non-JSON events (notably "data: [DONE]") and non-data lines pass
 // through byte-for-byte. Chunk boundaries do not align with event boundaries,
 // so a plain streamCopy could not rewrite safely; lines are the unit mlx-lm
 // actually emits.
-func streamRewriteSSE(w http.ResponseWriter, src io.Reader, modelArg, requested string) {
+func streamRewriteSSE(w http.ResponseWriter, src io.Reader, modelArg, requested string, opts relayOptions) relayOutcome {
+	var out relayOutcome
 	rc := http.NewResponseController(w)
 	br := bufio.NewReader(src)
+	// An SSE event is its data line and the blank line that terminates it. An
+	// event that is removed has to take its terminator with it, or the client
+	// receives a stray blank line where the event was and the stream it gets is
+	// not the stream it would have got.
+	dropBlank := false
 	for {
 		line, err := br.ReadBytes('\n')
 		if len(line) > 0 {
 			if payload, ok := bytes.CutPrefix(bytes.TrimSuffix(line, []byte("\n")), []byte("data: ")); ok {
-				out := rewriteModelField(payload, modelArg, requested)
-				if _, werr := fmt.Fprintf(w, "data: %s\n", out); werr != nil {
-					return // client went away
+				dropBlank = false
+				ev, parsed := decodeEvent(payload)
+				switch {
+				case parsed && isUsageOnly(ev):
+					if opts.observing {
+						out.usage = readUsage(ev)
+					}
+					if !opts.keepUsage {
+						// Gropius asked for this event, not the client. It is
+						// removed here rather than never asked for, because the
+						// counts are the whole point of asking.
+						dropBlank = true
+						continue
+					}
+				case opts.observing && out.firstToken.IsZero() && parsed && carriesGeneration(ev):
+					out.firstToken = time.Now()
 				}
+				rewritten := renderEvent(payload, ev, parsed, modelArg, requested)
+				if _, werr := fmt.Fprintf(w, "data: %s\n", rewritten); werr != nil {
+					out.truncated = true
+					return out // client went away
+				}
+			} else if isBlankLine(line) && dropBlank {
+				dropBlank = false
+				continue
 			} else if _, werr := w.Write(line); werr != nil {
-				return
+				out.truncated = true
+				return out
 			}
 			// A flush error means the connection does not support flushing; the
 			// data is still written, so keep going rather than truncating.
 			_ = rc.Flush()
 		}
 		if err != nil {
-			return
+			out.truncated = !errors.Is(err, io.EOF)
+			return out
 		}
 	}
+}
+
+// isBlankLine reports whether a line read off an SSE body is the empty line
+// that terminates an event.
+func isBlankLine(line []byte) bool {
+	return len(bytes.TrimRight(line, "\r\n")) == 0
 }
 
 // hopByHopHeaders are connection-scoped headers that belong to a single

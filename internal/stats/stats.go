@@ -62,7 +62,8 @@ const (
 	ClassLaunchFailed Class = "launch_failed"
 	// ClassNotReady is a model server that started but never answered.
 	ClassNotReady Class = "not_ready"
-	// ClassUnreachable is a model server that was running and did not respond.
+	// ClassUnreachable is a model server that was running and did not respond,
+	// or that stopped responding part-way through an answer it had begun.
 	ClassUnreachable Class = "unreachable"
 	// ClassCancelled is a client that went away before the answer was done.
 	ClassCancelled Class = "cancelled"

@@ -301,7 +301,7 @@ func TestNonStreamingResponseBodyIsCapped(t *testing.T) {
 	}
 	rec := httptest.NewRecorder()
 
-	relayRewritingModel(rec, resp, "backend-path", "requested-name")
+	relayRewritingModel(rec, resp, "backend-path", "requested-name", relayOptions{})
 
 	if got := rec.Body.Len(); got > maxResponseBody {
 		t.Errorf("relayRewritingModel wrote %d bytes, want capped at maxResponseBody=%d", got, maxResponseBody)
@@ -328,7 +328,7 @@ func TestNonStreamingResponseBodyIsCappedWithoutLeakingBackendPath(t *testing.T)
 	}
 	rec := httptest.NewRecorder()
 
-	relayRewritingModel(rec, resp, modelArg, requested)
+	relayRewritingModel(rec, resp, modelArg, requested, relayOptions{})
 
 	if strings.Contains(rec.Body.String(), modelArg) {
 		t.Fatalf("capped, truncated response still contains the backend path %q", modelArg)
