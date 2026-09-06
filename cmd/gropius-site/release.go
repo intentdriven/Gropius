@@ -1,48 +1,24 @@
 package main
 
-// THE RELEASE RECORD.
+// The release record: reading it, refusing it, and electing which release it
+// describes. THE SCHEMA AND THE ROUNDING RULE ARE IN THE PACKAGE COMMENT
+// (main.go), where `go doc ./cmd/gropius-site` shows them; what is here is why
+// the checks are the checks.
 //
-// The page's release facts are a view over the release the forge flags as
-// latest, and this file is the whole of the contract between the release run
-// and the page. The run reads the release once, writes it as a JSON file beside
-// the build, and hands the path to the render with --release. Nothing here
-// reaches the network, so the render stays offline and deterministic given that
-// file — which is what lets it run in a job that holds no credential.
-//
-// THE SCHEMA. One JSON object:
-//
-//	{
-//	  "version":       "v0.1.2",                     the release's tag
-//	  "published_at":  "2026-09-05T09:41:07Z",       RFC 3339, the instant it was published
-//	  "html_url":      "https://…/releases/tag/…",   the release's own page
-//	  "checksums_url": "https://…/SHA256SUMS.txt",   the checksums asset OF THIS RELEASE
-//	  "assets": [
-//	    {"name": "Gropius.app.zip", "size_bytes": 20971520, "url": "https://…"}
-//	  ]
-//	}
-//
-// Every field is required and no other field is admitted. It is deliberately
-// NOT the forge's own release JSON: a schema that accepts whatever the forge
-// sends is a schema that renders whatever the forge sends, and this one is
-// small enough to state completely and check completely.
-//
-// Every URL is PINNED to this repository's own release path — `html_url` to
-// `<forge>/<owner>/<repo>/releases/tag/<version>` and each asset to
-// `.../releases/download/<version>/` — because the asset URLs are where a
-// reader's binary comes from, and "it starts with https://" is the loosest
-// possible grammar for the most consequential field in the record. Pinning also
-// closes the case where the version and the URLs name different releases.
-//
-// WHICH release this is comes from electLatest below, not from the tag the run
-// carries.
+// Nothing in this file reaches the network. The release run reads the forge
+// once, writes the record as a file, and hands over the path — so the render
+// stays offline and deterministic given that file, which is what lets it run in
+// a job that holds no credential.
 //
 // WHY REFUSING IS THE RIGHT FAILURE. A record that is wrong in a way the
-// renderer accepts becomes a wrong fact on a public page — a version that is
-// not one, an asset three orders of magnitude too large, a checksums link
-// pointing at some other release. Every check below therefore STOPS the render.
-// The absence of a record is the graceful case, handled by the caller not
-// passing --release at all: a page with no release facts is complete and
-// honest, while a page with wrong ones is not.
+// renderer accepts becomes a wrong fact on a public page — a version that is not
+// one, an asset three orders of magnitude too large, a download link pointing
+// off the forge. Every check below therefore STOPS the render. The ABSENCE of a
+// record is the graceful case, and it is the caller's to decide: the release run
+// asks validate-release whether a record is fit to render and drops it if not,
+// so an unacceptable record costs the page its release facts rather than its
+// deploy. A page with no release facts is complete and honest; a page with wrong
+// ones is not.
 
 import (
 	"fmt"
@@ -58,10 +34,10 @@ const checksumsAsset = "SHA256SUMS.txt"
 
 // maxAssetBytes is where a size stops being a file and starts being a mistake.
 // The forge's own ceiling for a release asset is 2 GiB and this project's
-// largest asset is an app bundle measured in tens of megabytes, so five times
-// the forge's own limit is comfortably absurd: it cannot refuse a real asset,
-// and it does refuse a byte count that has been scaled, sign-flipped or read
-// out of the wrong field.
+// largest asset is an app bundle of a few megabytes, so five times the forge's
+// own limit is comfortably absurd: it cannot refuse a real asset, and it does
+// refuse a byte count that has been scaled, sign-flipped or read out of the
+// wrong field.
 const maxAssetBytes = 10 << 30
 
 // A release tag, and nothing else that could be typed where one belongs. The

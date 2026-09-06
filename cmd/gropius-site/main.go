@@ -14,13 +14,67 @@
 // Usage:
 //
 //	go run ./cmd/gropius-site --out site                        render the page
-//	go run ./cmd/gropius-site select --from releases.json       print the elected tag
-//	go run ./cmd/gropius-site validate-release release.json     check a release record
+//	go run ./cmd/gropius-site --out site --release release.json render it with the release facts
+//	go run ./cmd/gropius-site select --from releases.json       print the tag of the release the page names
+//	go run ./cmd/gropius-site validate-release release.json     say whether a record is fit to render
 //
 // The two extra verbs exist so the release run's decisions are this program's
 // decisions rather than shell: which release the page names is electLatest, and
 // whether a record is fit to render is loadRelease, and both are testable
 // against a fixture instead of only readable in a workflow file.
+//
+// # The release record
+//
+// --release names a JSON file holding the release the page shows. The release
+// run writes it, hands over the path, and it is never committed: it is an
+// ARGUMENT to a render, not part of the composition. Without it the page renders
+// with the static list of what a release contains and no version anywhere on it,
+// which is both the local path and the graceful case when the forge cannot be
+// read.
+//
+// One JSON object, every field required and no other field admitted:
+//
+//	{
+//	  "version":       "v0.1.2",                     the release's tag
+//	  "published_at":  "2026-09-05T09:41:07Z",       RFC 3339, when it was published
+//	  "html_url":      "https://…/releases/tag/…",   the release's own page
+//	  "checksums_url": "https://…/SHA256SUMS.txt",   the checksums asset OF THIS RELEASE
+//	  "assets": [
+//	    {"name": "Gropius.app.zip", "size_bytes": 3172806, "url": "https://…"}
+//	  ]
+//	}
+//
+// It is deliberately NOT the forge's own release JSON: a schema that accepts
+// whatever the forge sends is a schema that renders whatever the forge sends,
+// and this one is small enough to state completely and check completely. What is
+// checked, and what refuses a render rather than reaching the page:
+//
+//   - version must be a vX.Y.Z tag, with its leading v;
+//   - published_at must be an RFC 3339 instant;
+//   - html_url must be this repository's own <repo>/releases/tag/<version>, and
+//     every asset URL must sit under <repo>/releases/download/<version>/, because
+//     the asset URLs decide where a reader's binary comes from and because a
+//     record whose version and links name different releases is wrong;
+//   - checksums_url must be the record's own SHA256SUMS.txt asset;
+//   - each asset name must be a release asset's file name, listed once, with a
+//     size between one byte and 10 GiB.
+//
+// # Sizes on the page
+//
+// The rounding rule, because a page that overstates a download lies: decimal
+// units (1 kB is 1000 bytes, which is what the platform's own file listings
+// show), the largest unit in which the count is at least one, and the fraction
+// TRUNCATED to one decimal place rather than rounded. 20,971,520 bytes is
+// 20.97… MB and shows as 20.9 MB; it never shows as 21.0 MB. Under a kilobyte
+// the exact count is shown, since there is nothing to round.
+//
+// # Which release
+//
+// The page names the release the forge FLAGS as latest — the same election the
+// download button's releases/latest redirect and install.sh follow — never the
+// most recently created, and never a draft or a pre-release. `select` makes that
+// election from the forge's release list, so it is a function with a fixture
+// test rather than a line of shell.
 //
 // Why this lives here rather than in abcd's `site` verb: that verb renders its
 // own fixed site shape (a home page plus chapters from docs/) and has no
