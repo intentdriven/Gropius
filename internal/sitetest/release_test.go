@@ -87,17 +87,25 @@ func releaseRegion(t *testing.T, p string) string {
 
 func TestANewerReleaseChangesThePageAndNothingElse(t *testing.T) {
 	first := renderWithRelease(t, fixtureRelease)
-	newer := strings.ReplaceAll(fixtureRelease, "9.9.9", "9.9.10")
+	newer := strings.ReplaceAll(fixtureRelease, "9.9.9", "9.10.0")
 	second := renderWithRelease(t, newer)
 
 	if !strings.Contains(releaseRegion(t, first), "v9.9.9") {
 		t.Errorf("the first render does not name v9.9.9:\n%s", releaseRegion(t, first))
 	}
-	if !strings.Contains(releaseRegion(t, second), "v9.9.10") {
-		t.Errorf("the second render does not name v9.9.10:\n%s", releaseRegion(t, second))
+	if !strings.Contains(releaseRegion(t, second), "v9.10.0") {
+		t.Errorf("the second render does not name v9.10.0:\n%s", releaseRegion(t, second))
 	}
-	if strings.Contains(releaseRegion(t, second), "v9.9.9\n") || strings.Contains(releaseRegion(t, second), ">v9.9.9<") {
-		t.Error("the second render still names v9.9.9; the page keeps a release the record no longer describes")
+	// One release named, not two: a render that kept the previous record's
+	// version alongside the new one would satisfy every check above.
+	versions := regexp.MustCompile(`v[0-9]+\.[0-9]+\.[0-9]+`).FindAllString(releaseRegion(t, second), -1)
+	for _, v := range versions {
+		if v != "v9.10.0" {
+			t.Errorf("the second render also names %s; the page names one release, the one the record describes", v)
+		}
+	}
+	if len(versions) == 0 {
+		t.Error("the second render names no release at all")
 	}
 	// The two renders must differ only where the record differs. Everything
 	// outside the region is composed from the repository, which did not change.
@@ -211,17 +219,32 @@ func TestTheReleaseSectionMatchesTheRecordFieldByField(t *testing.T) {
 func TestTheReleaseRecordIsTheFlaggedLatestRelease(t *testing.T) {
 	step := releaseStep(t)
 
-	// `gh release view <tag>` takes the tag as a POSITIONAL argument, so a flag
-	// immediately after the verb is what proves none is passed.
-	if !regexp.MustCompile(`gh release view\s+--repo\s+"\$GITHUB_REPOSITORY"\s+--json\s+tagName,publishedAt,assets,url`).MatchString(step) {
-		t.Errorf("the release-record step does not read the flagged latest release with `gh release view --repo \"$GITHUB_REPOSITORY\" --json tagName,publishedAt,assets,url`:\n%s", step)
+	// The list the election reads must carry the forge's own flag and the two
+	// exclusions, or electLatest is deciding on fields it was not given.
+	if !regexp.MustCompile(`gh release list\s+--repo\s+"\$GITHUB_REPOSITORY"[^|]*--json\s+tagName,isLatest,isDraft,isPrerelease,publishedAt`).MatchString(step) {
+		t.Errorf("the release-record step does not list the releases with the forge's isLatest flag:\n%s", step)
 	}
-	// The tag this run carries must not reach the record: a redeploy of an older
-	// tag renders the page for the release the forge flags, not for its own ref.
-	for _, steer := range []string{"INPUT_TAG", "inputs.tag", "needs.resolve.outputs.tag"} {
+	// The election itself is cmd/gropius-site's, which is what makes the
+	// criterion testable against a fixture (TestTheFlaggedLatestIsElectedAndNotTheNewest
+	// in that package). A step that elected in shell would be untestable here.
+	if !strings.Contains(step, `gropius-site select --from "$list"`) {
+		t.Errorf("the release-record step does not elect through `gropius-site select`:\n%s", step)
+	}
+	// And the release it then fetches is the elected one. Every name the run's
+	// own tag could arrive under is refused, so a later edit cannot quietly
+	// point the record at the tag being deployed.
+	if !strings.Contains(step, `gh release view "$tag" --repo "$GITHUB_REPOSITORY"`) {
+		t.Errorf("the release-record step does not fetch the elected tag:\n%s", step)
+	}
+	for _, steer := range []string{"INPUT_TAG", "inputs.tag", "needs.resolve.outputs.tag", "GITHUB_REF_NAME", "github.ref_name"} {
 		if strings.Contains(step, steer) {
 			t.Errorf("the release-record step reads %s; the page names the flagged latest release, never the tag the run carries", steer)
 		}
+	}
+	// The record is validated before the render commits to it, so an
+	// unacceptable one costs the page its facts and not its deploy.
+	if !strings.Contains(step, "gropius-site validate-release") {
+		t.Errorf("the release-record step does not validate the record before handing it on:\n%s", step)
 	}
 }
 
@@ -313,92 +336,165 @@ func renderStep(t *testing.T) string {
 
 var fontHosts = []string{"fonts.googleapis.com", "fonts.gstatic.com"}
 
-func TestThePageRequestsNothingOffItsOwnOrigin(t *testing.T) {
-	for _, p := range []string{page, renderWithRelease(t, fixtureRelease)} {
-		// Subresources: src= on any element, and the stylesheet/preload links.
-		for _, m := range regexp.MustCompile(`\bsrc="([^"]+)"`).FindAllStringSubmatch(p, -1) {
-			checkReference(t, "src", m[1])
+// offOrigin is every reference in a page (and its stylesheet) that would take a
+// browser off the page's own origin and off the web font service.
+//
+// It walks what a browser REACHES FOR, which is more than what it fetches:
+// `src`, the link elements that fetch something, `url()` in the stylesheet — and
+// `preconnect`/`dns-prefetch`, which are not fetches at all. Those two matter
+// most: no CSP fetch directive governs them, so a hint added to the template
+// would open a DNS lookup and a TLS handshake to a third party on every load
+// with nothing at serve time to stop it. An `<a href>` is deliberately NOT
+// walked: it is a place a reader may choose to go, not a request the page makes.
+func offOrigin(p, style string) []string {
+	var off []string
+	check := func(where, ref string) {
+		ref = strings.TrimSpace(ref)
+		switch {
+		case ref == "", strings.HasPrefix(ref, "#"), strings.HasPrefix(ref, "data:"):
+			return
+		case !strings.Contains(ref, "//"):
+			return // relative: the page's own origin
 		}
-		for _, tag := range regexp.MustCompile(`<link\b[^>]*>`).FindAllString(p, -1) {
-			a := attrs(tag)
-			switch a["rel"] {
-			case "stylesheet", "preload", "prefetch", "icon", "apple-touch-icon", "manifest":
-				checkReference(t, "link rel="+a["rel"], a["href"])
+		for _, host := range fontHosts {
+			if strings.HasPrefix(ref, "https://"+host+"/") || ref == "https://"+host {
+				return
 			}
 		}
+		off = append(off, where+" "+ref)
+	}
+	for _, m := range regexp.MustCompile(`\bsrc="([^"]+)"`).FindAllStringSubmatch(p, -1) {
+		check("src", m[1])
+	}
+	for _, tag := range regexp.MustCompile(`<link\b[^>]*>`).FindAllString(p, -1) {
+		a := attrs(tag)
+		switch a["rel"] {
+		case "stylesheet", "preload", "prefetch", "preconnect", "dns-prefetch",
+			"icon", "apple-touch-icon", "manifest", "modulepreload", "prerender":
+			check("link rel="+a["rel"], a["href"])
+		}
+	}
+	for _, m := range regexp.MustCompile(`url\(\s*['"]?([^'")]+)`).FindAllStringSubmatch(style, -1) {
+		check("css url()", m[1])
+	}
+	return off
+}
+
+func TestThePageRequestsNothingOffItsOwnOrigin(t *testing.T) {
+	for name, p := range map[string]string{
+		"without a release record": page,
+		"with a release record":    renderWithRelease(t, fixtureRelease),
+	} {
+		for _, ref := range offOrigin(p, css) {
+			t.Errorf("%s: the page reaches for %s; it requests nothing but its own origin and the web font service", name, ref)
+		}
 		if strings.Contains(p, "<script") {
-			t.Error("the page carries a script element; it must run nothing")
+			t.Errorf("%s: the page carries a script element; it must run nothing", name)
 		}
 		for _, cookie := range []string{"document.cookie", `http-equiv="set-cookie"`, `http-equiv="Set-Cookie"`} {
 			if strings.Contains(p, cookie) {
-				t.Errorf("the page carries %q; it sets no cookie of its own", cookie)
+				t.Errorf("%s: the page carries %q; it sets no cookie of its own", name, cookie)
 			}
 		}
 	}
-	// The stylesheet may not pull anything in either.
-	for _, m := range regexp.MustCompile(`url\(\s*['"]?([^'")]+)`).FindAllStringSubmatch(css, -1) {
-		checkReference(t, "css url()", m[1])
-	}
 }
 
-func checkReference(t *testing.T, where, ref string) {
-	t.Helper()
-	ref = strings.TrimSpace(ref)
-	switch {
-	case ref == "", strings.HasPrefix(ref, "#"), strings.HasPrefix(ref, "data:"):
-		return
-	case !strings.Contains(ref, "//"):
-		return // relative: the page's own origin
+// The audit's own test: an origin added in any of the positions it walks must be
+// reported. Without this, the walk above passes for every page it does not read.
+func TestTheOriginAuditCatchesAnAddedOrigin(t *testing.T) {
+	const foreign = "https://cdn.example.invalid"
+	for _, tc := range []struct{ name, page, css string }{
+		{"a preconnect", `<link rel="preconnect" href="` + foreign + `">`, ""},
+		{"a dns-prefetch", `<link rel="dns-prefetch" href="` + foreign + `">`, ""},
+		{"a stylesheet", `<link rel="stylesheet" href="` + foreign + `/x.css">`, ""},
+		{"a preload", `<link rel="preload" href="` + foreign + `/x.woff2">`, ""},
+		{"an icon", `<link rel="icon" href="` + foreign + `/x.png">`, ""},
+		{"an image", `<img src="` + foreign + `/x.png">`, ""},
+		{"a script", `<script src="` + foreign + `/x.js"></script>`, ""},
+		{"an iframe", `<iframe src="` + foreign + `/x.html"></iframe>`, ""},
+		{"a font in the stylesheet", "", `@font-face { src: url("` + foreign + `/x.woff2"); }`},
+		{"an image in the stylesheet", "", `body { background: url(` + foreign + `/x.png); }`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if off := offOrigin(tc.page, tc.css); len(off) == 0 {
+				t.Errorf("%s to %s was not reported; the audit does not walk it", tc.name, foreign)
+			}
+		})
 	}
-	for _, host := range fontHosts {
-		if strings.HasPrefix(ref, "https://"+host+"/") {
-			return
+	// And the page's own shapes are not reported, or the audit above would be
+	// passing by failing everything.
+	for _, ok := range []struct{ page, css string }{
+		{`<link rel="stylesheet" href="site.css">`, ""},
+		{`<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>`, ""},
+		{`<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Jost">`, ""},
+		{`<a href="https://github.com/owner/repo">source</a>`, ""},
+	} {
+		if off := offOrigin(ok.page, ok.css); len(off) != 0 {
+			t.Errorf("the audit reports %v for a reference the page is allowed", off)
 		}
 	}
-	t.Errorf("%s fetches %q; the page requests nothing but its own origin and the web font service", where, ref)
 }
 
-// The serve-time half: the policy shipped beside the page allows exactly the
-// hosts the page references and nothing more, so the build-time walk above and
-// the header a visitor's browser enforces cannot drift apart.
+// The serve-time half. The policy is held DIRECTIVE BY DIRECTIVE, not as a
+// string: a policy that names both font hosts and starts from default-src 'none'
+// can still block the page's own stylesheet, or admit the font files under the
+// directive that governs stylesheets, and a substring check reads both as fine.
 func TestTheContentSecurityPolicyMatchesThePagesReferences(t *testing.T) {
-	headers := read(t, filepath.Join(repoRoot, "site-src", "headers"))
-	csp := ""
-	for _, line := range strings.Split(headers, "\n") {
-		if v, ok := strings.CutPrefix(strings.TrimSpace(line), "Content-Security-Policy:"); ok {
-			csp = strings.TrimSpace(v)
-		}
-	}
+	csp := policy(t)["Content-Security-Policy"]
 	if csp == "" {
-		t.Fatalf("site-src/headers ships no Content-Security-Policy:\n%s", headers)
+		t.Fatalf("site-src/headers ships no Content-Security-Policy:\n%s", read(t, headersFile(t)))
 	}
-	if !strings.Contains(csp, "default-src 'none'") {
-		t.Errorf("the policy does not start from default-src 'none': %q", csp)
+	d := directives(csp)
+
+	// Nothing is allowed that is not named, and the three source classes the
+	// page actually uses are named where a browser looks for them.
+	if got := d["default-src"]; !has(got, "'none'") || len(got) != 1 {
+		t.Errorf("default-src is %v; the policy starts from 'none'", got)
 	}
-	for _, host := range fontHosts {
-		if !strings.Contains(csp, host) {
-			t.Errorf("the policy does not admit %s, which the page references: %q", host, csp)
+	// The page's own stylesheet AND the font stylesheet are both style-src.
+	if got := d["style-src"]; !has(got, "'self'") {
+		t.Errorf("style-src is %v; without 'self' the page's own site.css is blocked and the page is unstyled", got)
+	}
+	if got := d["style-src"]; !has(got, "https://fonts.googleapis.com") {
+		t.Errorf("style-src is %v; the font stylesheet is fetched as a stylesheet, so it belongs here", got)
+	}
+	// The face FILES are font-src, and only font-src.
+	if got := d["font-src"]; !has(got, "https://fonts.gstatic.com") {
+		t.Errorf("font-src is %v; the face files come from fonts.gstatic.com", got)
+	}
+	if has(d["font-src"], "https://fonts.googleapis.com") || has(d["style-src"], "https://fonts.gstatic.com") {
+		t.Errorf("the two font hosts are under swapped directives: style-src %v, font-src %v", d["style-src"], d["font-src"])
+	}
+	// The page runs, submits and frames nothing.
+	for _, directive := range []string{"script-src", "form-action", "frame-ancestors", "base-uri"} {
+		if got := d[directive]; !has(got, "'none'") {
+			t.Errorf("%s is %v; the page has none of these and says so", directive, got)
 		}
 	}
-	// Nothing the page does not reference. A host in the policy that the page
-	// never fetches is a permission granted for no reason.
-	for _, m := range regexp.MustCompile(`https://([a-z0-9.-]+)`).FindAllStringSubmatch(csp, -1) {
-		found := false
-		for _, host := range fontHosts {
-			if m[1] == host {
-				found = true
+	// And no host beyond the two the page fetches from.
+	for directive, sources := range d {
+		for _, src := range sources {
+			if !strings.HasPrefix(src, "https://") {
+				continue
+			}
+			allowed := false
+			for _, host := range fontHosts {
+				if src == "https://"+host {
+					allowed = true
+				}
+			}
+			if !allowed {
+				t.Errorf("%s admits %s, which the page never fetches", directive, src)
 			}
 		}
-		if !found {
-			t.Errorf("the policy admits %s, which the page never fetches", m[1])
-		}
 	}
-	if strings.Contains(csp, "script-src") && !strings.Contains(csp, "script-src 'none'") {
-		t.Errorf("the policy admits a script source; the page runs nothing: %q", csp)
-	}
-	// The rule must cover the path the page is served under.
-	if !strings.Contains(headers, "/Gropius/*") {
-		t.Errorf("the headers file carries no rule for /Gropius/*, which is where the page is served:\n%s", headers)
+
+	// The rule must cover the path the page is served under, derived from the
+	// manifest rather than written twice: moving out_subdir moves the page, and
+	// a policy left behind covers nothing.
+	rule := "/" + outSubdir(t) + "*"
+	if !strings.Contains(read(t, headersFile(t)), rule+"\n") {
+		t.Errorf("the headers file carries no rule for %q, which is where the page is served:\n%s", rule, read(t, headersFile(t)))
 	}
 	// And the render must put it where the host reads it: the root of the
 	// assets directory, not beside the page.
@@ -409,6 +505,71 @@ func TestTheContentSecurityPolicyMatchesThePagesReferences(t *testing.T) {
 	if man.Headers != "site-src/headers" {
 		t.Errorf("the manifest names %q as the headers file; the committed one is site-src/headers", man.Headers)
 	}
+}
+
+// policy reads the headers the page is served with, as name -> value.
+func policy(t *testing.T) map[string]string {
+	t.Helper()
+	out := map[string]string{}
+	for _, line := range strings.Split(read(t, headersFile(t)), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, "/") {
+			continue
+		}
+		name, value, ok := strings.Cut(line, ":")
+		if !ok {
+			t.Errorf("the headers file carries a line that is neither a rule, a comment nor a header: %q", line)
+			continue
+		}
+		out[strings.TrimSpace(name)] = strings.TrimSpace(value)
+	}
+	return out
+}
+
+// directives splits a content-security policy into directive -> sources.
+func directives(csp string) map[string][]string {
+	out := map[string][]string{}
+	for _, part := range strings.Split(csp, ";") {
+		f := strings.Fields(part)
+		if len(f) == 0 {
+			continue
+		}
+		out[f[0]] = f[1:]
+	}
+	return out
+}
+
+func has(sources []string, want string) bool {
+	for _, s := range sources {
+		if s == want {
+			return true
+		}
+	}
+	return false
+}
+
+func headersFile(t *testing.T) string {
+	t.Helper()
+	var man struct {
+		Headers string `json:"headers"`
+	}
+	readJSON(t, filepath.Join(repoRoot, ".abcd", "site.json"), &man)
+	if man.Headers == "" {
+		t.Fatal("the manifest names no headers file")
+	}
+	return filepath.Join(repoRoot, filepath.FromSlash(man.Headers))
+}
+
+func outSubdir(t *testing.T) string {
+	t.Helper()
+	var man struct {
+		OutSubdir string `json:"out_subdir"`
+	}
+	readJSON(t, filepath.Join(repoRoot, ".abcd", "site.json"), &man)
+	if man.OutSubdir == "" {
+		t.Fatal("the manifest names no out_subdir")
+	}
+	return man.OutSubdir
 }
 
 func TestTheRenderWritesTheHeadersFileAtTheAssetsRoot(t *testing.T) {
