@@ -41,6 +41,7 @@ curl http://localhost:11535/v1/models
 | `state` | Whether the model is loaded, still loading, or not loaded. Only on an install with an API key. See below. |
 | `in_flight` | How many requests that model is already handling. Only on an install with an API key. |
 | `last_used` | Unix time at which Gropius last handled a request for that model. Only on an install with an API key, and only while the model is in memory — `loaded` or `loading`. |
+| `pinned` | Whether the operator has protected the model from eviction. Only on an install with an API key. See below. |
 
 ## The context figure
 
@@ -88,13 +89,14 @@ list always carries the exact number.
 
 ## Residency
 
-`state`, `in_flight` and `last_used` say what each model is doing right now, so
+`state`, `in_flight`, `last_used` and `pinned` say what each model is doing
+right now and which models are protected, so
 a client can send its work to a model that is already warm instead of forcing a
 load it did not know about. Loading a model takes seconds to a minute, longer
 for the largest; picking the warm one costs nothing.
 
 **They appear only when an API key is configured.** Set a key in **Settings**
-and the three fields are on every entry, for every client the key admits and
+and the four fields are on every entry, for every client the key admits and
 for same-machine clients that need no key. Leave the key unset — the shipping
 default, where anyone on the network may use the server — and the listing is
 exactly the four OpenAI fields and the context figure.
@@ -134,7 +136,8 @@ On an install with a key, an entry reads:
   "max_model_len": 40960,
   "state": "loaded",
   "in_flight": 2,
-  "last_used": 1757231998
+  "last_used": 1757231998,
+  "pinned": true
 }
 ```
 
@@ -154,6 +157,16 @@ A model still loading already carries one, stamped when its load was asked for.
 The time moves when a request starts and again when it finishes, so a model in
 the middle of a long generation carries the time that generation began, not the
 time it will end — do not compute an idle-timeout deadline from it.
+
+`pinned` is `true` for a model the operator pinned in **Settings**, and `false`
+for every other model. A pinned model is never evicted to make room and is
+never unloaded by the idle timeout, so it is the model that will still be warm
+on the next turn — the one field here that is a promise about the future rather
+than a description of the moment. It is a fact about the model, not about
+whether it is in memory: a pinned model that nothing has loaded yet reads
+`"state": "not_loaded", "pinned": true`, and it is protected from the moment a
+request loads it. See
+[Pin a model so it stays in memory](pinning-models.md).
 
 **A snapshot, not a reservation.** The values describe the moment the list is
 built. Reading `loaded` holds nothing warm on your behalf: another client's
@@ -176,15 +189,21 @@ rules.
   headroom for the cache and activations a running model needs.
 - A request for a model that does not fit in what is left unloads the
   least-recently-used idle model, at once, to make room. A model with a request
-  in flight is never the one chosen, and a model still loading is not either. If
-  nothing can be freed, the request is refused with an error naming the memory
-  pressure rather than waiting.
+  in flight is never the one chosen, a model still loading is not either, and a
+  pinned model is not either. If nothing can be freed, the request is refused
+  with an error naming the memory pressure rather than waiting. That refusal
+  names no model: which models this Mac is protecting stays off the network.
 - A model larger than the whole budget is refused outright: no eviction helps.
 - **Idle timeout** (**Settings**, off by default) unloads a model that has gone
   that long without a request, whether or not anything needs the room.
+- **Pinned models** (**Settings**) are never evicted to make room and never
+  reaped by the idle timeout. A request that would need a pinned model's memory
+  is refused instead.
 - **Preload** (**Settings**) loads the models it names at startup so their first
-  request is fast. It does not pin them: a preloaded model is evicted under
-  memory pressure and reaped by the idle timeout like any other.
+  request is fast. Preloading and pinning are separate settings and do different
+  things: preloading loads a model and leaves it as evictable as any other,
+  pinning protects a model but loads nothing. Name a model in both to have it
+  loaded at startup and protected from then on.
 
 ## Compatibility
 

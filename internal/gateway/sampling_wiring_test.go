@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -212,5 +213,34 @@ func TestSettingsNamesExactlyTheResidentModelsThatMustLoadAgain(t *testing.T) {
 	}
 	if len(body2.ReloadModels) != 0 {
 		t.Errorf("reload_models = %v, want empty when nothing moved", body2.ReloadModels)
+	}
+}
+
+// Pinning protects a model against other clients' requests, not against the
+// operator's own hand: every loopback caller is by design the administrator.
+// The unload succeeds, and the pin stays, so the model is protected again the
+// moment anything loads it.
+func TestUnloadingAPinnedModelLeavesThePinInPlace(t *testing.T) {
+	cfg := config.Default()
+	cfg.Pinned = []string{"org/keeper"}
+	a, _, mux := newWiredControl(t, cfg, "org/keeper")
+	srv := serve(t, mux)
+
+	loadModel(t, a, "org/keeper")
+
+	resp, err := srv.Client().Post(srv.URL+"/api/models/unload", "application/json",
+		strings.NewReader(`{"model":"org/keeper"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("unload of a pinned model = %d, want 200", resp.StatusCode)
+	}
+	if got := a.Pool.Resident(); len(got) != 0 {
+		t.Errorf("Resident() = %+v after the unload, want none", got)
+	}
+	if got := a.Config().Pinned; len(got) != 1 || got[0] != "org/keeper" {
+		t.Errorf("Pinned = %v after the unload, want the pin left in place", got)
 	}
 }

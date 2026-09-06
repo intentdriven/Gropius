@@ -667,6 +667,7 @@ func (p *urlPool) Acquire(context.Context, string) (*runtime.Upstream, func(), e
 	return &runtime.Upstream{RepoID: mergeModel, BaseURL: p.baseURL, ModelArg: p.modelArg}, func() {}, nil
 }
 func (p *urlPool) Resident() []runtime.Resident { return nil }
+func (p *urlPool) Pinned() []string             { return nil }
 func (p *urlPool) Unload(string) error          { return nil }
 
 // Merging is done once, on the body the gateway has already buffered, so a

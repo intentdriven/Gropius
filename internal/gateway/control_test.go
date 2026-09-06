@@ -10,6 +10,7 @@ import (
 
 	"github.com/intentdriven/Gropius/internal/app"
 	"github.com/intentdriven/Gropius/internal/config"
+	"github.com/intentdriven/Gropius/internal/registry"
 )
 
 func newTestControl(t *testing.T, cfg config.Config) *httptest.Server {
@@ -437,5 +438,70 @@ func TestSearchAuthorEmptyOverrideKeepsDefault(t *testing.T) {
 		if author != tc.wantAuthor || rest != tc.wantRest {
 			t.Errorf("searchAuthor(%q) = (%q, %q), want (%q, %q)", tc.q, author, rest, tc.wantAuthor, tc.wantRest)
 		}
+	}
+}
+
+// Pins apply the moment they are saved, so the answer must not tell the
+// operator to restart for a change that has already taken effect.
+func TestSavingPinnedModelsNeedsNoRestart(t *testing.T) {
+	srv, a := newTestControlApp(t, config.Default())
+
+	body := `{"host":"0.0.0.0","port":11535,"api_key":"","decode_concurrency":4,` +
+		`"idle_timeout_sec":0,"pinned":["org/keeper"]}`
+	resp := postJSON(t, srv, "/api/settings", body)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	var out struct {
+		Restart bool `json:"restart"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	if out.Restart {
+		t.Error("pinning reported restart=true, but the pool is told at once")
+	}
+	if got := a.Pool.Pinned(); len(got) != 1 || got[0] != "org/keeper" {
+		t.Errorf("the pool holds %v, want the model just pinned", got)
+	}
+}
+
+// The settings form does not own the pinned list on every save, and a save
+// that names it replaces it — leaving a model out is the only way a form can
+// unpin one.
+func TestSavingSettingsWithoutNamingPinnedKeepsThePins(t *testing.T) {
+	cfg := config.Default()
+	cfg.Pinned = []string{"org/keeper"}
+	srv, a := newTestControlApp(t, cfg)
+
+	resp := postJSON(t, srv, "/api/settings",
+		`{"host":"0.0.0.0","port":11535,"api_key":"","decode_concurrency":4,"idle_timeout_sec":0}`)
+	resp.Body.Close()
+	if got := a.Config().Pinned; len(got) != 1 || got[0] != "org/keeper" {
+		t.Errorf("Pinned = %v after an unrelated save, want the pin kept", got)
+	}
+}
+
+// A settings save whose pinned models cannot all be in memory at once is
+// refused, and the panel shows the operator why.
+func TestSettingsRefusesAPinnedSetLargerThanTheBudget(t *testing.T) {
+	srv, a := newTestControlApp(t, config.Default())
+	if err := a.Registry.Put(registry.Model{
+		RepoID: "org/enormous", Path: a.Paths.ModelDir("org/enormous"),
+		Bytes: 1 << 50, State: registry.StateReady, Progress: 100,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	resp := postJSON(t, srv, "/api/settings",
+		`{"host":"0.0.0.0","port":11535,"api_key":"","decode_concurrency":4,`+
+			`"idle_timeout_sec":0,"pinned":["org/enormous"]}`)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 for a pinned set that cannot fit", resp.StatusCode)
+	}
+	if got := a.Config().Pinned; len(got) != 0 {
+		t.Errorf("the refused pins reached the running configuration: %v", got)
 	}
 }

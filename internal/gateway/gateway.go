@@ -27,6 +27,7 @@ import (
 type Pool interface {
 	Acquire(ctx context.Context, repoID string) (*runtime.Upstream, func(), error)
 	Resident() []runtime.Resident
+	Pinned() []string
 	Unload(repoID string) error
 }
 
@@ -210,7 +211,17 @@ func (g *Gateway) handleListModels(w http.ResponseWriter, r *http.Request) {
 	// admitted while no key was configured could then be served as if one had
 	// been.
 	var residency map[string]runtime.Resident
+	var pinned map[string]bool
 	if g.admittedKeyed(r) {
+		// Folded on the same rule as the residency join below. The pinned set
+		// is read separately from the residency snapshot because a pin is not
+		// a property of a loaded model: a pinned model the pool is not holding
+		// is still pinned, and that is exactly the entry a client most wants to
+		// tell apart from an ordinary cold one.
+		pinned = make(map[string]bool)
+		for _, id := range g.pool.Pinned() {
+			pinned[config.FoldRepoID(id)] = true
+		}
 		residency = make(map[string]runtime.Resident)
 		for _, res := range g.pool.Resident() {
 			// Folded on both sides of the join, through the same rule the
@@ -249,7 +260,7 @@ func (g *Gateway) handleListModels(w http.ResponseWriter, r *http.Request) {
 			entry["max_model_len"] = m.ContextLength
 		}
 		if residency != nil {
-			addResidency(entry, residency[config.FoldRepoID(m.RepoID)])
+			addResidency(entry, residency[config.FoldRepoID(m.RepoID)], pinned[config.FoldRepoID(m.RepoID)])
 		}
 		data = append(data, entry)
 	}
@@ -273,7 +284,7 @@ func (g *Gateway) handleListModels(w http.ResponseWriter, r *http.Request) {
 // The values are a snapshot taken while the list is built. Nothing here holds a
 // model warm on the client's behalf: by the time the client reads them another
 // client's request may have evicted the model.
-func addResidency(entry map[string]any, res runtime.Resident) {
+func addResidency(entry map[string]any, res runtime.Resident, pinned bool) {
 	// The value is allow-listed too, not only the field names. Pool is an
 	// interface, so the string in Resident.State is not this package's to
 	// trust; anything but the two the pool defines means the listing cannot
@@ -294,6 +305,10 @@ func addResidency(entry map[string]any, res runtime.Resident) {
 	if !res.LastUsed.IsZero() {
 		entry["last_used"] = res.LastUsed.Unix()
 	}
+	// Always present rather than omitted when false: the whole value of the
+	// field is telling a pinned model from an unpinned one, and an absent key
+	// would be read as an older Gropius that cannot say either way.
+	entry["pinned"] = pinned
 }
 
 // maxRequestBody caps the size of a completion request. Prompts are text; a
