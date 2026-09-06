@@ -43,6 +43,8 @@ type Server struct {
 	FirstTokenDelay time.Duration
 	// ChunkDelay paces the chunks after the first; see Options.
 	ChunkDelay time.Duration
+	// RolePreamble emits a role-only first chunk; see Options.
+	RolePreamble bool
 
 	httpSrv   *httptest.Server
 	readyAt   time.Time
@@ -74,6 +76,12 @@ type Options struct {
 	// Without it a whole answer is written before a client could act on any of
 	// it, so a test about what happens mid-stream has no mid-stream.
 	ChunkDelay time.Duration
+	// RolePreamble emits a first chunk carrying only the assistant's role and
+	// no text, which is what OpenAI's own streaming API does and what several
+	// compatible servers do. Whether the pinned mlx-lm does has not been
+	// established here, so a test that cares which chunk a measurement lands
+	// on turns this on and says which behaviour it is describing.
+	RolePreamble bool
 }
 
 // Start launches a fake server. It is closed automatically via t.Cleanup by the
@@ -84,6 +92,7 @@ func Start(opts Options) *Server {
 		Reply:           opts.Reply,
 		FirstTokenDelay: opts.FirstTokenDelay,
 		ChunkDelay:      opts.ChunkDelay,
+		RolePreamble:    opts.RolePreamble,
 		readyAt:         time.Now().Add(opts.LoadDelay),
 	}
 	if s.Reply == "" {
@@ -258,6 +267,19 @@ func (s *Server) streamReply(w http.ResponseWriter, includeUsage bool) {
 	}
 	if s.FirstTokenDelay > 0 {
 		time.Sleep(s.FirstTokenDelay)
+	}
+	if s.RolePreamble {
+		b, _ := json.Marshal(map[string]any{
+			"id":     "chatcmpl-fake",
+			"object": "chat.completion.chunk",
+			"model":  s.ModelArg,
+			"choices": []any{map[string]any{
+				"index": 0,
+				"delta": map[string]any{"role": "assistant"},
+			}},
+		})
+		fmt.Fprintf(w, "data: %s\n\n", b)
+		flusher.Flush()
 	}
 	for i, word := range splitWords(s.Reply) {
 		if i > 0 && s.ChunkDelay > 0 {

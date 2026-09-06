@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/intentdriven/Gropius/internal/runtime"
@@ -32,6 +33,10 @@ type observation struct {
 	// written because a write that then fails is not a first token the client
 	// ever saw, and the difference between the two moments is a memcpy.
 	first time.Time
+	// delivered records that the relay ran and reported neither side cutting
+	// the answer short — that is, the whole answer was written and the model
+	// server's body was read to its end.
+	delivered bool
 }
 
 // observe starts an observation when the operator has recording on, and
@@ -102,6 +107,7 @@ func (o *observation) relayed(out relayOutcome) {
 	// and the status line has already gone out saying it was. Which of the two
 	// it was is read off the side that actually failed, not off a cancellation
 	// that may or may not have been delivered yet.
+	o.delivered = !out.clientGone && !out.upstreamCut
 	if o.record.Class != stats.ClassOK {
 		return
 	}
@@ -115,17 +121,23 @@ func (o *observation) relayed(out relayOutcome) {
 
 // finish records the request.
 //
-// A client that went away is recorded as having gone away whatever else
-// happened, because that is the observable outcome: the status line was sent
-// long before, so nothing else the handler saw describes it. Token counts are
-// dropped for anything but a completed answer — a partial count read off an
-// abandoned stream is a number that means nothing and would be averaged in as
-// if it did.
+// The cancelled class is decided by what was observed, in that order: the
+// relay's own verdict first, and the request's context only where the relay
+// has nothing to say. A client that reads to the end of the answer and closes
+// its socket without draining makes Go cancel this handler's context while
+// this very function is running, so a context error on its own does not mean
+// the client missed anything — and a request whose whole answer was delivered
+// must not be filed as abandoned with its token counts thrown away, which
+// would leave its model's totals short by exactly the requests that went best.
+//
+// Token counts are dropped for anything but a completed answer: a partial
+// count read off an abandoned stream is a number that means nothing and would
+// be averaged in as if it did.
 func (o *observation) finish(r *http.Request) {
 	if o == nil {
 		return
 	}
-	if r.Context().Err() != nil {
+	if !o.delivered && r.Context().Err() != nil {
 		o.record.Class = stats.ClassCancelled
 	}
 	if o.record.Class != stats.ClassOK {
@@ -220,25 +232,35 @@ func clientWantsUsage(payload map[string]json.RawMessage) bool {
 // truthy reports whether a JSON value is one the pinned model server would
 // act on, following Python's own rule: false, null, zero and the empty string
 // or collection are the refusals, and everything else is a yes.
+//
+// A number is decided by its value, not by how it was written down: 0, 0.0,
+// -0.0, 0e0 and 1e-400 all reach Python as zero and are all refusals there,
+// and matching them as text would have called four of the five a yes.
 func truthy(raw json.RawMessage) bool {
-	switch string(bytes.TrimSpace(raw)) {
-	case "false", "null", "0", "0.0", "-0", `""`, "[]", "{}", "":
+	trimmed := string(bytes.TrimSpace(raw))
+	if n, err := strconv.ParseFloat(trimmed, 64); err == nil {
+		return n != 0
+	}
+	switch trimmed {
+	case "false", "null", `""`, "[]", "{}", "":
 		return false
 	}
 	return true
 }
 
 // streamRequested reports whether the client asked for a streamed answer.
+//
+// Decided by the model server's rule, exactly as include_usage is: the pinned
+// server tests the field's truth in Python, so a client that sent 1 or "true"
+// is streamed and several OpenAI SDK wrappers send precisely that. Reading it
+// as a Go bool called those requests unstreamed, so nothing asked for their
+// token counts and every one of them was recorded as costing nothing.
 func streamRequested(payload map[string]json.RawMessage) bool {
 	raw, ok := payload["stream"]
 	if !ok {
 		return false
 	}
-	var streamed bool
-	if err := json.Unmarshal(raw, &streamed); err != nil {
-		return false
-	}
-	return streamed
+	return truthy(raw)
 }
 
 // mergeIncludeUsage asks the model server for the token counts, by setting the

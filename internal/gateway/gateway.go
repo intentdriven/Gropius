@@ -539,11 +539,8 @@ func relayRewritingModel(w http.ResponseWriter, resp *http.Response, modelArg, r
 		}
 		return out
 	default:
-		// A body of some other type is relayed as bytes; streamCopy reports
-		// nothing about how it ended, so nothing is claimed about it.
-		streamCopy(w, resp.Body)
+		return streamCopy(w, resp.Body)
 	}
-	return relayOutcome{}
 }
 
 // rewriteModelField returns b with a top-level "model" field equal to modelArg
@@ -670,7 +667,14 @@ func readUsage(ev map[string]json.RawMessage) *usageCounts {
 	if err := json.Unmarshal(raw, &counts); err != nil {
 		return nil
 	}
-	return &usageCounts{Prompt: counts.PromptTokens, Completion: counts.CompletionTokens}
+	// Clamped, because these are the child process's numbers rather than
+	// Gropius's own: a negative count would be summed into the per-model and
+	// per-minute totals and drag them below zero, and no count is a truer
+	// answer than a wrong one.
+	return &usageCounts{
+		Prompt:     max(counts.PromptTokens, 0),
+		Completion: max(counts.CompletionTokens, 0),
+	}
 }
 
 // streamRewriteSSE relays an SSE body line by line, rewriting the "model"
@@ -690,33 +694,44 @@ func streamRewriteSSE(w http.ResponseWriter, src io.Reader, modelArg, requested 
 	dropBlank := false
 	for {
 		line, err := br.ReadBytes('\n')
+		// ReadBytes returns the bytes it did read alongside the error that
+		// stopped it, so a line and the failure that truncated it can arrive
+		// together. Every path through the body below therefore falls out to
+		// the one error check at the bottom rather than continuing the loop:
+		// skipping it on the path that removes an event would lose the very
+		// fact this relay exists to report.
 		if len(line) > 0 {
 			if prefix, payload, ok := cutDataPrefix(line); ok {
 				dropBlank = false
 				ev, parsed := decodeEvent(payload)
-				switch {
-				case parsed && isUsageOnly(ev):
-					if opts.observing {
-						out.usage = readUsage(ev)
+				if parsed && opts.observing {
+					// Read from any event that carries counts, not only from
+					// the one that is removed: reading and removing are
+					// separate decisions, and a server that hangs the counts
+					// on a chunk of the answer would otherwise be recorded as
+					// a success that cost nothing.
+					if u := readUsage(ev); u != nil {
+						out.usage = u
 					}
-					if opts.dropUsage {
-						// Gropius asked for this event, not the client. It is
-						// removed here rather than never asked for, because the
-						// counts are the whole point of asking.
-						dropBlank = true
-						continue
+					if out.firstToken.IsZero() && carriesGeneration(ev) {
+						out.firstToken = time.Now()
 					}
-				case opts.observing && out.firstToken.IsZero() && parsed && carriesGeneration(ev):
-					out.firstToken = time.Now()
 				}
-				rewritten := renderEvent(payload, ev, parsed, modelArg, requested)
-				if _, werr := fmt.Fprintf(w, "%s%s\n", prefix, rewritten); werr != nil {
-					out.clientGone = true
-					return out
+				if parsed && opts.dropUsage && isUsageOnly(ev) {
+					// Gropius asked for this event, not the client. It is
+					// removed here rather than never asked for, because the
+					// counts are the whole point of asking.
+					dropBlank = true
+				} else {
+					rewritten := renderEvent(payload, ev, parsed, modelArg, requested)
+					if _, werr := fmt.Fprintf(w, "%s%s\n", prefix, rewritten); werr != nil {
+						out.clientGone = true
+						return out
+					}
+					_ = rc.Flush()
 				}
 			} else if isBlankLine(line) && dropBlank {
 				dropBlank = false
-				continue
 			} else {
 				// Anything else relayed ends the removed event's reach: only
 				// the blank line immediately after it belongs to it, and a
@@ -726,10 +741,11 @@ func streamRewriteSSE(w http.ResponseWriter, src io.Reader, modelArg, requested 
 					out.clientGone = true
 					return out
 				}
+				// A flush error means the connection does not support
+				// flushing; the data is still written, so keep going rather
+				// than truncating.
+				_ = rc.Flush()
 			}
-			// A flush error means the connection does not support flushing; the
-			// data is still written, so keep going rather than truncating.
-			_ = rc.Flush()
 		}
 		if err != nil {
 			out.upstreamCut = !errors.Is(err, io.EOF)
@@ -826,21 +842,29 @@ func (g *Gateway) resolveModel(requested string) (string, error) {
 
 // streamCopy relays the upstream body, flushing each chunk so SSE tokens reach
 // the client as they are generated rather than in one lump at the end.
-func streamCopy(w http.ResponseWriter, src io.Reader) {
+//
+// It reports which side ended it for the same reason the two relays above do:
+// a body that stopped part-way is not an answer, and saying nothing about it
+// would leave the class to be guessed from a context cancellation delivered
+// on another goroutine.
+func streamCopy(w http.ResponseWriter, src io.Reader) relayOutcome {
+	var out relayOutcome
 	rc := http.NewResponseController(w)
 	buf := make([]byte, 8<<10)
 	for {
 		n, err := src.Read(buf)
 		if n > 0 {
 			if _, werr := w.Write(buf[:n]); werr != nil {
-				return // client went away
+				out.clientGone = true
+				return out
 			}
 			// A flush error means the connection does not support flushing; the
 			// data is still written, so keep going rather than truncating.
 			_ = rc.Flush()
 		}
 		if err != nil {
-			return
+			out.upstreamCut = !errors.Is(err, io.EOF)
+			return out
 		}
 	}
 }
