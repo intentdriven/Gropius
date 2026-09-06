@@ -196,3 +196,23 @@ form label.switch input { width: auto; flex: none; }
 .empty { padding: 48px 0; text-align: center; color: var(--muted); }
 h2 { font-size: 19px; margin-top: 0; }
 h3 { font-size: 14px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin: 26px 0 8px; }
+
+/* Statistics: a wide table on a narrow window scrolls inside its own box
+   rather than pushing the page sideways. */
+.scroll { overflow-x: auto; }
+#statsTable { width: 100%; border-collapse: collapse; font-size: 13px; }
+#statsTable th, #statsTable td {
+  padding: 6px 10px; text-align: left; white-space: nowrap;
+  border-bottom: 1px solid var(--line);
+}
+#statsTable th {
+  font-size: 11px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted);
+}
+#statsTable td.figure { font-variant-numeric: tabular-nums; text-align: right; }
+#statsTable td.bad { color: var(--red); }
+.statcard {
+  padding: 12px 14px; margin-bottom: 8px;
+  border: 1px solid var(--line);
+}
+.statcard .name { font-weight: 600; }
+.statcard .figures { color: var(--muted); font-size: 13px; margin-top: 4px; }

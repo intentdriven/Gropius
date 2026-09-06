@@ -65,6 +65,10 @@ function showTab(name) {
     (t) => t.classList.toggle('active', t.dataset.tab === name));
   document.querySelectorAll('.panel').forEach(
     (p) => p.classList.toggle('active', p.id === `tab-${name}`));
+  // The request rows are fetched rather than pushed: they are far too many to
+  // ride the state snapshot the rest of the panel redraws from, so they are
+  // asked for while the view that shows them is open and not otherwise.
+  watchStats(name === 'stats');
 }
 document.querySelectorAll('.tab').forEach(
   (t) => t.addEventListener('click', () => showTab(t.dataset.tab)));
@@ -410,6 +414,7 @@ function renderSettings() {
   $('setIdle').value = c.idle_timeout_sec;
   $('setConc').value = c.decode_concurrency;
   $('setHF').value   = c.hf_token || '';
+  $('setStats').checked = !!c.statistics;
   writeSampling('input', c.sampling);
   overrides = { ...(c.model_sampling || {}) };
   renderOverrides();
@@ -570,6 +575,8 @@ $('ovApply').addEventListener('click', () => {
   renderOverrides();
 });
 
+$('setStats').addEventListener('change', () => { settingsTouched = true; });
+
 $('genKey').addEventListener('click', () => {
   const b = new Uint8Array(24);
   crypto.getRandomValues(b);
@@ -594,6 +601,7 @@ $('settingsForm').addEventListener('submit', async (e) => {
     idle_timeout_sec:   parseInt($('setIdle').value, 10) || 0,
     decode_concurrency: parseInt($('setConc').value, 10) || 1,
     hf_token:           $('setHF').value,
+    statistics:         $('setStats').checked,
     // A blank sampling field is sent as null, not as zero: the model server is
     // handed a flag only for a parameter that has a value.
     sampling:           readSampling('input'),
@@ -621,6 +629,127 @@ $('settingsForm').addEventListener('submit', async (e) => {
     msg.textContent = err.message;
   }
 });
+
+// ── statistics ───────────────────────────────────────────
+// Nothing here is shown, and nothing is fetched, until the operator turns
+// recording on: with the switch off the endpoint answers with an empty view
+// and the panel says so.
+
+let statsTimer = null;
+
+// watchStats starts or stops the polling that keeps the Statistics view fresh
+// while it is the visible one.
+function watchStats(visible) {
+  if (statsTimer) { clearInterval(statsTimer); statsTimer = null; }
+  if (!visible) return;
+  refreshStats();
+  statsTimer = setInterval(refreshStats, 2000);
+}
+
+async function refreshStats() {
+  try {
+    renderStats(await api('/api/stats'));
+  } catch {
+    // A panel that cannot reach its own server already says "disconnected" at
+    // the top; a second alert about it would be noise.
+  }
+}
+
+function renderStats(view) {
+  const on = !!(view && view.enabled);
+  $('statsOff').hidden = on;
+  $('statsBody').hidden = !on;
+  if (!on) return;
+
+  $('statsModels').innerHTML = (view.models || []).length
+    ? (view.models || []).map(modelStatsCard).join('')
+    : '<p class="hint">No requests yet.</p>';
+
+  // Newest first: the request a reader wants is almost always the last one.
+  const rows = (view.requests || []).slice().reverse();
+  $('statsRows').innerHTML = rows.map((r) => {
+    const c = requestRow(r);
+    const bad = c.failed ? ' bad' : '';
+    return `<tr>
+      <td>${c.time}</td>
+      <td>${escapeHtml(c.model)}</td>
+      <td class="${c.failed ? 'bad' : ''}">${c.outcome}</td>
+      <td class="figure${bad}">${c.tokens}</td>
+      <td class="figure${bad}">${c.first}</td>
+      <td class="figure${bad}">${c.rate}</td>
+      <td class="figure${bad}">${c.total}</td>
+    </tr>`;
+  }).join('');
+}
+
+// modelStatsCard is one model's totals since recording was turned on.
+function modelStatsCard(m) {
+  const failed = (m.requests || 0) - ((m.by_class || {}).ok || 0);
+  const figures = [
+    `${m.requests} request${m.requests === 1 ? '' : 's'}`,
+    failed ? `${failed} did not answer` : null,
+    `${m.prompt_tokens} tokens in · ${m.completion_tokens} out`,
+    m.loads ? `loaded ${m.loads}×` : null,
+    m.evictions ? `evicted ${m.evictions}×` : null,
+    m.last_load_ms ? `last load ${millis(m.last_load_ms)}` : null,
+  ].filter(Boolean).join(' · ');
+  return `<div class="statcard"><div class="name">${escapeHtml(m.model || '—')}</div>` +
+    `<div class="figures">${figures}</div></div>`;
+}
+
+// requestRow is the whole of one row of the request table: a pure function of
+// one record, so what a reader sees can be asserted without a DOM (see
+// stats_test.go). Every cell is a figure, a fixed outcome word, or the id of a
+// model this Mac holds — there is nothing else in a record to show.
+function requestRow(r) {
+  const answered = r.class === 'ok';
+  const d = new Date(r.at * 1000);
+  const pad = (n) => String(n).padStart(2, '0');
+  return {
+    time: `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`,
+    model: r.model || '—',
+    outcome: outcomeLabel(r.class),
+    failed: !answered,
+    tokens: answered ? `${r.prompt_tokens} / ${r.completion_tokens}` : '—',
+    first: r.first_token_ms >= 0 ? millis(r.first_token_ms) : '—',
+    rate: generationRate(r),
+    total: millis(r.duration_ms),
+  };
+}
+
+// outcomeLabel says in words how a request ended. The recorder's own names are
+// for the record and for whatever reads it later; a reader of the panel should
+// not have to learn them.
+function outcomeLabel(c) {
+  return {
+    ok: 'answered',
+    client_error: 'rejected',
+    upstream_status: 'model refused',
+    busy: 'too busy',
+    refused: 'no room',
+    launch_failed: 'could not start',
+    not_ready: 'never ready',
+    unreachable: 'no answer',
+    cancelled: 'client left',
+  }[c] || 'unknown';
+}
+
+// generationRate is the tokens after the first over the time spent generating
+// them, which is what vLLM, the OpenTelemetry conventions and LM Studio all
+// mean by tokens per second. A request with no first token, or with one token,
+// has no rate at all rather than a figure that means something else.
+function generationRate(r) {
+  if (r.class !== 'ok' || r.first_token_ms < 0 || r.completion_tokens < 2) return '—';
+  const generating = (r.duration_ms - r.first_token_ms) / 1000;
+  if (generating <= 0) return '—';
+  return `${((r.completion_tokens - 1) / generating).toFixed(1)} tok/s`;
+}
+
+// millis renders a duration the way a reader reads one: milliseconds while
+// they are small enough to matter, seconds once they are not.
+function millis(ms) {
+  return ms < 1000 ? `${ms} ms` : `${(ms / 1000).toFixed(1)} s`;
+}
 
 // ── misc ─────────────────────────────────────────────────
 function escapeHtml(s) {
