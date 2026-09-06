@@ -80,7 +80,7 @@ type Options struct {
 	// no text, which is what OpenAI's own streaming API does and what several
 	// compatible servers do. Whether the pinned mlx-lm does has not been
 	// established here, so a test that cares which chunk a measurement lands
-	// on turns this on and says which behaviour it is describing.
+	// on turns this on and says which behavior it is describing.
 	RolePreamble bool
 }
 

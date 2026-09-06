@@ -162,6 +162,13 @@ type Event struct {
 // is the seam it plugs into so that there is one collection path rather than
 // two. A recorder built without a store keeps everything in memory and writes
 // nowhere, which is what this build does.
+//
+// It carries two of the three kinds of record that ADR names: the request
+// lines and the load and removal events, which are the two the recorder
+// produces. The third — a startup record of the settings in effect — is not
+// the recorder's to produce and arrives with the store that writes it, which
+// is also where a lifecycle (a flush, a close, a rotation) belongs. Adding
+// either here would be deciding the store's shape from the outside.
 type Store interface {
 	AppendRequest(Record) error
 	AppendEvent(Event) error

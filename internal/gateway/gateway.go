@@ -612,7 +612,7 @@ const usageField = "usage"
 // when a streamed request asked for its token counts: the counts, and nothing
 // about the generation.
 //
-// The shape recognised is exactly the shape asked for: the counts, and a
+// The shape recognized is exactly the shape asked for: the counts, and a
 // choices array that is present and empty. Anything else — no choices field at
 // all, a choices field that is not a list, counts riding an event that also
 // carries a choice — is relayed as it stands, because removing an event this

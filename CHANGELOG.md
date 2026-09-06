@@ -25,7 +25,11 @@ GitHub release notes.
   keeps the figures is never handed a request, its headers or its connection,
   and the only text it can be given is the id of a model already on this Mac.
   Everything is held in memory, a restart empties it, and turning the switch
-  off empties it at once. Nothing leaves the Mac, under
+  off empties it at once. The boundary is the Mac rather than one account: the
+  control panel asks for no password and answers every account on this Mac by
+  design, so where several people log in, any of them can turn the switch on
+  and read what it holds — and the panel says **Recording** beside the server
+  status for as long as it is on. Nothing leaves the Mac, under
   [the standing decision that no telemetry ever will](.abcd/development/decisions/adrs/2609061503319212-no-public-telemetry-local-telemetry-only-as-a-strict-opt-in.md).
   A streamed answer carries no token counts unless the request asks for them,
   so while recording is on Gropius asks the model server on the client's

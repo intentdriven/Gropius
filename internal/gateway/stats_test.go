@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/intentdriven/Gropius/internal/app"
 	"github.com/intentdriven/Gropius/internal/config"
 	"github.com/intentdriven/Gropius/internal/mlxtest"
 	"github.com/intentdriven/Gropius/internal/registry"
@@ -465,6 +466,10 @@ func TestNothingFromTheRequestReachesTheRecordOrTheLog(t *testing.T) {
 	}{
 		{"the statistics view", string(view)},
 		{"the per-model counters", string(summary)},
+		// The endpoint itself, not only what it is built from: a handler that
+		// decorated its answer would carry whatever it added past a scan of
+		// the recorder alone.
+		{"the statistics endpoint", statsEndpointBody(t, rec)},
 		{"the process log", logged.String()},
 	} {
 		for _, secret := range []string{sentinel, token, "192.0.2.44"} {
@@ -506,6 +511,29 @@ func TestOffLeavesTheGatewayAsItWas(t *testing.T) {
 	if strings.Contains(body, `"choices":[]`) {
 		t.Error("with the switch off the client received a usage chunk")
 	}
+}
+
+// statsEndpointBody serves GET /api/stats from a control plane holding this
+// recorder, and returns the bytes a reader of the panel would receive.
+func statsEndpointBody(t *testing.T, rec *stats.Recorder) string {
+	t.Helper()
+	cfg := config.Default()
+	cfg.Statistics = true
+	a, err := app.New(app.Options{Paths: config.NewPaths(t.TempDir()), Config: cfg})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { a.Close() })
+	a.Stats = rec
+
+	mux := http.NewServeMux()
+	(&Control{App: a}).Routes(mux)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/stats", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("GET /api/stats = %d, want 200", w.Code)
+	}
+	return w.Body.String()
 }
 
 // The switch applies to the next request, not to the next restart: the gateway
@@ -1088,7 +1116,7 @@ func TestNegativeTokenCountsAreRefused(t *testing.T) {
 // with a role-only chunk, the figure is the time to that chunk — the moment
 // the client first hears from the model — rather than to the first word. This
 // test says which of the two it is, rather than leaving it to be inferred from
-// a server whose behaviour is not established here.
+// a server whose behavior is not established here.
 func TestTimeToFirstTokenIsTheFirstChunkAboutTheAnswer(t *testing.T) {
 	srv, rec, _, _ := statsGateway(t, true, mlxtest.Options{
 		RolePreamble:    true,

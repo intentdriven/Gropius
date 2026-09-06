@@ -41,8 +41,10 @@ One record per request, made of these and nothing else:
 - `streamed` — whether the client asked for the answer a chunk at a time.
 - `prompt_tokens` and `completion_tokens` — the model server's own count of
   what went in and what came out. Only an answered request carries them.
-- `first_token_ms` — how long the client waited for the first chunk of a
-  streamed answer.
+- `first_token_ms` — how long the model took to produce the first chunk of a
+  streamed answer, measured from the request arriving to that chunk reaching
+  Gropius. It is `-1` for a request that produced no streamed chunk at all,
+  and the panel shows a dash.
 - `duration_ms` — how long the whole request took, from the moment it arrived.
 - `queue_wait_ms` — how long it waited for a free slot on a model that was
   already loaded.
