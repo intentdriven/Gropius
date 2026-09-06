@@ -142,8 +142,15 @@ func ValidRepoID(s string) bool {
 	return validRepoComponent(org) && validRepoComponent(name)
 }
 
+// MaxRepoComponent bounds each half of a repo id. HuggingFace itself allows no
+// more, and the bound is what turns "at most MaxModelSampling overrides" into a
+// bound on the size of config.json rather than only on its entry count — an
+// unbounded key would let a legal number of entries write a file Load then
+// refuses to read.
+const MaxRepoComponent = 96
+
 func validRepoComponent(s string) bool {
-	if s == "" || s == "." || s == ".." {
+	if s == "" || s == "." || s == ".." || len(s) > MaxRepoComponent {
 		return false
 	}
 	for _, r := range s {
@@ -404,6 +411,15 @@ func Load(path string) (Config, []string, error) {
 }
 
 // Save atomically writes config to path.
+//
+// A config that would not load again is refused rather than written. Load caps
+// what it will read, and a config.json over that cap is not a smaller problem
+// than a corrupt one: main falls back to loopback-only with the shipping
+// defaults, so the API key and the bind address a user set are silently
+// unused until someone edits the file by hand. The check is here rather than
+// in Validate because it is a property of the encoded bytes — MarshalIndent's
+// output is larger than the body it came from, so bounding the request that
+// carried it is not enough.
 func Save(path string, c Config) error {
 	if err := c.Validate(); err != nil {
 		return err
@@ -411,6 +427,10 @@ func Save(path string, c Config) error {
 	b, err := json.MarshalIndent(c, "", "  ")
 	if err != nil {
 		return err
+	}
+	if len(b)+1 > MaxConfigBytes {
+		return fmt.Errorf("settings are %d bytes, over the %d-byte limit config.json can be read back from",
+			len(b)+1, MaxConfigBytes)
 	}
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o755); err != nil {

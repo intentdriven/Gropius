@@ -360,3 +360,80 @@ func collectRefs(t *testing.T, path string, v reflect.Value, out map[string]uint
 		}
 	}
 }
+
+// Everything the settings endpoint accepts is written to config.json, and a
+// config.json Load will not read sends the next start into its fail-closed
+// loopback-only branch — the LAN endpoint gone until someone edits the file by
+// hand. Save is the last place that can be prevented.
+func TestSaveRefusesAConfigTooLargeToLoadBack(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+
+	cfg := Default()
+	cfg.APIKey = strings.Repeat("k", MaxConfigBytes)
+	if err := Save(path, cfg); err == nil {
+		t.Fatal("Save wrote a config.json that Load will refuse to read")
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Errorf("a refused Save left a file behind: %v", err)
+	}
+
+	// The same config within the limit still saves and loads.
+	cfg.APIKey = "bh_short"
+	if err := Save(path, cfg); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	if _, _, err := Load(path); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+}
+
+// A repo id is a key in the override map and a directory name on disk. Bounding
+// its length is what makes "at most MaxModelSampling overrides" a bound on
+// bytes rather than only on entries.
+func TestValidRepoIDBoundsLength(t *testing.T) {
+	long := strings.Repeat("a", 200)
+	if ValidRepoID(long + "/name") {
+		t.Error("an unbounded organisation name was accepted")
+	}
+	if ValidRepoID("org/" + long) {
+		t.Error("an unbounded repository name was accepted")
+	}
+	if !ValidRepoID("mlx-community/Qwen3-8B-4bit") {
+		t.Error("a real repo id was refused")
+	}
+	if !ValidRepoID(strings.Repeat("a", MaxRepoComponent) + "/" + strings.Repeat("b", MaxRepoComponent)) {
+		t.Error("a repo id at the length limit was refused")
+	}
+}
+
+// The two bounds together: a full override map, at the longest ids allowed,
+// beside the other settings, must still round-trip through the file.
+func TestAFullOverrideMapStillFitsTheConfigFile(t *testing.T) {
+	cfg := Default()
+	cfg.ModelSampling = map[string]Sampling{}
+	for i := range MaxModelSampling {
+		id := fmt.Sprintf("%s%03d/%s", strings.Repeat("o", MaxRepoComponent-3), i, strings.Repeat("n", MaxRepoComponent))
+		cfg.ModelSampling[id] = Sampling{
+			Temperature: f64(0.7), TopP: f64(0.95), TopK: intp(40),
+			MinP: f64(0.05), MaxTokens: intp(8192),
+		}
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := Save(path, cfg); err != nil {
+		t.Fatalf("Save: %v — a legal override map does not fit the file", err)
+	}
+	loaded, dropped, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(dropped) != 0 {
+		t.Errorf("dropped %v from a config within every limit", dropped)
+	}
+	if len(loaded.ModelSampling) != MaxModelSampling {
+		t.Errorf("loaded %d overrides, want %d", len(loaded.ModelSampling), MaxModelSampling)
+	}
+}

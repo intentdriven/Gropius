@@ -275,3 +275,51 @@ func TestCaseVariantOverrideKeysAreRefused(t *testing.T) {
 		t.Error("the ambiguous pair was saved anyway")
 	}
 }
+
+// The override cap exists so that a save cannot write a config.json the next
+// start refuses to read — which reverts the bind address and the API key to the
+// shipping defaults until someone edits the file by hand. Both halves are
+// checked: a body over the cap, and a body under it that would still marshal
+// into a file too large.
+func TestASaveCannotWriteAConfigTheNextStartRefuses(t *testing.T) {
+	srv, a := newTestControlApp(t, config.Default())
+
+	// A body larger than the file may be.
+	huge := `{"host":"127.0.0.1","port":11535,"decode_concurrency":4,"api_key":"` +
+		strings.Repeat("k", config.MaxConfigBytes) + `"}`
+	resp := postJSON(t, srv, "/api/settings", huge)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("status = %d for an oversized body, want 400", resp.StatusCode)
+	}
+
+	// A body inside the cap whose indented encoding is not: the file is written
+	// with MarshalIndent, which puts every list element on its own indented
+	// line, so bounding the request that carried it is not enough.
+	list := make([]string, 90000)
+	for i := range list {
+		list[i] = "aa/bb"
+	}
+	encoded, err := json.Marshal(map[string]any{
+		"host": "127.0.0.1", "port": 11535, "decode_concurrency": 4, "preload": list,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	near := string(encoded)
+	if len(near) > config.MaxConfigBytes {
+		t.Fatalf("test body is %d bytes, over the request cap already", len(near))
+	}
+	resp2 := postJSON(t, srv, "/api/settings", near)
+	resp2.Body.Close()
+	if resp2.StatusCode != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400 — this save writes a config.json Load will refuse", resp2.StatusCode)
+	}
+
+	// Whatever happened, the file that exists must still load.
+	if _, err := os.Stat(a.Paths.Config); err == nil {
+		if _, _, err := config.Load(a.Paths.Config); err != nil {
+			t.Errorf("config.json can no longer be read: %v", err)
+		}
+	}
+}
