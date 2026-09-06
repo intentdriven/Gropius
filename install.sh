@@ -45,6 +45,16 @@ die() {
 
 [ "$(uname -s)" = "Darwin" ] || die "Gropius is macOS only."
 
+# Both bundles declare macOS 26 as their minimum, so Launch Services refuses
+# them on anything older. Refuse here instead — before the download, before the
+# sudo prompt, and before /Applications and the firewall are touched — so an
+# unsupported Mac is turned away rather than half-installed. The major lives in
+# this one variable; build/Info.plist is the value it must match.
+MIN_MACOS_MAJOR=26
+macos_major="$(sw_vers -productVersion 2>/dev/null | cut -d. -f1)"
+[ "${macos_major:-0}" -ge "$MIN_MACOS_MAJOR" ] ||
+	die "Gropius requires macOS $MIN_MACOS_MAJOR (this Mac runs $(sw_vers -productVersion 2>/dev/null || echo "an older system"))."
+
 # The server needs Apple Silicon (MLX runs on Metal). The client is universal.
 # `uname -m` reports x86_64 in a Rosetta-translated shell (common with x86_64
 # Homebrew), so also ask the kernel whether the hardware is Apple Silicon.
