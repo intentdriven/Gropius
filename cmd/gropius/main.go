@@ -262,6 +262,12 @@ func openBrowser(url string) {
 }
 
 // withLogging logs API requests but not the noisy static-asset and polling ones.
+//
+// The line describes the call, never the caller: method, path, status and
+// duration are what a failure is diagnosed from, and the client's network
+// address is deliberately left out so that serving a request records nothing
+// about who made it. Debugging one client goes through the per-model debug
+// action instead.
 func withLogging(next http.Handler, log *slog.Logger) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if isNoisy(r.URL.Path) {
@@ -269,11 +275,47 @@ func withLogging(next http.Handler, log *slog.Logger) http.Handler {
 			return
 		}
 		start := time.Now()
-		next.ServeHTTP(w, r)
+		rec := &statusRecorder{ResponseWriter: w}
+		next.ServeHTTP(rec, r)
 		log.Info("request",
 			"method", r.Method, "path", r.URL.Path,
-			"from", r.RemoteAddr, "took", time.Since(start).Round(time.Millisecond))
+			"status", rec.status(), "took", time.Since(start).Round(time.Millisecond))
 	})
+}
+
+// statusRecorder remembers the response status so the log can report it.
+//
+// Unwrap keeps http.NewResponseController working through the wrapper: the
+// streaming completions path flushes each SSE chunk that way, and without it
+// a stream would arrive as one blob at the end.
+type statusRecorder struct {
+	http.ResponseWriter
+	code int
+}
+
+func (s *statusRecorder) WriteHeader(code int) {
+	if s.code == 0 {
+		s.code = code
+	}
+	s.ResponseWriter.WriteHeader(code)
+}
+
+func (s *statusRecorder) Write(b []byte) (int, error) {
+	if s.code == 0 {
+		s.code = http.StatusOK // an implicit WriteHeader
+	}
+	return s.ResponseWriter.Write(b)
+}
+
+func (s *statusRecorder) Unwrap() http.ResponseWriter { return s.ResponseWriter }
+
+// status is the code the handler produced; a handler that wrote nothing at all
+// still ends as a 200, which is what net/http sends.
+func (s *statusRecorder) status() int {
+	if s.code == 0 {
+		return http.StatusOK
+	}
+	return s.code
 }
 
 func isNoisy(path string) bool {
