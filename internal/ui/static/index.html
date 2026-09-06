@@ -75,14 +75,15 @@
       each model performs. Nothing is recorded until you do, and nothing leaves this Mac.</p>
   </div>
   <div id="statsBody" hidden>
+    <p class="figures" id="statsTotals"></p>
     <h2>Per model</h2>
     <div id="statsModels"></div>
     <h2>Recent requests</h2>
     <div class="scroll">
       <table id="statsTable">
         <thead>
-          <tr><th>Time</th><th>Model</th><th>Outcome</th><th>Tokens in/out</th>
-            <th>First token</th><th>Rate</th><th>Total</th></tr>
+          <tr><th>Time</th><th>Model</th><th>Mode</th><th>Outcome</th><th>Tokens in/out</th>
+            <th>First token</th><th>Rate</th><th>Waited</th><th>Total</th></tr>
         </thead>
         <tbody id="statsRows"></tbody>
       </table>

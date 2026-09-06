@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -26,8 +27,10 @@ type observation struct {
 	rec     *stats.Recorder
 	started time.Time
 	record  stats.Record
-	// first is when the first streamed event carrying a choice reached the
-	// client, zero when there was none.
+	// first is when the first streamed event carrying a choice was read off
+	// the model server, zero when there was none. It is read rather than
+	// written because a write that then fails is not a first token the client
+	// ever saw, and the difference between the two moments is a memcpy.
 	first time.Time
 }
 
@@ -96,11 +99,16 @@ func (o *observation) relayed(out relayOutcome) {
 		o.record.CompletionTokens = out.usage.Completion
 	}
 	// A 200 whose body then stopped part-way is not a request that went well,
-	// and the status line has already gone out saying it was. Recorded as the
-	// model server not answering, which is what happened; a client that went
-	// away instead is caught in finish, where cancellation wins over
-	// everything.
-	if out.truncated && o.record.Class == stats.ClassOK {
+	// and the status line has already gone out saying it was. Which of the two
+	// it was is read off the side that actually failed, not off a cancellation
+	// that may or may not have been delivered yet.
+	if o.record.Class != stats.ClassOK {
+		return
+	}
+	switch {
+	case out.clientGone:
+		o.record.Class = stats.ClassCancelled
+	case out.upstreamCut:
 		o.record.Class = stats.ClassUnreachable
 	}
 }
@@ -138,28 +146,39 @@ type usageCounts struct {
 }
 
 // relayOutcome is what relaying the answer revealed, over and above the status
-// line: whether the answer was cut short, when the client saw the first chunk,
-// and the token counts if the answer carried them.
+// line: whether the answer was cut short and by which side, when the first
+// chunk was relayed, and the token counts if the answer carried them.
+//
+// The two ways an answer stops early are kept apart because they are opposite
+// facts about the same request, and getting them the wrong way round is the
+// one error that would make this feature actively misleading. The relay knows
+// which side failed — a failed read is the model server, a failed write is the
+// client — so it says, rather than leaving the class to be inferred from a
+// cancellation that arrives on another goroutine whenever it is scheduled.
 type relayOutcome struct {
-	// truncated is a streamed answer that stopped part-way: the model server
-	// went away mid-generation, or the client did. Only the streaming relay
-	// reports it, because it is the only one that can tell.
-	truncated  bool
+	// upstreamCut is a read from the model server that failed part-way.
+	upstreamCut bool
+	// clientGone is a write to the client that failed part-way.
+	clientGone bool
 	firstToken time.Time
 	usage      *usageCounts
 }
 
 // relayOptions tell the relay what the observer needs and what the client
-// asked for. Both are false with the switch off, which is the relay's original
-// behavior exactly.
+// asked for.
+//
+// Both fields are false in the zero value, and the zero value has to be the
+// harmless one: removing an event is the destructive act here, so it is the
+// one that has to be asked for by name. A caller that forgets these entirely
+// relays exactly what the model server sent.
 type relayOptions struct {
 	// observing turns on the reading the relay does for the recorder: when the
 	// first chunk went out, and the counts in the usage event.
 	observing bool
-	// keepUsage forwards the usage-only event to the client. It is true only
-	// when the client's own request asked for it; otherwise the event is
-	// Gropius's business and is removed before the answer is relayed.
-	keepUsage bool
+	// dropUsage removes the usage-only event from the answer. It is set only
+	// when Gropius asked the model server for that event on a client's behalf
+	// and the client did not ask for it itself.
+	dropUsage bool
 }
 
 // streamOptionsField is the request field that decides whether a streamed
@@ -171,18 +190,42 @@ const includeUsageField = "include_usage"
 
 // clientWantsUsage reports whether the client's own request asked the model
 // server for the token counts. What it asked for is what it gets back.
+//
+// The question is decided the way the model server decides it, not the way Go
+// would: the pinned server reads the value for its truth in Python, where 1
+// and "true" are as true as true is. Reading it as a Go bool would answer
+// "the client did not ask" for a request the model server is about to honour,
+// and the client would then lose the event it wrote that field to get. Every
+// value that is not plainly a refusal therefore counts as asking, because
+// keeping an event the client may not want is a smaller wrong than removing
+// one it does.
 func clientWantsUsage(payload map[string]json.RawMessage) bool {
 	raw, ok := payload[streamOptionsField]
 	if !ok {
 		return false
 	}
-	var opts struct {
-		IncludeUsage bool `json:"include_usage"`
-	}
+	var opts map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &opts); err != nil {
+		// Not an object: the model server will refuse this request, and
+		// nothing was merged into it. Nothing to remove either way.
+		return true
+	}
+	value, ok := opts[includeUsageField]
+	if !ok {
 		return false
 	}
-	return opts.IncludeUsage
+	return truthy(value)
+}
+
+// truthy reports whether a JSON value is one the pinned model server would
+// act on, following Python's own rule: false, null, zero and the empty string
+// or collection are the refusals, and everything else is a yes.
+func truthy(raw json.RawMessage) bool {
+	switch string(bytes.TrimSpace(raw)) {
+	case "false", "null", "0", "0.0", "-0", `""`, "[]", "{}", "":
+		return false
+	}
+	return true
 }
 
 // streamRequested reports whether the client asked for a streamed answer.

@@ -329,7 +329,7 @@ func TestConcurrentRecordingIsSafe(t *testing.T) {
 	r.SetEnabled(true)
 
 	var wg sync.WaitGroup
-	for i := range 8 {
+	for range 8 {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -340,9 +340,42 @@ func TestConcurrentRecordingIsSafe(t *testing.T) {
 				_ = r.Summary()
 			}
 		}()
-		if i == 4 {
+	}
+	// The interesting race is the switch going off under a request: that
+	// replaces the ring and both maps while the goroutines above are reading
+	// and writing them.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for range 20 {
+			r.SetEnabled(false)
 			r.SetEnabled(true)
 		}
-	}
+	}()
 	wg.Wait()
+}
+
+// A recorder that was never built is not a reason for the control panel to
+// stop answering: the readers tolerate one.
+func TestTheReadersTolerateNoRecorderAtAll(t *testing.T) {
+	var r *Recorder
+	if r.Enabled() || len(r.Summary()) != 0 || r.View().Enabled {
+		t.Error("a nil recorder claims to be recording something")
+	}
+}
+
+// Off holds nothing, down to the ring itself.
+func TestOffHoldsNoRing(t *testing.T) {
+	r, _ := newTestRecorder(t)
+	if r.ring != nil {
+		t.Error("a recorder that is off has already allocated its ring")
+	}
+	r.SetEnabled(true)
+	if len(r.ring) != RingSize {
+		t.Errorf("a recording recorder has a ring of %d, want %d", len(r.ring), RingSize)
+	}
+	r.SetEnabled(false)
+	if r.ring != nil {
+		t.Error("switching off left the ring allocated")
+	}
 }

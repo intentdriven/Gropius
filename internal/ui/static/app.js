@@ -661,6 +661,13 @@ function renderStats(view) {
   $('statsBody').hidden = !on;
   if (!on) return;
 
+  const totals = recentTotals(view.rollups || [], Math.floor(Date.now() / 1000));
+  $('statsTotals').textContent =
+    `Last hour: ${totals.hourRequests} request${totals.hourRequests === 1 ? '' : 's'}, ` +
+    `${totals.hourCompletion} tokens generated · ` +
+    `Last 24 hours: ${totals.dayRequests} request${totals.dayRequests === 1 ? '' : 's'}, ` +
+    `${totals.dayCompletion} tokens generated`;
+
   $('statsModels').innerHTML = (view.models || []).length
     ? (view.models || []).map(modelStatsCard).join('')
     : '<p class="hint">No requests yet.</p>';
@@ -673,23 +680,53 @@ function renderStats(view) {
     return `<tr>
       <td>${c.time}</td>
       <td>${escapeHtml(c.model)}</td>
+      <td>${c.mode}</td>
       <td class="${c.failed ? 'bad' : ''}">${c.outcome}</td>
       <td class="figure${bad}">${c.tokens}</td>
       <td class="figure${bad}">${c.first}</td>
       <td class="figure${bad}">${c.rate}</td>
+      <td class="figure${bad}">${c.waited}</td>
       <td class="figure${bad}">${c.total}</td>
     </tr>`;
   }).join('');
 }
 
+// recentTotals adds the minute buckets up over the last hour and the last day.
+// The buckets are the only thing that reaches back further than the thousand
+// rows the ring holds, which at a busy minute is not far at all.
+function recentTotals(rollups, nowSeconds) {
+  const hourFrom = nowSeconds - 3600;
+  const dayFrom = nowSeconds - 86400;
+  const t = { hourRequests: 0, hourCompletion: 0, dayRequests: 0, dayCompletion: 0 };
+  rollups.forEach((b) => {
+    if (b.minute < dayFrom) return;
+    t.dayRequests += b.requests;
+    t.dayCompletion += b.completion_tokens;
+    if (b.minute < hourFrom) return;
+    t.hourRequests += b.requests;
+    t.hourCompletion += b.completion_tokens;
+  });
+  return t;
+}
+
 // modelStatsCard is one model's totals since recording was turned on.
 function modelStatsCard(m) {
   const failed = (m.requests || 0) - ((m.by_class || {}).ok || 0);
+  const last = generationRate({
+    class: 'ok',
+    completion_tokens: m.last_completion_tokens,
+    first_token_ms: m.last_first_token_ms,
+    duration_ms: m.last_duration_ms,
+  });
   const figures = [
     `${m.requests} request${m.requests === 1 ? '' : 's'}`,
     failed ? `${failed} did not answer` : null,
     `${m.prompt_tokens} tokens in · ${m.completion_tokens} out`,
+    m.last_first_token_ms >= 0 ? `last first token ${millis(m.last_first_token_ms)}` : null,
+    last !== '—' ? `last rate ${last}` : null,
+    m.last_duration_ms ? `last request ${millis(m.last_duration_ms)}` : null,
     m.loads ? `loaded ${m.loads}×` : null,
+    m.failed_loads ? `${m.failed_loads} failed to load` : null,
     m.evictions ? `evicted ${m.evictions}×` : null,
     m.last_load_ms ? `last load ${millis(m.last_load_ms)}` : null,
   ].filter(Boolean).join(' · ');
@@ -705,14 +742,20 @@ function requestRow(r) {
   const answered = r.class === 'ok';
   const d = new Date(r.at * 1000);
   const pad = (n) => String(n).padStart(2, '0');
+  // Both waits are a wait for the model rather than for the answer, so they
+  // are one cell: a reader wants to know how much of the total was spent
+  // before generation began, not which queue it was spent in.
+  const waited = (r.queue_wait_ms || 0) + (r.load_wait_ms || 0);
   return {
     time: `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`,
     model: r.model || '—',
+    mode: r.streamed ? 'stream' : 'once',
     outcome: outcomeLabel(r.class),
     failed: !answered,
     tokens: answered ? `${r.prompt_tokens} / ${r.completion_tokens}` : '—',
     first: r.first_token_ms >= 0 ? millis(r.first_token_ms) : '—',
     rate: generationRate(r),
+    waited: waited ? millis(waited) : '—',
     total: millis(r.duration_ms),
   };
 }
@@ -731,6 +774,7 @@ function outcomeLabel(c) {
     not_ready: 'never ready',
     unreachable: 'no answer',
     cancelled: 'client left',
+    gateway_error: 'Gropius failed',
   }[c] || 'unknown';
 }
 

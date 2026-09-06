@@ -193,11 +193,28 @@ func TestThePoolReportsLoads(t *testing.T) {
 	if got.took < 60*time.Millisecond {
 		t.Errorf("the load was reported as taking %v, want at least the 60ms it waited", got.took)
 	}
-	obs.mu.Lock()
-	starts := len(obs.starts)
-	obs.mu.Unlock()
-	if starts != 1 {
-		t.Errorf("the observer was told of %d load starts, want 1", starts)
+	// Polled rather than read: the pool promises the reports, not the order
+	// they arrive in, and a test that assumes an ordering the interface
+	// refuses to promise is a test that will fail for the wrong reason.
+	awaitStarts(t, obs, 1)
+}
+
+// awaitStarts blocks until the observer has been told of n load starts, and
+// fails if a different number arrives.
+func awaitStarts(t *testing.T, o *recordingObserver, n int) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		o.mu.Lock()
+		got := len(o.starts)
+		o.mu.Unlock()
+		if got == n {
+			return
+		}
+		if got > n || time.Now().After(deadline) {
+			t.Fatalf("the observer was told of %d load starts, want %d", got, n)
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 }
 

@@ -136,7 +136,7 @@ func New(opts Options) (*App, error) {
 		// The pool reports loads and removals to the recorder, which ignores
 		// them while recording is off. Adapting here keeps internal/stats a
 		// leaf package that imports nothing of ours.
-		Observer: poolObserver{a.Stats},
+		Observer: poolObserver{rec: a.Stats, log: opts.Log},
 	})
 	a.Stats.SetEnabled(opts.Config.Statistics)
 
@@ -219,7 +219,10 @@ func (a *App) SetConfig(c config.Config) error {
 // poolObserver adapts the pool's reports onto the recorder. The pool names its
 // own reasons and the recorder names its own; this is the one place that has
 // to know both.
-type poolObserver struct{ rec *stats.Recorder }
+type poolObserver struct {
+	rec *stats.Recorder
+	log *slog.Logger
+}
 
 func (o poolObserver) LoadStarted(repoID string) { o.rec.LoadStarted(repoID) }
 
@@ -228,7 +231,32 @@ func (o poolObserver) LoadFinished(repoID string, took time.Duration, err error)
 }
 
 func (o poolObserver) EntryStopped(repoID string, reason runtime.StopReason) {
-	o.rec.Removed(repoID, string(reason))
+	mapped, ok := stopReasons[reason]
+	if !ok {
+		// The two vocabularies are declared in two packages and a cast between
+		// them would have gone on agreeing forever after one of them changed
+		// its spelling — silently, since the only figure that reads a reason
+		// is the eviction count, and a count that stops rising looks like a
+		// Mac with room to spare. An unmapped reason is recorded under its own
+		// name and said out loud.
+		o.log.Warn("a model left the pool for a reason the statistics do not know", "reason", reason)
+		mapped = string(reason)
+	}
+	o.rec.Removed(repoID, mapped)
+}
+
+// stopReasons maps every reason the pool can give onto the recorder's own. It
+// is a total mapping on purpose: a reason added to one side and not the other
+// shows up as a missing key, which is a line in the log rather than a figure
+// that quietly stops moving.
+var stopReasons = map[runtime.StopReason]string{
+	runtime.StopEvicted:    stats.ReasonEvicted,
+	runtime.StopIdle:       stats.ReasonIdle,
+	runtime.StopUnloaded:   stats.ReasonUnloaded,
+	runtime.StopAbandoned:  stats.ReasonAbandoned,
+	runtime.StopLoadFailed: stats.ReasonLoadFailed,
+	runtime.StopCrashed:    stats.ReasonCrashed,
+	runtime.StopShutdown:   stats.ReasonShutdown,
 }
 
 // canonicalPerModel checks the keys of a per-model settings map submitted

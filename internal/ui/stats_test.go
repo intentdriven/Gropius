@@ -1,8 +1,10 @@
 package ui
 
 import (
+	"fmt"
 	"reflect"
 	"regexp"
+	"strings"
 	"testing"
 )
 
@@ -18,10 +20,12 @@ func TestTheRequestRowShowsFiguresAndNothingElse(t *testing.T) {
 		{
 			name: "an answer",
 			rec: `{"model":"org/a","at":1788696030,"class":"ok","streamed":true,` +
-				`"prompt_tokens":120,"completion_tokens":201,"first_token_ms":200,"duration_ms":4200}`,
+				`"prompt_tokens":120,"completion_tokens":201,"first_token_ms":200,"duration_ms":4200,` +
+				`"queue_wait_ms":40,"load_wait_ms":1200}`,
 			want: map[string]any{
-				"model": "org/a", "outcome": "answered", "tokens": "120 / 201",
-				"first": "200 ms", "rate": "50.0 tok/s", "total": "4.2 s", "failed": false,
+				"model": "org/a", "mode": "stream", "outcome": "answered", "tokens": "120 / 201",
+				"first": "200 ms", "rate": "50.0 tok/s", "waited": "1.2 s", "total": "4.2 s",
+				"failed": false,
 			},
 		},
 		{
@@ -31,8 +35,8 @@ func TestTheRequestRowShowsFiguresAndNothingElse(t *testing.T) {
 			rec: `{"model":"org/a","at":1788696030,"class":"busy","streamed":true,` +
 				`"prompt_tokens":0,"completion_tokens":0,"first_token_ms":-1,"duration_ms":3}`,
 			want: map[string]any{
-				"model": "org/a", "outcome": "too busy", "tokens": "—",
-				"first": "—", "rate": "—", "total": "3 ms", "failed": true,
+				"model": "org/a", "mode": "stream", "outcome": "too busy", "tokens": "—",
+				"first": "—", "rate": "—", "waited": "—", "total": "3 ms", "failed": true,
 			},
 		},
 		{
@@ -42,8 +46,8 @@ func TestTheRequestRowShowsFiguresAndNothingElse(t *testing.T) {
 			rec: `{"model":"","at":1788696030,"class":"client_error","streamed":false,` +
 				`"prompt_tokens":0,"completion_tokens":0,"first_token_ms":-1,"duration_ms":1}`,
 			want: map[string]any{
-				"model": "—", "outcome": "rejected", "tokens": "—",
-				"first": "—", "rate": "—", "total": "1 ms", "failed": true,
+				"model": "—", "mode": "once", "outcome": "rejected", "tokens": "—",
+				"first": "—", "rate": "—", "waited": "—", "total": "1 ms", "failed": true,
 			},
 		},
 		{
@@ -51,10 +55,11 @@ func TestTheRequestRowShowsFiguresAndNothingElse(t *testing.T) {
 			// answer still carries its counts.
 			name: "an answer that did not stream",
 			rec: `{"model":"org/a","at":1788696030,"class":"ok","streamed":false,` +
-				`"prompt_tokens":10,"completion_tokens":20,"first_token_ms":-1,"duration_ms":1000}`,
+				`"prompt_tokens":10,"completion_tokens":20,"first_token_ms":-1,"duration_ms":1000,` +
+				`"queue_wait_ms":5,"load_wait_ms":0}`,
 			want: map[string]any{
-				"model": "org/a", "outcome": "answered", "tokens": "10 / 20",
-				"first": "—", "rate": "—", "total": "1.0 s", "failed": false,
+				"model": "org/a", "mode": "once", "outcome": "answered", "tokens": "10 / 20",
+				"first": "—", "rate": "—", "waited": "5 ms", "total": "1.0 s", "failed": false,
 			},
 		},
 	}
@@ -103,7 +108,7 @@ func TestTheGenerationRateIsWhatEveryoneElseMeansByIt(t *testing.T) {
 func TestEveryOutcomeHasWordsForIt(t *testing.T) {
 	classes := []string{
 		"ok", "client_error", "upstream_status", "busy", "refused",
-		"launch_failed", "not_ready", "unreachable", "cancelled",
+		"launch_failed", "not_ready", "unreachable", "cancelled", "gateway_error",
 	}
 	for _, class := range classes {
 		got := evalPanel(t, `outcomeLabel("`+class+`")`, "outcomeLabel")
@@ -125,10 +130,53 @@ func TestThePanelIsWiredToTheStatisticsSwitchAndTheView(t *testing.T) {
 		// The view is drawn from the endpoint that serves the rows, not from
 		// the state snapshot, which deliberately does not carry them.
 		regexp.MustCompile(`api\('/api/stats'\)`),
+		// The tab handler is what starts the polling; the fetch alone would
+		// still match if nothing ever called it.
+		regexp.MustCompile(`watchStats\(name === 'stats'\)`),
 		regexp.MustCompile(`\brequestRow\(`),
+		regexp.MustCompile(`\brecentTotals\(`),
 	} {
 		if !want.MatchString(src) {
 			t.Errorf("the control panel no longer matches %s — that behaviour is then asserted by nothing", want)
+		}
+	}
+}
+
+// The minute buckets are what the view says about the shape of a day, and a
+// figure that is kept but never shown is a figure nobody can check. These are
+// the totals drawn from them.
+func TestTheRecentTotalsAreDrawnFromTheMinuteBuckets(t *testing.T) {
+	// The first bucket is two hours before "now": inside the day, outside the
+	// hour. The other two are inside both.
+	rollups := `[{"minute":1788696000,"requests":5,"prompt_tokens":50,"completion_tokens":100},` +
+		`{"minute":1788699600,"requests":2,"prompt_tokens":20,"completion_tokens":40},` +
+		`{"minute":1788703140,"requests":3,"prompt_tokens":30,"completion_tokens":60}]`
+	const now = 1788703200 // one minute after the last bucket
+
+	got := evalPanelValue(t, "recentTotals("+rollups+", "+fmt.Sprint(now)+")", "recentTotals")
+	want := map[string]any{
+		"hourRequests": float64(5), "hourCompletion": float64(100),
+		"dayRequests": float64(10), "dayCompletion": float64(200),
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("recentTotals = %#v, want %#v", got, want)
+	}
+}
+
+// Nothing recorded is kept out of sight: every field of a record and every
+// per-model counter reaches the panel somewhere, or it is a figure the
+// operator was told about and cannot see.
+func TestEveryRecordedFigureReachesThePanel(t *testing.T) {
+	src := readPanelSource(t)
+	for _, field := range []string{
+		"prompt_tokens", "completion_tokens", "first_token_ms", "duration_ms",
+		"queue_wait_ms", "load_wait_ms", "streamed", "model", "class", "at",
+		"loads", "failed_loads", "evictions", "last_load_ms",
+		"last_first_token_ms", "last_duration_ms", "last_completion_tokens",
+		"by_class", "requests", "rollups",
+	} {
+		if !strings.Contains(src, field) {
+			t.Errorf("the panel never reads %q, which the recorder keeps — a figure nobody can see", field)
 		}
 	}
 }

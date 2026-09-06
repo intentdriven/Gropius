@@ -50,7 +50,9 @@ accounted for, how many times the model loaded and how long the last load
 took, and how many times it was evicted to make room for another.
 
 Everything held is in memory, and a restart empties it. The Statistics tab
-shows the most recent thousand requests and a day of per-minute totals.
+shows the most recent thousand requests one by one, and the totals for the
+last hour and the last day, which reach back further than a thousand rows do
+on a busy Mac.
 
 ## What is never recorded
 
@@ -82,10 +84,8 @@ Gropius writes a line to its own log for each API request it serves. That line
 records the method, path, status and duration of the request, and nothing
 else — in particular, never the address of the client that made it.
 
-Each model server also writes its own log, at its normal level: what it is
-loading, how far a prompt has been processed, and its own errors. It writes no
-prompt and no answer at that level. Raising a model server's log level is a
-separate, deliberate action per model, and it says so where you do it: at the
-higher level that model server writes every request and every response it
-produces to its log. Switching request statistics on never changes any model
-server's log level.
+Each model server also writes its own log. Gropius starts every one of them at
+a level that writes what it is loading, how far a prompt has been processed
+and its own errors — and no prompt and no answer. Switching request statistics
+on never changes that: the two are separate by construction, and a test fails
+the build if the switch ever reaches the code that starts a model server.

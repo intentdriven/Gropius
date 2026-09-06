@@ -54,6 +54,9 @@ type stubPool struct {
 	srv *mlxtest.Server
 	// acquireErr, if set, is returned by Acquire.
 	acquireErr error
+	// baseURL, if set, replaces the fake server's own address, so a test can
+	// hand the gateway an upstream it cannot even build a request for.
+	baseURL string
 
 	mu       sync.Mutex
 	acquired []string
@@ -82,9 +85,13 @@ func (p *stubPool) Acquire(ctx context.Context, repoID string) (*runtime.Upstrea
 		p.released++
 		p.mu.Unlock()
 	}
+	base := p.srv.URL()
+	if p.baseURL != "" {
+		base = p.baseURL
+	}
 	return &runtime.Upstream{
 		RepoID:   repoID,
-		BaseURL:  p.srv.URL(),
+		BaseURL:  base,
 		ModelArg: p.srv.ModelArg,
 	}, release, nil
 }

@@ -500,8 +500,11 @@ func TestAnAnswerCutShortIsNotRecordedAsOne(t *testing.T) {
 	w := httptest.NewRecorder()
 
 	out := streamRewriteSSE(w, src, "backend", "friendly", relayOptions{observing: true})
-	if !out.truncated {
+	if !out.upstreamCut {
 		t.Fatal("a stream that ended in an error was reported as having finished")
+	}
+	if out.clientGone {
+		t.Error("the model server going away was blamed on the client")
 	}
 	if out.firstToken.IsZero() {
 		t.Error("the chunk that did arrive was not timed")
@@ -520,9 +523,11 @@ type errReader struct{ err error }
 func (r errReader) Read([]byte) (int, error) { return 0, r.err }
 
 // Which events count as the usage event Gropius asked for, and which do not.
-// Removing an event the gateway does not understand is the one mistake here a
-// client would see, so anything that is not clearly the counts-only event is
-// relayed as it stands.
+// Only the shape that was asked for is removed — the counts with a choices
+// array that is present and empty. Removing an event the gateway does not
+// understand is the one mistake here a client would see, so everything else is
+// relayed as it stands, including an event carrying counts and no choices at
+// all, which is a shape nothing has established anything about.
 func TestOnlyTheCountsOnlyEventIsRemoved(t *testing.T) {
 	cases := []struct {
 		name  string
@@ -530,7 +535,7 @@ func TestOnlyTheCountsOnlyEventIsRemoved(t *testing.T) {
 		want  bool
 	}{
 		{"the pinned server's own shape", `{"choices":[],"usage":{"prompt_tokens":1,"completion_tokens":2}}`, true},
-		{"counts with no choices field at all", `{"usage":{"prompt_tokens":1}}`, true},
+		{"counts with no choices field at all", `{"usage":{"prompt_tokens":1}}`, false},
 		{"a chunk of the answer", `{"choices":[{"index":0}]}`, false},
 		{"a chunk that also carries counts", `{"choices":[{"index":0}],"usage":{"prompt_tokens":1}}`, false},
 		{"a null usage", `{"choices":[],"usage":null}`, false},
@@ -590,7 +595,7 @@ func TestRemovingTheCountsEventTakesOnlyItsOwnTerminator(t *testing.T) {
 
 	w := httptest.NewRecorder()
 	out := streamRewriteSSE(w, strings.NewReader(body), "backend", "friendly",
-		relayOptions{observing: true, keepUsage: false})
+		relayOptions{observing: true, dropUsage: true})
 
 	if got := w.Body.String(); got != want {
 		t.Errorf("the relayed stream is\n%q\nwant\n%q", got, want)
@@ -598,7 +603,172 @@ func TestRemovingTheCountsEventTakesOnlyItsOwnTerminator(t *testing.T) {
 	if out.usage == nil || out.usage.Completion != 2 {
 		t.Errorf("the counts were removed without being read: %+v", out.usage)
 	}
-	if out.truncated {
+	if out.upstreamCut || out.clientGone {
 		t.Error("a stream that ran to its end was reported as cut short")
+	}
+}
+
+// The gateway's own failures are the gateway's own, not the client's and not
+// the model server's. There are three of them and they all answer 500; a 500
+// recorded as an answered request is a lie the panel would then average in.
+func TestTheGatewaysOwnFailureIsRecordedAsOne(t *testing.T) {
+	srv, rec, _, pool := statsGateway(t, true, mlxtest.Options{})
+	// An upstream base URL that cannot be built into a request: the request
+	// resolves and the model is acquired, and then the gateway itself fails.
+	pool.baseURL = "://not a url"
+
+	status, _ := completion(t, srv, `{"model":"`+testModelID+`","messages":[{"role":"user","content":"hi"}]}`)
+	if status != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500", status)
+	}
+	if got := onlyRecord(t, rec).Class; got != stats.ClassGatewayError {
+		t.Errorf("the gateway's own failure was recorded as %q, want %q", got, stats.ClassGatewayError)
+	}
+}
+
+// The model server decides what "include_usage" means, and it decides it in
+// Python, where 1 and "true" are as true as true is. A client that wrote a
+// truthy value asked for its counts and gets them: reading the field as a Go
+// boolean would answer "it did not ask" for a request the model server is
+// about to honour, and the client would lose the event it wrote that field to
+// get.
+func TestAClientKeepsTheCountsWhateverTruthItAskedWith(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want bool
+	}{
+		{"true", `{"stream_options":{"include_usage":true}}`, true},
+		{"one", `{"stream_options":{"include_usage":1}}`, true},
+		{"a truthy string", `{"stream_options":{"include_usage":"true"}}`, true},
+		{"false", `{"stream_options":{"include_usage":false}}`, false},
+		{"null", `{"stream_options":{"include_usage":null}}`, false},
+		{"zero", `{"stream_options":{"include_usage":0}}`, false},
+		{"an empty string", `{"stream_options":{"include_usage":""}}`, false},
+		{"the key left out", `{"stream_options":{}}`, false},
+		{"no stream_options at all", `{"stream":true}`, false},
+		// Not an object: nothing was merged into it and the model server will
+		// refuse it, so there is nothing of Gropius's to remove either way.
+		{"a stream_options that is not an object", `{"stream_options":"yes"}`, true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			payload, ok := decodeEvent([]byte(c.body))
+			if !ok {
+				t.Fatalf("%s is not an object", c.body)
+			}
+			if got := clientWantsUsage(payload); got != c.want {
+				t.Errorf("clientWantsUsage(%s) = %v, want %v", c.body, got, c.want)
+			}
+		})
+	}
+}
+
+// And end to end: a client that asked with a truthy value still receives the
+// event, with the switch on.
+func TestATruthyIncludeUsageStillReceivesTheCounts(t *testing.T) {
+	srv, _, _, _ := statsGateway(t, true, mlxtest.Options{})
+
+	_, got := completion(t, srv, `{"model":"`+testModelID+`","stream":true,"stream_options":{"include_usage":1},"messages":[{"role":"user","content":"hi"}]}`)
+	if !strings.Contains(got, `"choices":[]`) {
+		t.Errorf("a client that asked for the counts with 1 did not get them:\n%s", got)
+	}
+}
+
+// A non-streamed answer stops early for the same reasons a streamed one does —
+// the model server going away mid-body, or a body past the cap — and the 200
+// has already gone out. Recording it as an answered request would put a free
+// success and a zero token count into the model's totals.
+func TestANonStreamedAnswerCutShortIsNotRecordedAsOne(t *testing.T) {
+	resp := &http.Response{
+		Header: http.Header{"Content-Type": []string{"application/json"}},
+		Body:   io.NopCloser(io.MultiReader(strings.NewReader(`{"model":"backend","cho`), errReader{errors.New("connection reset")})),
+	}
+	out := relayRewritingModel(httptest.NewRecorder(), resp, "backend", "friendly", relayOptions{observing: true})
+	if !out.upstreamCut {
+		t.Fatal("a non-streamed body that stopped part-way was reported as complete")
+	}
+
+	obs := &observation{rec: stats.New(stats.Options{}), started: time.Now(),
+		record: stats.Record{Class: stats.ClassOK, FirstTokenMS: stats.NoFirstToken}}
+	obs.relayed(out)
+	if obs.record.Class != stats.ClassUnreachable {
+		t.Errorf("a non-streamed answer cut short is recorded as %q, want %q", obs.record.Class, stats.ClassUnreachable)
+	}
+}
+
+// A client that goes away mid-stream is the client's doing, and the relay is
+// the thing that knows it: the write failed here, and nothing about it has to
+// be inferred from a cancellation delivered on another goroutine whenever it
+// happens to be scheduled.
+func TestTheSideThatFailedIsTheSideThatIsRecorded(t *testing.T) {
+	body := "data: {\"model\":\"backend\",\"choices\":[{\"index\":0}]}\n\n" +
+		"data: {\"model\":\"backend\",\"choices\":[{\"index\":1}]}\n\n"
+	out := streamRewriteSSE(refusingWriter{httptest.NewRecorder()}, strings.NewReader(body),
+		"backend", "friendly", relayOptions{observing: true})
+	if !out.clientGone {
+		t.Fatal("a write to the client that failed was not reported as the client going away")
+	}
+	if out.upstreamCut {
+		t.Error("the client going away was blamed on the model server")
+	}
+
+	obs := &observation{rec: stats.New(stats.Options{}), started: time.Now(),
+		record: stats.Record{Class: stats.ClassOK, FirstTokenMS: stats.NoFirstToken}}
+	obs.relayed(out)
+	if obs.record.Class != stats.ClassCancelled {
+		t.Errorf("a client that went away is recorded as %q, want %q", obs.record.Class, stats.ClassCancelled)
+	}
+}
+
+// refusingWriter is a client that has already gone: every write to it fails.
+type refusingWriter struct{ http.ResponseWriter }
+
+func (refusingWriter) Write([]byte) (int, error) { return 0, errors.New("broken pipe") }
+
+// A data line without the conventional space is still a data line, and one
+// that went unparsed would go unrewritten — carrying the model server's own
+// absolute path to a client. Its framing is given back exactly as it arrived.
+func TestADataLineWithoutTheSpaceIsStillRewritten(t *testing.T) {
+	body := "data:{\"model\":\"/models/org/a\",\"choices\":[{\"index\":0}]}\n\n"
+	w := httptest.NewRecorder()
+
+	streamRewriteSSE(w, strings.NewReader(body), "/models/org/a", "org/a", relayOptions{})
+
+	got := w.Body.String()
+	if strings.Contains(got, "/models/org/a") {
+		t.Errorf("the model server's own path reached the client:\n%s", got)
+	}
+	if !strings.HasPrefix(got, "data:{") {
+		t.Errorf("the line came back as %q, want its own framing back", got)
+	}
+}
+
+// The older completions endpoint is served by the same handler and is recorded
+// the same way. The pinned model server reads stream_options in the code both
+// endpoints go through, so a streamed request there is asked for its counts
+// too.
+func TestTheLegacyCompletionsEndpointIsRecordedToo(t *testing.T) {
+	srv, rec, fake, _ := statsGateway(t, true, mlxtest.Options{})
+
+	resp, err := http.Post(srv.URL+"/v1/completions", "application/json",
+		strings.NewReader(`{"model":"`+testModelID+`","stream":true,"prompt":"hi"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", resp.StatusCode, body)
+	}
+	if strings.Contains(string(body), `"choices":[]`) {
+		t.Error("the client received a usage chunk it did not ask for")
+	}
+	if _, asked := fake.LastBody()["stream_options"]; !asked {
+		t.Error("the model server was not asked for the token counts on the older endpoint")
+	}
+	got := onlyRecord(t, rec)
+	if got.Model != testModelID || got.Class != stats.ClassOK || got.CompletionTokens != 4 {
+		t.Errorf("the request was recorded as %+v, want an answered request with its counts", got)
 	}
 }

@@ -49,8 +49,8 @@ const (
 	// ClassClientError is one of the gateway's own refusals: a body it could
 	// not read or parse, no model field, an unknown model, a body too large.
 	ClassClientError Class = "client_error"
-	// ClassUpstreamStatus is a non-2xx status the model server itself
-	// returned, relayed to the client as it stands.
+	// ClassUpstreamStatus is a status of 300 or more that the model server
+	// itself returned, relayed to the client as it stands.
 	ClassUpstreamStatus Class = "upstream_status"
 	// ClassBusy is a refusal because that model already has as many requests
 	// in flight as it will take.
@@ -67,6 +67,11 @@ const (
 	ClassUnreachable Class = "unreachable"
 	// ClassCancelled is a client that went away before the answer was done.
 	ClassCancelled Class = "cancelled"
+	// ClassGatewayError is Gropius's own failure: it could not re-encode the
+	// request or could not build the call to the model server. It is neither
+	// the client's fault nor the model server's, and recording it as anything
+	// else would put the blame on one of them.
+	ClassGatewayError Class = "gateway_error"
 )
 
 // Reasons an entry left the pool. Only ReasonEvicted is an eviction; the pool
@@ -258,19 +263,26 @@ func (r *Recorder) SetEnabled(on bool) {
 	r.enabled = on
 	if !on {
 		r.clearLocked()
+		return
 	}
+	r.ring = make([]Record, RingSize)
 }
 
 // Enabled reports whether requests are being recorded.
 func (r *Recorder) Enabled() bool {
+	if r == nil {
+		return false
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.enabled
 }
 
-// clearLocked empties everything the recorder holds. Callers must hold r.mu.
+// clearLocked empties everything the recorder holds, down to the ring itself:
+// while recording is off there is nothing to hold, so there is nothing
+// allocated to hold it in. Callers must hold r.mu.
 func (r *Recorder) clearLocked() {
-	r.ring = make([]Record, RingSize)
+	r.ring = nil
 	r.next = 0
 	r.full = false
 	r.models = map[string]*ModelCounters{}
@@ -281,15 +293,31 @@ func (r *Recorder) clearLocked() {
 // stamped with the recorder's, so a caller with nothing better to say than
 // "now" does not have to invent one.
 func (r *Recorder) Add(rec Record) {
-	now := r.now()
 	if rec.At == 0 {
-		rec.At = now.UTC().Unix()
+		rec.At = r.now().UTC().Unix()
 	}
-
-	r.mu.Lock()
-	if !r.enabled {
-		r.mu.Unlock()
+	if !r.addLocked(rec) {
 		return
+	}
+	if r.store != nil {
+		// A store that cannot write is a broken store, not a broken request:
+		// the durable-store intent owns what to do about it. Nothing is
+		// logged here, because a log line per failed write would be a second
+		// unbounded record of the traffic this one is meant to bound.
+		_ = r.store.AppendRequest(rec)
+	}
+}
+
+// addLocked folds one record into everything the recorder holds, reporting
+// whether it was recorded at all. It is its own function so that the lock is
+// released by a defer: a panic anywhere in here would otherwise leave the
+// mutex held, and every request that followed would block on it forever with
+// nothing in any log to say why.
+func (r *Recorder) addLocked(rec Record) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !r.enabled {
+		return false
 	}
 	r.ring[r.next] = rec
 	r.next = (r.next + 1) % RingSize
@@ -306,32 +334,25 @@ func (r *Recorder) Add(rec Record) {
 	m.LastDurationMS = rec.DurationMS
 	m.LastCompletionTokens = rec.CompletionTokens
 
-	bucket := r.bucketLocked(now)
+	// Bucketed by when the request arrived, which is what the row itself is
+	// stamped with: a request that spans a minute boundary must not land in a
+	// bucket its own row disagrees with.
+	bucket := r.bucketLocked(time.Unix(rec.At, 0).UTC())
 	bucket.Requests++
 	bucket.PromptTokens += int64(rec.PromptTokens)
 	bucket.CompletionTokens += int64(rec.CompletionTokens)
-	store := r.store
-	r.mu.Unlock()
-
-	if store != nil {
-		// A store that cannot write is a broken store, not a broken request:
-		// the durable-store intent owns what to do about it. Nothing is
-		// logged here, because a log line per failed write would be a second
-		// unbounded record of the traffic this one is meant to bound.
-		_ = store.AppendRequest(rec)
-	}
+	return true
 }
 
 // LoadStarted notes that a model server is being started. It is the pool's
 // call, made outside the pool's lock.
 func (r *Recorder) LoadStarted(model string) {
 	r.mu.Lock()
+	defer r.mu.Unlock()
 	if !r.enabled {
-		r.mu.Unlock()
 		return
 	}
 	r.modelLocked(model)
-	r.mu.Unlock()
 }
 
 // LoadFinished notes that a model server finished loading, or failed to.
@@ -344,24 +365,28 @@ func (r *Recorder) LoadFinished(model string, took time.Duration, err error) {
 		Failed:     err != nil,
 	}
 
-	r.mu.Lock()
-	if !r.enabled {
-		r.mu.Unlock()
+	if !r.loadFinishedLocked(model, ev) {
 		return
 	}
+	if r.store != nil {
+		_ = r.store.AppendEvent(ev)
+	}
+}
+
+func (r *Recorder) loadFinishedLocked(model string, ev Event) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !r.enabled {
+		return false
+	}
 	m := r.modelLocked(model)
-	if err != nil {
+	if ev.Failed {
 		m.FailedLoads++
 	} else {
 		m.Loads++
 		m.LastLoadMS = ev.DurationMS
 	}
-	store := r.store
-	r.mu.Unlock()
-
-	if store != nil {
-		_ = store.AppendEvent(ev)
-	}
+	return true
 }
 
 // Removed notes that a model server left the pool, and why. Only
@@ -369,21 +394,26 @@ func (r *Recorder) LoadFinished(model string, took time.Duration, err error) {
 func (r *Recorder) Removed(model, reason string) {
 	ev := Event{At: r.now().UTC().Unix(), Model: model, Kind: EventRemoved, Reason: reason}
 
-	r.mu.Lock()
-	if !r.enabled {
-		r.mu.Unlock()
+	if !r.removedLocked(model, reason) {
 		return
 	}
-	m := r.modelLocked(model)
-	if reason == ReasonEvicted {
-		m.Evictions++
+	if r.store != nil {
+		_ = r.store.AppendEvent(ev)
 	}
-	store := r.store
-	r.mu.Unlock()
+}
 
-	if store != nil {
-		_ = store.AppendEvent(ev)
+func (r *Recorder) removedLocked(model, reason string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !r.enabled {
+		return false
 	}
+	if reason == ReasonEvicted {
+		r.modelLocked(model).Evictions++
+	} else {
+		r.modelLocked(model)
+	}
+	return true
 }
 
 // modelLocked returns the counters for a model, creating them on first sight.
@@ -401,17 +431,20 @@ func (r *Recorder) modelLocked(model string) *ModelCounters {
 // bucket that has fallen out of the window. Callers must hold r.mu.
 func (r *Recorder) bucketLocked(now time.Time) *Rollup {
 	minute := now.UTC().Truncate(time.Minute).Unix()
+	if b, ok := r.rollups[minute]; ok {
+		return b
+	}
+	// Only a new minute is worth sweeping for stale ones: within a minute the
+	// set cannot have changed, and sweeping on every request would walk up to
+	// 1,440 entries under the lock for nothing.
 	oldest := minute - int64(RollupWindow/time.Second)
 	for k := range r.rollups {
 		if k <= oldest {
 			delete(r.rollups, k)
 		}
 	}
-	b, ok := r.rollups[minute]
-	if !ok {
-		b = &Rollup{Minute: minute}
-		r.rollups[minute] = b
-	}
+	b := &Rollup{Minute: minute}
+	r.rollups[minute] = b
 	return b
 }
 
@@ -420,6 +453,9 @@ func (r *Recorder) bucketLocked(now time.Time) *Rollup {
 // and the rollups are fetched from the Statistics page instead, because the
 // snapshot is re-encoded and redrawn every couple of seconds.
 func (r *Recorder) Summary() []ModelCounters {
+	if r == nil {
+		return nil
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.summaryLocked()
@@ -444,6 +480,9 @@ func (r *Recorder) summaryLocked() []ModelCounters {
 
 // View is everything the Statistics page draws, oldest request first.
 func (r *Recorder) View() View {
+	if r == nil {
+		return View{}
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if !r.enabled {

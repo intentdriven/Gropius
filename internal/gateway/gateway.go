@@ -412,6 +412,7 @@ func (g *Gateway) handleCompletions(w http.ResponseWriter, r *http.Request) {
 	// with a 404 when offline.
 	rewritten, err := json.Marshal(up.ModelArg)
 	if err != nil {
+		obs.failed(stats.ClassGatewayError)
 		writeError(w, http.StatusInternalServerError, "could not re-encode the request")
 		return
 	}
@@ -442,14 +443,15 @@ func (g *Gateway) handleCompletions(w http.ResponseWriter, r *http.Request) {
 	// removes the extra event on the way back if the client did not (see
 	// mergeIncludeUsage and relayOptions). A non-streamed answer already
 	// carries its counts and needs nothing.
-	relay := relayOptions{observing: obs.recording(), keepUsage: true}
+	relay := relayOptions{observing: obs.recording()}
 	if obs.recording() && streamRequested(payload) {
-		relay.keepUsage = clientWantsUsage(payload)
+		relay.dropUsage = !clientWantsUsage(payload)
 		mergeIncludeUsage(payload)
 	}
 
 	body, err := json.Marshal(payload)
 	if err != nil {
+		obs.failed(stats.ClassGatewayError)
 		writeError(w, http.StatusInternalServerError, "could not re-encode the request")
 		return
 	}
@@ -457,6 +459,7 @@ func (g *Gateway) handleCompletions(w http.ResponseWriter, r *http.Request) {
 	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost,
 		up.BaseURL+r.URL.Path, bytes.NewReader(body))
 	if err != nil {
+		obs.failed(stats.ClassGatewayError)
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -519,20 +522,25 @@ func relayRewritingModel(w http.ResponseWriter, resp *http.Response, modelArg, r
 		if tooLarge {
 			body = body[:maxResponseBody]
 		}
-		_, _ = w.Write(rewriteModelField(body, modelArg, requested))
+		ev, parsed := decodeEvent(body)
+		_, _ = w.Write(renderEvent(body, ev, parsed, modelArg, requested))
 		if err != nil || tooLarge {
-			return relayOutcome{}
+			// The answer the client received is not the answer the model
+			// server was going to give, and the 200 has already gone out. A
+			// non-streamed answer stops early for exactly the reasons a
+			// streamed one does, and is recorded the same way.
+			return relayOutcome{upstreamCut: true}
 		}
 		var out relayOutcome
-		if opts.observing {
+		if opts.observing && parsed {
 			// A non-streamed answer always carries its counts, so nothing was
-			// merged into the request to get them.
-			if ev, ok := decodeEvent(body); ok {
-				out.usage = readUsage(ev)
-			}
+			// merged into the request to get them. It is parsed once, above.
+			out.usage = readUsage(ev)
 		}
 		return out
 	default:
+		// A body of some other type is relayed as bytes; streamCopy reports
+		// nothing about how it ended, so nothing is claimed about it.
 		streamCopy(w, resp.Body)
 	}
 	return relayOutcome{}
@@ -607,12 +615,11 @@ const usageField = "usage"
 // when a streamed request asked for its token counts: the counts, and nothing
 // about the generation.
 //
-// The pinned server writes an empty choices array; an event that omits the
-// field entirely counts too, because such an event is equally not about the
-// generation and a client that did not ask for the counts should not receive
-// either. An event whose choices field is present but not a list is left
-// alone: it is not a shape this understands, and removing an event it does not
-// understand is the one mistake here that a client would see.
+// The shape recognised is exactly the shape asked for: the counts, and a
+// choices array that is present and empty. Anything else — no choices field at
+// all, a choices field that is not a list, counts riding an event that also
+// carries a choice — is relayed as it stands, because removing an event this
+// does not understand is the one mistake here that a client would see.
 func isUsageOnly(ev map[string]json.RawMessage) bool {
 	usage, ok := ev[usageField]
 	if !ok || string(usage) == "null" {
@@ -620,7 +627,7 @@ func isUsageOnly(ev map[string]json.RawMessage) bool {
 	}
 	raw, has := ev[choicesField]
 	if !has {
-		return true
+		return false
 	}
 	choices, ok := decodeChoices(raw)
 	return ok && len(choices) == 0
@@ -684,7 +691,7 @@ func streamRewriteSSE(w http.ResponseWriter, src io.Reader, modelArg, requested 
 	for {
 		line, err := br.ReadBytes('\n')
 		if len(line) > 0 {
-			if payload, ok := bytes.CutPrefix(bytes.TrimSuffix(line, []byte("\n")), []byte("data: ")); ok {
+			if prefix, payload, ok := cutDataPrefix(line); ok {
 				dropBlank = false
 				ev, parsed := decodeEvent(payload)
 				switch {
@@ -692,7 +699,7 @@ func streamRewriteSSE(w http.ResponseWriter, src io.Reader, modelArg, requested 
 					if opts.observing {
 						out.usage = readUsage(ev)
 					}
-					if !opts.keepUsage {
+					if opts.dropUsage {
 						// Gropius asked for this event, not the client. It is
 						// removed here rather than never asked for, because the
 						// counts are the whole point of asking.
@@ -703,9 +710,9 @@ func streamRewriteSSE(w http.ResponseWriter, src io.Reader, modelArg, requested 
 					out.firstToken = time.Now()
 				}
 				rewritten := renderEvent(payload, ev, parsed, modelArg, requested)
-				if _, werr := fmt.Fprintf(w, "data: %s\n", rewritten); werr != nil {
-					out.truncated = true
-					return out // client went away
+				if _, werr := fmt.Fprintf(w, "%s%s\n", prefix, rewritten); werr != nil {
+					out.clientGone = true
+					return out
 				}
 			} else if isBlankLine(line) && dropBlank {
 				dropBlank = false
@@ -716,7 +723,7 @@ func streamRewriteSSE(w http.ResponseWriter, src io.Reader, modelArg, requested 
 				// later blank belongs to whatever came between.
 				dropBlank = false
 				if _, werr := w.Write(line); werr != nil {
-					out.truncated = true
+					out.clientGone = true
 					return out
 				}
 			}
@@ -725,10 +732,32 @@ func streamRewriteSSE(w http.ResponseWriter, src io.Reader, modelArg, requested 
 			_ = rc.Flush()
 		}
 		if err != nil {
-			out.truncated = !errors.Is(err, io.EOF)
+			out.upstreamCut = !errors.Is(err, io.EOF)
 			return out
 		}
 	}
+}
+
+// cutDataPrefix splits an SSE line into its "data:" prefix and the payload
+// after it, reporting whether it is a data line at all.
+//
+// The single space after the colon is conventional, not required, and the
+// prefix is returned rather than re-spelled so a server that omits it gets its
+// own framing back byte for byte. Matching only the spelling with the space
+// would let a data line through unparsed — and therefore unrewritten, carrying
+// the model server's absolute path straight to a client.
+func cutDataPrefix(line []byte) (prefix, payload []byte, ok bool) {
+	body := bytes.TrimSuffix(bytes.TrimSuffix(line, []byte("\n")), []byte("\r"))
+	rest, ok := bytes.CutPrefix(body, []byte("data:"))
+	if !ok {
+		return nil, nil, false
+	}
+	prefix = []byte("data:")
+	if after, hadSpace := bytes.CutPrefix(rest, []byte(" ")); hadSpace {
+		prefix = []byte("data: ")
+		rest = after
+	}
+	return prefix, rest, true
 }
 
 // isBlankLine reports whether a line read off an SSE body is the empty line
