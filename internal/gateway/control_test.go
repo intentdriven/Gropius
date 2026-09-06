@@ -505,3 +505,34 @@ func TestSettingsRefusesAPinnedSetLargerThanTheBudget(t *testing.T) {
 		t.Errorf("the refused pins reached the running configuration: %v", got)
 	}
 }
+
+// A save that names the pinned list replaces it. Unlike the two per-model maps
+// beside it, no guard is needed for that — encoding/json resets a slice's
+// length rather than merging into it — but the difference is subtle enough
+// that removing a pin deserves a test of its own.
+func TestSavingAShorterPinnedListRemovesTheRest(t *testing.T) {
+	cfg := config.Default()
+	cfg.Pinned = []string{"org/one", "org/two"}
+	srv, a := newTestControlApp(t, cfg)
+
+	resp := postJSON(t, srv, "/api/settings",
+		`{"host":"0.0.0.0","port":11535,"api_key":"","decode_concurrency":4,`+
+			`"idle_timeout_sec":0,"pinned":["org/one"]}`)
+	resp.Body.Close()
+	if got := a.Config().Pinned; len(got) != 1 || got[0] != "org/one" {
+		t.Errorf("Pinned = %v, want only the model the save named", got)
+	}
+	if got := a.Pool.Pinned(); len(got) != 1 || got[0] != "org/one" {
+		t.Errorf("the pool holds %v, want only the model the save named", got)
+	}
+
+	// And an explicit null clears it, the way naming a collection means "these
+	// are its members" everywhere else in this handler.
+	resp = postJSON(t, srv, "/api/settings",
+		`{"host":"0.0.0.0","port":11535,"api_key":"","decode_concurrency":4,`+
+			`"idle_timeout_sec":0,"pinned":null}`)
+	resp.Body.Close()
+	if got := a.Config().Pinned; len(got) != 0 {
+		t.Errorf("Pinned = %v after an explicit null, want none", got)
+	}
+}
