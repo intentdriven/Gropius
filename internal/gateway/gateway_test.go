@@ -913,3 +913,105 @@ func TestLoopbackRebindingHostRequiresKey(t *testing.T) {
 		t.Errorf("with no key configured loopback must stay open regardless of Host, got %d", w.Code)
 	}
 }
+
+// Gropius's extensions to the OpenAI-shaped models list are top-level fields
+// with names already common elsewhere: context_length is what OpenRouter- and
+// Ollama-style listings publish, max_model_len what vLLM-derived clients read.
+// Both carry the same figure, and the four fields the list already served are
+// untouched.
+func TestListModelsPublishesContextLengthUnderBothNames(t *testing.T) {
+	fake := mlxtest.Start(mlxtest.Options{ModelArg: "/m"})
+	defer fake.Close()
+
+	models := &stubModels{models: []registry.Model{
+		{RepoID: "org/wide", State: registry.StateReady, ContextLength: 262144},
+	}}
+	g := New(Options{Config: config.Default(), Pool: &stubPool{srv: fake}, Models: models})
+	srv := httptest.NewServer(g.Handler())
+	defer srv.Close()
+
+	entry := firstModelEntry(t, srv)
+	for _, name := range []string{"context_length", "max_model_len"} {
+		n, ok := entry[name].(float64)
+		if !ok || int64(n) != 262144 {
+			t.Errorf("%s = %v, want 262144", name, entry[name])
+		}
+	}
+	want := map[string]bool{"id": true, "object": true, "created": true, "owned_by": true,
+		"context_length": true, "max_model_len": true}
+	for k := range entry {
+		if !want[k] {
+			t.Errorf("unexpected field %q on the models list", k)
+		}
+	}
+	for k := range want {
+		if _, ok := entry[k]; !ok {
+			t.Errorf("field %q missing from the models list", k)
+		}
+	}
+}
+
+// A model whose configuration declares no positional range is listed exactly
+// as it is without one: no figure, and still ready to serve.
+func TestListModelsOmitsAnUnknownContextLength(t *testing.T) {
+	fake := mlxtest.Start(mlxtest.Options{ModelArg: "/m"})
+	defer fake.Close()
+
+	models := &stubModels{models: []registry.Model{
+		{RepoID: "org/quiet", State: registry.StateReady},
+	}}
+	g := New(Options{Config: config.Default(), Pool: &stubPool{srv: fake}, Models: models})
+	srv := httptest.NewServer(g.Handler())
+	defer srv.Close()
+
+	entry := firstModelEntry(t, srv)
+	if entry["id"] != "org/quiet" {
+		t.Fatalf("the model was not listed: %+v", entry)
+	}
+	for _, name := range []string{"context_length", "max_model_len"} {
+		if v, ok := entry[name]; ok {
+			t.Errorf("%s = %v, want the field to be absent", name, v)
+		}
+	}
+}
+
+// The registry bounds the figure on every path into it, but the models list
+// is the LAN-facing edge: a figure that somehow got past those bounds must
+// not be published from here either.
+func TestListModelsRefusesAnAbsurdContextLength(t *testing.T) {
+	fake := mlxtest.Start(mlxtest.Options{ModelArg: "/m"})
+	defer fake.Close()
+
+	models := &stubModels{models: []registry.Model{
+		{RepoID: "org/absurd", State: registry.StateReady, ContextLength: registry.MaxContextLength + 1},
+	}}
+	g := New(Options{Config: config.Default(), Pool: &stubPool{srv: fake}, Models: models})
+	srv := httptest.NewServer(g.Handler())
+	defer srv.Close()
+
+	entry := firstModelEntry(t, srv)
+	if _, ok := entry["context_length"]; ok {
+		t.Errorf("an out-of-range figure was published: %v", entry["context_length"])
+	}
+}
+
+// firstModelEntry decodes GET /v1/models and returns the single entry, as a
+// raw map so a test can see exactly which fields are on the wire.
+func firstModelEntry(t *testing.T, srv *httptest.Server) map[string]any {
+	t.Helper()
+	resp, err := srv.Client().Get(srv.URL + "/v1/models")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var out struct {
+		Data []map[string]any `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Data) != 1 {
+		t.Fatalf("data = %+v, want exactly one model", out.Data)
+	}
+	return out.Data[0]
+}
