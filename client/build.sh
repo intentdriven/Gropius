@@ -18,12 +18,15 @@ mkdir -p "$MACOS" "$RES"
 
 # Universal binary (arm64 + x86_64) so it runs on any Mac, Apple Silicon or Intel.
 swiftc -O -parse-as-library \
-    -target arm64-apple-macos14.0 \
+    -target arm64-apple-macos26.0 \
     -o "$MACOS/$APP-arm64" \
     GropiusChat/GropiusChat.swift
 
-if swiftc -target x86_64-apple-macos14.0 -O -parse-as-library -o "$MACOS/$APP-x86_64" \
-        GropiusChat/GropiusChat.swift 2>/dev/null; then
+# swiftc's stderr is deliberately NOT discarded here: a failed x86_64 leg falls
+# through to an arm64-only build, and the release's universal-binary check then
+# reports a missing slice rather than the compile error that caused it.
+if swiftc -target x86_64-apple-macos26.0 -O -parse-as-library -o "$MACOS/$APP-x86_64" \
+        GropiusChat/GropiusChat.swift; then
     lipo -create -output "$MACOS/$APP" "$MACOS/$APP-arm64" "$MACOS/$APP-x86_64"
     rm -f "$MACOS/$APP-arm64" "$MACOS/$APP-x86_64"
     echo "Built a universal (arm64 + x86_64) binary."

@@ -5,14 +5,14 @@ A small native macOS app for chatting with the MLX models a
 running Gropius, pick a model, and talk to it — streaming replies, no browser.
 
 It's a plain OpenAI-compatible client, so it needs nothing installed on the other
-machine: just this one app.
+machine: just this one app. **Requires macOS 26**, the same floor as the server.
 
 ## Build
 
-Requires the Xcode command-line tools (`xcode-select --install`) on the Mac you
+Needs the Xcode command-line tools (`xcode-select --install`) on the Mac you
 build on, with the **macOS 26 SDK**: the app's Liquid Glass button styles exist
-only there, so the build fails against an older SDK even though the built app
-runs on macOS 14 or later. No Xcode project — one Swift file, one script:
+only there, so the build fails against an older SDK. No Xcode project — one
+Swift file, one script:
 
 ```sh
 ./build.sh

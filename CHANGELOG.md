@@ -17,6 +17,13 @@ GitHub release notes.
   request, and never the client's network address. A handler panic is reported
   the same way, so no line the server writes identifies a caller.
 
+### Removed
+
+- **Breaking:** support for every macOS below 26. Gropius and the GropiusChat
+  client both require macOS 26; the one-line installer refuses an older Mac
+  before it downloads anything, and the bundles declare the same minimum, so
+  macOS refuses to launch them there.
+
 ## [0.1.2] - 2026-09-06
 
 ### Security
