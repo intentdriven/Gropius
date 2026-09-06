@@ -8,15 +8,33 @@
 # build time — the page must request nothing but its own origin and the web font
 # service. Two checks rather than one because they fail differently: the test
 # fails a build when a reference is added, and the header stops a browser from
-# following one that reached the page some other way.
+# following one that reached the page some other way. Neither covers
+# `preconnect`, which is not a fetch and which no CSP directive governs, so the
+# build-time walk audits those links by name.
 #
 # It is derived from what the page actually references, and the test refuses a
 # host in it that the page never fetches. The page carries no script, no form
 # and no frame, so those are refused outright rather than left to default-src.
 # Fonts: the stylesheet comes from fonts.googleapis.com and the face files it
 # names come from fonts.gstatic.com, so both are needed and neither is enough.
+#
+# `img-src 'self'` is the one source here the page does not use. It is kept
+# deliberately: a browser asks for /favicon.ico on its own whether or not the
+# page links one, and under `default-src 'none'` that same-origin request is
+# refused and logged as a policy violation on every load, for no gain. There is
+# no `data:` and no remote image source, because the page has neither.
+#
+# The rule pattern mirrors wrangler.jsonc's route rather than the directory:
+# `/Gropius*` covers `/Gropius`, `/Gropius/` and everything under it without
+# depending on a splat matching the empty string. internal/sitetest derives it
+# from the manifest's out_subdir, so moving the page moves the policy with it.
 
-/Gropius/*
-  Content-Security-Policy: default-src 'none'; script-src 'none'; style-src 'self' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'
+/Gropius*
+  Content-Security-Policy: default-src 'none'; script-src 'none'; style-src 'self' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'
   Referrer-Policy: no-referrer
   X-Content-Type-Options: nosniff
+  # The page is the record's answer to "which release is current", so a stale
+  # copy is the one failure it exists to prevent. Revalidate every time: the
+  # files are small, unhashed, and served from an edge that answers a 304
+  # cheaply.
+  Cache-Control: public, max-age=0, must-revalidate
