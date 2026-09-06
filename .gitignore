@@ -40,9 +40,10 @@ go.work.sum
 # cmd/gropius-site and rendered again by the deploy workflow, so it is an
 # artefact, not a source.
 /site/
-# NOTE: build/AppIcon.icns IS committed (the 1024px source PNG isn't in the repo,
-# and make icon short-circuits when the .icns already exists) so CI can build the
-# server app on a clean checkout. Only the transient iconset staging dir is ignored.
+# NOTE: build/AppIcon.icns IS committed, and `make app` copies it rather than
+# regenerating it, so CI can build the server app on a clean checkout without
+# librsvg. `make icon` rebuilds it from build/icon.svg by hand. Only the
+# transient rasterisation artefacts are ignored.
 /build/icon-1024.png
 /build/AppIcon.iconset/
 .DS_Store
