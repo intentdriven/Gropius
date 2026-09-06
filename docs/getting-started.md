@@ -107,6 +107,16 @@ Setting a key also turns on the models list's residency fields, so a client
 holding it can see which models are loaded and pick a warm one instead of
 triggering a load — see the [models list reference](models-list.md).
 
+### Keep a model in memory
+
+**Settings → Pinned models** protects the models you rely on. A pinned model is
+never unloaded to make room for another and the idle timeout does not touch it;
+a request that would need its memory is refused instead, and that refusal never
+says which models are protected. Pinning is not preloading: preloading loads a
+model at start-up and leaves it as evictable as any other, pinning protects a
+model but loads nothing. See
+[Pin a model so it stays in memory](pinning-models.md).
+
 ### What Gropius reads of a request
 
 Gropius passes a request on to the model without reading what is in it. There
