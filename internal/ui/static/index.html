@@ -176,10 +176,10 @@
       <p class="hint">Some models refuse a conversation whose instructions are not all at
         the top, so an assistant that repeats its instructions mid-conversation gets an
         error instead of an answer. Switch merging on for such a model and Gropius gathers
-        that request's instruction messages into one message at the front, separated by a
-        blank line, before the model sees it. Gropius reads the instruction messages of
-        requests to that model and nothing else, keeps none of what it reads, and writes
-        none of it down.</p>
+        that request's instruction messages into the leading one, separated by a blank
+        line, before the model sees it. Gropius reads the instruction messages of requests
+        to that model and nothing else, keeps none of what it reads, and writes none of it
+        down.</p>
       <div id="mergeList"></div>
     </fieldset>
     <button type="submit">Save settings</button>

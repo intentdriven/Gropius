@@ -129,34 +129,56 @@ func decodedMessages(t *testing.T, messages []any) []any {
 // model, the model server sees one leading system message holding both texts in
 // order, and every other message and field as it was.
 func TestMergingFoldsSystemMessagesIntoOneLeadingMessage(t *testing.T) {
-	srv, _, fake, _ := newMergeGateway(t, mergingOn)
+	const modelPath = "/models/mlx-community/Qwen3-8B-4bit"
+	srv, upstream := newRecordingGateway(t, mergingOn, false)
 
-	got := postMerge(t, srv, fake, map[string]any{
-		"model":       mergeModel,
-		"temperature": 0.25,
-		"messages": []any{
-			map[string]any{"role": "system", "content": "You are Alice's assistant."},
-			map[string]any{"role": "user", "content": "hi"},
-			map[string]any{"role": "system", "content": "Answer briefly."},
-			map[string]any{"role": "assistant", "content": "hello"},
-		},
-	})
+	// The criterion is "every other message and field is unchanged in value",
+	// so the request carries the shapes a field can take: a float, a nested
+	// object, an array, and an integer too wide to survive a float round-trip.
+	// It is sent and inspected as raw bytes, because a value that cannot
+	// survive a round trip cannot be asserted through one either.
+	const wideSeed = "12345678901234567890123"
+	body := `{"model":"` + mergeModel + `","temperature":0.25,` +
+		`"response_format":{"type":"json_object"},` +
+		`"tools":[{"type":"function","function":{"name":"lookup"}}],` +
+		`"seed":` + wideSeed + `,` +
+		`"messages":[` +
+		`{"role":"system","content":"You are Alice's assistant."},` +
+		`{"role":"user","content":"hi"},` +
+		`{"role":"system","content":"Answer briefly."},` +
+		`{"role":"assistant","content":"hello"}]}`
+
+	resp, err := srv.Client().Post(srv.URL+"/v1/chat/completions", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
 
 	want := decodedMessages(t, []any{
 		map[string]any{"role": "system", "content": "You are Alice's assistant.\n\nAnswer briefly."},
 		map[string]any{"role": "user", "content": "hi"},
 		map[string]any{"role": "assistant", "content": "hello"},
 	})
-	if !reflect.DeepEqual(got, want) {
+	if got := upstream.messages(t); !reflect.DeepEqual(got, want) {
 		t.Errorf("upstream messages =\n %#v\nwant\n %#v", got, want)
 	}
+
 	// Merging rewrites the messages and nothing else. The model field is the
 	// backend's own path, as it is for every relayed request.
-	if temp, _ := fake.LastBody()["temperature"].(float64); temp != 0.25 {
-		t.Errorf("temperature reached the model server as %v, want 0.25", temp)
-	}
-	if got := fake.LastModelField(); got != fake.ModelArg {
-		t.Errorf("upstream saw model=%q, want the backend path %q", got, fake.ModelArg)
+	relayed := string(upstream.rawBody())
+	for _, field := range []string{
+		`"model":"` + modelPath + `"`,
+		`"temperature":0.25`,
+		`"response_format":{"type":"json_object"}`,
+		`"tools":[{"type":"function","function":{"name":"lookup"}}]`,
+		`"seed":` + wideSeed,
+	} {
+		if !strings.Contains(relayed, field) {
+			t.Errorf("the model server received\n %s\nwhich does not carry %s unchanged", relayed, field)
+		}
 	}
 }
 

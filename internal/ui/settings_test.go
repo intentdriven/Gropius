@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"reflect"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -91,14 +92,18 @@ func TestSettingsFormPostsThePerModelMapWhole(t *testing.T) {
 // perModelSettings is only worth testing while the form both builds its body
 // from it and renders the boxes it reads. These are the two lines the value
 // tests above cannot reach without a DOM.
+//
+// Matched on the identifiers rather than the line, so re-aligning the object
+// literal the body is built from — a whitespace-only edit — does not report
+// the switches as unasserted.
 func TestSettingsFormIsWiredToThePerModelSwitches(t *testing.T) {
 	src := readPanelSource(t)
-	for _, fragment := range []string{
-		"per_model:         perModelSettings(state.config.per_model, listedMergeModels(), checkedMergeModels()),",
-		"renderMergeSwitches();",
+	for _, want := range []*regexp.Regexp{
+		regexp.MustCompile(`per_model:\s*perModelSettings\(\s*state\.config\.per_model,\s*listedMergeModels\(\),\s*checkedMergeModels\(\),?\s*\)`),
+		regexp.MustCompile(`\brenderMergeSwitches\(\)`),
 	} {
-		if !strings.Contains(src, fragment) {
-			t.Errorf("the control panel no longer contains %q — the per-model switches are then asserted by nothing", fragment)
+		if !want.MatchString(src) {
+			t.Errorf("the control panel no longer matches %s — the per-model switches are then asserted by nothing", want)
 		}
 	}
 }
