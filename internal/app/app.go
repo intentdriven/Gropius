@@ -55,6 +55,13 @@ type Options struct {
 	Paths  config.Paths
 	Config config.Config
 	Log    *slog.Logger
+	// Launcher starts model server processes. Nil — the shipping case — means
+	// the real one, which runs mlx_lm.server out of the managed virtualenv.
+	// It is a seam because the wiring between a saved configuration and a
+	// model server's command line runs through this composition root, and a
+	// test that cannot see a launched process cannot see whether that wiring
+	// is connected.
+	Launcher runtime.Launcher
 }
 
 // New wires the application together.
@@ -95,14 +102,19 @@ func New(opts Options) (*App, error) {
 		downloads:   map[string]*download{},
 	}
 
-	launcher := &runtime.ExecLauncher{
-		Paths:  opts.Paths,
-		LogDir: opts.Paths.Logs,
-	}
-	// Kill any model servers left running by a previous run that crashed before
-	// it could stop them — otherwise they hold GPU memory until reboot.
-	if killed := launcher.ReapOrphans(); killed > 0 {
-		opts.Log.Warn("reaped model servers left over from a previous run", "count", killed)
+	launcher := opts.Launcher
+	if launcher == nil {
+		exec := &runtime.ExecLauncher{
+			Paths:  opts.Paths,
+			LogDir: opts.Paths.Logs,
+		}
+		// Kill any model servers left running by a previous run that crashed
+		// before it could stop them — otherwise they hold GPU memory until
+		// reboot.
+		if killed := exec.ReapOrphans(); killed > 0 {
+			opts.Log.Warn("reaped model servers left over from a previous run", "count", killed)
+		}
+		launcher = exec
 	}
 
 	a.Pool = runtime.NewPool(runtime.PoolOptions{
