@@ -207,7 +207,6 @@ var ErrClosed = errors.New("pool is closed")
 // The returned release function must be called when the request finishes. Until
 // it is, the model is pinned and cannot be evicted out from under the caller.
 func (p *Pool) Acquire(ctx context.Context, repoID string) (*Upstream, func(), error) {
-	entered := p.opts.now()
 	p.mu.Lock()
 	if p.closed {
 		p.mu.Unlock()
@@ -239,6 +238,12 @@ func (p *Pool) Acquire(ctx context.Context, repoID string) (*Upstream, func(), e
 	e.inFlight++
 	e.lastUsed = p.opts.now()
 	ready := e.ready
+	// The load wait is clocked from here, with the entry in hand, rather than
+	// from the top of Acquire: everything above is contention on this pool's
+	// own lock and, for the request that triggers a load, the launch itself.
+	// Billing those as "waiting for the model to load" would report a warm,
+	// free model as cold whenever another goroutine happened to hold the lock.
+	entered := p.opts.now()
 	p.mu.Unlock()
 
 	release := func() {
