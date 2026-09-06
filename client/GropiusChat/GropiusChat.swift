@@ -378,17 +378,13 @@ final class AppModel: ObservableObject {
 // MARK: - Styling
 
 extension View {
-    /// Apply the macOS 26 Liquid Glass button style, falling back to a bordered
-    /// style on earlier systems so the app still builds and runs there. Toolbar
-    /// buttons adopt Liquid Glass automatically; this is for the custom buttons
-    /// (the composer, the settings sheet) so they match.
+    /// Apply the macOS 26 Liquid Glass button style. Toolbar buttons adopt
+    /// Liquid Glass automatically; this is for the custom buttons (the
+    /// composer, the settings sheet) so they match. The app's deployment
+    /// target is macOS 26, so no availability fallback is needed.
     @ViewBuilder
     func glassButton(prominent: Bool = false) -> some View {
-        if #available(macOS 26.0, *) {
-            if prominent { buttonStyle(.glassProminent) } else { buttonStyle(.glass) }
-        } else {
-            if prominent { buttonStyle(.borderedProminent) } else { buttonStyle(.bordered) }
-        }
+        if prominent { buttonStyle(.glassProminent) } else { buttonStyle(.glass) }
     }
 }
 

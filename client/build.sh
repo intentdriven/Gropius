@@ -22,8 +22,11 @@ swiftc -O -parse-as-library \
     -o "$MACOS/$APP-arm64" \
     GropiusChat/GropiusChat.swift
 
+# swiftc's stderr is deliberately NOT discarded here: a failed x86_64 leg falls
+# through to an arm64-only build, and the release's universal-binary check then
+# reports a missing slice rather than the compile error that caused it.
 if swiftc -target x86_64-apple-macos26.0 -O -parse-as-library -o "$MACOS/$APP-x86_64" \
-        GropiusChat/GropiusChat.swift 2>/dev/null; then
+        GropiusChat/GropiusChat.swift; then
     lipo -create -output "$MACOS/$APP" "$MACOS/$APP-arm64" "$MACOS/$APP-x86_64"
     rm -f "$MACOS/$APP-arm64" "$MACOS/$APP-x86_64"
     echo "Built a universal (arm64 + x86_64) binary."
