@@ -33,6 +33,19 @@ type App struct {
 	Stats *stats.Recorder
 	Log   *slog.Logger
 
+	// saveMu serialises whole settings saves. cfgMu guards the value; this
+	// guards the sequence — write the file, swap the value, tell the pool —
+	// which is not one step and must not interleave with another save's, or the
+	// pool ends up enforcing a pinned set that the file, the panel and
+	// /v1/models all say does not exist.
+	//
+	// It is a lock of its own rather than cfgMu held wider, because cfgMu
+	// cannot be held across the pool setter: startLocked runs under the pool's
+	// p.mu and calls SamplingFor, which takes cfgMu.RLock, so p.mu -> cfgMu is
+	// an established order and cfgMu -> p.mu would invert it. Nothing taken
+	// under p.mu or cfgMu takes saveMu, so it adds no order at all.
+	saveMu sync.Mutex
+
 	cfgMu sync.RWMutex
 	cfg   config.Config
 
@@ -206,6 +219,9 @@ func (a *App) Config() config.Config {
 // listener and the model servers are already running with the old values, and
 // silently pretending otherwise would be worse than saying so.
 func (a *App) SetConfig(c config.Config) error {
+	a.saveMu.Lock()
+	defer a.saveMu.Unlock()
+
 	if err := c.Validate(); err != nil {
 		return err
 	}

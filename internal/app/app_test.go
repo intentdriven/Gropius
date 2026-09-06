@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -1260,5 +1261,43 @@ func TestThePinnedFitCheckIsInclusiveOfTheBudget(t *testing.T) {
 	if err := a.SetConfig(c); err == nil {
 		t.Errorf("a pinned model charged %s against a budget of %s was accepted",
 			runtime.HumanBytes(runtime.LoadCost(over)), runtime.HumanBytes(budget))
+	}
+}
+
+// SetConfig writes the file, swaps the live configuration and tells the pool as
+// three steps. Overlapping saves interleaving across those steps leave the pool
+// enforcing a pin that the settings, the panel and /v1/models all say does not
+// exist — a divergence between what is enforced and what every surface reports,
+// lasting until the next save or a restart.
+func TestOverlappingSavesLeaveThePoolAgreeingWithTheSettings(t *testing.T) {
+	a := newTestApp(t)
+	putReady(t, a, "org/one", 1<<20)
+	putReady(t, a, "org/two", 1<<20)
+
+	var wg sync.WaitGroup
+	for i := range 24 {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			c := a.Config()
+			if i%2 == 0 {
+				c.Pinned = []string{"org/one"}
+			} else {
+				c.Pinned = []string{"org/two"}
+			}
+			_ = a.SetConfig(c)
+		}(i)
+	}
+	wg.Wait()
+
+	if got, want := a.Pool.Pinned(), a.Config().Pinned; !reflect.DeepEqual(got, want) {
+		t.Errorf("the pool enforces %v while the settings say %v", got, want)
+	}
+	stored, _, err := config.Load(a.Paths.Config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := stored.Pinned, a.Config().Pinned; !reflect.DeepEqual(got, want) {
+		t.Errorf("config.json holds %v while the running settings say %v", got, want)
 	}
 }
