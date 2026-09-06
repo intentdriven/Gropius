@@ -43,6 +43,10 @@ at start-up.
 | `min_p` | number, `0` to `1` inclusive |
 | `max_tokens` | integer, at least `0` |
 
+A budget of `0` is accepted and yields nothing: `generate.py`'s step loop
+breaks on `n == max_tokens` before its first `yield`, so the completion is
+empty rather than unbounded.
+
 ### The sampler's own limits, which the request check does not cover
 
 `validate_model_parameters` is not the whole story. `mlx_lm/sample_utils.py`
