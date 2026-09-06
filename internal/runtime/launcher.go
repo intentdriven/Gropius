@@ -142,6 +142,24 @@ type LaunchError struct {
 func (e *LaunchError) Error() string { return e.Err.Error() }
 func (e *LaunchError) Unwrap() error { return e.Err }
 
+// NotReadyError wraps the other half of a load going wrong: the process
+// started and then never answered a completion — it exited during startup, or
+// it was still loading when the readiness timeout ran out.
+//
+// It carries the same message it always did; the type is what lets a caller
+// tell "could not be started" from "started and never answered". The two are
+// different failures: the first is a broken installation or a vanished model
+// directory, the second is usually a model too large for this Mac or weights
+// that will not load. Its message is safe to relay, unlike a LaunchError's:
+// it comes from the process's own exit status or from the probe's timeout, not
+// from a path on this machine.
+type NotReadyError struct {
+	Err error
+}
+
+func (e *NotReadyError) Error() string { return e.Err.Error() }
+func (e *NotReadyError) Unwrap() error { return e.Err }
+
 // ExecLauncher runs the real `mlx_lm.server` out of the managed virtualenv.
 type ExecLauncher struct {
 	Paths config.Paths
@@ -179,13 +197,16 @@ func (l *ExecLauncher) Precheck(spec Spec) error {
 	return nil
 }
 
-// Launch spawns mlx_lm.server for one model.
-func (l *ExecLauncher) Launch(ctx context.Context, spec Spec) (Process, error) {
-	if err := l.Precheck(spec); err != nil {
-		return nil, err
-	}
-	python := l.Paths.VenvPython()
-
+// launchArgs is the model server's whole command line, spec by spec.
+//
+// It is a function of the Spec alone, and the Spec carries nothing about
+// logging: the level is a constant here. That is the point. At DEBUG the model
+// server writes every request body and every response to its log, prompts and
+// completions included, so the level is never something another feature can
+// reach — recording request statistics leaves this vector byte for byte as it
+// was. Raising it is a separate, deliberate action per model, and it says in
+// plain words what it writes.
+func launchArgs(spec Spec) []string {
 	// `python -m mlx_lm.server` is deprecated in 0.31; `python -m mlx_lm server`
 	// is the supported spelling.
 	args := []string{
@@ -201,8 +222,16 @@ func (l *ExecLauncher) Launch(ctx context.Context, spec Spec) (Process, error) {
 	if spec.DecodeConcurrency > 1 {
 		args = append(args, "--decode-concurrency", strconv.Itoa(spec.DecodeConcurrency))
 	}
+	return args
+}
 
-	cmd := exec.Command(python, args...)
+// Launch spawns mlx_lm.server for one model.
+func (l *ExecLauncher) Launch(ctx context.Context, spec Spec) (Process, error) {
+	if err := l.Precheck(spec); err != nil {
+		return nil, err
+	}
+	python := l.Paths.VenvPython()
+	cmd := exec.Command(python, launchArgs(spec)...)
 	cmd.Env = append(os.Environ(),
 		// Without an existing HF_HUB_CACHE directory, mlx_lm.server raises
 		// CacheNotFound while serving /v1/models and returns an empty 200.

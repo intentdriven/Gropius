@@ -99,3 +99,37 @@ func TestLaunchDoesNotBlockOnFIFOLogFile(t *testing.T) {
 		t.Fatal("Launch blocked opening a FIFO planted as the log file")
 	}
 }
+
+// Every model server is started at INFO, whatever else its Spec carries.
+//
+// At the level above, the pinned model server writes every request body and
+// every response it produces to its log — prompts and completions. So this is
+// not a formatting detail: it is the line between the content-free record the
+// operator opted into and a full transcript on disk. The architecture tests
+// keep the switch out of this package; this one asserts what a model server is
+// actually launched with, off the argument vector rather than off the source.
+func TestEveryModelServerIsLaunchedAtInfo(t *testing.T) {
+	temp := 0.7
+	specs := map[string]Spec{
+		"a plain spec":            {RepoID: "org/a", ModelPath: "/models/org/a", Port: 1},
+		"with sampling defaults":  {RepoID: "org/b", ModelPath: "/models/org/b", Port: 2, Sampling: config.Sampling{Temperature: &temp}},
+		"with decode concurrency": {RepoID: "org/c", ModelPath: "/models/org/c", Port: 3, DecodeConcurrency: 4},
+	}
+	for name, spec := range specs {
+		t.Run(name, func(t *testing.T) {
+			argv := launchArgs(spec)
+			got, ok := flagValue(argv, "--log-level")
+			if !ok {
+				t.Fatalf("the model server is launched with no log level at all: %v", argv)
+			}
+			if got != "INFO" {
+				t.Errorf("the model server is launched at %q, want INFO — above it the server writes every prompt and every answer to its log", got)
+			}
+			for _, arg := range argv {
+				if arg == "DEBUG" {
+					t.Errorf("the argument vector names DEBUG: %v", argv)
+				}
+			}
+		})
+	}
+}

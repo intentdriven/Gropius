@@ -54,6 +54,13 @@ type stubPool struct {
 	srv *mlxtest.Server
 	// acquireErr, if set, is returned by Acquire.
 	acquireErr error
+	// baseURL, if set, replaces the fake server's own address, so a test can
+	// hand the gateway an upstream it cannot even build a request for.
+	baseURL string
+	// releaseDelay holds the handler up inside release(), which runs before
+	// the deferred bookkeeping. It gives a test a window in which a client's
+	// disconnect is delivered while the handler is still finishing.
+	releaseDelay time.Duration
 
 	mu       sync.Mutex
 	acquired []string
@@ -78,13 +85,20 @@ func (p *stubPool) Acquire(ctx context.Context, repoID string) (*runtime.Upstrea
 	p.mu.Unlock()
 
 	release := func() {
+		if p.releaseDelay > 0 {
+			time.Sleep(p.releaseDelay)
+		}
 		p.mu.Lock()
 		p.released++
 		p.mu.Unlock()
 	}
+	base := p.srv.URL()
+	if p.baseURL != "" {
+		base = p.baseURL
+	}
 	return &runtime.Upstream{
 		RepoID:   repoID,
-		BaseURL:  p.srv.URL(),
+		BaseURL:  base,
 		ModelArg: p.srv.ModelArg,
 	}, release, nil
 }
@@ -301,7 +315,7 @@ func TestNonStreamingResponseBodyIsCapped(t *testing.T) {
 	}
 	rec := httptest.NewRecorder()
 
-	relayRewritingModel(rec, resp, "backend-path", "requested-name")
+	relayRewritingModel(rec, resp, "backend-path", "requested-name", relayOptions{})
 
 	if got := rec.Body.Len(); got > maxResponseBody {
 		t.Errorf("relayRewritingModel wrote %d bytes, want capped at maxResponseBody=%d", got, maxResponseBody)
@@ -328,7 +342,7 @@ func TestNonStreamingResponseBodyIsCappedWithoutLeakingBackendPath(t *testing.T)
 	}
 	rec := httptest.NewRecorder()
 
-	relayRewritingModel(rec, resp, modelArg, requested)
+	relayRewritingModel(rec, resp, modelArg, requested, relayOptions{})
 
 	if strings.Contains(rec.Body.String(), modelArg) {
 		t.Fatalf("capped, truncated response still contains the backend path %q", modelArg)

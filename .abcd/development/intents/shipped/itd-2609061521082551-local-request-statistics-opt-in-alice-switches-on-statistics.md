@@ -102,16 +102,20 @@ one lookup rather than a second pass over the stream.
 - Deferred: how far back the live view reaches, and where its records are
   served from, are the spec's, once the cost of carrying them to the panel is
   measured.
-- Deferred: the separate per-model debug action has no record of its own yet.
-  The reviewer asked for it to be captured before planning; it is captured as
-  its own draft so the rule that it never shares the statistics switch has a
-  home.
+- Deferred: the separate per-model debug action ships as its own intent,
+  captured as the draft itd-2609062346072707, so the rule that it never shares
+  the statistics switch has a home. Nothing in this intent raises a model
+  server's log level, and nothing in it can.
 - Depends on: adr-2609061503319212 (no public telemetry; local only; strict
   opt-in, off by default).
 
 ## Audit Notes
 
-_Empty. Populated by intent-auditor when intent moves to shipped/._
+<!-- abcd-review: OWED receipt=rcp-e6806ab7063d -->
+Fidelity review OWED (receipt rcp-e6806ab7063d). The audit compares this
+promise against what was delivered, so it runs after the branch merges; the
+receipt's request lives in the per-machine tier and does not travel, so
+whoever runs it re-emits the request with `abcd intent audit`.
 
 ## Grounds
 

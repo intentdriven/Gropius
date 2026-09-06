@@ -49,6 +49,10 @@ Cross-machine LAN use works; TLS and notarized distribution are not yet included
 - **Sampling defaults** — one place to say what an omitted `temperature` means
   for the whole machine, with an optional override per model; a request that
   sets its own value still wins.
+- **Request statistics, opt-in** — off until you turn it on: a content-free
+  record of each request's model, token counts and timings, shown per model in
+  the control panel and kept on this Mac
+  ([how to switch it on](docs/request-statistics.md)).
 - **Network-shared** — bind the LAN, discoverable over Bonjour, optional API key.
 - **Multi-account** — other user accounts on the same Mac share one copy of each
   model on disk and on the GPU.
@@ -133,6 +137,15 @@ activity private means setting the key, not leaving the fields off.
 
 The server's request log records the method, path, status and duration of a
 request, and never the client's network address.
+
+Gropius collects no telemetry: nothing about usage, models, hardware or errors
+leaves your Mac, to the project or to anyone else. **Request statistics** is a
+local record, off unless you turn it on, holding token counts and timings —
+never a prompt, an answer, an API key or a client's address. The boundary is
+the Mac rather than your account: the control panel answers anyone who can
+reach it on this Mac, so on a Mac several people log into, any of them can
+turn the switch on and read what it records
+([what is recorded, and who can see it](docs/request-statistics.md)).
 
 Gropius passes a request's prompt on to the model without reading it. The one
 exception is **Merge system messages**, a per-model setting that is off unless

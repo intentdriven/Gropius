@@ -30,6 +30,22 @@ type Upstream struct {
 	// model, so sending the client's friendly name would make the backend try to
 	// download a repo by that name from HuggingFace.
 	ModelArg string
+	// Waits is what this one acquisition spent getting here. An Upstream is
+	// built per Acquire rather than shared, so the waits belong on it: the
+	// caller that paid them is the caller holding it.
+	Waits AcquireStats
+}
+
+// AcquireStats separates the two waits an acquisition can incur, which the
+// caller cannot tell apart from the single duration it can measure itself.
+//
+// LoadWait is time spent waiting for the model server to become ready, borne
+// by every waiter on that load and not only by the request that triggered it.
+// QueueWait is time spent waiting for a concurrency slot on a model that was
+// already loaded. A request that found its model warm and free pays neither.
+type AcquireStats struct {
+	LoadWait  time.Duration
+	QueueWait time.Duration
 }
 
 // ResidencyState says how far a model has got towards serving a request
@@ -92,6 +108,11 @@ type PoolOptions struct {
 	// ReadyTimeout bounds how long we wait for a model to load. Large models on
 	// a cold page cache genuinely take minutes.
 	ReadyTimeout time.Duration
+
+	// Observer, when set, is told when a model server loads and when one
+	// leaves the pool. Nil (the default) means nobody is watching and every
+	// report is a no-op; see PoolObserver for what the pool promises it.
+	Observer PoolObserver
 
 	// HTTP is the client used for readiness probes.
 	HTTP *http.Client
@@ -217,6 +238,12 @@ func (p *Pool) Acquire(ctx context.Context, repoID string) (*Upstream, func(), e
 	e.inFlight++
 	e.lastUsed = p.opts.now()
 	ready := e.ready
+	// The load wait is clocked from here, with the entry in hand, rather than
+	// from the top of Acquire: everything above is contention on this pool's
+	// own lock and, for the request that triggers a load, the launch itself.
+	// Billing those as "waiting for the model to load" would report a warm,
+	// free model as cold whenever another goroutine happened to hold the lock.
+	entered := p.opts.now()
 	p.mu.Unlock()
 
 	release := func() {
@@ -232,7 +259,7 @@ func (p *Pool) Acquire(ctx context.Context, repoID string) (*Upstream, func(), e
 		// it down the moment the last waiter is gone. The identity check
 		// guards against a load that already failed and removed itself.
 		if e.inFlight == 0 && !isReady(e) && p.entries[config.FoldRepoID(e.repoID)] == e {
-			p.stopEntryLocked(e)
+			p.stopEntryLocked(e, StopAbandoned)
 		}
 		p.mu.Unlock()
 	}
@@ -247,6 +274,11 @@ func (p *Pool) Acquire(ctx context.Context, repoID string) (*Upstream, func(), e
 		release()
 		return nil, nil, ctx.Err()
 	}
+	// Every waiter on a load pays the wait, not only the request that started
+	// it: a request that arrives halfway through someone else's load is still
+	// a request that waited for a model to load, and reporting it as a queue
+	// wait would say the model was busy when it was cold.
+	loaded := p.opts.now()
 
 	// The model is ready; now claim a concurrency slot on it. Beyond the batch the
 	// server can actually decode, extra requests wait here rather than piling into
@@ -268,6 +300,10 @@ func (p *Pool) Acquire(ctx context.Context, repoID string) (*Upstream, func(), e
 		RepoID:   repoID,
 		BaseURL:  fmt.Sprintf("http://127.0.0.1:%d", e.port),
 		ModelArg: e.modelArg,
+		Waits: AcquireStats{
+			LoadWait:  loaded.Sub(entered),
+			QueueWait: p.opts.now().Sub(loaded),
+		},
 	}, releaseSlot, nil
 }
 
@@ -330,6 +366,7 @@ func (p *Pool) startLocked(repoID string) (*entry, error) {
 	}
 	e.proc = proc
 	p.entries[config.FoldRepoID(repoID)] = e
+	p.notify(func(o PoolObserver) { o.LoadStarted(repoID) })
 
 	go p.waitReady(e)
 	return e, nil
@@ -341,7 +378,10 @@ func (p *Pool) waitReady(e *entry) {
 	ctx, cancel := context.WithTimeout(context.Background(), p.opts.ReadyTimeout)
 	defer cancel()
 
+	started := p.opts.now()
 	err := p.probeReady(ctx, e)
+	took := p.opts.now().Sub(started)
+	p.notify(func(o PoolObserver) { o.LoadFinished(e.repoID, took, err) })
 
 	p.mu.Lock()
 	e.readyErr = err
@@ -355,6 +395,7 @@ func (p *Pool) waitReady(e *entry) {
 		// against the budget.
 		if p.entries[config.FoldRepoID(e.repoID)] == e {
 			delete(p.entries, config.FoldRepoID(e.repoID))
+			p.notify(func(o PoolObserver) { o.EntryStopped(e.repoID, StopLoadFailed) })
 		}
 	}
 	p.mu.Unlock()
@@ -385,6 +426,7 @@ func (p *Pool) watchExit(e *entry) {
 	p.mu.Lock()
 	if p.entries[config.FoldRepoID(e.repoID)] == e {
 		delete(p.entries, config.FoldRepoID(e.repoID))
+		p.notify(func(o PoolObserver) { o.EntryStopped(e.repoID, StopCrashed) })
 	}
 	p.mu.Unlock()
 }
@@ -411,9 +453,9 @@ func (p *Pool) probeReady(ctx context.Context, e *entry) error {
 		select {
 		case <-e.proc.Done():
 			if err := e.proc.Err(); err != nil {
-				return fmt.Errorf("model server for %s exited during startup: %w", e.repoID, err)
+				return &NotReadyError{Err: fmt.Errorf("model server for %s exited during startup: %w", e.repoID, err)}
 			}
-			return fmt.Errorf("model server for %s exited during startup", e.repoID)
+			return &NotReadyError{Err: fmt.Errorf("model server for %s exited during startup", e.repoID)}
 		default:
 		}
 
@@ -434,7 +476,7 @@ func (p *Pool) probeReady(ctx context.Context, e *entry) error {
 
 		select {
 		case <-ctx.Done():
-			return fmt.Errorf("%s did not become ready within %s", e.repoID, p.opts.ReadyTimeout)
+			return &NotReadyError{Err: fmt.Errorf("%s did not become ready within %s", e.repoID, p.opts.ReadyTimeout)}
 		case <-time.After(backoff):
 		}
 		// Cap the retry interval low: this loop only spins while the server socket
@@ -478,13 +520,15 @@ func (p *Pool) evictForLocked(need int64) error {
 				"not enough memory to load another model: every loaded model is currently serving a request (limit %s)",
 				humanBytes(p.opts.MaxResidentBytes))
 		}
-		p.stopEntryLocked(victim)
+		p.stopEntryLocked(victim, StopEvicted)
 	}
 }
 
-// stopEntryLocked removes an entry and stops its process. Callers must hold p.mu.
-func (p *Pool) stopEntryLocked(e *entry) {
+// stopEntryLocked removes an entry and stops its process, reporting why it
+// went. Callers must hold p.mu.
+func (p *Pool) stopEntryLocked(e *entry, reason StopReason) {
 	delete(p.entries, config.FoldRepoID(e.repoID))
+	p.notify(func(o PoolObserver) { o.EntryStopped(e.repoID, reason) })
 	proc := e.proc
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
@@ -515,7 +559,7 @@ func (p *Pool) Unload(repoID string) error {
 		return fmt.Errorf("%s is serving %d request(s); try again in a moment: %w",
 			repoID, e.inFlight, ErrBusy)
 	}
-	p.stopEntryLocked(e)
+	p.stopEntryLocked(e, StopUnloaded)
 	return nil
 }
 
@@ -572,7 +616,7 @@ func (p *Pool) reapIdle() {
 				// open, so tearing it down would waste the load and error every
 				// caller waiting on it. isReady checks without blocking.
 				if e.inFlight == 0 && isReady(e) && now.Sub(e.lastUsed) >= p.opts.IdleTimeout {
-					p.stopEntryLocked(e)
+					p.stopEntryLocked(e, StopIdle)
 				}
 			}
 			p.mu.Unlock()
@@ -591,6 +635,7 @@ func (p *Pool) Close() error {
 	procs := make([]Process, 0, len(p.entries))
 	for _, e := range p.entries {
 		procs = append(procs, e.proc)
+		p.notify(func(o PoolObserver) { o.EntryStopped(e.repoID, StopShutdown) })
 	}
 	p.entries = map[string]*entry{}
 	p.mu.Unlock()

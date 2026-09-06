@@ -127,7 +127,17 @@ reaches a model the next time it loads. See
 [Set default sampling parameters](sampling-defaults.md), with the parameters
 themselves in [Reference: sampling parameters](sampling-reference.md).
 
-## 8. Sharing across user accounts (optional)
+## 8. See how your models are performing (optional)
+
+Gropius keeps no record of the requests it serves unless you ask it to.
+**Settings → Request statistics** turns on a content-free record of each
+request — the model, the token counts and the timings — shown per model on the
+**Statistics** tab, so two quantisations of the same model can be compared by
+their numbers. It never records a prompt, an answer, an API key or the address
+of the client, and nothing recorded leaves this Mac. See
+[Record request statistics on this Mac](request-statistics.md).
+
+## 9. Sharing across user accounts (optional)
 
 If several people log into this Mac, let them share one copy of each model:
 

@@ -17,6 +17,7 @@ import (
 	"github.com/intentdriven/Gropius/internal/hub"
 	"github.com/intentdriven/Gropius/internal/registry"
 	"github.com/intentdriven/Gropius/internal/runtime"
+	"github.com/intentdriven/Gropius/internal/stats"
 )
 
 // App holds everything the daemon needs.
@@ -26,7 +27,10 @@ type App struct {
 	Registry    *registry.Registry
 	Pool        *runtime.Pool
 	Provisioner *runtime.Provisioner
-	Log         *slog.Logger
+	// Stats holds the live view of what this Mac has served, and holds nothing
+	// at all until the operator turns recording on (adr-2609061503319212).
+	Stats *stats.Recorder
+	Log   *slog.Logger
 
 	cfgMu sync.RWMutex
 	cfg   config.Config
@@ -98,6 +102,7 @@ func New(opts Options) (*App, error) {
 		Hub:         hc,
 		Registry:    reg,
 		Provisioner: runtime.NewProvisioner(opts.Paths),
+		Stats:       stats.New(stats.Options{}),
 		Log:         opts.Log,
 		cfg:         opts.Config,
 		downloads:   map[string]*download{},
@@ -128,7 +133,12 @@ func New(opts Options) (*App, error) {
 		SamplingFor: func(repoID string) config.Sampling {
 			return a.Config().EffectiveSampling(repoID)
 		},
+		// The pool reports loads and removals to the recorder, which ignores
+		// them while recording is off. Adapting here keeps internal/stats a
+		// leaf package that imports nothing of ours.
+		Observer: poolObserver{rec: a.Stats, log: opts.Log},
 	})
+	a.Stats.SetEnabled(opts.Config.Statistics)
 
 	// Settings read from disk have not been through SetConfig's checks: the
 	// file can be hand-edited, restored from a backup, or written by another
@@ -197,8 +207,56 @@ func (a *App) SetConfig(c config.Config) error {
 	a.cfg = c
 	a.cfgMu.Unlock()
 
+	// The switch applies to the next request, not to the next start. Turning
+	// it off also empties what was recorded, which is what makes "off" the
+	// same state as a fresh start rather than a hidden one.
+	a.Stats.SetEnabled(c.Statistics)
+
 	a.Hub.Token = c.HFToken
 	return nil
+}
+
+// poolObserver adapts the pool's reports onto the recorder. The pool names its
+// own reasons and the recorder names its own; this is the one place that has
+// to know both.
+type poolObserver struct {
+	rec *stats.Recorder
+	log *slog.Logger
+}
+
+func (o poolObserver) LoadStarted(repoID string) { o.rec.LoadStarted(repoID) }
+
+func (o poolObserver) LoadFinished(repoID string, took time.Duration, err error) {
+	o.rec.LoadFinished(repoID, took, err)
+}
+
+func (o poolObserver) EntryStopped(repoID string, reason runtime.StopReason) {
+	mapped, ok := stopReasons[reason]
+	if !ok {
+		// The two vocabularies are declared in two packages and a cast between
+		// them would have gone on agreeing forever after one of them changed
+		// its spelling — silently, since the only figure that reads a reason
+		// is the eviction count, and a count that stops rising looks like a
+		// Mac with room to spare. An unmapped reason is recorded under its own
+		// name and said out loud.
+		o.log.Warn("a model left the pool for a reason the statistics do not know", "reason", reason)
+		mapped = string(reason)
+	}
+	o.rec.Removed(repoID, mapped)
+}
+
+// stopReasons maps every reason the pool can give onto the recorder's own. It
+// is a total mapping on purpose: a reason added to one side and not the other
+// shows up as a missing key, which is a line in the log rather than a figure
+// that quietly stops moving.
+var stopReasons = map[runtime.StopReason]string{
+	runtime.StopEvicted:    stats.ReasonEvicted,
+	runtime.StopIdle:       stats.ReasonIdle,
+	runtime.StopUnloaded:   stats.ReasonUnloaded,
+	runtime.StopAbandoned:  stats.ReasonAbandoned,
+	runtime.StopLoadFailed: stats.ReasonLoadFailed,
+	runtime.StopCrashed:    stats.ReasonCrashed,
+	runtime.StopShutdown:   stats.ReasonShutdown,
 }
 
 // canonicalPerModel checks the keys of a per-model settings map submitted

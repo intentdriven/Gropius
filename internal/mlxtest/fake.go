@@ -11,6 +11,14 @@
 //   - /health returns {"status":"ok"} immediately, before the weights load.
 //     Readiness therefore cannot be inferred from /health alone.
 //   - Streaming responses are SSE "data: {...}" lines ending with "data: [DONE]".
+//   - Token counts only reach a streaming client when the request carries
+//     "stream_options": {"include_usage": true}. The server then emits one
+//     extra event before "[DONE]" whose "choices" array is empty and which
+//     carries the usage object.
+//   - A "stream_options" object that does not carry the "include_usage" key
+//     raises inside the real server, which answers 500. A gateway that merges
+//     into a client's own stream_options must therefore always write the key
+//     rather than assume it is there.
 package mlxtest
 
 import (
@@ -31,6 +39,12 @@ type Server struct {
 	ModelArg string
 	// Reply is the assistant text returned for a completion.
 	Reply string
+	// FirstTokenDelay holds the first streamed chunk back; see Options.
+	FirstTokenDelay time.Duration
+	// ChunkDelay paces the chunks after the first; see Options.
+	ChunkDelay time.Duration
+	// RolePreamble emits a role-only first chunk; see Options.
+	RolePreamble bool
 
 	httpSrv   *httptest.Server
 	readyAt   time.Time
@@ -53,15 +67,33 @@ type Options struct {
 	// addresses it there, so a fake standing in for a launched process has to
 	// answer on that port rather than one of its own.
 	Port int
+	// FirstTokenDelay holds the first streamed chunk back, standing in for the
+	// prefill a real model does before it can emit anything. Without it the
+	// whole answer arrives inside a millisecond and a time-to-first-token
+	// measurement has nothing to measure.
+	FirstTokenDelay time.Duration
+	// ChunkDelay paces the chunks after the first, standing in for generation.
+	// Without it a whole answer is written before a client could act on any of
+	// it, so a test about what happens mid-stream has no mid-stream.
+	ChunkDelay time.Duration
+	// RolePreamble emits a first chunk carrying only the assistant's role and
+	// no text, which is what OpenAI's own streaming API does and what several
+	// compatible servers do. Whether the pinned mlx-lm does has not been
+	// established here, so a test that cares which chunk a measurement lands
+	// on turns this on and says which behavior it is describing.
+	RolePreamble bool
 }
 
 // Start launches a fake server. It is closed automatically via t.Cleanup by the
 // caller, or explicitly with Close.
 func Start(opts Options) *Server {
 	s := &Server{
-		ModelArg: opts.ModelArg,
-		Reply:    opts.Reply,
-		readyAt:  time.Now().Add(opts.LoadDelay),
+		ModelArg:        opts.ModelArg,
+		Reply:           opts.Reply,
+		FirstTokenDelay: opts.FirstTokenDelay,
+		ChunkDelay:      opts.ChunkDelay,
+		RolePreamble:    opts.RolePreamble,
+		readyAt:         time.Now().Add(opts.LoadDelay),
 	}
 	if s.Reply == "" {
 		s.Reply = "GROPIUS OK"
@@ -173,7 +205,14 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	s.completed.Add(1)
 
 	if stream, _ := body["stream"].(bool); stream {
-		s.streamReply(w)
+		includeUsage, err := streamIncludeUsage(body)
+		if err != nil {
+			// The real server reads stream_options["include_usage"] directly:
+			// an object without the key raises, and the client sees a 500.
+			http.Error(w, `{"error":"KeyError: 'include_usage'"}`, http.StatusInternalServerError)
+			return
+		}
+		s.streamReply(w, includeUsage)
 		return
 	}
 
@@ -191,9 +230,33 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// streamIncludeUsage reads the request's stream_options the way the real
+// server does. It reports an error for an object that does not carry the
+// include_usage key, which is the shape that raises upstream; an absent or
+// null stream_options is simply "no usage", as it is there.
+func streamIncludeUsage(body map[string]any) (bool, error) {
+	raw, ok := body["stream_options"]
+	if !ok || raw == nil {
+		return false, nil
+	}
+	opts, ok := raw.(map[string]any)
+	if !ok {
+		return false, fmt.Errorf("stream_options is not an object")
+	}
+	v, ok := opts["include_usage"]
+	if !ok {
+		return false, fmt.Errorf("stream_options carries no include_usage")
+	}
+	b, _ := v.(bool)
+	return b, nil
+}
+
 // streamReply emits one SSE chunk per word, flushing each so a proxy that
-// buffers the body instead of streaming it will be caught by the tests.
-func (s *Server) streamReply(w http.ResponseWriter) {
+// buffers the body instead of streaming it will be caught by the tests. When
+// the request asked for usage, one more event follows the words: an empty
+// choices array and the token counts, which is the shape the real server
+// emits and the only way a streaming client learns what it spent.
+func (s *Server) streamReply(w http.ResponseWriter, includeUsage bool) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.WriteHeader(http.StatusOK)
@@ -202,7 +265,26 @@ func (s *Server) streamReply(w http.ResponseWriter) {
 	if !ok {
 		return
 	}
-	for _, word := range splitWords(s.Reply) {
+	if s.FirstTokenDelay > 0 {
+		time.Sleep(s.FirstTokenDelay)
+	}
+	if s.RolePreamble {
+		b, _ := json.Marshal(map[string]any{
+			"id":     "chatcmpl-fake",
+			"object": "chat.completion.chunk",
+			"model":  s.ModelArg,
+			"choices": []any{map[string]any{
+				"index": 0,
+				"delta": map[string]any{"role": "assistant"},
+			}},
+		})
+		fmt.Fprintf(w, "data: %s\n\n", b)
+		flusher.Flush()
+	}
+	for i, word := range splitWords(s.Reply) {
+		if i > 0 && s.ChunkDelay > 0 {
+			time.Sleep(s.ChunkDelay)
+		}
 		chunk := map[string]any{
 			"id":     "chatcmpl-fake",
 			"object": "chat.completion.chunk",
@@ -213,6 +295,19 @@ func (s *Server) streamReply(w http.ResponseWriter) {
 			}},
 		}
 		b, _ := json.Marshal(chunk)
+		fmt.Fprintf(w, "data: %s\n\n", b)
+		flusher.Flush()
+	}
+	if includeUsage {
+		b, _ := json.Marshal(map[string]any{
+			"id":      "chatcmpl-fake",
+			"object":  "chat.completion.chunk",
+			"model":   s.ModelArg,
+			"choices": []any{},
+			"usage": map[string]any{
+				"prompt_tokens": 3, "completion_tokens": 4, "total_tokens": 7,
+			},
+		})
 		fmt.Fprintf(w, "data: %s\n\n", b)
 		flusher.Flush()
 	}

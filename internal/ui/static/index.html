@@ -25,6 +25,9 @@
   <div class="status" id="serverStatus">
     <span class="dot" id="statusDot"></span>
     <span id="statusText">connecting…</span>
+    <a href="#" id="recordingBadge" class="recording" hidden
+       onclick="showTab('stats');return false"
+       title="Request statistics are being recorded on this Mac. Anyone who can open this panel can read them.">Recording</a>
   </div>
 </header>
 
@@ -42,6 +45,7 @@
 <nav class="tabs">
   <button class="tab active" data-tab="models">My Models</button>
   <button class="tab" data-tab="search">Find Models</button>
+  <button class="tab" data-tab="stats">Statistics</button>
   <button class="tab" data-tab="connect">Connect</button>
   <button class="tab" data-tab="settings">Settings</button>
 </nav>
@@ -63,6 +67,33 @@
   </form>
   <p class="hint">Searching the <code>mlx-community</code> organisation. Prefix with <code>author:someone</code> to look elsewhere.</p>
   <div id="searchResults"></div>
+</section>
+
+<!-- ── Statistics ────────────────────────────────────────── -->
+<section id="tab-stats" class="panel">
+  <div id="statsOff" class="empty" hidden>
+    <p><strong>Gropius is not recording anything.</strong></p>
+    <p>Turn on <em>Record request statistics on this Mac</em> in
+      <a href="#" onclick="showTab('settings');return false">Settings</a> to see how
+      each model performs. Nothing is recorded until you do, and nothing leaves this Mac.</p>
+  </div>
+  <div id="statsBody" hidden>
+    <p class="figures" id="statsTotals"></p>
+    <h2>Per model</h2>
+    <div id="statsModels"></div>
+    <h2>Recent requests</h2>
+    <div class="scroll">
+      <table id="statsTable">
+        <thead>
+          <tr><th>Time</th><th>Model</th><th>Mode</th><th>Outcome</th><th>Tokens in/out</th>
+            <th>First token</th><th>Rate</th><th>Waited</th><th>Total</th></tr>
+        </thead>
+        <tbody id="statsRows"></tbody>
+      </table>
+    </div>
+    <p class="hint">Newest first. Times are this Mac's. No message text and no client
+      address is recorded, so none can be shown.</p>
+  </div>
 </section>
 
 <!-- ── Connect ───────────────────────────────────────────── -->
@@ -169,6 +200,26 @@
         <input id="ovMaxTokens" type="number" step="1" min="0" max="1048576" placeholder="machine-wide default">
       </label>
       <button type="button" id="ovApply" class="ghost">Set override</button>
+    </fieldset>
+
+    <fieldset class="group">
+      <legend>Request statistics</legend>
+      <label class="switch">
+        <input id="setStats" type="checkbox">
+        <span>Record request statistics on this Mac</span>
+      </label>
+      <p class="hint">Off unless you turn it on. While it is on, Gropius records, for each
+        request it serves: the model, when the request arrived, how it ended, whether it
+        streamed, how many tokens went in and came out, how long the first token took, how
+        long the whole request took, and how long it waited for the model. It never records
+        a prompt, an answer, an API key or the address of the client that sent it, and
+        nothing recorded leaves this Mac. Turning it off again empties what is held.
+        Everyone who can open this panel can turn it on and read it, which on a Mac that
+        several people log into means every account on it — so on a shared Mac this is a
+        decision for all of them, and while it is on <strong>Recording</strong> appears
+        beside the server status at the top of this page. The
+        <a href="https://github.com/intentdriven/Gropius/blob/main/docs/request-statistics.md">what
+        is recorded page</a> says all of this field by field.</p>
     </fieldset>
 
     <fieldset class="group">

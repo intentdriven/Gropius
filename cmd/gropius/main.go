@@ -149,7 +149,7 @@ func runServer(ln net.Listener, paths config.Paths, cfg config.Config, headless 
 	// OpenAI-compatible API — LAN-facing, guarded by the optional API key. The
 	// gateway reads the key live (a.Config) so setting one in the control panel
 	// takes effect without a restart.
-	g := gateway.New(gateway.Options{ConfigFunc: a.Config, Pool: a.Pool, Models: a.Registry, Log: log})
+	g := gateway.New(gateway.Options{ConfigFunc: a.Config, Pool: a.Pool, Models: a.Registry, Log: log, Stats: a.Stats})
 	apiHandler := g.Handler()
 	for _, p := range []string{"/v1/", "/health"} {
 		mux.Handle(p, apiHandler)

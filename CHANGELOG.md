@@ -13,6 +13,31 @@ GitHub release notes.
 
 ### Added
 
+- **Request statistics**, a switch in Settings that is off until it is turned
+  on. While it is on, Gropius records one content-free row per request it
+  serves — the model, when the request arrived, how it ended, whether it
+  streamed, the model server's own token counts, the time to the first
+  streamed chunk, the total duration, and how long it waited for a free slot
+  or for the model to load — and a new **Statistics** tab shows those rows and
+  each model's totals, loads and evictions, so two quantisations of the same
+  model can be compared by their numbers. It never records a prompt, an
+  answer, an API key or the address of the client: the part of Gropius that
+  keeps the figures is never handed a request, its headers or its connection,
+  and the only text it can be given is the id of a model already on this Mac.
+  Everything is held in memory, a restart empties it, and turning the switch
+  off empties it at once. The boundary is the Mac rather than one account: the
+  control panel asks for no password and answers every account on this Mac by
+  design, so where several people log in, any of them can turn the switch on
+  and read what it holds — and the panel says **Recording** beside the server
+  status for as long as it is on. Nothing leaves the Mac, under
+  [the standing decision that no telemetry ever will](.abcd/development/decisions/adrs/2609061503319212-no-public-telemetry-local-telemetry-only-as-a-strict-opt-in.md).
+  A streamed answer carries no token counts unless the request asks for them,
+  so while recording is on Gropius asks the model server on the client's
+  behalf and removes the extra chunk before relaying the answer when the
+  client did not ask — what a client receives is the stream it would have
+  received. Switching this on never changes any model server's own log level,
+  and two architecture tests hold that apart. See
+  [Record request statistics on this Mac](docs/request-statistics.md).
 - **Merge system messages**, a per-model setting in Settings that is off until
   it is switched on. Some models refuse a conversation whose instructions are
   not all at the top, which breaks any assistant that repeats its instructions
