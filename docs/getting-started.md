@@ -60,6 +60,11 @@ curl http://localhost:11535/v1/chat/completions \
 The first request for a model loads it (a few seconds to a minute for large
 ones); later requests are fast. You can pre-load from **My Models → Load**.
 
+`GET /v1/models` lists what this Mac can serve, and gives each model's maximum
+context so a client can size its prompts before sending. The
+[models list reference](models-list.md) describes every field, including what
+that figure does and does not promise.
+
 ## 5. Talk to it — from another machine
 
 Open the **Connect** tab. It lists the exact base URLs to use, for example

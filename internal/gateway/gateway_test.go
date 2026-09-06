@@ -9,6 +9,8 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -1014,4 +1016,58 @@ func firstModelEntry(t *testing.T, srv *httptest.Server) map[string]any {
 		t.Fatalf("data = %+v, want exactly one model", out.Data)
 	}
 	return out.Data[0]
+}
+
+// The models list is a documented interface, and the reference page is where
+// a reader looks it up. This pins the page to the handler: every field served
+// is described there, and nothing is described that is not served.
+func TestModelsListReferenceDocumentsEveryFieldServed(t *testing.T) {
+	fake := mlxtest.Start(mlxtest.Options{ModelArg: "/m"})
+	defer fake.Close()
+
+	models := &stubModels{models: []registry.Model{
+		{RepoID: "org/m", State: registry.StateReady, ContextLength: 131072},
+	}}
+	g := New(Options{Config: config.Default(), Pool: &stubPool{srv: fake}, Models: models})
+	srv := httptest.NewServer(g.Handler())
+	defer srv.Close()
+
+	served := map[string]bool{}
+	for k := range firstModelEntry(t, srv) {
+		served[k] = true
+	}
+
+	page, err := os.ReadFile(filepath.Join("..", "..", "docs", "models-list.md"))
+	if err != nil {
+		t.Fatalf("the models-list reference page is missing: %v", err)
+	}
+	documented := map[string]bool{}
+	for _, line := range strings.Split(string(page), "\n") {
+		if !strings.HasPrefix(line, "| `") {
+			continue
+		}
+		field, _, ok := strings.Cut(strings.TrimPrefix(line, "| `"), "`")
+		if ok {
+			documented[field] = true
+		}
+	}
+
+	for field := range served {
+		if !documented[field] {
+			t.Errorf("the models list serves %q, which the reference page does not describe", field)
+		}
+	}
+	for field := range documented {
+		if !served[field] {
+			t.Errorf("the reference page describes %q, which the models list does not serve", field)
+		}
+	}
+
+	// The two things a reader must not have to infer: what the figure is, and
+	// that it is not what this Mac can necessarily serve.
+	for _, phrase := range []string{"architectural maximum", "may be smaller"} {
+		if !strings.Contains(string(page), phrase) {
+			t.Errorf("the reference page never says %q", phrase)
+		}
+	}
 }
