@@ -161,9 +161,9 @@ func TestTurningTheSwitchOnAppliesAtOnce(t *testing.T) {
 	}
 }
 
-// The rows name a model and figures, and nothing else. This is the same scan
-// the gateway makes over the recorder, made again at the surface the rows
-// actually leave through.
+// The figures are the operator's, and the machine is the boundary. The
+// endpoint that serves them sits on the control plane, which answers nobody
+// but this Mac.
 func TestTheStatisticsEndpointIsLoopbackOnly(t *testing.T) {
 	paths := config.NewPaths(t.TempDir())
 	cfg := config.Default()
@@ -176,7 +176,7 @@ func TestTheStatisticsEndpointIsLoopbackOnly(t *testing.T) {
 	h := (&Control{App: a}).Handler()
 
 	req := httptest.NewRequest(http.MethodGet, "/api/stats", nil)
-	req.RemoteAddr = "192.168.1.77:5555"
+	req.RemoteAddr = "192.0.2.44:5555" // a LAN host (RFC 5737 documentation range)
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
 	if w.Code != http.StatusForbidden {
