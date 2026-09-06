@@ -16,6 +16,10 @@ GitHub release notes.
 - The server's request log records the method, path, status and duration of a
   request, and never the client's network address. A handler panic is reported
   the same way, so no line the server writes identifies a caller.
+- Gropius and the GropiusChat client require macOS 26. Both bundles declare
+  that minimum and the installer refuses an older Mac before it downloads
+  anything, so a Mac that cannot run them is turned away up front rather than
+  after the install. This drops support for earlier systems.
 
 ## [0.1.2] - 2026-09-06
 

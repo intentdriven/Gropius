@@ -9,7 +9,7 @@ found_during: "2026-09-06 landing-page planning interview"
 origin: researcher-authored
 production_mode: hand-written
 found_at: "build/Info.plist"
-resolution: "Raised LSMinimumSystemVersion to 26.0 in build/Info.plist and client/Info.plist, moved both swiftc deployment targets in client/build.sh to macos26.0, and stated \"Requires macOS 26\" in README.md and docs/getting-started.md; internal/archtest asserts all five surfaces agree."
+resolution: "build/Info.plist is the single declaration of the floor and now says 26.0. Held to it: client/Info.plist, both swiftc deployment targets in client/build.sh, a new sw_vers gate in install.sh that refuses an older Mac before any download, and the phrase \"Requires macOS 26\" in README.md, docs/getting-started.md and client/README.md. internal/archtest reads the plist value and derives every one of those expectations from it, so no surface carries a second copy of the number to drift from."
 impact: fix
 ---
 
