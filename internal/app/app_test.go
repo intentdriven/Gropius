@@ -560,13 +560,11 @@ func TestDownloadOfReCasedIDReusesExistingEntry(t *testing.T) {
 	defer broken.Close()
 	a.Hub.BaseURL = broken.URL
 
-	var dlErr error
-	waitFor(t, "the re-cased download to start", func() bool {
-		dlErr = a.Download("Org/Repo")
-		return !errors.Is(dlErr, ErrAlreadyDownloading)
-	})
-	if dlErr != nil {
-		t.Fatalf("Download: %v", dlErr)
+	// Straight through, with no retry loop around it: the first download has
+	// been seen finished, and a download that has published its final state is
+	// no longer registered as in flight.
+	if err := a.Download("Org/Repo"); err != nil {
+		t.Fatalf("Download: %v", err)
 	}
 	waitFor(t, "the attempt to settle", func() bool {
 		m, err := a.Registry.Get("org/repo")

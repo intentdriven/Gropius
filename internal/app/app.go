@@ -359,7 +359,7 @@ func (a *App) Download(repoID string) error {
 		State:   registry.StateDownloading,
 		AddedAt: addedAt,
 	}); err != nil {
-		a.finishDownload(repoID)
+		a.finishDownload(dl, nil)
 		return err
 	}
 
@@ -367,7 +367,11 @@ func (a *App) Download(repoID string) error {
 	go func() {
 		defer a.dlWG.Done()
 		defer close(dl.done)
-		defer a.finishDownload(repoID)
+		// A safety net, not the normal path: every branch below deregisters
+		// itself as it publishes its final state. Deregistering twice is
+		// harmless, and leaving a download registered forever would refuse
+		// every later attempt at that model.
+		defer a.finishDownload(dl, nil)
 
 		err := a.Hub.Download(ctx, hub.DownloadRequest{
 			RepoID:      repoID,
@@ -395,22 +399,29 @@ func (a *App) Download(repoID string) error {
 			}
 		}
 
+		// Each branch publishes its final state and deregisters the download
+		// in one step (see finishDownload). Logging stays outside it: the log
+		// is not what another goroutine is waiting to see.
 		switch {
 		case err == nil:
-			// Re-derive the size from disk rather than trusting the manifest.
-			if perr := a.Registry.Put(registry.Model{
-				RepoID: repoID,
-				Path:   dest,
-				Bytes:  dirSize(dest),
-				// Read through the registry's own primitive, so the download
-				// path and the rescan apply one key rule; a model carries its
-				// context length from the moment it is ready, not only after
-				// the next startup rescan.
-				ContextLength: registry.ReadContextLength(dest),
-				State:         registry.StateReady,
-				Progress:      100,
-				AddedAt:       addedAt,
-			}); perr != nil {
+			var perr error
+			a.finishDownload(dl, func() {
+				// Re-derive the size from disk rather than trusting the manifest.
+				perr = a.Registry.Put(registry.Model{
+					RepoID: repoID,
+					Path:   dest,
+					Bytes:  dirSize(dest),
+					// Read through the registry's own primitive, so the download
+					// path and the rescan apply one key rule; a model carries its
+					// context length from the moment it is ready, not only after
+					// the next startup rescan.
+					ContextLength: registry.ReadContextLength(dest),
+					State:         registry.StateReady,
+					Progress:      100,
+					AddedAt:       addedAt,
+				})
+			})
+			if perr != nil {
 				// The files are on disk; only the index write failed. Surface it —
 				// a silently unrecorded model would look missing until a rescan.
 				a.Log.Error("model downloaded but could not be recorded", "model", repoID, "err", perr)
@@ -421,18 +432,30 @@ func (a *App) Download(repoID string) error {
 		case errors.Is(err, context.Canceled):
 			// A cancelled download leaves .part files behind on purpose: they let
 			// the next attempt resume instead of starting over.
-			if a.restoreReady(repoID, dest, wasReady, prior) {
+			var restored bool
+			a.finishDownload(dl, func() {
+				restored = a.restoreReady(repoID, dest, wasReady, prior)
+				if !restored {
+					a.Registry.SetState(repoID, registry.StateFailed, 0, "cancelled")
+				}
+			})
+			if restored {
 				a.Log.Info("download cancelled; the ready model is untouched", "model", repoID)
 			} else {
-				a.Registry.SetState(repoID, registry.StateFailed, 0, "cancelled")
 				a.Log.Info("download cancelled", "model", repoID)
 			}
 
 		default:
-			if a.restoreReady(repoID, dest, wasReady, prior) {
+			var restored bool
+			a.finishDownload(dl, func() {
+				restored = a.restoreReady(repoID, dest, wasReady, prior)
+				if !restored {
+					a.Registry.SetState(repoID, registry.StateFailed, 0, err.Error())
+				}
+			})
+			if restored {
 				a.Log.Warn("download failed; the ready model is untouched", "model", repoID, "err", err)
 			} else {
-				a.Registry.SetState(repoID, registry.StateFailed, 0, err.Error())
 				a.Log.Error("download failed", "model", repoID, "err", err)
 			}
 		}
@@ -471,10 +494,31 @@ func (a *App) restoreReady(repoID, dest string, wasReady bool, prior registry.Mo
 	return true
 }
 
-func (a *App) finishDownload(repoID string) {
+// finishDownload publishes a download's final state and deregisters it as one
+// step, then reports whether this call was the one that deregistered it.
+//
+// One step is the whole point. The registry is what everything else watches —
+// the control panel renders every change the event stream pushes, and the
+// tests wait on it — so publishing "ready" before releasing the model left a
+// window in which a caller could see the model finished and still be refused
+// its next Download with ErrAlreadyDownloading. A caller cannot observe that
+// window now: reaching the in-flight map means taking this lock, and the state
+// that says the download ended is written inside it.
+//
+// publish may be nil, for a caller that has nothing to publish.
+//
+// The identity check matters for the deferred safety-net call: by the time it
+// runs, the branch above has already deregistered this download and the id may
+// belong to a newer attempt, which must not be cancelled out from under itself.
+func (a *App) finishDownload(dl *download, publish func()) {
 	a.dlMu.Lock()
-	delete(a.downloads, dlKey(repoID))
-	a.dlMu.Unlock()
+	defer a.dlMu.Unlock()
+	if publish != nil {
+		publish()
+	}
+	if cur, ok := a.downloads[dlKey(dl.repoID)]; ok && cur == dl {
+		delete(a.downloads, dlKey(dl.repoID))
+	}
 }
 
 // dlKey is the in-flight downloads map key: case-folded like the registry's,
