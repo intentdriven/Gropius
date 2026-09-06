@@ -43,9 +43,15 @@ default — which is what OpenAI clients expect.
 ## One model, its own figures
 
 **Settings → Per-model sampling** gives a single model its own values. Choose
-the model, fill in only the fields that should differ, and **Set override**;
-then **Save settings**. A field left blank in an override keeps the
-machine-wide value, so an override can be a temperature alone.
+the model — the fields fill in with whatever it already has — set the ones
+that should differ from the machine-wide defaults, and **Save settings**. A
+field left blank keeps the machine-wide value, so an override can be a
+temperature alone. Clearing every field removes the override, as does
+**Remove** beside it in the list.
+
+The fields are part of the settings form, so **Save settings** takes whatever
+is in them; **Set override** is for building up several models' overrides
+before saving.
 
 The override applies to that model the next time it loads. A model with no
 override is served with the machine-wide set.

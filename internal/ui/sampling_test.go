@@ -122,3 +122,33 @@ func TestPostedSamplingShapeDecodesIntoTheConfigType(t *testing.T) {
 		t.Errorf("sampling = %+v, want every field unset", s)
 	}
 }
+
+// Two ways the override editor could lie to the user, both pinned here
+// because the panel has no runtime test harness in this repository.
+func TestOverrideEditorDoesNotSilentlyDiscardInput(t *testing.T) {
+	script, err := assets.ReadFile("static/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	js := string(script)
+
+	// The per-model fields sit inside the settings form, above its submit
+	// button, so pressing Save (or Enter in a number field) must not throw
+	// away what is typed in them.
+	if !strings.Contains(js, "foldPendingOverride()") {
+		t.Error("the settings submit handler does not fold the per-model fields in, so values typed there are silently dropped on Save")
+	}
+	if strings.Count(js, "foldPendingOverride()") < 2 {
+		t.Error("foldPendingOverride is defined but not called from both the button and the submit handler")
+	}
+
+	// Setting an override replaces it wholesale, so the fields have to show
+	// what is stored — otherwise editing a temperature quietly deletes the
+	// token budget saved beside it.
+	if !strings.Contains(js, "prefillOverride") {
+		t.Error("selecting a model does not load its saved override into the fields, so editing one parameter discards the others")
+	}
+	if !strings.Contains(js, `$('ovModel').addEventListener('change'`) {
+		t.Error("no change listener on the model select, so the fields never follow the selection")
+	}
+}

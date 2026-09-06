@@ -447,9 +447,23 @@ function renderOverrides() {
     select.appendChild(opt);
   });
   if (chosen && ids.has(chosen)) select.value = chosen;
+  prefillOverride();
 }
 
-$('ovApply').addEventListener('click', () => {
+// prefillOverride shows what is stored for the selected model. Setting an
+// override replaces it whole, so the fields have to start from the saved
+// values — otherwise changing a temperature quietly drops the token budget
+// saved beside it.
+function prefillOverride() {
+  writeSampling('over', overrides[$('ovModel').value]);
+}
+
+// foldPendingOverride takes whatever is in the per-model fields and makes it
+// the selected model's override; every field blank removes it. Called both
+// from the button and from the form's submit, because the fields sit inside
+// the settings form and pressing Save (or Enter in a number field) must not
+// throw away what is typed in them.
+function foldPendingOverride() {
   const id = $('ovModel').value;
   if (!id) return;
   const values = readSampling('over');
@@ -458,7 +472,12 @@ $('ovApply').addEventListener('click', () => {
   } else {
     overrides[id] = values;
   }
-  writeSampling('over', {});
+}
+
+$('ovModel').addEventListener('change', prefillOverride);
+
+$('ovApply').addEventListener('click', () => {
+  foldPendingOverride();
   settingsTouched = true;
   renderOverrides();
 });
@@ -474,6 +493,9 @@ $('genKey').addEventListener('click', () => {
 $('settingsForm').addEventListener('submit', async (e) => {
   e.preventDefault();
   const msg = $('settingsMsg');
+  // Anything typed in the per-model fields counts, whether or not Set override
+  // was pressed.
+  foldPendingOverride();
   // Only the fields this form owns. Anything omitted (advertise, preload) is
   // preserved server-side — sending advertise:true here used to silently
   // re-enable LAN advertising on every save.
