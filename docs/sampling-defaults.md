@@ -24,8 +24,9 @@ loading again — see [When a change takes effect](#when-a-change-takes-effect).
 | Maximum completion tokens | `max_tokens`, and `max_completion_tokens` | 512 |
 
 A maximum of 0 is accepted and means every request that omits the parameter
-gets an empty answer; there is no upper limit, so a very large figure lets one
-request hold a model for as long as it keeps generating.
+gets an empty answer. The largest maximum is 1048576 tokens — beyond the
+longest context any of these models serves, and high enough that the limit is
+never what stops a real answer.
 
 These are the parameters the model server accepts when it starts. Anything else
 a request can carry — repetition and presence penalties, `logit_bias`,
@@ -90,10 +91,14 @@ every time, and there is no setting to add to that.
 Every field has a range, and the panel refuses a value outside it, naming the
 field and changing nothing. The ranges are the model server's own: temperature
 is at least 0, top-p and min-p are between 0 and 1, and top-k and the token
-budget are whole numbers of at least 0. Top-k has an upper limit of 1024 as
-well, because the model server refuses a top-k as large as the model's
-vocabulary and Gropius cannot tell what that is at the moment you save. A
-top-k above a few hundred keeps every plausible token anyway.
+budget are whole numbers of at least 0. Two ceilings are Gropius' own rather than the
+model server's. Top-k has an upper limit of 1024, because the model server
+refuses a top-k as large as the model's vocabulary and Gropius cannot tell what
+that is at the moment you save; a top-k above a few hundred keeps every
+plausible token anyway. The maximum completion tokens has an upper limit of
+1048576, because a default larger than any real context window does not mean a
+generous budget, it means every request that omits the parameter runs until the
+model stops of its own accord.
 
 The check matters because these values are given to the model server at
 start-up. A figure it will not accept does not stop the model loading: the

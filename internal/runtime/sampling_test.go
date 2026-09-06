@@ -5,6 +5,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -282,5 +283,44 @@ func TestPoolLaunchesEachModelWithItsOwnSamplingDefaults(t *testing.T) {
 	}
 	if got := l.specFor("org/plain").Sampling.Temperature; got == nil || *got != 1.2 {
 		t.Errorf("temperature after reload = %v, want the saved 1.2", got)
+	}
+}
+
+// The command line is where an out-of-range integer would do its damage, so the
+// rendering is checked at the extremes the type allows rather than only at the
+// values the settings endpoint lets through.
+func TestIntegerFlagsRenderExactlyAndNeverNegative(t *testing.T) {
+	args := samplingArgs(config.Sampling{
+		TopK:      iptr(1024),
+		MaxTokens: iptr(config.MaxCompletionTokens),
+	})
+	if got, _ := flagValue(args, "--top-k"); got != "1024" {
+		t.Errorf("--top-k = %q, want 1024", got)
+	}
+	want := strconv.Itoa(config.MaxCompletionTokens)
+	if got, _ := flagValue(args, "--max-tokens"); got != want {
+		t.Errorf("--max-tokens = %q, want %s", got, want)
+	}
+
+	// Rendered from the integer field, not from the float64 the bounds are
+	// compared in. This is the property that does not depend on the
+	// architecture: narrowing an out-of-range float64 saturates on arm64 and
+	// wraps to a negative on amd64, so a test that only feeds extreme values
+	// through Sampling would pass here and fail on the other build.
+	if got := formatSamplingValue(config.SamplingValue{
+		Field: "max_tokens", Integer: true, Int: 8192, Number: 1234,
+	}); got != "8192" {
+		t.Errorf("formatSamplingValue = %q, want the integer field's 8192 — "+
+			"rendering through the float64 is implementation-defined out of range", got)
+	}
+
+	// Values beyond what the endpoint accepts are dropped, not rendered — and
+	// certainly never rendered as a negative, which argparse would take.
+	for _, v := range []int{1<<63 - 1, -(1 << 62)} {
+		for _, a := range samplingArgs(config.Sampling{MaxTokens: iptr(v), TopK: iptr(v)}) {
+			if strings.HasPrefix(a, "-") && !strings.HasPrefix(a, "--") {
+				t.Errorf("max_tokens/top_k %d rendered %q, which argparse reads as a value", v, a)
+			}
+		}
 	}
 }

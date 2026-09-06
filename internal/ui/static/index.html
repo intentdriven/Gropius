@@ -135,7 +135,7 @@
       </label>
       <label>
         <span>Maximum completion tokens</span>
-        <input id="setMaxTokens" type="number" step="1" min="0" placeholder="512">
+        <input id="setMaxTokens" type="number" step="1" min="0" max="1048576" placeholder="512">
       </label>
     </fieldset>
 
@@ -166,7 +166,7 @@
       </label>
       <label>
         <span>Maximum completion tokens</span>
-        <input id="ovMaxTokens" type="number" step="1" min="0" placeholder="machine-wide default">
+        <input id="ovMaxTokens" type="number" step="1" min="0" max="1048576" placeholder="machine-wide default">
       </label>
       <button type="button" id="ovApply" class="ghost">Set override</button>
     </fieldset>

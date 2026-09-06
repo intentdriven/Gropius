@@ -238,3 +238,18 @@ func between(s, open, close string) string {
 	}
 	return rest[:j]
 }
+
+// The completion-token ceiling is Gropius' own too, so the panel carries the
+// configured figure rather than a copy of it.
+func TestMaxTokensInputsCarryTheConfiguredCeiling(t *testing.T) {
+	page, err := assets.ReadFile("static/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := fmt.Sprintf(`max="%d"`, config.MaxCompletionTokens)
+	for _, id := range []string{"setMaxTokens", "ovMaxTokens"} {
+		if tag := inputTag(t, string(page), id); !strings.Contains(tag, want) {
+			t.Errorf("%s carries %q, want %s", id, tag, want)
+		}
+	}
+}

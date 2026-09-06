@@ -89,7 +89,11 @@ func samplingArgs(s config.Sampling) []string {
 // and still renders with a leading dash, which would read as another flag.
 func formatSamplingValue(v config.SamplingValue) string {
 	if v.Integer {
-		return strconv.FormatInt(int64(v.Number), 10)
+		// From the integer field, never from the float64 the bounds are
+		// compared in: narrowing a float64 that is out of integer range is
+		// implementation-defined, and on one of Go's architectures it wraps to
+		// a negative — which argparse would accept as a token budget.
+		return strconv.Itoa(v.Int)
 	}
 	if v.Number == 0 {
 		return "0"

@@ -83,24 +83,23 @@ func TestSamplingHowToStatesTheRealRanges(t *testing.T) {
 		if !b.HasMax {
 			continue
 		}
-		switch {
-		case b.Max == 1:
-			// "between 0 and 1", below.
-		case b.Field == "top_k":
-			// The one bound that is not the model server's own, so the page has
-			// to give the figure and say why — and the figure is read off the
-			// bound, not repeated here, or the page and the code drift apart
-			// while this test stays green.
-			want := fmt.Sprintf("Top-k has an upper limit of %d", int(b.Max))
-			if !containsAll(page, want) {
-				t.Errorf("the page does not say %q", want)
-			}
-		default:
-			t.Fatalf("%s has an upper bound of %v the page does not describe", b.Field, b.Max)
+		if b.Max == 1 {
+			continue // "between 0 and 1", below
+		}
+		// Any other ceiling is Gropius' own rather than the model server's, so
+		// the page has to give the figure — read off the bound, not repeated
+		// here, or the page and the code drift apart while this test is green.
+		want := fmt.Sprintf("%d", int(b.Max))
+		if !containsAll(page, want) {
+			t.Errorf("the page does not give %s's ceiling of %s", b.Field, want)
 		}
 	}
 	if !containsAll(page, "temperature\nis at least 0", "between 0 and 1") {
 		t.Error("the page does not state the ranges the panel enforces")
+	}
+	// And why the ceilings Gropius sets are not the model server's.
+	if !containsAll(page, "Top-k has an upper limit of") {
+		t.Error("the page gives top_k's ceiling without saying it is Gropius' own")
 	}
 }
 

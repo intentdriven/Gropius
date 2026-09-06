@@ -65,7 +65,11 @@ func TestGoRangesAreExactlyThese(t *testing.T) {
 		// smallest an MLX model ships.
 		{Field: "top_k", Min: 0, Max: 1024, HasMax: true, Integer: true},
 		{Field: "min_p", Min: 0, Max: 1, HasMax: true},
-		{Field: "max_tokens", Min: 0, Integer: true},
+		// The request check takes any non-negative budget. A default above any
+		// real context window means "generate until the model stops" on every
+		// request that omits the parameter, and it is also the value that put
+		// an integer conversion out of range.
+		{Field: "max_tokens", Min: 0, Max: MaxCompletionTokens, HasMax: true, Integer: true},
 	}
 	if got := SamplingBounds(); !reflect.DeepEqual(got, want) {
 		t.Fatalf("SamplingBounds() = %+v\nwant %+v", got, want)
@@ -460,5 +464,60 @@ func TestSamplingValidateRefusesNaNAndInfinity(t *testing.T) {
 				t.Errorf("dropped = %v, want the field named", dropped)
 			}
 		})
+	}
+}
+
+// A whole-number setting must survive as a whole number. Widening it to a
+// float64 and narrowing back is a conversion Go leaves to the platform once the
+// value is out of range: on one architecture it saturates, on another it wraps
+// to a negative — which would then be rendered onto a model server's command
+// line as a negative token budget.
+func TestIntegerSamplingValuesAreCarriedAsIntegers(t *testing.T) {
+	s := Sampling{TopK: intp(1024), MaxTokens: intp(MaxCompletionTokens)}
+	got := map[string]int{}
+	for _, v := range s.Values() {
+		if !v.Integer {
+			t.Errorf("%s is not carried as an integer", v.Field)
+			continue
+		}
+		got[v.Field] = v.Int
+	}
+	if got["top_k"] != 1024 {
+		t.Errorf("top_k = %d, want 1024", got["top_k"])
+	}
+	if got["max_tokens"] != MaxCompletionTokens {
+		t.Errorf("max_tokens = %d, want %d", got["max_tokens"], MaxCompletionTokens)
+	}
+}
+
+// A token budget above any real context window is not a preference, it is a
+// number that stopped meaning anything — and it was the lever that let an
+// integer conversion go out of range.
+func TestMaxTokensAboveTheCeilingIsRefusedAndDropped(t *testing.T) {
+	if err := (Sampling{MaxTokens: intp(MaxCompletionTokens)}).Validate(); err != nil {
+		t.Errorf("max_tokens at the ceiling = %v, want it accepted", err)
+	}
+	for _, v := range []int{MaxCompletionTokens + 1, 1<<63 - 1} {
+		if err := (Sampling{MaxTokens: intp(v)}).Validate(); err == nil {
+			t.Errorf("Validate accepted max_tokens %d", v)
+		}
+	}
+
+	// And in a hand-edited file it is dropped, not fatal.
+	path := filepath.Join(t.TempDir(), "config.json")
+	raw := fmt.Sprintf(`{"host":"0.0.0.0","port":11535,"decode_concurrency":4,
+		"sampling":{"max_tokens":%d}}`, 1<<63-1)
+	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, dropped, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() = %v, want nil", err)
+	}
+	if cfg.Sampling.MaxTokens != nil {
+		t.Errorf("max_tokens = %d, want it dropped", *cfg.Sampling.MaxTokens)
+	}
+	if len(dropped) != 1 || !strings.Contains(dropped[0], "max_tokens") {
+		t.Errorf("dropped = %v, want max_tokens named", dropped)
 	}
 }

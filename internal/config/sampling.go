@@ -47,8 +47,12 @@ type SamplingBound struct {
 // sanitising and the range test all read the same table.
 type samplingParam struct {
 	bound SamplingBound
-	// get returns the field's value and whether it is set.
+	// get returns the field's value and whether it is set, as a float64 so one
+	// bounds check serves every parameter.
 	get func(Sampling) (float64, bool)
+	// getInt returns a whole-number field's value without going through a
+	// float64. Set for every parameter whose bound says Integer.
+	getInt func(Sampling) (int, bool)
 	// clear unsets the field.
 	clear func(*Sampling)
 }
@@ -78,6 +82,17 @@ type samplingParam struct {
 // than a thousand candidates is indistinguishable from keeping all of them.
 const MaxTopK = 1024
 
+// MaxCompletionTokens is Gropius' own ceiling on the completion-token default.
+//
+// The model server sets none: it takes any non-negative integer. But this is a
+// default applied to every request that omits the parameter, so a figure above
+// any real context window does not mean "a generous budget", it means "keep
+// generating until the model stops" — one request holding a model for as long
+// as it likes. A million tokens is beyond the longest context any MLX model
+// serves today, and it keeps the value inside the range where converting it is
+// not a question about the architecture.
+const MaxCompletionTokens = 1 << 20
+
 var samplingParams = []samplingParam{
 	{
 		bound: SamplingBound{Field: "temperature", Min: 0},
@@ -90,9 +105,10 @@ var samplingParams = []samplingParam{
 		clear: func(s *Sampling) { s.TopP = nil },
 	},
 	{
-		bound: SamplingBound{Field: "top_k", Min: 0, Max: MaxTopK, HasMax: true, Integer: true},
-		get:   func(s Sampling) (float64, bool) { return derefInt(s.TopK) },
-		clear: func(s *Sampling) { s.TopK = nil },
+		bound:  SamplingBound{Field: "top_k", Min: 0, Max: MaxTopK, HasMax: true, Integer: true},
+		get:    func(s Sampling) (float64, bool) { return derefInt(s.TopK) },
+		getInt: func(s Sampling) (int, bool) { return derefIntExact(s.TopK) },
+		clear:  func(s *Sampling) { s.TopK = nil },
 	},
 	{
 		bound: SamplingBound{Field: "min_p", Min: 0, Max: 1, HasMax: true},
@@ -100,9 +116,12 @@ var samplingParams = []samplingParam{
 		clear: func(s *Sampling) { s.MinP = nil },
 	},
 	{
-		bound: SamplingBound{Field: "max_tokens", Min: 0, Integer: true},
-		get:   func(s Sampling) (float64, bool) { return derefInt(s.MaxTokens) },
-		clear: func(s *Sampling) { s.MaxTokens = nil },
+		bound: SamplingBound{
+			Field: "max_tokens", Min: 0, Max: MaxCompletionTokens, HasMax: true, Integer: true,
+		},
+		get:    func(s Sampling) (float64, bool) { return derefInt(s.MaxTokens) },
+		getInt: func(s Sampling) (int, bool) { return derefIntExact(s.MaxTokens) },
+		clear:  func(s *Sampling) { s.MaxTokens = nil },
 	},
 }
 
@@ -120,10 +139,26 @@ func derefInt(p *int) (float64, bool) {
 	return float64(*p), true
 }
 
+func derefIntExact(p *int) (int, bool) {
+	if p == nil {
+		return 0, false
+	}
+	return *p, true
+}
+
 // SamplingValue is one sampling parameter that is set, ready to be rendered.
+//
+// A whole-number parameter is carried in Int and a fractional one in Number.
+// They are separate fields rather than one float64 because narrowing a float64
+// back to an integer is implementation-defined once the value is out of range:
+// the same code saturates on one architecture and wraps to a negative on
+// another, and a negative token budget on a model server's command line is
+// read as a value, accepted, and then refused on every request that omits the
+// parameter.
 type SamplingValue struct {
 	Field   string
 	Number  float64
+	Int     int
 	Integer bool
 }
 
@@ -139,7 +174,13 @@ func (s Sampling) Values() []SamplingValue {
 		if !ok {
 			continue
 		}
-		out = append(out, SamplingValue{Field: p.bound.Field, Number: v, Integer: p.bound.Integer})
+		val := SamplingValue{Field: p.bound.Field, Number: v, Integer: p.bound.Integer}
+		if p.bound.Integer {
+			// Straight from the field, never through the float64 the bounds
+			// are compared in.
+			val.Int, _ = p.getInt(s)
+		}
+		out = append(out, val)
 	}
 	return out
 }
