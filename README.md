@@ -122,10 +122,12 @@ print(client.chat.completions.create(
 By default the server is **reachable by anyone on your network with no API key** —
 the control panel warns you while this is so. Set a key in **Settings** to require
 `Authorization: Bearer <key>`. Same-machine clients (loopback, including other
-user accounts) never need a key. Setting a key also turns on the models list's
-residency fields, which say which models are loaded and how busy they are; with
-no key set, the list carries nothing about what this Mac is running. The control panel and its `/api/*` endpoints are
+user accounts) never need a key. The control panel and its `/api/*` endpoints are
 bound to loopback only and are never reachable from the LAN.
+
+Setting a key also turns on the models list's residency fields, which say which
+models are loaded and how busy they are. With no key set, the list carries
+nothing about what this Mac is running.
 
 The server's request log records the method, path, status and duration of a
 request, and never the client's network address.

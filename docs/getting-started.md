@@ -88,10 +88,6 @@ instead.
 
 By default anyone on your network can use the server. To require a key:
 
-Setting a key also turns on the models list's residency fields, so an entitled
-client can see which models are loaded and pick a warm one — see the
-[models list reference](models-list.md).
-
 1. **Settings → API key → Generate a key** (or type your own), then **Save**.
 2. Clients now send it:
 
@@ -106,6 +102,10 @@ Requests from the Mac itself (including other user accounts) never need the
 key, as long as they are addressed to `localhost` or `127.0.0.1`. A local proxy
 or tunnel that forwards another host name must send the key like any other
 client.
+
+Setting a key also turns on the models list's residency fields, so a client
+holding it can see which models are loaded and pick a warm one instead of
+triggering a load — see the [models list reference](models-list.md).
 
 ### What Gropius reads of a request
 
