@@ -166,9 +166,11 @@ and each account falls back to its own data directory.
   Options**), or run `caffeinate` in a terminal for a headless session.
 - **The log says `config.json could not be read` and other machines cannot
   connect.** Gropius refuses a `config.json` that is not an ordinary file (a
-  symlink from a dotfiles manager, say) and starts locked to this Mac only,
-  so a file it cannot trust never opens the server to the network. Replace
-  the link with a real copy of the file and restart.
+  symlink from a dotfiles manager, say) or that does not parse — a hand-edited
+  value of the wrong kind, such as a number in quotes — and starts locked to
+  this Mac only, so a file it cannot trust never opens the server to the
+  network. Replace the link with a real copy of the file, or correct the value,
+  and restart.
 - **First request is slow.** That is the model loading into memory. Pre-load it
   from **My Models → Load**. With the default settings a loaded model stays
   resident forever; an idle timeout in **Settings** unloads it after that many

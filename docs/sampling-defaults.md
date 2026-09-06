@@ -108,6 +108,15 @@ model server did not respond`. Every request that omits that parameter would
 fail that way — exactly the requests a default exists to serve — so Gropius
 never accepts such a figure.
 
-The same value hand-edited into `config.json` is ignored rather than fatal:
-Gropius starts normally, logs which fields it dropped, and serves as though
-they had never been set.
+A value of the right kind but the wrong size, hand-edited into `config.json`,
+is ignored rather than fatal: Gropius starts normally, logs which fields it
+dropped, and serves as though they had never been set.
+
+A value of the wrong *kind* is a different matter. `"temperature": "0.7"` with
+quotes round it, `"top_k": 40.0` with a decimal point, or a number too large
+for the field, is a malformed file rather than a setting out of range — the
+same as a misspelled port — and Gropius cannot tell a damaged file from a
+deliberate one. It starts locked to this Mac, with the shipping defaults, so a
+file it cannot read never opens the server to the network by accident. The log
+says `config.json could not be read`. Fix the file and restart, or change the
+setting from the panel, which never writes a malformed one.
