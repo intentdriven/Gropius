@@ -96,7 +96,10 @@ two releases.
 
 ## Audit Notes
 
-_Empty. Populated by intent-auditor when intent moves to shipped/._
+<!-- abcd-review: OWED receipt=rcp-1b8dfae179dc -->
+Fidelity review OWED (receipt rcp-1b8dfae179dc). The audit runs after the
+branch merges: it reads the delivered diff against these acceptance criteria,
+and the diff is not final until review closes.
 
 ## Grounds
 
