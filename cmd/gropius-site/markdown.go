@@ -105,7 +105,7 @@ func selectSpans(r repo, src source) ([]span, error) {
 			if src.Limit > 0 && len(out) == src.Limit {
 				break
 			}
-			text, err := part(b.text, src.Part)
+			text, err := part(b.text, src)
 			if err != nil {
 				return nil, err
 			}
@@ -133,7 +133,7 @@ func selectSpans(r repo, src source) ([]span, error) {
 			if b.kind != src.Select || !strings.Contains(b.text, src.Match) {
 				continue
 			}
-			text, err := part(b.text, src.Part)
+			text, err := part(b.text, src)
 			if err != nil {
 				return nil, err
 			}
@@ -152,20 +152,56 @@ func selectSpans(r repo, src source) ([]span, error) {
 	return out, nil
 }
 
-// part narrows a block to the piece the manifest asked for. "first-sentence" is
-// the only narrowing: a landing page's fact line wants the requirement, not the
-// paragraph of qualification the tutorial rightly carries after it. An
-// unrecognised value is refused rather than treated as "all" — a typo would
-// otherwise put a whole paragraph of qualification on the page and say nothing.
-func part(text, which string) (string, error) {
-	switch which {
+// part narrows a block to the piece the manifest asked for. A page's fact line
+// wants the requirement, not the paragraph of qualification the tutorial rightly
+// carries after it — and the sentence it wants is not always the first one. An
+// unrecognized value is refused rather than treated as "all": a typo would
+// otherwise put a whole paragraph on the page and say nothing.
+func part(text string, src source) (string, error) {
+	switch src.Part {
 	case "", "all":
 		return text, nil
 	case "first-sentence":
 		return firstSentence(text), nil
+	case "matched-sentence":
+		// The sentence the match landed in. What makes a paragraph selectable
+		// without moving the sentence out of the file a human reads.
+		if src.Match == "" {
+			return "", fmt.Errorf("part matched-sentence needs a match")
+		}
+		out := matchedSentence(text, src.Match)
+		if out == "" {
+			return "", fmt.Errorf("no sentence in the selected block contains %q", src.Match)
+		}
+		return out, nil
+	case "code-span":
+		// The value inside the first `backticks` of the block: a fact line that
+		// wants an address, not the sentence documenting it.
+		m := codeSpanRe.FindStringSubmatch(text)
+		if m == nil {
+			return "", fmt.Errorf("the selected block carries no code span")
+		}
+		return m[1], nil
 	default:
-		return "", fmt.Errorf("unknown part %q (want first-sentence or all)", which)
+		return "", fmt.Errorf("unknown part %q (want all, first-sentence, matched-sentence or code-span)", src.Part)
 	}
+}
+
+// matchedSentence returns the sentence of text containing match, with the same
+// sentence boundary firstSentence uses.
+func matchedSentence(text, match string) string {
+	rest := text
+	for rest != "" {
+		sentence := firstSentence(rest)
+		if strings.Contains(sentence, match) {
+			return strings.TrimSpace(sentence)
+		}
+		if len(sentence) >= len(rest) {
+			return ""
+		}
+		rest = strings.TrimSpace(rest[len(sentence):])
+	}
+	return ""
 }
 
 // firstSentence cuts at the first full stop that ends a sentence. A full stop
@@ -203,13 +239,35 @@ func sentenceCase(s string) string {
 }
 
 // blocksUnder returns the blocks of one section: everything after the named
-// heading, up to the next heading at the same or a higher level.
+// heading, up to the next heading at the same or a higher level. An empty
+// heading selects the file's LEAD — everything before its first heading — which
+// is where a README states what the project is before it starts organizing.
 func blocksUnder(path, heading string) ([]block, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
 	lines := strings.Split(string(raw), "\n")
+	if heading == "" {
+		// The lead runs to the first section heading. A title (a single level-1
+		// heading at the top) is skipped rather than treated as that boundary,
+		// so the rule reads the same whether the file titles itself in Markdown
+		// or, as this repository's README does, in HTML.
+		start, end := 0, len(lines)
+		for i, line := range lines {
+			m := headingRe.FindStringSubmatch(line)
+			if m == nil {
+				continue
+			}
+			if len(m[1]) == 1 && start == 0 {
+				start = i + 1
+				continue
+			}
+			end = i
+			break
+		}
+		return scanBlocks(lines[start:end]), nil
+	}
 	start, level, seen := -1, 0, 0
 	for i, line := range lines {
 		m := headingRe.FindStringSubmatch(line)

@@ -73,6 +73,12 @@ type manifest struct {
 		Install      source   `json:"install"`
 		InstallNote  source   `json:"install_note"`
 		Requirements []source `json:"requirements"`
+		CtaNote      source   `json:"cta_note"`
+		Endpoint     source   `json:"endpoint"`
+		Runtime      source   `json:"runtime"`
+		License      source   `json:"license"`
+		Status       source   `json:"status"`
+		FooterNote   source   `json:"footer_note"`
 	} `json:"sources"`
 }
 
@@ -93,14 +99,11 @@ type uiStrings struct {
 	DownloadLabel     string   `json:"download_label"`
 	DownloadNote      string   `json:"download_note"`
 	RepositoryLabel   string   `json:"repository_label"`
-	CtaNote           string   `json:"cta_note"`
 	FactRequires      string   `json:"fact_requires"`
 	FactEndpoint      string   `json:"fact_endpoint"`
 	FactRuntime       string   `json:"fact_runtime"`
-	FactLicence       string   `json:"fact_licence"`
-	Endpoint          string   `json:"endpoint"`
-	Runtime           string   `json:"runtime"`
-	Licence           string   `json:"licence"`
+	FactLicense       string   `json:"fact_license"`
+	FactStatus        string   `json:"fact_status"`
 	InstallHeading    string   `json:"install_heading"`
 	InstallComments   []string `json:"install_comments"`
 	AssetsHeading     string   `json:"assets_heading"`
@@ -108,10 +111,10 @@ type uiStrings struct {
 		File string `json:"file"`
 		Note string `json:"note"`
 	} `json:"assets"`
-	PillarsLabel   string `json:"pillars_label"`
-	FooterNote     string `json:"footer_note"`
-	FooterReleases string `json:"footer_releases"`
-	FooterSource   string `json:"footer_source"`
+	PillarsLabel    string `json:"pillars_label"`
+	FooterSeparator string `json:"footer_separator"`
+	FooterReleases  string `json:"footer_releases"`
+	FooterSource    string `json:"footer_source"`
 }
 
 // identity is the canonical block: the three lines every public surface renders.
@@ -148,6 +151,15 @@ type pageData struct {
 	Install      []installStep
 	InstallNote  []template.HTML
 	Requirements []template.HTML
+	// Selected prose. Everything the page asserts about the product is a span
+	// of a repository file, so a sentence edited in the README changes the page
+	// and cannot be left behind in a string table.
+	CtaNote    template.HTML
+	Endpoint   template.HTML
+	Runtime    template.HTML
+	License    template.HTML
+	Status     template.HTML
+	FooterNote template.HTML
 }
 
 func render(root, manifestPath, out string) error {
@@ -236,6 +248,28 @@ func render(root, manifestPath, out string) error {
 	}
 	if len(data.Requirements) == 0 {
 		return fmt.Errorf("requirements: the manifest selected nothing; the page must state the platform it needs")
+	}
+
+	for _, sel := range []struct {
+		name string
+		src  source
+		into *template.HTML
+	}{
+		{"cta_note", m.Sources.CtaNote, &data.CtaNote},
+		{"endpoint", m.Sources.Endpoint, &data.Endpoint},
+		{"runtime", m.Sources.Runtime, &data.Runtime},
+		{"license", m.Sources.License, &data.License},
+		{"status", m.Sources.Status, &data.Status},
+		{"footer_note", m.Sources.FooterNote, &data.FooterNote},
+	} {
+		spans, err := selectSpans(src, sel.src)
+		if err != nil {
+			return fmt.Errorf("%s: %w", sel.name, err)
+		}
+		if len(spans) != 1 {
+			return fmt.Errorf("%s: the manifest selects %d spans; the page has one slot", sel.name, len(spans))
+		}
+		*sel.into = inlineHTML(spans[0].Body)
 	}
 
 	tmplPath, err := src.path(m.Template)

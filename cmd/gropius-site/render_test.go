@@ -29,6 +29,15 @@ const (
 `
 
 	fixtureReadme = "# Fixture\n" + `
+A lead paragraph before any heading.
+
+It manages its own runtime: it installs a private Python of its own. A second
+sentence the page does not take.
+
+## Status
+
+Experimental. Cross-machine use works; nothing else is claimed here.
+
 ## Features
 
 - **One** — the first thing it does.
@@ -43,7 +52,12 @@ const (
 ` + "```sh\ncurl -fsSL https://example.invalid/install.sh | bash -s -- client\n```" + `
 
 The installer verifies the download before installing it: it checks it against
-the checksums published beside it. A second sentence, to be cut.
+the checksums published beside it. The binaries are ad-hoc signed, not
+notarized. A third sentence, to be left behind.
+
+## Licence
+
+MIT. See LICENSE.
 `
 
 	fixtureGettingStarted = `# Getting started
@@ -52,6 +66,11 @@ the checksums published beside it. A second sentence, to be cut.
 
 - An **Apple Silicon** Mac (M1 or later). A sentence of qualification after it.
 - **Requires macOS 26.** A sentence of qualification after it.
+
+## 5. Talk to it — from another machine
+
+It lists the exact base URLs to use, for example ` + "`http://fixture.invalid:11535/v1`" + `.
+From any other machine on the same network:
 `
 )
 
@@ -141,6 +160,22 @@ func TestFixtureRenders(t *testing.T) {
 	}
 	if strings.Contains(page, "A second sentence, to be cut.") {
 		t.Error("first-sentence did not narrow the install note")
+	}
+	// The prose the page asserts about the product, each selected rather than
+	// written here: the matched sentence, the code span, the lead, the licence.
+	for _, want := range []string{
+		"The binaries are ad-hoc signed, not notarized.",
+		"http://fixture.invalid:11535/v1",
+		"It manages its own runtime: it installs a private Python of its own.",
+		"MIT.",
+		"Experimental.",
+	} {
+		if !strings.Contains(page, want) {
+			t.Errorf("the rendered fixture does not carry the selected span %q", want)
+		}
+	}
+	if strings.Contains(page, "A third sentence, to be left behind.") {
+		t.Error("matched-sentence did not narrow the call-to-action note")
 	}
 }
 

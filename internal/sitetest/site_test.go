@@ -225,6 +225,81 @@ func TestReleaseFactsRegionIsMarkedForItsOwner(t *testing.T) {
 	}
 }
 
+// The interface strings are LABELS. Anything the page asserts about the product
+// — what the app is, what a release contains, what it requires, what it is
+// licensed under — is the identity block or a span of a repository file, so
+// editing the sentence in the README changes the page. A sentence copied into
+// ui.json instead is a promise someone has to keep by hand in two places, and
+// the page keeps its copy after the README moves on.
+func TestInterfaceStringsAreLabelsNotProse(t *testing.T) {
+	corpus := normalizeProse(read(t, filepath.Join(repoRoot, "README.md")) + "\n" +
+		read(t, filepath.Join(repoRoot, "docs", "getting-started.md")))
+
+	var raw map[string]any
+	readJSON(t, filepath.Join(repoRoot, "site-src", "ui.json"), &raw)
+	for key, value := range raw {
+		// _purpose documents the file to a human reading it; lang is a tag.
+		if key == "_purpose" || key == "lang" {
+			continue
+		}
+		for _, v := range flatten(value) {
+			if sentences := sentenceCount(v); sentences > 1 || (sentences == 1 && words(v) > 6) {
+				t.Errorf("ui.json %q is prose, not a label: %q — select it from a repository file in .abcd/site.json", key, v)
+				continue
+			}
+			if n := normalizeProse(v); words(v) >= 4 && strings.Contains(corpus, n) {
+				t.Errorf("ui.json %q repeats repository prose: %q — select it in .abcd/site.json so the page follows the file", key, v)
+			}
+		}
+	}
+}
+
+// flatten reduces a ui.json value to the strings inside it.
+func flatten(v any) []string {
+	switch t := v.(type) {
+	case string:
+		return []string{t}
+	case []any:
+		var out []string
+		for _, e := range t {
+			out = append(out, flatten(e)...)
+		}
+		return out
+	case map[string]any:
+		var out []string
+		for _, e := range t {
+			out = append(out, flatten(e)...)
+		}
+		return out
+	default:
+		return nil
+	}
+}
+
+// sentenceCount counts sentence-ending stops: one inside a file name
+// ("Gropius.app.zip") is not one, because it is followed by a letter.
+func sentenceCount(v string) int {
+	n := 0
+	for _, m := range regexp.MustCompile(`\.(\s|$)`).FindAllString(v, -1) {
+		_ = m
+		n++
+	}
+	return n
+}
+
+func words(v string) int { return len(strings.Fields(v)) }
+
+// normalizeProse strips the markup a Markdown source carries and the line
+// breaks it wraps at, so a sentence can be compared with the same sentence as
+// the page would show it.
+func normalizeProse(v string) string {
+	v = strings.ToLower(v)
+	for _, c := range []string{"**", "`", "*", "_"} {
+		v = strings.ReplaceAll(v, c, "")
+	}
+	return " " + strings.Join(strings.Fields(v), " ") + " "
+}
+
 // --- Criterion 3 -----------------------------------------------------------
 //
 // "Given the page is registered as an identity surface, when the identity check

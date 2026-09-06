@@ -1,5 +1,5 @@
 {
-  "_purpose": "The complete list of words cmd/gropius-site may add to the landing page. Everything else the page shows is the identity block (.abcd/development/IDENTITY.md) or a span of a repository file selected by .abcd/site.json. The renderer refuses a key it does not know, so nothing reaches the page by being typed here alone.",
+  "_purpose": "The complete list of LABELS cmd/gropius-site may add to the landing page: button text, section labels, the eyebrow and the display headline. Every sentence the page asserts about the product is the identity block (.abcd/development/IDENTITY.md) or a span of a repository file selected by .abcd/site.json — a claim written here instead would be a promise someone has to keep by hand. internal/sitetest fails when a value here is prose rather than a label.",
   "lang": "en-GB",
   "nav_label": "Primary",
   "nav_download": "Download",
@@ -7,30 +7,43 @@
   "nav_source": "Source",
   "nav_getting_started": "Getting started",
   "eyebrow": "Local inference server for Apple Silicon",
-  "headline": ["One Mac.", "Every machine", "on the network."],
+  "headline": [
+    "One Mac.",
+    "Every machine",
+    "on the network."
+  ],
   "headline_accent": "on the network.",
   "mark_label": "The Gropius app icon: a yellow triangle beside a grey square, above a blue square and a red circle",
   "download_label": "Download Gropius",
   "download_note": "Gropius.app.zip, latest release",
   "repository_label": "View the source",
-  "cta_note": "The zip holds an ad-hoc signed, not notarized, app. Control-click it and choose Open the first time, or use the installer below, which verifies the download for you and clears the quarantine.",
   "fact_requires": "Requires",
   "fact_endpoint": "Endpoint",
   "fact_runtime": "Runtime",
-  "fact_licence": "Licence",
-  "endpoint": "http://your-mac.local:11535/v1",
-  "runtime": "A private Python and MLX under Application Support. Your system Python is untouched.",
-  "licence": "MIT. Status: experimental.",
+  "fact_license": "Licence",
+  "fact_status": "Status",
   "install_heading": "Install from the terminal",
-  "install_comments": ["# server (Apple Silicon)", "# native chat client (universal, runs on Intel too)"],
+  "install_comments": [
+    "# server (Apple Silicon)",
+    "# native chat client (universal, runs on Intel too)"
+  ],
   "assets_heading": "What a release contains",
   "assets": [
-    { "file": "Gropius.app.zip", "note": "server, menu-bar app" },
-    { "file": "GropiusChat.app.zip", "note": "chat client, universal" },
-    { "file": "SHA256SUMS.txt", "note": "checksums" }
+    {
+      "file": "Gropius.app.zip",
+      "note": "server, menu-bar app"
+    },
+    {
+      "file": "GropiusChat.app.zip",
+      "note": "chat client, universal"
+    },
+    {
+      "file": "SHA256SUMS.txt",
+      "note": "checksums"
+    }
   ],
   "pillars_label": "What Gropius does",
-  "footer_note": "Gropius is MIT licensed and experimental. Cross-machine LAN use works; TLS and notarized distribution are not yet included.",
+  "footer_separator": "·",
   "footer_releases": "All releases",
   "footer_source": "Source"
 }

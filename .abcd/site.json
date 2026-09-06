@@ -52,6 +52,48 @@
         "match": "Requires macOS",
         "part": "first-sentence"
       }
-    ]
+    ],
+    "cta_note": {
+      "file": "README.md",
+      "heading": "Install",
+      "select": "paragraph",
+      "match": "ad-hoc signed",
+      "part": "matched-sentence"
+    },
+    "endpoint": {
+      "file": "docs/getting-started.md",
+      "heading": "5. Talk to it — from another machine",
+      "select": "paragraph",
+      "match": "base URLs",
+      "part": "code-span"
+    },
+    "runtime": {
+      "file": "README.md",
+      "heading": "",
+      "select": "paragraph",
+      "match": "manages its own runtime",
+      "part": "first-sentence"
+    },
+    "license": {
+      "file": "README.md",
+      "heading": "Licence",
+      "select": "paragraph",
+      "match": "MIT",
+      "part": "first-sentence"
+    },
+    "status": {
+      "file": "README.md",
+      "heading": "Status",
+      "select": "paragraph",
+      "match": "Experimental",
+      "part": "first-sentence"
+    },
+    "footer_note": {
+      "file": "README.md",
+      "heading": "Status",
+      "select": "paragraph",
+      "match": "Cross-machine",
+      "part": "all"
+    }
   }
 }

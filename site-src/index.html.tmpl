@@ -62,13 +62,14 @@
           <span>{{ .UI.RepositoryLabel }}<small>{{ .Links.RepositoryName }}</small></span>
         </a>
       </div>
-      <p class="cta-note">{{ .UI.CtaNote }}</p>
+      <p class="cta-note">{{ .CtaNote }}</p>
     </div>
     <dl class="facts">
       <dt>{{ .UI.FactRequires }}</dt><dd>{{ range $i, $r := .Requirements }}{{ if $i }} {{ end }}{{ $r }}{{ end }}</dd>
-      <dt>{{ .UI.FactEndpoint }}</dt><dd><span class="mono">{{ .UI.Endpoint }}</span></dd>
-      <dt>{{ .UI.FactRuntime }}</dt><dd>{{ .UI.Runtime }}</dd>
-      <dt>{{ .UI.FactLicence }}</dt><dd>{{ .UI.Licence }}</dd>
+      <dt>{{ .UI.FactEndpoint }}</dt><dd><span class="mono">{{ .Endpoint }}</span></dd>
+      <dt>{{ .UI.FactRuntime }}</dt><dd>{{ .Runtime }}</dd>
+      <dt>{{ .UI.FactLicense }}</dt><dd>{{ .License }}</dd>
+      <dt>{{ .UI.FactStatus }}</dt><dd>{{ .Status }}</dd>
     </dl>
   </section>
 
@@ -122,9 +123,9 @@
   </section>
 
   <footer>
-    <span>{{ .UI.FooterNote }}</span>
+    <span>{{ .FooterNote }}</span>
     <span>
-      <a href="{{ .Links.Releases }}">{{ .UI.FooterReleases }}</a> &nbsp;&middot;&nbsp;
+      <a href="{{ .Links.Releases }}">{{ .UI.FooterReleases }}</a> &nbsp;{{ .UI.FooterSeparator }}&nbsp;
       <a href="{{ .Links.Repository }}">{{ .UI.FooterSource }}</a>
     </span>
   </footer>
