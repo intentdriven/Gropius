@@ -101,6 +101,17 @@ Fidelity review OWED (receipt rcp-1b8dfae179dc). The audit runs after the
 branch merges: it reads the delivered diff against these acceptance criteria,
 and the diff is not final until review closes.
 
+2026-09-06: the title. The 2026-09-06 planning answers ask for this record to be
+retitled without "via a Cloudflare Worker", and both reviews of the draft asked
+for the same — a mechanism does not belong in a capability's heading. It was
+already done: this record was written with the title it carries, in the planning
+session itself, and no version of it in git ever named a hosting mechanism. The
+slug and the filename carry none either. Noted here so the trace is dated rather
+than only recoverable from `git log --follow`, and so a reader comparing the
+answer sheet with the record does not go looking for a change that was never
+needed. The title is not edited now and will not be: a shipped record is the
+promise as it was made.
+
 ## Grounds
 
 - pursued: we expect one public page with a working download to reach people who will not read a README, and rendering it at release to keep it correct without upkeep; we are wrong if downloads from the page stay flat against the release page's, or if the page drifts from the README within two releases
