@@ -1,6 +1,8 @@
 # Gropius — architecture decisions
 
-Empirically verified on macOS 26.5.2 / M-series / Go 1.25.6, 2026-07-14.
+Empirically verified on macOS 26.5.2 / M-series / Go 1.25.6, 2026-07-14;
+items 7-9 read from the pinned mlx-lm 0.31.3 source on 2026-09-06 (see
+`../research/notes/2026-09-06-mlx-lm-sampling-launch-flags.md`).
 
 ## Verified by spike (not assumed)
 
@@ -22,6 +24,28 @@ Empirically verified on macOS 26.5.2 / M-series / Go 1.25.6, 2026-07-14.
 5. Streaming (SSE), `/health`, and `--decode-concurrency` (real batching) all work.
 6. Thinking-model control is `chat_template_kwargs` in the request body
    (`--chat-template-args` is the CLI spelling of the same thing).
+7. **The sampling parameters that can be defaulted are exactly five.** mlx-lm
+   0.31.3 takes `--temp`, `--top-p`, `--top-k`, `--min-p` and `--max-tokens`
+   when it starts, and applies each to any request that omits the field.
+   Everything else a request may carry — the repetition, presence and
+   frequency penalties, `xtc_*`, `logit_bias`, `logprobs`, `seed` — is
+   per-request only. There is no `--seed`.
+8. **An out-of-range value does not fail the launch; it kills every request
+   that omits the parameter.** `argparse` range-checks nothing, so the process
+   starts and looks healthy. The server then validates the *effective* value
+   of each request — the body's where there is one, the flag's otherwise — and
+   `validate_model_parameters` raises **uncaught** out of `do_POST` (only the
+   `Content-Length` parse sits in a `try`). The socket closes with no HTTP
+   response, and the gateway turns that into `502`. Requests carrying their
+   own value keep working, so the symptom is a 502 for some clients and not
+   others on a server that reports itself as running. Gropius therefore
+   validates every sampling default against the server's own ranges before it
+   can be saved.
+9. **`top_k` must be below the model's vocabulary size.** `sample_utils.
+   apply_top_k` refuses anything else, and it raises from *inside* compiled
+   generation, one layer deeper than the request check. A vocabulary size is
+   not knowable when a setting is saved, so Gropius caps `top_k` well below
+   the smallest an MLX model ships.
 
 ## Decisions
 

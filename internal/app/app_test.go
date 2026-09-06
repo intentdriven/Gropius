@@ -385,7 +385,7 @@ func TestSetConfigPersists(t *testing.T) {
 		t.Errorf("Hub.Token = %q, want the newly-saved token", a.Hub.Token)
 	}
 
-	reloaded, err := config.Load(a.Paths.Config)
+	reloaded, _, err := config.Load(a.Paths.Config)
 	if err != nil {
 		t.Fatal(err)
 	}

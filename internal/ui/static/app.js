@@ -94,6 +94,10 @@ function render() {
   renderModels();
   renderConnect();
   renderSettings();
+  // Independent of renderSettings, which returns early while the form is
+  // being edited: the list of models to choose from is live state, not a
+  // value the user is in the middle of typing.
+  refreshOverrideModels();
 }
 
 function renderWarnings() {
@@ -345,6 +349,57 @@ let settingsTouched = false;
 document.querySelectorAll('#settingsForm input, #settingsForm select')
   .forEach((el) => el.addEventListener('input', () => { settingsTouched = true; }));
 
+// The sampling fields, paired with the config keys they carry. Each is a
+// number or nothing at all: blank means "pass no flag", which is not the same
+// as zero — zero is a real temperature.
+const SAMPLING_FIELDS = [
+  { key: 'temperature', input: 'setTemp',      over: 'ovTemp',      integer: false },
+  { key: 'top_p',       input: 'setTopP',      over: 'ovTopP',      integer: false },
+  { key: 'top_k',       input: 'setTopK',      over: 'ovTopK',      integer: true },
+  { key: 'min_p',       input: 'setMinP',      over: 'ovMinP',      integer: false },
+  { key: 'max_tokens',  input: 'setMaxTokens', over: 'ovMaxTokens', integer: true },
+];
+
+// The per-model overrides being edited. Held here rather than read back off
+// the form, so removing one and saving is a single action.
+let overrides = {};
+
+// numberOrNull reads one numeric input. A blank field is null — the key is
+// still sent, so clearing a field clears the stored value.
+function numberOrNull(id, integer) {
+  const raw = $(id).value.trim();
+  if (raw === '') return null;
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return null;
+  return integer ? Math.trunc(n) : n;
+}
+
+function readSampling(which) {
+  const out = {};
+  SAMPLING_FIELDS.forEach((f) => { out[f.key] = numberOrNull(f[which], f.integer); });
+  return out;
+}
+
+function writeSampling(which, values) {
+  const v = values || {};
+  SAMPLING_FIELDS.forEach((f) => {
+    $(f[which]).value = (v[f.key] === undefined || v[f.key] === null) ? '' : v[f.key];
+  });
+}
+
+// isEmptySampling reports whether nothing at all is set, so "set override"
+// with every field blank removes the override instead of storing an empty one.
+function isEmptySampling(values) {
+  return SAMPLING_FIELDS.every((f) => values[f.key] === null || values[f.key] === undefined);
+}
+
+function describeSampling(values) {
+  return SAMPLING_FIELDS
+    .filter((f) => values[f.key] !== null && values[f.key] !== undefined)
+    .map((f) => `${f.key} ${values[f.key]}`)
+    .join(' · ');
+}
+
 function renderSettings() {
   // Don't stomp on what the user is typing while live updates arrive.
   if (settingsTouched) return;
@@ -355,7 +410,93 @@ function renderSettings() {
   $('setIdle').value = c.idle_timeout_sec;
   $('setConc').value = c.decode_concurrency;
   $('setHF').value   = c.hf_token || '';
+  writeSampling('input', c.sampling);
+  overrides = { ...(c.model_sampling || {}) };
+  renderOverrides();
 }
+
+function renderOverrides() {
+  renderOverrideList();
+  refreshOverrideModels();
+  prefillOverride();
+}
+
+function renderOverrideList() {
+  const list = $('overrideList');
+  list.innerHTML = '';
+  Object.keys(overrides).sort().forEach((id) => {
+    const row = document.createElement('div');
+    row.className = 'override';
+    const meta = document.createElement('div');
+    const name = document.createElement('div');
+    name.className = 'name';
+    name.textContent = id;
+    const values = document.createElement('div');
+    values.className = 'values';
+    values.textContent = describeSampling(overrides[id]) || 'no parameters set';
+    meta.append(name, values);
+    row.append(meta, btn('Remove', 'ghost', () => {
+      delete overrides[id];
+      settingsTouched = true;
+      renderOverrides();
+    }));
+    list.appendChild(row);
+  });
+
+}
+
+// refreshOverrideModels rebuilds the list of models that can be given an
+// override, keeping the current selection. It runs on every state frame, not
+// only when the form is redrawn, so a model that finishes downloading while
+// the form is being edited can be chosen without reloading the page.
+function refreshOverrideModels() {
+  // Offer every model on this Mac, plus any model an override already names
+  // (one whose files have since been deleted still has a saved override).
+  const select = $('ovModel');
+  const chosen = select.value;
+  const ids = new Set((state.models || []).map((m) => m.repo_id));
+  Object.keys(overrides).forEach((id) => ids.add(id));
+  select.innerHTML = '';
+  [...ids].sort().forEach((id) => {
+    const opt = document.createElement('option');
+    opt.value = id;
+    opt.textContent = id;
+    select.appendChild(opt);
+  });
+  if (chosen && ids.has(chosen)) select.value = chosen;
+}
+
+// prefillOverride shows what is stored for the selected model. Setting an
+// override replaces it whole, so the fields have to start from the saved
+// values — otherwise changing a temperature quietly drops the token budget
+// saved beside it.
+function prefillOverride() {
+  writeSampling('over', overrides[$('ovModel').value]);
+}
+
+// foldPendingOverride takes whatever is in the per-model fields and makes it
+// the selected model's override; every field blank removes it. Called both
+// from the button and from the form's submit, because the fields sit inside
+// the settings form and pressing Save (or Enter in a number field) must not
+// throw away what is typed in them.
+function foldPendingOverride() {
+  const id = $('ovModel').value;
+  if (!id) return;
+  const values = readSampling('over');
+  if (isEmptySampling(values)) {
+    delete overrides[id];
+  } else {
+    overrides[id] = values;
+  }
+}
+
+$('ovModel').addEventListener('change', prefillOverride);
+
+$('ovApply').addEventListener('click', () => {
+  foldPendingOverride();
+  settingsTouched = true;
+  renderOverrides();
+});
 
 $('genKey').addEventListener('click', () => {
   const b = new Uint8Array(24);
@@ -368,6 +509,9 @@ $('genKey').addEventListener('click', () => {
 $('settingsForm').addEventListener('submit', async (e) => {
   e.preventDefault();
   const msg = $('settingsMsg');
+  // Anything typed in the per-model fields counts, whether or not Set override
+  // was pressed.
+  foldPendingOverride();
   // Only the fields this form owns. Anything omitted (advertise, preload) is
   // preserved server-side — sending advertise:true here used to silently
   // re-enable LAN advertising on every save.
@@ -378,6 +522,10 @@ $('settingsForm').addEventListener('submit', async (e) => {
     idle_timeout_sec:   parseInt($('setIdle').value, 10) || 0,
     decode_concurrency: parseInt($('setConc').value, 10) || 1,
     hf_token:           $('setHF').value,
+    // A blank sampling field is sent as null, not as zero: the model server is
+    // handed a flag only for a parameter that has a value.
+    sampling:           readSampling('input'),
+    model_sampling:     overrides,
   };
   try {
     const res = await api('/api/settings', {
@@ -386,9 +534,14 @@ $('settingsForm').addEventListener('submit', async (e) => {
       body: JSON.stringify(body),
     });
     msg.className = 'msg';
-    msg.textContent = res.restart
-      ? 'Saved. Restart Gropius for the change to take effect.'
-      : 'Saved.';
+    const parts = ['Saved.'];
+    if (res.restart) parts.push('Restart Gropius for the change to take effect.');
+    // Sampling defaults are set when a model server starts, so a model that is
+    // already loaded keeps the values it started with.
+    if (res.reload_models && res.reload_models.length) {
+      parts.push(`Load ${res.reload_models.join(', ')} again to serve with the new sampling defaults.`);
+    }
+    msg.textContent = parts.join(' ');
     settingsTouched = false;
   } catch (err) {
     msg.className = 'msg err';

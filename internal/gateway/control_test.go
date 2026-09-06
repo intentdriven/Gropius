@@ -14,6 +14,14 @@ import (
 
 func newTestControl(t *testing.T, cfg config.Config) *httptest.Server {
 	t.Helper()
+	srv, _ := newTestControlApp(t, cfg)
+	return srv
+}
+
+// newTestControlApp is newTestControl plus the App behind it, for tests that
+// have to see what a request did to the running configuration.
+func newTestControlApp(t *testing.T, cfg config.Config) (*httptest.Server, *app.App) {
+	t.Helper()
 
 	paths := config.NewPaths(t.TempDir())
 	a, err := app.New(app.Options{Paths: paths, Config: cfg})
@@ -28,7 +36,22 @@ func newTestControl(t *testing.T, cfg config.Config) *httptest.Server {
 
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
-	return srv
+	return srv, a
+}
+
+// postJSON posts a raw JSON body to a control-plane endpoint.
+func postJSON(t *testing.T, srv *httptest.Server, path, body string) *http.Response {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodPost, srv.URL+path, strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := srv.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return resp
 }
 
 // /api/instance serves this run's identity token, which the singleton
