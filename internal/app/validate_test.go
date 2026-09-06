@@ -6,6 +6,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/intentdriven/Gropius/internal/registry"
 )
 
 func TestValidateModelDir(t *testing.T) {
@@ -151,5 +153,62 @@ func TestValidateModelDirRejectsMissingIndexedShard(t *testing.T) {
 	})
 	if err := validateModelDir(complete); err != nil {
 		t.Errorf("a shard-complete model was rejected: %v", err)
+	}
+}
+
+// Download validation and the rescan must agree about what a model's
+// config.json has to be. They used to hold one copy of that rule each — the
+// same criteria, a separate size cap, and nothing keeping the two in step —
+// so a directory could pass validation on download and then be refused by
+// every rescan, or the reverse. This pins the two verdicts together over the
+// shapes that distinguish them.
+func TestDownloadValidationAndRescanAgreeOnTheModelConfig(t *testing.T) {
+	cases := []struct {
+		name   string
+		config string
+		want   bool // both paths accept it
+	}{
+		{"model_type", `{"model_type":"qwen3"}`, true},
+		{"architectures only", `{"architectures":["Qwen3ForCausalLM"]}`, true},
+		{"neither key", `{"hello":"world"}`, false},
+		{"an HTML error page", `<!DOCTYPE html><html>404</html>`, false},
+		{"truncated JSON", `{"model_type":`, false},
+		{"a JSON array", `[{"model_type":"qwen3"}]`, false},
+		{"null", `null`, false},
+		{"empty", ``, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			root := t.TempDir()
+			dir := filepath.Join(root, "models", "org", "m")
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(c.config), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, "model.safetensors"), []byte("weights"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			validated := validateModelDir(dir) == nil
+			if validated != c.want {
+				t.Errorf("validateModelDir accepted = %v, want %v", validated, c.want)
+			}
+
+			// The rescan's verdict on the same directory: adoption.
+			reg, err := registry.Open(filepath.Join(root, "registry.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := reg.Rescan(filepath.Join(root, "models")); err != nil {
+				t.Fatal(err)
+			}
+			_, err = reg.Get("org/m")
+			adopted := err == nil
+			if adopted != validated {
+				t.Errorf("the rescan adopted = %v but download validation accepted = %v — the two rules have drifted apart", adopted, validated)
+			}
+		})
 	}
 }

@@ -650,8 +650,8 @@ func inspectModelDir(dir string) (complete bool, size int64, contextLength int64
 	if !hasConfig || !hasWeights || partial || irregular {
 		return false, size, 0
 	}
-	cfg, cfgOK := readModelConfig(dir)
-	if !cfgOK || !plausibleConfig(cfg) || CheckShards(dir) != nil {
+	cfg, err := readModelConfig(dir)
+	if err != nil || !plausibleConfig(cfg) || CheckShards(dir) != nil {
 		return false, size, 0
 	}
 	return true, size, contextLengthFrom(cfg)
@@ -663,36 +663,61 @@ func inspectModelDir(dir string) (complete bool, size int64, contextLength int64
 // would balloon memory during a scan.
 const maxManifestJSON = 8 << 20
 
-// readManifest reads a capped JSON file from dir into v. It reports false when
-// the file is missing, not a regular file, oversized, or not valid JSON.
+// readManifest reads a capped JSON file from dir into v. It says how the file
+// failed — missing, not a regular file, oversized, or not valid JSON — so a
+// caller that has to explain a rejection to a person can.
 //
 // In the shared cache another account can plant a FIFO — or a symlink to one —
 // under a manifest name, and a plain Open would block until a writer appears,
 // wedging the startup rescan for every account; the downloader only ever
 // writes manifests as regular files. config.ReadRegular refuses both.
-func readManifest(dir, name string, v any) bool {
+func readManifest(dir, name string, v any) error {
 	b, err := config.ReadRegular(filepath.Join(dir, name), maxManifestJSON)
-	return err == nil && json.Unmarshal(b, v) == nil
+	if err != nil {
+		return fmt.Errorf("%s is missing, unreadable, or oversized: %w", name, err)
+	}
+	if err := json.Unmarshal(b, v); err != nil {
+		return fmt.Errorf("%s is not valid JSON: %w", name, err)
+	}
+	return nil
 }
 
-// readModelConfig decodes dir's config.json. It reports false when the file
-// is missing, not a regular file, oversized, or not valid JSON. This is the
-// only decoder of a model's configuration in Gropius; every question asked of
-// that file is answered from the map it returns.
-func readModelConfig(dir string) (map[string]any, bool) {
+// readModelConfig decodes dir's config.json. This is the only decoder of a
+// model's configuration in Gropius; every question asked of that file —
+// whether the directory is a model, what positional range it declares, and
+// whether a finished download is worth advertising — is answered from the map
+// it returns.
+func readModelConfig(dir string) (map[string]any, error) {
 	var cfg map[string]any
-	if !readManifest(dir, "config.json", &cfg) {
-		return nil, false
+	if err := readManifest(dir, "config.json", &cfg); err != nil {
+		return nil, err
 	}
-	return cfg, true
+	return cfg, nil
 }
 
 // plausibleConfig reports whether a decoded config.json can be a model
-// config. The criteria match the app layer's structural validation (mlx-lm
-// keys off model_type, or architectures for some models), so a download that
-// failed that validation cannot be re-adopted as ready by a rescan.
+// config: mlx-lm keys off model_type, or architectures for some models.
 func plausibleConfig(cfg map[string]any) bool {
 	return cfg["model_type"] != nil || cfg["architectures"] != nil
+}
+
+// CheckModelConfig reports an error unless dir holds a config.json that is
+// readable, parseable, and can be a model config.
+//
+// It is exported so the app layer's download validation applies exactly the
+// rule the rescan applies, rather than a second copy of it — the same reason
+// CheckShards is exported. Two copies drifting apart would let a directory
+// pass validation as a finished download and then be refused by every
+// rescan, or the reverse.
+func CheckModelConfig(dir string) error {
+	cfg, err := readModelConfig(dir)
+	if err != nil {
+		return err
+	}
+	if !plausibleConfig(cfg) {
+		return errors.New("config.json has neither model_type nor architectures — not a loadable model")
+	}
+	return nil
 }
 
 // ReadContextLength reports the architectural context length declared by the
@@ -702,8 +727,8 @@ func plausibleConfig(cfg map[string]any) bool {
 // rule that could drift from the rescan's — the same reason CheckShards is
 // exported.
 func ReadContextLength(dir string) int64 {
-	cfg, ok := readModelConfig(dir)
-	if !ok {
+	cfg, err := readModelConfig(dir)
+	if err != nil {
 		return 0
 	}
 	return contextLengthFrom(cfg)
@@ -778,8 +803,8 @@ func CheckShards(dir string) error {
 	var index struct {
 		WeightMap map[string]string `json:"weight_map"`
 	}
-	if !readManifest(dir, indexName, &index) {
-		return fmt.Errorf("%s is missing, unreadable, oversized, or not valid JSON", indexName)
+	if err := readManifest(dir, indexName, &index); err != nil {
+		return err
 	}
 	seen := map[string]bool{}
 	for _, shard := range index.WeightMap {

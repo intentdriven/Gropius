@@ -1,30 +1,13 @@
 package app
 
 import (
-	"encoding/json"
 	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
 
-	"github.com/intentdriven/Gropius/internal/config"
 	"github.com/intentdriven/Gropius/internal/registry"
 )
-
-// readCapped reads at most max bytes from the regular file at path, refusing
-// an oversized one rather than silently truncating it into a parse.
-//
-// In shared-cache mode a model directory can be adopted as ready from an
-// account other than the one now running the server (registry.Rescan), and
-// that owning account keeps the ability to replace its own config.json with a
-// FIFO or a symlink at any time — the shared root's sticky bit only blocks a
-// non-owner from doing so, not the owner. A later retry of that repo reaches
-// this file via validateModelDir, and a plain Open would either block forever
-// on the FIFO (wedging the download goroutine, and with it App.Close's
-// dlWG.Wait) or follow the symlink. config.ReadRegular refuses both.
-func readCapped(path string, max int64) ([]byte, error) {
-	return config.ReadRegular(path, max)
-}
 
 // dirSize sums the size of every regular file under dir.
 func dirSize(dir string) int64 {
@@ -51,25 +34,17 @@ func dirSize(dir string) int64 {
 // page saved as config.json, or a repo with no safetensors. The authoritative
 // check that a model *runs* is the pool's readiness probe on first use, which
 // issues a real completion.
-// maxConfigJSON caps how much of a model's config.json we read. A real config
-// is a few KB; anything approaching this is either broken or a hostile file
-// planted to make validation balloon memory. The read is bounded rather than
-// slurped whole with os.ReadFile.
-const maxConfigJSON = 8 << 20
-
 func validateModelDir(dir string) error {
-	b, err := readCapped(filepath.Join(dir, "config.json"), maxConfigJSON)
-	if err != nil {
-		return fmt.Errorf("config.json is missing or unreadable: %w", err)
-	}
-	var cfg map[string]any
-	if err := json.Unmarshal(b, &cfg); err != nil {
-		return fmt.Errorf("config.json is not valid JSON: %w", err)
-	}
-	// mlx-lm keys off model_type (and, for some, architectures). Its absence
-	// means this is not a model config we can serve.
-	if cfg["model_type"] == nil && cfg["architectures"] == nil {
-		return fmt.Errorf("config.json has neither model_type nor architectures — not a loadable model")
+	// The registry owns the rule about what a model's config.json has to be,
+	// and the bounded, regular-file-only read behind it: in shared-cache mode
+	// a model directory adopted from another account stays writable by that
+	// account, which can replace config.json with a FIFO or a symlink at any
+	// time, and a plain Open here would block the download goroutine forever
+	// or follow the link. Calling the registry's check rather than keeping a
+	// copy of it is what stops a directory passing validation on download and
+	// then being refused by every rescan.
+	if err := registry.CheckModelConfig(dir); err != nil {
+		return err
 	}
 
 	weights, _ := filepath.Glob(filepath.Join(dir, "*.safetensors"))
