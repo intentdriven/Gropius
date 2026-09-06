@@ -138,7 +138,7 @@ func TestThePanelIsWiredToTheStatisticsSwitchAndTheView(t *testing.T) {
 		regexp.MustCompile(`\brecentTotals\(`),
 	} {
 		if !want.MatchString(src) {
-			t.Errorf("the control panel no longer matches %s — that behaviour is then asserted by nothing", want)
+			t.Errorf("the control panel no longer matches %s — that behavior is then asserted by nothing", want)
 		}
 	}
 }
@@ -200,9 +200,70 @@ func TestThePanelSaysWhenItIsRecording(t *testing.T) {
 	if !strings.Contains(markup, `id="recordingBadge"`) {
 		t.Error("the page has no recording indicator for the panel to show")
 	}
-	if !strings.Contains(markup, "every account on it") {
-		t.Error("the switch does not say who else on this Mac can turn it on and read it")
+}
+
+// The paragraph beside the switch is the whole of what an operator has to
+// decide on, so it is asserted whole rather than by grepping for phrases in
+// it. A phrase can be found in the middle of a sentence that was cut in half,
+// which is exactly how this paragraph came to lose its verb and its only route
+// to the page that explains the switch, with a test that went on passing.
+//
+// It is deliberately brittle. The words beside an opt-in are a promise about
+// what Gropius will do with a person's requests, and changing them should be
+// something someone did on purpose.
+func TestTheSwitchExplainsItselfInWholeSentences(t *testing.T) {
+	const want = "Off unless you turn it on. While it is on, Gropius records, for each " +
+		"request it serves: the model, when the request arrived, how it ended, whether it " +
+		"streamed, how many tokens went in and came out, how long the first token took, how " +
+		"long the whole request took, and how long it waited for the model. It never records " +
+		"a prompt, an answer, an API key or the address of the client that sent it, and " +
+		"nothing recorded leaves this Mac. Turning it off again empties what is held. " +
+		"Everyone who can open this panel can turn it on and read it, which on a Mac that " +
+		"several people log into means every account on it \u2014 so on a shared Mac this is a " +
+		"decision for all of them, and while it is on Recording appears beside the server " +
+		"status at the top of this page. The what is recorded page says all of this field by field."
+
+	if got := statisticsHint(t); got != want {
+		t.Errorf("the paragraph beside the switch reads:\n  %s\nwant:\n  %s", got, want)
 	}
+	if !strings.Contains(readPanelMarkup(t), `href="https://github.com/intentdriven/Gropius/blob/main/docs/request-statistics.md"`) {
+		t.Error("the switch no longer links to the page that says what it records")
+	}
+}
+
+// statisticsHint returns the text of the paragraph beside the switch, with its
+// markup removed and its whitespace collapsed, which is what a reader sees.
+func statisticsHint(t *testing.T) string {
+	t.Helper()
+	markup := readPanelMarkup(t)
+	start := strings.Index(markup, "<legend>Request statistics</legend>")
+	if start < 0 {
+		t.Fatal("the settings form has no request-statistics group")
+	}
+	rest := markup[start:]
+	open := strings.Index(rest, `<p class="hint">`)
+	end := strings.Index(rest, "</p>")
+	if open < 0 || end < open {
+		t.Fatal("the request-statistics group has no hint paragraph")
+	}
+	return strings.Join(strings.Fields(stripTags(rest[open+len(`<p class="hint">`):end])), " ")
+}
+
+// stripTags removes HTML tags, leaving the words between them.
+func stripTags(s string) string {
+	var b strings.Builder
+	depth := 0
+	for _, r := range s {
+		switch {
+		case r == '<':
+			depth++
+		case r == '>':
+			depth--
+		case depth == 0:
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
 }
 
 func readPanelMarkup(t *testing.T) string {
