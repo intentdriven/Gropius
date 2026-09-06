@@ -237,8 +237,73 @@ jobs:
           # nothing outside the standard library, so there is nothing to cache.
           cache: false
 
+      # release record: begin
+      - name: Read the release the forge flags as latest
+        id: release
+        # THE PAGE'S RELEASE FACTS. `gh release view` with no tag is the forge's
+        # `releases/latest` — the same election the download button and
+        # install.sh follow — so it excludes drafts and pre-releases and is NOT
+        # the newest created release. The tag this run happens to carry is
+        # deliberately not consulted: a redeploy of an older tag must not move
+        # the page back to it.
+        #
+        # The record is written to the runner's temp directory, never into the
+        # checkout: it is an ARGUMENT to a render, not a source file, and
+        # nothing that reaches site-src/ can be mistaken for something the
+        # repository composes the page from.
+        #
+        # continue-on-error, because this is the one step in the chain that
+        # depends on something outside it. A forge that cannot be read must cost
+        # the page its release facts, never its deploy: the render below falls
+        # back to the static list, and the page keeps its download button.
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_JSON: ${{ runner.temp }}/release.json
+        run: |
+          set -euo pipefail
+          raw="${RUNNER_TEMP}/release-raw.json"
+          gh release view --repo "$GITHUB_REPOSITORY" --json tagName,publishedAt,assets,url > "$raw"
+
+          # Reshape into the record cmd/gropius-site validates, dropping every
+          # field the page does not show. The checksums link is the release's
+          # OWN SHA256SUMS.txt asset, looked up by name rather than composed
+          # from a URL pattern, so a release that does not carry one produces no
+          # record at all instead of a link that 404s.
+          jq '{
+                version: .tagName,
+                published_at: .publishedAt,
+                html_url: .url,
+                checksums_url: ([.assets[] | select(.name == "SHA256SUMS.txt") | .url] | first),
+                assets: [.assets[] | {name: .name, size_bytes: .size, url: .url}]
+              }' "$raw" > "${RELEASE_JSON}.partial"
+
+          if ! jq -e '.checksums_url | type == "string"' "${RELEASE_JSON}.partial" > /dev/null; then
+            echo "::warning::the release flagged latest carries no SHA256SUMS.txt; the page renders without its release facts"
+            rm -f "${RELEASE_JSON}.partial"
+            exit 1
+          fi
+          mv "${RELEASE_JSON}.partial" "$RELEASE_JSON"
+          echo "the release flagged latest is $(jq -r .version "$RELEASE_JSON"), with $(jq '.assets | length' "$RELEASE_JSON") asset(s)."
+      # release record: end
+
+      # render: begin
       - name: Render the landing page
-        run: go run ./cmd/gropius-site --out site
+        # --release is passed only when the record exists. Its absence is the
+        # graceful case, not a failure: the page renders with the static list of
+        # what a release contains and no version anywhere on it, which is also
+        # exactly what `make site` produces locally.
+        env:
+          RELEASE_JSON: ${{ runner.temp }}/release.json
+        run: |
+          set -euo pipefail
+          if [ -s "$RELEASE_JSON" ]; then
+            go run ./cmd/gropius-site --out site --release "$RELEASE_JSON"
+          else
+            echo "::warning::no release record; the page renders without its release facts"
+            go run ./cmd/gropius-site --out site
+          fi
+      # render: end
 
       - name: Check the render produced the page and its stylesheet
         # A render that silently produced nothing would deploy an empty
@@ -248,6 +313,10 @@ jobs:
           set -euo pipefail
           test -s site/Gropius/index.html
           test -s site/Gropius/site.css
+          # The response headers belong at the ROOT of the assets directory,
+          # which is where the host reads them; a policy written beside the page
+          # is a policy nothing applies.
+          test -s site/_headers
           echo "rendered $(find site -type f | wc -l) file(s)."
 
       - name: Hand the rendered page to the deploy job
