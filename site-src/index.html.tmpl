@@ -83,22 +83,31 @@
       <p>{{ range $i, $n := .InstallNote }}{{ if $i }} {{ end }}{{ $n }}{{ end }}</p>
     </div>
     <div class="release-facts">
-      <!-- release facts: begin. This marker is TEMPLATE-ONLY: html/template elides
-           comments, so the rendered page carries none of it and class=
-           "release-facts" above is the only handle in the output.
-           This region names the assets a release carries and nothing else.
-           The version, the date, each asset's size and the link to the
-           checksums are itd-2609061353258535's; it replaces this list rather
-           than adding a second one beside it. Nothing here may carry a version
-           literal: the download button resolves the latest release at request
-           time, and a stale number on the page would contradict it. -->
+      <!-- THE RELEASE FACTS. Every value below comes from the release record the
+           release run writes and hands to cmd/gropius-site with --release; not
+           one of them may be written here. Without a record — `make site`, or a
+           run where the forge could not be read — the page falls back to the
+           static list of what a release contains, which names no release and so
+           cannot go stale. The comment is template-only: html/template elides
+           it, and class="release-facts" is the region's only handle in the
+           output. -->
+      {{- if .Release }}
+      <h2>{{ .UI.ReleaseHeading }}</h2>
+      <p class="release-line"><a class="mono" href="{{ .Release.HTMLURL }}">{{ .Release.Version }}</a><span>{{ .UI.ReleasePublished }} {{ .Release.Published }}</span></p>
+      <ul class="assets">
+        {{- range .Release.Assets }}
+        <li><a class="mono" href="{{ .URL }}">{{ .Name }}</a><span>{{ .Size }}</span></li>
+        {{- end }}
+      </ul>
+      <p class="release-note"><a href="{{ .Release.ChecksumsURL }}">{{ $.UI.ChecksumsLabel }}</a></p>
+      {{- else }}
       <h2>{{ .UI.AssetsHeading }}</h2>
       <ul class="assets">
         {{- range .UI.Assets }}
         <li><span class="mono">{{ .File }}</span><span>{{ .Note }}</span></li>
         {{- end }}
       </ul>
-      <!-- release facts: end -->
+      {{- end }}
     </div>
   </section>
 

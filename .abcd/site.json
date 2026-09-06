@@ -10,6 +10,7 @@
   "static": [
     "site-src/site.css"
   ],
+  "headers": "site-src/headers",
   "out_subdir": "Gropius",
   "forge": {
     "base": "https://github.com",

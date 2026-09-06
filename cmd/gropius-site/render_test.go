@@ -83,6 +83,7 @@ func tree(t *testing.T) string {
 		filepath.Join("site-src", "index.html.tmpl"),
 		filepath.Join("site-src", "site.css"),
 		filepath.Join("site-src", "ui.json"),
+		filepath.Join("site-src", "headers"),
 		filepath.Join(".abcd", "site.json"),
 	} {
 		b, err := os.ReadFile(filepath.Join("..", "..", f))
@@ -136,7 +137,7 @@ func patchManifest(t *testing.T, root string, edit func(m map[string]any)) {
 func renderFixture(t *testing.T, root string) (string, error) {
 	t.Helper()
 	out := filepath.Join(t.TempDir(), "out")
-	return out, render(root, filepath.Join(root, ".abcd", "site.json"), out)
+	return out, render(root, filepath.Join(root, ".abcd", "site.json"), out, "")
 }
 
 // The baseline: without it, every refusal below could be passing for the wrong

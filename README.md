@@ -60,7 +60,10 @@ curl -fsSL https://raw.githubusercontent.com/intentdriven/Gropius/main/install.s
 
 That command and a direct download of the current release are also on the
 project's page at <https://intentdriven.sh/Gropius>, which is where someone who
-is not building from source starts.
+is not building from source starts. The page names the release GitHub flags as
+latest, lists every file it carries with its size, and links the checksums to
+verify a download against; the release run renders it from the release itself,
+so no one edits the page to keep it current.
 
 **Requires macOS 26.** Both apps declare that minimum and the installer checks
 it, so an older Mac is turned away before anything is installed. The **server

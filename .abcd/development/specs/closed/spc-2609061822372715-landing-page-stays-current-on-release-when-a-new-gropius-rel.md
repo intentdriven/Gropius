@@ -176,3 +176,75 @@ release chain's, and only within the shape spc-2609061822370424 established:
   the bar is that the number matches the record's byte count.
 - Whether the release section also names the previous release is deliberately
   unanswered and out of scope for the first cut; the page names the current one.
+
+## As built (2026-09-06)
+
+Seven things this record describes were built differently. They are stated here
+rather than edited into the paragraphs above, so what was planned and what
+shipped both stay readable.
+
+**The record is an argument, not a source file.** The open design point is
+settled the other way from this record's own prose: the release facts reach the
+render as `--release <file>`, and the workflow writes that file into the
+runner's temp directory rather than into `site-src/release.json`. A file under
+`site-src/` would sit among the files the composition manifest selects the
+page's copy from, and nothing in the tree would say it is generated; a path
+handed to the render says it plainly. The rendered values are unchanged, which
+is what this record's criteria are written against.
+
+**The record's absence leaves the static asset list, not an empty region.** This
+record says the page renders "without a release section" when the record cannot
+be read. What ships is the region spc-2609061822370424 already had — the
+heading and the three file names a release carries, with no version, no size and
+no date. It is what `make site` produces locally and what the workflow produces
+when the forge cannot be read. The property the criterion is about holds either
+way: the page serves, the download button is untouched, and nothing on it can go
+stale. A blank column beside the install block would have been a worse page for
+no gain in honesty.
+
+**A malformed record fails the render; only a missing one is graceful.** The
+graceful case is decided by the caller: the workflow's record step is
+`continue-on-error`, and the render passes `--release` only when the file
+exists. A file that exists and does not parse, or parses and is wrong, stops the
+render — because at that point something in the chain is broken, and a page
+quietly missing its facts would hide it.
+
+**Markup in a record value is refused, not escaped.** This record asks for an
+escaping assertion on a fixture with markup in an asset name. The renderer
+refuses such a record instead: an asset name must match a release asset's file
+name, a version must be a `vX.Y.Z` tag, and every URL must be `https`. The
+fixture is still there (`TestTheRecordIsRefused`, cases "a version carrying
+markup" and "an asset name carrying markup"); the outcome asserted is the
+stronger one.
+
+**The origin audit walks subresources, not every href.** Criterion 5's
+satisfaction paragraph says the test walks every `src`, `href` and `url()`. It
+walks `src`, the `<link>` elements that fetch something, and `url()` in the
+stylesheet. An `<a href>` is a place a reader may choose to go, not a request the
+page makes, so holding the anchors to the same allowlist would have failed the
+page for linking its own repository. `site-src/headers` ships the matching
+policy, and a test refuses a host in that policy the page never fetches.
+
+**`docs/getting-started.md` is untouched.** This record's docs list names a
+download step there that says the page shows the release flagged latest. That
+guide has no download step: it is the build-from-source tutorial, and the
+download and the installer live in `README.md`, which is where the sentence
+went. Adding one to the guide would also have disturbed the spans the page
+composes its platform requirement from.
+
+**The election is a function in `cmd/gropius-site`, and its fixture test lives
+there rather than in `internal/sitetest`.** This record's criterion-3 paragraph
+promises "a records fixture whose newest-created entry is not the flagged one,
+asserting the flagged one is chosen", in `internal/sitetest`. That fixture exists
+and does exactly that — `TestTheFlaggedLatestIsElectedAndNotTheNewest` — but in
+`cmd/gropius-site`, because the election is a function there:
+`gropius-site select --from <list>` reads the forge's release list and returns
+the flagged release, refusing a list where nothing is flagged, one where two
+things are, and a flagged entry that is a draft, a pre-release or not a release
+tag. The workflow lists, elects through that verb, and then fetches the elected
+tag — three moves rather than the single `releases/latest` read this record's
+Approach describes, and the reason is this paragraph: an election made by the
+forge alone is correct but untestable from here, and the case the criterion names
+cannot be produced against a real forge without hand-making a stale release.
+`internal/sitetest` holds the workflow to that shape, which is all a YAML file can
+be held to.
