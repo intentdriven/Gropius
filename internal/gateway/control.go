@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -456,7 +457,12 @@ func (c *Control) handleSetSettings(w http.ResponseWriter, r *http.Request) {
 	// Preload, or Advertise (which has no UI control) — must keep its existing
 	// value. Decoding into a zero Config and saving it wholesale silently wiped
 	// those, dropping a user's preload list on any unrelated settings change.
-	incoming := current
+	//
+	// A deep copy, not a shallow one: encoding/json decodes straight into an
+	// existing non-nil pointer's target, so with a plain assignment a posted
+	// sampling value would land in the live configuration before Validate could
+	// look at it — and stay there when Validate refused the save.
+	incoming := current.Clone()
 	if err := json.NewDecoder(r.Body).Decode(&incoming); err != nil {
 		writeError(w, http.StatusBadRequest, "settings body is not valid JSON")
 		return
@@ -482,9 +488,30 @@ func (c *Control) handleSetSettings(w http.ResponseWriter, r *http.Request) {
 		incoming.DecodeConcurrency != current.DecodeConcurrency ||
 		incoming.IdleTimeoutSec != current.IdleTimeoutSec
 	writeJSON(w, http.StatusOK, map[string]any{
-		"status":  "saved",
-		"restart": restart,
+		"status":        "saved",
+		"restart":       restart,
+		"reload_models": samplingReloads(current, incoming, c.App.Pool.Resident()),
 	})
+}
+
+// samplingReloads names the loaded models whose sampling defaults changed with
+// this save.
+//
+// The defaults are launch flags, so a model that is already running keeps the
+// values its process started with until it loads again. Saying which models
+// those are is the difference between "the change has not reached these yet"
+// and a change that silently appears to have done nothing. A model carrying an
+// override that shadows the changed value is not listed: nothing about how it
+// is served moved.
+func samplingReloads(before, after config.Config, resident []runtime.Resident) []string {
+	out := []string{}
+	for _, m := range resident {
+		if !before.EffectiveSampling(m.RepoID).Equal(after.EffectiveSampling(m.RepoID)) {
+			out = append(out, m.RepoID)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // handleEvents streams state snapshots to the UI over SSE, so download progress
