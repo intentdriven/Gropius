@@ -7,6 +7,11 @@
 <meta name="description" content="{{ .Identity.Tagline }}">
 <link rel="stylesheet" href="site.css">
 <link rel="preconnect" href="https://fonts.googleapis.com">
+<!-- The face FILES come from fonts.gstatic.com, so the preconnect above only
+     does half its job without this one. crossorigin because fonts are fetched
+     in CORS mode. Keeping the two web faces on Google Fonts is the maintainer's
+     decision; this markup does not widen it. -->
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Jost:wght@400;500;700;800&amp;family=IBM+Plex+Mono:wght@400;500&amp;display=swap">
 </head>
 <body>

@@ -294,7 +294,11 @@ func scanBlocks(lines []string) []block {
 // is HTML-escaped FIRST and the three patterns are applied to the escaped
 // string, so nothing a source file contains can introduce markup of its own —
 // only these three shapes become tags, and only where the source file wrote
-// them. Nesting is not supported: a bold link stays as it was written.
+// them. Two limits, both deliberate: nesting is not supported (a bold link stays
+// as it was written), and a source file that writes an HTML entity gets it
+// escaped, so `&amp;` reaches the page as that literal text. Escaping first is
+// what makes the guarantee simple enough to be sure of; a span that needs an
+// entity should write the character.
 func inlineHTML(md string) template.HTML {
 	s := html.EscapeString(md)
 	s = codeSpanRe.ReplaceAllString(s, "<code>$1</code>")
