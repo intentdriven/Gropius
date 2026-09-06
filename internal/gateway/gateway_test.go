@@ -1686,3 +1686,130 @@ func mustList(t *testing.T, h http.Handler) []map[string]any {
 	}
 	return out.Data
 }
+
+// The registry's index, the pool's entries and the listing's join between them
+// are three key spaces that must be one. This drives a corpus of spellings
+// through all three at once: the registry must resolve each to the same model,
+// the pool must still hold exactly one entry however many spellings have asked
+// for it, and the listing must report that model loaded under the registry's
+// own spelling every time.
+//
+// The archtest keeps the fold in one place; this asserts that one place is
+// enough — that no site has drifted into keying by something else.
+func TestRegistryPoolAndListingShareOneKeySpace(t *testing.T) {
+	const canonical = "mlx-community/Qwen3-8B-4bit"
+
+	root := t.TempDir()
+	dir := filepath.Join(root, "models", "mlx-community", "Qwen3-8B-4bit")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "config.json"),
+		[]byte(`{"model_type":"qwen3","max_position_embeddings":40960}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "model.safetensors"), make([]byte, 64), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	reg, err := registry.Open(filepath.Join(root, "registry.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := reg.Rescan(filepath.Join(root, "models")); err != nil {
+		t.Fatalf("Rescan: %v", err)
+	}
+	scanned, err := reg.Get(canonical)
+	if err != nil {
+		t.Fatalf("the scanned model is not in the registry: %v", err)
+	}
+	fake := mlxtest.Start(mlxtest.Options{ModelArg: scanned.Path})
+	defer fake.Close()
+
+	launcher := &composedLauncher{}
+	pool := runtime.NewPool(runtime.PoolOptions{
+		Launcher:         launcher,
+		Models:           registrySource{reg},
+		MaxResidentBytes: 1 << 30,
+		ReadyTimeout:     10 * time.Second,
+		HTTP:             &http.Client{Timeout: 5 * time.Second, Transport: composedTransport{fake.URL()}},
+	})
+	defer pool.Close()
+
+	cfg := config.Default()
+	cfg.APIKey = "bh_secret"
+	g := New(Options{Config: cfg, Pool: pool, Models: reg})
+
+	// Every spelling an operator or a script can reach the pool with.
+	for _, spelling := range []string{
+		canonical,
+		"MLX-Community/Qwen3-8B-4bit",
+		"mlx-community/qwen3-8b-4bit",
+		"MLX-COMMUNITY/QWEN3-8B-4BIT",
+	} {
+		if got := config.FoldRepoID(spelling); got != config.FoldRepoID(canonical) {
+			t.Errorf("FoldRepoID(%q) = %q, want the same key as %q", spelling, got, canonical)
+			continue
+		}
+		if m, err := reg.Get(spelling); err != nil || m.RepoID != canonical {
+			t.Errorf("registry.Get(%q) = %+v, %v; want the model spelled %q", spelling, m, err, canonical)
+			continue
+		}
+
+		_, release, err := pool.Acquire(context.Background(), spelling)
+		if err != nil {
+			t.Errorf("Acquire(%q): %v", spelling, err)
+			continue
+		}
+		release()
+
+		if res := pool.Resident(); len(res) != 1 {
+			t.Errorf("after acquiring %q the pool holds %d entries, want 1: %+v", spelling, len(res), res)
+		}
+		entry := entryByID(t, mustList(t, g.Handler()), canonical)
+		if entry["state"] != "loaded" {
+			t.Errorf("after acquiring %q the listing reports state = %v, want %q",
+				spelling, entry["state"], "loaded")
+		}
+	}
+
+	if launcher.launched != 1 {
+		t.Errorf("launched %d model servers for one model, want 1", launcher.launched)
+	}
+}
+
+// The projection reads withAuth's admission bit, so a handler reached without
+// withAuth in front of it has no admission to read — and must report nothing
+// rather than fall back to the live configuration, which is the second read
+// this design exists to remove. Mounting handleListModels on a mux of its own
+// is exactly the refactor that would do it silently.
+func TestListModelsWithoutTheAuthMiddlewareReportsNoResidency(t *testing.T) {
+	fake := mlxtest.Start(mlxtest.Options{ModelArg: "/m"})
+	defer fake.Close()
+
+	cfg := config.Default()
+	cfg.APIKey = "bh_secret"
+	models := &stubModels{models: []registry.Model{
+		{RepoID: "org/warm", State: registry.StateReady, AddedAt: time.Unix(1757145600, 0)},
+	}}
+	pool := &stubPool{srv: fake, resident: []runtime.Resident{{
+		RepoID:   "org/warm",
+		State:    runtime.ResidencyLoaded,
+		InFlight: 3,
+		LastUsed: time.Unix(1757145600, 0),
+	}}}
+	g := New(Options{Config: cfg, Pool: pool, Models: models})
+
+	// The handler directly: no withAuth, so no admission decision was made.
+	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	w := httptest.NewRecorder()
+	g.handleListModels(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("GET /v1/models = %d, want 200", w.Code)
+	}
+	for _, name := range []string{"state", "in_flight", "last_used"} {
+		if strings.Contains(w.Body.String(), name) {
+			t.Errorf("a handler reached without withAuth served %q: %s", name, w.Body.String())
+		}
+	}
+}

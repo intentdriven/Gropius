@@ -205,13 +205,15 @@ func (g *Gateway) handleListModels(w http.ResponseWriter, r *http.Request) {
 	if g.admittedKeyed(r) {
 		residency = make(map[string]runtime.Resident)
 		for _, res := range g.pool.Resident() {
-			// Folded on both sides of the join. The registry reports a model's
+			// Folded on both sides of the join, through the same rule the
+			// registry and the pool key by. The registry reports a model's
 			// canonical spelling and the pool reports whatever string reached
 			// Acquire, and they are not always the same one; joining on the raw
 			// strings would report a warm model as cold, which is the swap this
-			// listing exists to prevent. Folding cannot mis-attribute: the
-			// registry allows at most one model per folded id.
-			residency[strings.ToLower(res.RepoID)] = res
+			// listing exists to prevent. This cannot mis-attribute only because
+			// all three key by config.FoldRepoID, so the registry's "at most one
+			// model per folded id" is the pool's guarantee and this join's too.
+			residency[config.FoldRepoID(res.RepoID)] = res
 		}
 	}
 
@@ -239,7 +241,7 @@ func (g *Gateway) handleListModels(w http.ResponseWriter, r *http.Request) {
 			entry["max_model_len"] = m.ContextLength
 		}
 		if residency != nil {
-			addResidency(entry, residency[strings.ToLower(m.RepoID)])
+			addResidency(entry, residency[config.FoldRepoID(m.RepoID)])
 		}
 		data = append(data, entry)
 	}

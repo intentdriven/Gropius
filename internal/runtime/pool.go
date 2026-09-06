@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"net/http"
 	"sort"
-	"strings"
 	"sync"
 	"time"
 
@@ -193,7 +192,7 @@ func (p *Pool) Acquire(ctx context.Context, repoID string) (*Upstream, func(), e
 		return nil, nil, ErrClosed
 	}
 
-	e, ok := p.entries[entryKey(repoID)]
+	e, ok := p.entries[config.FoldRepoID(repoID)]
 	if !ok {
 		var err error
 		e, err = p.startLocked(repoID)
@@ -232,7 +231,7 @@ func (p *Pool) Acquire(ctx context.Context, repoID string) (*Upstream, func(), e
 		// model could deny every other model from loading for minutes. Tear
 		// it down the moment the last waiter is gone. The identity check
 		// guards against a load that already failed and removed itself.
-		if e.inFlight == 0 && !isReady(e) && p.entries[entryKey(e.repoID)] == e {
+		if e.inFlight == 0 && !isReady(e) && p.entries[config.FoldRepoID(e.repoID)] == e {
 			p.stopEntryLocked(e)
 		}
 		p.mu.Unlock()
@@ -330,7 +329,7 @@ func (p *Pool) startLocked(repoID string) (*entry, error) {
 		return nil, fmt.Errorf("start model server for %s: %w", repoID, &LaunchError{Err: err})
 	}
 	e.proc = proc
-	p.entries[entryKey(repoID)] = e
+	p.entries[config.FoldRepoID(repoID)] = e
 
 	go p.waitReady(e)
 	return e, nil
@@ -354,8 +353,8 @@ func (p *Pool) waitReady(e *entry) {
 		// same repoID key. Deleting by key alone would then orphan that healthy
 		// replacement — its process would leak and its memory would stop counting
 		// against the budget.
-		if p.entries[entryKey(e.repoID)] == e {
-			delete(p.entries, entryKey(e.repoID))
+		if p.entries[config.FoldRepoID(e.repoID)] == e {
+			delete(p.entries, config.FoldRepoID(e.repoID))
 		}
 	}
 	p.mu.Unlock()
@@ -384,8 +383,8 @@ func (p *Pool) waitReady(e *entry) {
 func (p *Pool) watchExit(e *entry) {
 	<-e.proc.Done()
 	p.mu.Lock()
-	if p.entries[entryKey(e.repoID)] == e {
-		delete(p.entries, entryKey(e.repoID))
+	if p.entries[config.FoldRepoID(e.repoID)] == e {
+		delete(p.entries, config.FoldRepoID(e.repoID))
 	}
 	p.mu.Unlock()
 }
@@ -485,7 +484,7 @@ func (p *Pool) evictForLocked(need int64) error {
 
 // stopEntryLocked removes an entry and stops its process. Callers must hold p.mu.
 func (p *Pool) stopEntryLocked(e *entry) {
-	delete(p.entries, entryKey(e.repoID))
+	delete(p.entries, config.FoldRepoID(e.repoID))
 	proc := e.proc
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
@@ -508,7 +507,7 @@ func (p *Pool) Unload(repoID string) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	e, ok := p.entries[entryKey(repoID)]
+	e, ok := p.entries[config.FoldRepoID(repoID)]
 	if !ok {
 		return fmt.Errorf("%s: %w", repoID, ErrNotLoaded)
 	}
@@ -619,19 +618,6 @@ func (p *Pool) Close() error {
 
 // isReady reports whether an entry has finished loading (its ready channel is
 // closed) without blocking.
-// entryKey is the key a model's entry is held under. Repo ids name the same
-// model whatever their case — the registry looks them up case-insensitively and
-// reports one canonical spelling — but callers do not all come through it:
-// App.preload takes ids from the hand-edited config, and the load and unload
-// endpoints take them from a request body. Keying on the exact string would let
-// one model occupy two entries, which means two servers for the same weights,
-// both charged against the budget, and a models list that reports a warm model
-// as cold because the listing joins on the registry's spelling.
-//
-// This folds the same way the registry does, so the two key spaces agree and no
-// two registry models can ever collide here.
-func entryKey(repoID string) string { return strings.ToLower(repoID) }
-
 func isReady(e *entry) bool {
 	select {
 	case <-e.ready:

@@ -90,7 +90,7 @@ var ErrNotFound = errors.New("model not found")
 // spellings are one model. Keying case-sensitively let a re-cased download
 // mint a second entry over the same directory — and removing either row
 // deleted the other's weights. Entries keep their first-seen spelling.
-func key(repoID string) string { return strings.ToLower(repoID) }
+func key(repoID string) string { return config.FoldRepoID(repoID) }
 
 // Registry is a concurrency-safe, file-backed index of local models.
 type Registry struct {
