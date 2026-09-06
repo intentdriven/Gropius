@@ -225,6 +225,15 @@ jobs:
           # The resolved commit sha, never the tag NAME: checkout re-resolves a
           # named ref at each job's start, so a tag moved mid-run would differ
           # between this job and `deploy`.
+          #
+          # NOTE, for a manual redeploy of an older tag: this checkout gives the
+          # page its template, stylesheet and composed prose from THAT tag's
+          # tree, while the record step below reads the release the forge flags
+          # as latest regardless. The two coincide on the release path, which is
+          # every ordinary run; a dispatch of an older tag deliberately renders
+          # that tag's page with the current release's facts, because the record
+          # says the page names the flagged latest and never the tag the run
+          # carries.
           ref: ${{ needs.resolve.outputs.sha }}
           persist-credentials: false
 
@@ -239,30 +248,48 @@ jobs:
 
       # release record: begin
       - name: Read the release the forge flags as latest
-        # THE PAGE'S RELEASE FACTS. `gh release view` with no tag is the forge's
-        # `releases/latest` — the same election the download button and
-        # install.sh follow — so it excludes drafts and pre-releases and is NOT
-        # the newest created release. The tag this run happens to carry is
-        # deliberately not consulted: a redeploy of an older tag must not move
+        # THE PAGE'S RELEASE FACTS, in three moves, none of which is a decision
+        # this file makes:
+        #
+        #   1. list the releases with the forge's own `isLatest` flag,
+        #   2. `gropius-site select` elects from that list — the flagged one,
+        #      never the newest created, and never a draft or a pre-release,
+        #   3. fetch that release and reshape it into the record the renderer
+        #      validates.
+        #
+        # The election is Go rather than shell so it can be tested against a
+        # fixture: the case the record is about — a release created after the
+        # flagged one — cannot be produced against the real forge without
+        # hand-making a stale release. The tag this run happens to carry is
+        # deliberately never consulted; a redeploy of an older tag must not move
         # the page back to it.
         #
         # The record is written to the runner's temp directory, never into the
         # checkout: it is an ARGUMENT to a render, not a source file, and
-        # nothing that reaches site-src/ can be mistaken for something the
+        # nothing that reaches site-src/ should be mistaken for something the
         # repository composes the page from.
         #
         # continue-on-error, because this is the one step in the chain that
-        # depends on something outside it. A forge that cannot be read must cost
-        # the page its release facts, never its deploy: the render below falls
-        # back to the static list, and the page keeps its download button.
+        # depends on something outside it. A forge that cannot be read, a list
+        # nothing is flagged in, or a record the renderer will not accept must
+        # cost the page its release facts and never its deploy: the render below
+        # falls back to the static list, and the page keeps its download button.
         continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_JSON: ${{ runner.temp }}/release.json
         run: |
           set -euo pipefail
+          list="${RUNNER_TEMP}/releases.json"
           raw="${RUNNER_TEMP}/release-raw.json"
-          gh release view --repo "$GITHUB_REPOSITORY" --json tagName,publishedAt,assets,url > "$raw"
+
+          gh release list --repo "$GITHUB_REPOSITORY" --limit 100 \
+            --json tagName,isLatest,isDraft,isPrerelease,publishedAt > "$list"
+          tag="$(go run ./cmd/gropius-site select --from "$list")"
+          echo "the release flagged latest is $tag"
+
+          gh release view "$tag" --repo "$GITHUB_REPOSITORY" \
+            --json tagName,publishedAt,assets,url > "$raw"
 
           # Reshape into the record cmd/gropius-site validates, dropping every
           # field the page does not show. The checksums link is the release's
@@ -277,18 +304,33 @@ jobs:
                 assets: [.assets[] | {name: .name, size_bytes: .size, url: .url}]
               }' "$raw" > "${RELEASE_JSON}.partial"
 
-          if ! jq -e '.checksums_url | type == "string"' "${RELEASE_JSON}.partial" > /dev/null; then
-            echo "::warning::the release flagged latest carries no SHA256SUMS.txt; the page renders without its release facts"
+          # Ask the renderer whether it would accept this record BEFORE the
+          # render commits to it. Without this the degradation would key on the
+          # file merely existing, and a release whose asset names or links the
+          # record's grammar refuses would fail the render job and take the
+          # deploy with it — losing the whole page over a fact.
+          if ! go run ./cmd/gropius-site validate-release "${RELEASE_JSON}.partial"; then
+            {
+              echo "### The landing page is deployed without its release facts"
+              echo
+              echo "The release flagged latest (\`$tag\`) produced a record"
+              echo "\`cmd/gropius-site\` will not render. The page is deployed with"
+              echo "its static list of what a release contains; the download button"
+              echo "is unaffected. The refusal is in this job's log."
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::warning::the release record was refused; the page is deployed without its release facts"
             rm -f "${RELEASE_JSON}.partial"
             exit 1
           fi
           mv "${RELEASE_JSON}.partial" "$RELEASE_JSON"
-          echo "the release flagged latest is $(jq -r .version "$RELEASE_JSON"), with $(jq '.assets | length' "$RELEASE_JSON") asset(s)."
+          echo "rendering $tag with $(jq '.assets | length' "$RELEASE_JSON") asset(s)."
       # release record: end
 
       # render: begin
       - name: Render the landing page
-        # --release is passed only when the record exists. Its absence is the
+        # --release is passed only when the record exists, and the step above
+        # leaves it behind only when the renderer has already accepted it — so
+        # here "the file exists" means "it validates". Its absence is the
         # graceful case, not a failure: the page renders with the static list of
         # what a release contains and no version anywhere on it, which is also
         # exactly what `make site` produces locally.
@@ -300,6 +342,7 @@ jobs:
             go run ./cmd/gropius-site --out site --release "$RELEASE_JSON"
           else
             echo "::warning::no release record; the page renders without its release facts"
+            echo "The landing page is rendered without its release facts." >> "$GITHUB_STEP_SUMMARY"
             go run ./cmd/gropius-site --out site
           fi
       # render: end
@@ -433,8 +476,19 @@ jobs:
           css="$(curl -sS -o /dev/null -w '%{http_code}' -L --max-time 20 "${BASE}/Gropius/site.css" || echo 000)"
           echo "/Gropius/site.css -> ${css}"
           [ "$css" = 200 ] || fail=1
+          # The whole argument for shipping site-src/headers is enforcement at
+          # SERVE time. Every other check on it stops at the file: the tests read
+          # it, the render copies it, the deploy asserts it survived the
+          # handover. This is the only place that can say whether a visitor's
+          # browser is actually handed the policy, so it asks.
+          if curl -sSI -L --max-time 20 "${BASE}/Gropius/" | grep -qi '^content-security-policy:'; then
+            echo "/Gropius/ is served with a content-security-policy."
+          else
+            echo "/Gropius/ is served with NO content-security-policy header"
+            fail=1
+          fi
           if [ "$fail" != 0 ]; then
-            echo "::warning::the deploy succeeded but the address did not answer as expected; check the route, the zone's DNS record, and html_handling in wrangler.jsonc"
+            echo "::warning::the deploy succeeded but the address did not answer as expected; check the route, the zone's DNS record, html_handling in wrangler.jsonc, and whether _headers is read from the assets directory root"
             exit 1
           fi
-          echo "both spellings of the address serve the page, and its stylesheet resolves."
+          echo "both spellings of the address serve the page, its stylesheet resolves, and the policy is served."
