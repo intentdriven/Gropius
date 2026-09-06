@@ -3,7 +3,7 @@ BUNDLE  := dist/$(APP).app
 BIN     := bin/gropius
 PKG     := ./cmd/gropius
 
-.PHONY: all test build app icon install run clean fmt vet lint allow-firewall install-shared
+.PHONY: all test build app icon install run clean fmt vet lint allow-firewall install-shared site
 
 all: test build
 
@@ -20,6 +20,12 @@ vet:
 
 lint: fmt vet test
 
+## site: render the landing page into site/ (gitignored). Reads only the files
+## .abcd/site.json names, writes only under site/, and reaches no network, so
+## the deploy workflow can render in a job that holds no credential.
+site:
+	go run ./cmd/gropius-site --out site
+
 ## build: the plain binary. LDFLAGS is empty for dev builds (keeps debug symbols
 ## for delve); the app/release build overrides it to strip. VERSION is stamped
 ## into `gropius -version`; the release workflow passes the tag explicitly.
@@ -31,8 +37,18 @@ build:
 ## app: a real .app bundle (menu-bar app, LAN + Bonjour entitlements).
 ## Strips debug info (-s -w): a distributed binary needs no DWARF, and it roughly
 ## halves the download.
+## The icon is the COMMITTED build/AppIcon.icns, and this target never
+## regenerates it: rasterizing icon.svg needs librsvg, which no workflow installs
+## and the GitHub macOS runner does not carry, so a dependency on `icon` here
+## would fail `make app` on a clean checkout and turn the release red after the
+## tag was already pushed. Regeneration is `make icon`, run by hand when the art
+## changes. internal/archtest holds both halves of that.
 app: LDFLAGS = -s -w
-app: build icon
+app: build
+	@test -s build/AppIcon.icns || { \
+		echo "build/AppIcon.icns is missing or empty; it is committed art — restore it, or run 'make icon' (needs librsvg)" >&2; \
+		exit 1; \
+	}
 	rm -rf $(BUNDLE)
 	mkdir -p $(BUNDLE)/Contents/MacOS $(BUNDLE)/Contents/Resources
 	cp build/Info.plist $(BUNDLE)/Contents/Info.plist
@@ -50,7 +66,9 @@ app: build icon
 		--sign - $(BUNDLE)
 	@echo "built $(BUNDLE)"
 
-## icon: generate AppIcon.icns from the source PNG
+## icon: regenerate AppIcon.icns from build/icon.svg. Needs librsvg
+## (brew install librsvg) and is run by hand when the art changes; nothing in the
+## build or the release path depends on it.
 icon:
 	@build/mkicon.sh
 

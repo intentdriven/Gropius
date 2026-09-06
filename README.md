@@ -58,6 +58,10 @@ it through the firewall, and launches it:
 curl -fsSL https://raw.githubusercontent.com/intentdriven/Gropius/main/install.sh | bash
 ```
 
+That command and a direct download of the current release are also on the
+project's page at <https://intentdriven.sh/Gropius>, which is where someone who
+is not building from source starts.
+
 **Requires macOS 26.** Both apps declare that minimum and the installer checks
 it, so an older Mac is turned away before anything is installed. The **server
 needs Apple Silicon** (MLX runs on Metal). For the native chat client

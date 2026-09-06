@@ -1,0 +1,99 @@
+{
+  "schema_version": 1,
+  "purpose": "Composition manifest for the landing page at intentdriven.sh/Gropius. It names WHERE each block of the page comes from; it carries no prose. The title, tagline and pitch are the canonical identity block's; every other sentence is a span of a repository file selected by path and heading; the words the renderer may add itself are the closed list in site-src/ui.json.",
+  "identity": {
+    "file": ".abcd/development/IDENTITY.md",
+    "heading": "Identity (canonical)"
+  },
+  "ui_strings": "site-src/ui.json",
+  "template": "site-src/index.html.tmpl",
+  "static": [
+    "site-src/site.css"
+  ],
+  "out_subdir": "Gropius",
+  "forge": {
+    "base": "https://github.com",
+    "repository": "intentdriven/Gropius",
+    "branch": "main",
+    "download_asset": "Gropius.app.zip"
+  },
+  "sources": {
+    "pillars": {
+      "file": "README.md",
+      "heading": "Features",
+      "select": "bullets",
+      "limit": 3
+    },
+    "install": {
+      "file": "README.md",
+      "heading": "Install",
+      "select": "code-blocks",
+      "limit": 2
+    },
+    "install_note": {
+      "file": "README.md",
+      "heading": "Install",
+      "select": "paragraph",
+      "match": "verifies the download",
+      "part": "first-sentence"
+    },
+    "requirements": [
+      {
+        "file": "docs/getting-started.md",
+        "heading": "1. Requirements",
+        "select": "bullet",
+        "match": "Apple Silicon",
+        "part": "first-sentence"
+      },
+      {
+        "file": "docs/getting-started.md",
+        "heading": "1. Requirements",
+        "select": "bullet",
+        "match": "Requires macOS",
+        "part": "first-sentence"
+      }
+    ],
+    "cta_note": {
+      "file": "README.md",
+      "heading": "Install",
+      "select": "paragraph",
+      "match": "ad-hoc signed",
+      "part": "matched-sentence"
+    },
+    "endpoint": {
+      "file": "docs/getting-started.md",
+      "heading": "5. Talk to it — from another machine",
+      "select": "paragraph",
+      "match": "base URLs",
+      "part": "code-span"
+    },
+    "runtime": {
+      "file": "README.md",
+      "heading": "",
+      "select": "paragraph",
+      "match": "manages its own runtime",
+      "part": "first-sentence"
+    },
+    "license": {
+      "file": "README.md",
+      "heading": "Licence",
+      "select": "paragraph",
+      "match": "MIT",
+      "part": "first-sentence"
+    },
+    "status": {
+      "file": "README.md",
+      "heading": "Status",
+      "select": "paragraph",
+      "match": "Experimental",
+      "part": "first-sentence"
+    },
+    "footer_note": {
+      "file": "README.md",
+      "heading": "Status",
+      "select": "paragraph",
+      "match": "Cross-machine",
+      "part": "all"
+    }
+  }
+}

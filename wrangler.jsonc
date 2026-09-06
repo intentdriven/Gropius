@@ -1,0 +1,49 @@
+{
+  // The landing page's Worker: static assets only, no script. The assets are
+  // the output of `make site` (cmd/gropius-site), which writes them under a
+  // Gropius/ subdirectory so the served path matches the route below.
+  //
+  // GITHUB ACTIONS IS THE ONLY DEPLOYER. The Worker's automatic build on push
+  // is disconnected on purpose — a dashboard setting, recorded here because the
+  // tree is the only durable record of it:
+  //   automatic production builds:  disabled
+  //   automatic branch builds:      disabled
+  // What deploys instead is .github/workflows/site.yml, called by the release
+  // chain once a release has published: a render job that holds no credential
+  // hands its output to a deploy job that holds the Cloudflare token and runs
+  // no build code. Reconnecting the dashboard build would put a second,
+  // unreviewed path onto this address.
+  //
+  // Two GitHub Environments gate that workflow, and this is the only durable
+  // record of how they are configured:
+  //   site-render   the render job. NO SECRETS. Deployment policy: branch
+  //                 `main` AND tags `v*`.
+  //   site          the deploy job. Same policy. Holds CLOUDFLARE_API_TOKEN and
+  //                 CLOUDFLARE_ACCOUNT_ID, read by exactly one step.
+  // The {main, v*} policy refuses unreviewed workflow content: a dispatch runs
+  // the workflow file as it exists on the ref it was dispatched from, so an
+  // arbitrary branch is refused, while `main` is the reviewed state and a `v*`
+  // tag is immutable. Residual, plainly: whoever can merge to main can change
+  // the workflow and have it run with these secrets — this repository's
+  // ordinary review boundary, not a new one.
+  "name": "gropius",
+  "compatibility_date": "2026-09-06",
+  // A PATH ROUTE, not a custom domain: the apex is the organization's own site
+  // and only /Gropius belongs to this project. The deploy asserts the route, so
+  // a drifted attachment is reclaimed on the next release rather than left
+  // wherever the dashboard last put it.
+  "routes": [
+    { "pattern": "intentdriven.sh/Gropius*", "zone_name": "intentdriven.sh" }
+  ],
+  "assets": {
+    "directory": "./site",
+    // The page lives at site/Gropius/index.html, so a request for /Gropius and
+    // one for /Gropius/ must both reach it; auto-trailing-slash is what serves
+    // the directory index for either spelling.
+    "html_handling": "auto-trailing-slash",
+    // The documented default. Nothing renders a 404 page today, and claiming
+    // "404-page" without one would fall back to a plain 404 anyway; when the
+    // site grows one, this is the line that changes.
+    "not_found_handling": "none"
+  }
+}

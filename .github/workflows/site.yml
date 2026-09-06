@@ -1,0 +1,367 @@
+name: site
+
+# Deploy the landing page at intentdriven.sh/Gropius. One reusable workflow with
+# two entry points:
+#
+#   workflow_call     the RELEASE CHAIN. release.yml calls this as a separate,
+#                     non-gating job once its `release` job has succeeded.
+#                     Deliberately NOT a `release: published` trigger: releases
+#                     here are created by release.yml under the workflow's own
+#                     GITHUB_TOKEN, and Actions never fires event triggers for
+#                     actions taken with that token, so such a trigger would
+#                     never fire at all. Being CALLED also removes the race
+#                     against the asset uploads — `gh release create` has already
+#                     returned.
+#   workflow_dispatch the manual redeploy. An empty `tag` input resolves the
+#                     latest published release, so a redeploy still renders from
+#                     a release rather than from whatever main happens to hold.
+#
+# A site failure can neither block the release nor change a byte of what it
+# published: the isolation is the caller's job dependency (release.yml's `site`
+# job needs `release`), not the file separation. It does turn the caller's run
+# red, because a called workflow's failure is the caller's failure; the Release,
+# its assets and its attestations are already made and are untouched.
+#
+# THE ENVIRONMENT CONTRACT (dashboard state, recorded here and in wrangler.jsonc
+# because the tree is the only durable record of it). TWO environments:
+#
+#   site-render   the render job. NO SECRETS AT ALL. Deployment policy: branch
+#                 `main` AND tags `v*`.
+#   site          the deploy job. Same policy, and no required reviewer, so a
+#                 redeploy never waits on a human.
+#                 Secrets: CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID.
+#
+# WHY {main, v*} AND NOT `v*` ALONE. What the restriction refuses is UNREVIEWED
+# WORKFLOW CONTENT: a dispatch runs this file as it exists on the ref it was
+# dispatched from, so a dispatch from an arbitrary branch would run that branch's
+# edited copy — and is refused, because that branch matches neither pattern.
+# `main` is the reviewed state and a `v*` tag is immutable. A tags-only policy
+# would be wrong rather than merely stricter: the primary path is
+# auto-release -> release.yml -> here, whose run ref is refs/heads/main, so `v*`
+# alone would refuse every ordinary release.
+#
+# The residual, stated plainly: whoever can merge to main can change this file
+# and have it run with those secrets. That is this repository's ordinary review
+# boundary — the same one release.yml already rests on — not a new surface.
+#
+# WHY THE RENDER AND THE DEPLOY ARE SEPARATE JOBS. The render runs repository
+# code; the deploy holds the only credential in this repository. Keeping them
+# apart means a compromise of the render yields no token, and the bytes cross
+# between them as an artifact rather than a shared checkout. The deploy job runs
+# no build step at all: it checks out wrangler.jsonc, unpacks what render made,
+# and calls wrangler.
+on:
+  workflow_call:
+    inputs:
+      tag:
+        description: The released tag to render and deploy (vX.Y.Z).
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Tag to redeploy (vX.Y.Z). Empty resolves the latest published release.
+        required: false
+        type: string
+        default: ''
+
+# One group per deploy target. Never cancelled: a deploy cancelled between
+# uploading assets and switching the route leaves the site half-moved, which is
+# worse than a queued run.
+concurrency:
+  group: site-${{ inputs.tag || github.ref }}
+  cancel-in-progress: false
+
+# Floor for the workflow: read-only. Each job takes exactly what it needs, and a
+# called workflow is additionally capped by its caller's grants.
+permissions:
+  contents: read
+
+jobs:
+  # Decide which tag this run is for, and which commit that tag names. Pure
+  # read: no checkout at all, so no credential is ever persisted here.
+  resolve:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      tag: ${{ steps.resolve.outputs.tag }}
+      sha: ${{ steps.resolve.outputs.sha }}
+      deploy: ${{ steps.resolve.outputs.deploy }}
+    steps:
+      - name: Refuse a ref the deploy environments would not admit
+        # The {main, v*} restriction is a deployment policy on the two
+        # environments — dashboard state that the tree cannot otherwise hold, and
+        # that a fork or an edited policy silently removes. Assert it here too,
+        # so the constraint the header claims is one the repository itself
+        # states. It FAILS rather than skipping: a skipped deploy leaves a green
+        # run beside an unchanged page, which reads as success.
+        env:
+          REF: ${{ github.ref }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          case "$REF" in
+            "refs/heads/${DEFAULT_BRANCH}") ;;
+            refs/tags/v*) ;;
+            *)
+              echo "refusing to run the site workflow from $REF: the site-render and site environments admit the default branch and v* tags only" >&2
+              exit 1
+              ;;
+          esac
+          echo "$REF is a ref both environments admit."
+
+      - name: Resolve the tag and the tagged commit
+        id: resolve
+        # No ${{ }} interpolation in this script (injection-safe): the tag input
+        # arrives through env and the script writes only $GITHUB_OUTPUT.
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          tag="$INPUT_TAG"
+          if [ -z "$tag" ]; then
+            # `releases/latest` is GitHub's own notion of latest and excludes
+            # drafts and pre-releases — the same endpoint the page's download
+            # button resolves, so the page and the button cannot disagree about
+            # which release is current.
+            tag="$(gh api "repos/${GITHUB_REPOSITORY}/releases/latest" --jq '.tag_name')"
+            test -n "$tag"
+            echo "no tag given; the latest published release is $tag"
+          fi
+
+          # Validate the SHAPE before the tag is used anywhere: it is externally
+          # supplied, and downstream it becomes a path component of an API URL
+          # and a line written to $GITHUB_OUTPUT. A bash [[ =~ ]] match rather
+          # than grep, deliberately: grep is line-oriented, so a tag carrying an
+          # embedded newline would satisfy a ^…$ pattern on its first line and
+          # the rest would be written into $GITHUB_OUTPUT as a forged second
+          # line. [[ =~ ]] matches the whole string, newlines included.
+          tag_re='^v[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$'
+          if [[ ! $tag =~ $tag_re ]]; then
+            echo "refusing '$tag': not a vX.Y.Z release tag" >&2
+            exit 1
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+          # Resolve the tag to its COMMIT once, here, and hand that sha to every
+          # job below, which checks out the sha and never the tag name: checkout
+          # re-resolves a NAMED ref at each job's start, so a tag re-pointed
+          # between `resolve` and `deploy` would swap unreviewed content into the
+          # render. Annotated tags (auto-release makes them with `git tag -a`)
+          # point at a tag OBJECT, so peel until a commit appears — bounded, so a
+          # nested or cyclic chain cannot spin here.
+          ref_json="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${tag}")"
+          obj_type="$(printf '%s' "$ref_json" | jq -r '.object.type')"
+          obj_sha="$(printf '%s' "$ref_json" | jq -r '.object.sha')"
+          hops=0
+          while [ "$obj_type" = tag ]; do
+            hops=$((hops + 1))
+            if [ "$hops" -gt 10 ]; then
+              echo "refusing '$tag': more than 10 tag objects deep; this is not a release tag" >&2
+              exit 1
+            fi
+            tag_json="$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${obj_sha}")"
+            obj_type="$(printf '%s' "$tag_json" | jq -r '.object.type')"
+            obj_sha="$(printf '%s' "$tag_json" | jq -r '.object.sha')"
+          done
+          if [ "$obj_type" != commit ]; then
+            echo "refusing '$tag': it resolves to a $obj_type, not a commit" >&2
+            exit 1
+          fi
+          sha_re='^[0-9a-f]{40}$'
+          if [[ ! $obj_sha =~ $sha_re ]]; then
+            echo "refusing '$tag': did not resolve to a commit sha (got '$obj_sha')" >&2
+            exit 1
+          fi
+          echo "sha=$obj_sha" >> "$GITHUB_OUTPUT"
+
+          # A pre-release never becomes the public page. Both readings are
+          # refused, because they can disagree: `gh release create` marks a
+          # release as a full release unless told otherwise, so a vX.Y.Z-rc1 TAG
+          # can carry a Release that is not flagged. This SKIPS rather than
+          # fails — the run is informational, not a gate, and a red site run
+          # against a deliberate pre-release would train the maintainer to ignore
+          # this workflow.
+          prerelease=false
+          pre_re='^v[0-9]+\.[0-9]+\.[0-9]+-'
+          if [[ $tag =~ $pre_re ]]; then
+            prerelease=true
+          fi
+          if [ "$prerelease" = false ]; then
+            prerelease="$(gh release view "$tag" --repo "${GITHUB_REPOSITORY}" \
+              --json isPrerelease,isDraft \
+              --jq 'if (.isPrerelease or .isDraft) then "true" else "false" end')"
+          fi
+          if [ "$prerelease" = true ]; then
+            echo "::notice::$tag is a pre-release or draft; the landing page is not deployed."
+            echo "deploy=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "deploy=true" >> "$GITHUB_OUTPUT"
+          echo "rendering the landing page from $tag ($obj_sha)."
+
+  # Render the page, with NO deploy credential anywhere in the job. The renderer
+  # is standard-library Go: it reads the files .abcd/site.json names, writes only
+  # under site/, and reaches no network.
+  render:
+    needs: resolve
+    if: ${{ needs.resolve.outputs.deploy == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # NO SECRETS live here and none are referenced. The environment is a GATE,
+    # not a credential store: it holds this job to the same {main, v*} policy as
+    # `deploy`, so a run dispatched from an arbitrary branch cannot reach it.
+    environment: site-render
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the tagged commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The resolved commit sha, never the tag NAME: checkout re-resolves a
+          # named ref at each job's start, so a tag moved mid-run would differ
+          # between this job and `deploy`.
+          ref: ${{ needs.resolve.outputs.sha }}
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.25.6'
+          # cache: false — this workflow runs on the release path, where module
+          # caching is a cache-poisoning vector (zizmor). The renderer imports
+          # nothing outside the standard library, so there is nothing to cache.
+          cache: false
+
+      - name: Render the landing page
+        run: go run ./cmd/gropius-site --out site
+
+      - name: Check the render produced the page and its stylesheet
+        # A render that silently produced nothing would deploy an empty
+        # directory over a working page. Assert the two files exist before the
+        # bytes leave this job.
+        run: |
+          set -euo pipefail
+          test -s site/Gropius/index.html
+          test -s site/Gropius/site.css
+          echo "rendered $(find site -type f | wc -l) file(s)."
+
+      - name: Hand the rendered page to the deploy job
+        # In-run handover rather than a re-fetch, so `deploy` serves exactly the
+        # bytes this job produced.
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: site-${{ needs.resolve.outputs.tag }}
+          path: site
+          if-no-files-found: error
+          retention-days: 1
+
+  # Deploy. The ONLY job that holds a Cloudflare credential, and it runs no build
+  # code: it checks out the tagged commit for wrangler.jsonc alone, unpacks the
+  # artifact `render` handed it, and calls wrangler.
+  deploy:
+    needs: [resolve, render]
+    if: ${{ needs.resolve.outputs.deploy == 'true' }}
+    runs-on: ubuntu-latest
+    # Generous for what it does, and sized for a slow Cloudflare API rather than
+    # for the work: a deploy killed mid-call leaves assets uploaded and the route
+    # unswitched, which is the state the concurrency group below exists to avoid.
+    timeout-minutes: 15
+    # A second group, keyed on the TARGET rather than the tag: there is exactly
+    # one production route, so two deploys must never race for it. This gives
+    # mutual exclusion, not ordering — two releases cut close together can
+    # serialise in the wrong order and leave the page one release behind, which
+    # is recoverable by re-running the newer release's site job, and this page
+    # carries no version so the visible difference is nil.
+    concurrency:
+      group: site-production
+      cancel-in-progress: false
+    environment: site
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the tagged commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The same resolved sha `render` used, so wrangler.jsonc — the file
+          # that declares the route this job asserts — comes from the tag being
+          # deployed. A fresh checkout, not a carried-over workspace: no build
+          # step has ever run in this tree.
+          ref: ${{ needs.resolve.outputs.sha }}
+          persist-credentials: false
+
+      - name: Collect the rendered page
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: site-${{ needs.resolve.outputs.tag }}
+          path: ${{ runner.temp }}/site-artifact
+
+      - name: Audit the rendered tree, then put it where wrangler expects it
+        # The artifact is extracted OUTSIDE the workspace, audited, and only then
+        # copied into ./site. wrangler.jsonc lives in the workspace and names the
+        # route this job asserts; keeping the two under different roots means
+        # nothing the artifact carries is ever written near it. Anything that is
+        # not a regular file or a directory is refused rather than trusted: a
+        # symlink is a write primitive aimed wherever it points.
+        run: |
+          set -euo pipefail
+          staging="${RUNNER_TEMP}/site-artifact"
+          if find "$staging" -mindepth 1 ! -type f ! -type d | read -r; then
+            echo "::error::the rendered tree holds something that is not a regular file or directory"
+            exit 1
+          fi
+          test -s "$staging/Gropius/index.html"
+          mkdir -p site
+          cp -R "$staging/." site/
+          test -s site/Gropius/index.html
+
+      - name: Deploy to the Worker
+        uses: cloudflare/wrangler-action@ebbaa1584979971c8614a24965b4405ff95890e0 # v4.0.0
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          # `deploy` also asserts the route declared in wrangler.jsonc, so a
+          # drifted attachment is reclaimed here rather than left wherever the
+          # dashboard last put it.
+          command: deploy
+          # Hand-reviewed pin, and it is the ONLY control on this dependency: a
+          # version named in a `with:` value is invisible to dependabot's
+          # github-actions ecosystem, and wrangler-action resolves it from the
+          # npm registry with nothing to verify it against. Aging is therefore
+          # the whole defense: pick a version at least 7 days old at the time of
+          # the bump, mirroring dependabot's cooldown. 4.123.0 was published
+          # 2026-08-13.
+          wranglerVersion: '4.123.0'
+
+      - name: Check that both spellings of the address answer
+        # A DIAGNOSTIC, not a gate — hence continue-on-error: the deploy has
+        # already succeeded by this point, and the zone's DNS is outside this
+        # repository's control, so a failure here must never turn a successful
+        # release red. It runs because the page is served under a PATH: every
+        # reference on it is relative, so if /Gropius does not redirect to
+        # /Gropius/, "site.css" resolves to /site.css — a path the route does not
+        # match — and the first visitor who types the address without a trailing
+        # slash gets an unstyled page. Better read here than discovered there.
+        continue-on-error: true
+        env:
+          BASE: https://intentdriven.sh
+        run: |
+          set -uo pipefail
+          fail=0
+          for suffix in /Gropius /Gropius/; do
+            code="$(curl -sS -o /dev/null -w '%{http_code}' -L --max-time 20 "${BASE}${suffix}" || echo 000)"
+            echo "${suffix} -> ${code}"
+            [ "$code" = 200 ] || fail=1
+          done
+          css="$(curl -sS -o /dev/null -w '%{http_code}' -L --max-time 20 "${BASE}/Gropius/site.css" || echo 000)"
+          echo "/Gropius/site.css -> ${css}"
+          [ "$css" = 200 ] || fail=1
+          if [ "$fail" != 0 ]; then
+            echo "::warning::the deploy succeeded but the address did not answer as expected; check the route, the zone's DNS record, and html_handling in wrangler.jsonc"
+            exit 1
+          fi
+          echo "both spellings of the address serve the page, and its stylesheet resolves."

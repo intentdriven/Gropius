@@ -35,6 +35,20 @@
       "template": "{tagline}"
     },
     {
+      "id": "landing-hero",
+      "files": [
+        "site/Gropius/index.html"
+      ],
+      "kind": "regexp",
+      "patterns": [
+        "(?s)<p class=\"lede\">(.*?)</p>"
+      ],
+      "requires": [
+        "tagline"
+      ],
+      "template": "{tagline}"
+    },
+    {
       "id": "conventions-opening",
       "files": [
         "AGENTS.md"

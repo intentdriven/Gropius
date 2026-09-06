@@ -1,0 +1,49 @@
+{
+  "_purpose": "The complete list of LABELS cmd/gropius-site may add to the landing page: button text, section labels, the eyebrow and the display headline. Every sentence the page asserts about the product is the identity block (.abcd/development/IDENTITY.md) or a span of a repository file selected by .abcd/site.json — a claim written here instead would be a promise someone has to keep by hand. internal/sitetest fails when a value here is prose rather than a label.",
+  "lang": "en-GB",
+  "nav_label": "Primary",
+  "nav_download": "Download",
+  "nav_install": "Install",
+  "nav_source": "Source",
+  "nav_getting_started": "Getting started",
+  "eyebrow": "Local inference server for Apple Silicon",
+  "headline": [
+    "One Mac.",
+    "Every machine",
+    "on the network."
+  ],
+  "headline_accent": "on the network.",
+  "mark_label": "The Gropius app icon: a yellow triangle beside a grey square, above a blue square and a red circle",
+  "download_label": "Download Gropius",
+  "download_note": "Gropius.app.zip, latest release",
+  "repository_label": "View the source",
+  "fact_requires": "Requires",
+  "fact_endpoint": "Endpoint",
+  "fact_runtime": "Runtime",
+  "fact_license": "Licence",
+  "fact_status": "Status",
+  "install_heading": "Install from the terminal",
+  "install_comments": [
+    "# server (Apple Silicon)",
+    "# native chat client (universal, runs on Intel too)"
+  ],
+  "assets_heading": "What a release contains",
+  "assets": [
+    {
+      "file": "Gropius.app.zip",
+      "note": "server, menu-bar app"
+    },
+    {
+      "file": "GropiusChat.app.zip",
+      "note": "chat client, universal"
+    },
+    {
+      "file": "SHA256SUMS.txt",
+      "note": "checksums"
+    }
+  ],
+  "pillars_label": "What Gropius does",
+  "footer_separator": "·",
+  "footer_releases": "All releases",
+  "footer_source": "Source"
+}

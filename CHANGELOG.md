@@ -22,6 +22,12 @@ GitHub release notes.
   the same figure on each model card, and
   [docs/models-list.md](docs/models-list.md) is a new reference page for every
   field the models list serves.
+- A public page at <https://intentdriven.sh/Gropius>, carrying the download of
+  the current release, the one-line installer and a link to the repository. Its
+  title, tagline and pitch render from the project's canonical identity block
+  and the rest of its copy from README.md and the getting-started guide, so the
+  page says what the repository says. The release chain renders and deploys it;
+  `make site` renders it locally.
 - Settings holds the sampling defaults the whole machine serves with —
   temperature, top-p, top-k, min-p and a completion-token budget — with an
   optional override per model, so a fleet of clients that never set a
@@ -38,6 +44,11 @@ GitHub release notes.
 
 ### Changed
 
+- The app icon is redrawn as the four-form mark — a yellow triangle, a grey
+  square, a blue square and a red circle on a dark tile — and `build/icon.svg`
+  is now its source. The shipped icon used different shapes and colours, so the
+  Dock and menu-bar icon changes with this release. The landing page draws the
+  same mark, so the icon on the page is the one that arrives in the Dock.
 - The server's request log records the method, path, status and duration of a
   request, and never the client's network address. A handler panic is reported
   the same way, so no line the server writes identifies a caller.

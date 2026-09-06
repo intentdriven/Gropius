@@ -36,9 +36,14 @@ go.work.sum
 /dist/
 /client/dist/
 /release-artifacts/
-# NOTE: build/AppIcon.icns IS committed (the 1024px source PNG isn't in the repo,
-# and make icon short-circuits when the .icns already exists) so CI can build the
-# server app on a clean checkout. Only the transient iconset staging dir is ignored.
+# The rendered landing page (make site). Composed from committed files by
+# cmd/gropius-site and rendered again by the deploy workflow, so it is an
+# artifact, not a source.
+/site/
+# NOTE: build/AppIcon.icns IS committed, and `make app` copies it rather than
+# regenerating it, so CI can build the server app on a clean checkout without
+# librsvg. `make icon` rebuilds it from build/icon.svg by hand. Only the
+# transient rasterization artifacts are ignored.
 /build/icon-1024.png
 /build/AppIcon.iconset/
 .DS_Store

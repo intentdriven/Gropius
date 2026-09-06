@@ -1,0 +1,402 @@
+/* Landing page styles for intentdriven.sh/Gropius.
+ *
+ * Rendered verbatim beside index.html by cmd/gropius-site; the page references
+ * it relatively ("site.css") because the site is served under a path, not a
+ * domain root.
+ *
+ * THE FOUR MARK COLORS ARE NOT FREE CHOICES. --mark-yellow, --mark-grey,
+ * --mark-blue and --mark-red in the two dark blocks below are the fills of
+ * build/icon.svg, so the mark on the page and the icon in the Dock are the same
+ * drawing. internal/sitetest reads both files and fails when they disagree.
+ * The light theme carries the same four hues adjusted for a light ground — the
+ * yellow and the grey darkened for legibility, the red and blue deepened — a
+ * design choice, held to nothing.
+ */
+
+:root {
+  --ground: #F3F3EF;
+  --ground-2: #E8E8E2;
+  --ink: #16161A;
+  --ink-2: #4E5057;
+  --muted: #7A7C83;
+  --line: #C9CAC4;
+  --code-bg: #1E1F24;
+  --code-fg: #ECECE8;
+  --focus: #1E4DA1;
+  /* The icon's four, adjusted for the light ground (see the note above). */
+  --mark-yellow: #F0B90B;
+  --mark-grey: #62656C;
+  --mark-blue: #1E4DA1;
+  --mark-red: #D93A2B;
+  /* Interface accents, taken from the mark so the page has no fifth color. */
+  --accent: var(--mark-red);
+  --accent-ink: #FFFFFF;
+  --rule: var(--mark-yellow);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --ground: #17181d;
+    --ground-2: #202126;
+    --ink: #ECECE8;
+    --ink-2: #B8B9B4;
+    --muted: #8A8C92;
+    --line: #3A3B41;
+    --code-bg: #0F1013;
+    --code-fg: #ECECE8;
+    --focus: #F5C518;
+    /* build/icon.svg's fills, exactly. */
+    --mark-yellow: #F5C518;
+    --mark-grey: #B4B6BB;
+    --mark-blue: #2B5DAA;
+    --mark-red: #E63329;
+    --accent: var(--mark-red);
+    --accent-ink: #17181d;
+    --rule: var(--mark-yellow);
+  }
+}
+
+:root[data-theme="dark"] {
+  --ground: #17181d;
+  --ground-2: #202126;
+  --ink: #ECECE8;
+  --ink-2: #B8B9B4;
+  --muted: #8A8C92;
+  --line: #3A3B41;
+  --code-bg: #0F1013;
+  --code-fg: #ECECE8;
+  --focus: #F5C518;
+  /* build/icon.svg's fills, exactly. */
+  --mark-yellow: #F5C518;
+  --mark-grey: #B4B6BB;
+  --mark-blue: #2B5DAA;
+  --mark-red: #E63329;
+  --accent: var(--mark-red);
+  --accent-ink: #17181d;
+  --rule: var(--mark-yellow);
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--ground);
+  color: var(--ink);
+  font-family: "Jost", "Futura", "Avenir Next", "Helvetica Neue", Arial, sans-serif;
+  font-size: 17px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* No image is rendered today, but a page served to a 375px viewport must not
+   start scrolling sideways the day one is added (criterion 7). */
+img { max-width: 100%; }
+
+a { color: inherit; }
+
+a:focus-visible, button:focus-visible {
+  outline: 3px solid var(--focus);
+  outline-offset: 3px;
+}
+
+code, pre, .mono {
+  font-family: "IBM Plex Mono", "SF Mono", Menlo, Consolas, monospace;
+}
+
+.page {
+  max-width: 1120px;
+  margin: 0 auto;
+  padding: 0 28px 64px;
+}
+
+/* Top bar */
+.bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 22px 0;
+  border-bottom: 3px solid var(--ink);
+}
+
+.wordmark {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-weight: 800;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  font-size: 15px;
+  text-decoration: none;
+}
+
+.wordmark .dot {
+  width: 18px;
+  height: 18px;
+  display: inline-block;
+  flex: none;
+}
+
+.bar nav {
+  display: flex;
+  gap: 26px;
+  font-size: 14px;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.bar nav a { text-decoration: none; }
+.bar nav a:hover { color: var(--accent); }
+
+/* Hero. Its height is the whole fold budget: the download button and the
+   repository link sit in the section directly below and must be reachable
+   without scrolling at 1280x800 (criterion 1), so every padding, size and
+   line-height here is a number internal/sitetest sums. */
+.hero {
+  display: grid;
+  grid-template-columns: 7fr 5fr;
+  gap: 48px;
+  align-items: end;
+  padding: 40px 0 32px;
+  border-bottom: 1px solid var(--line);
+}
+
+.eyebrow {
+  font-size: 13px;
+  font-weight: 500;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--ink-2);
+  margin: 0 0 18px;
+}
+
+h1 {
+  font-size: clamp(40px, 5.2vw, 64px);
+  line-height: 0.95;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  text-transform: uppercase;
+  margin: 0 0 26px;
+  text-wrap: balance;
+}
+
+h1 em {
+  font-style: normal;
+  color: var(--accent);
+}
+
+/* The tagline, verbatim from the identity block. */
+.lede {
+  max-width: 34em;
+  font-size: 20px;
+  line-height: 1.45;
+  color: var(--ink);
+  margin: 0;
+}
+
+/* The pitch, verbatim from the identity block. */
+.pitch {
+  max-width: 40em;
+  font-size: 16px;
+  line-height: 1.55;
+  color: var(--ink-2);
+  margin: 16px 0 0;
+}
+
+.mark {
+  justify-self: end;
+  width: 100%;
+  max-width: 300px;
+  display: block;
+}
+
+/* Actions */
+.actions {
+  display: grid;
+  grid-template-columns: 7fr 5fr;
+  gap: 48px;
+  padding: 32px 0 40px;
+  border-bottom: 1px solid var(--line);
+}
+
+.cta-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  align-items: stretch;
+}
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 12px;
+  padding: 18px 26px;
+  font-family: inherit;
+  font-size: 16px;
+  line-height: 1.2;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  text-decoration: none;
+  border: 3px solid var(--ink);
+  color: var(--ink);
+  background: transparent;
+  transition: transform 120ms ease, background 120ms ease, color 120ms ease;
+}
+
+.btn:hover { transform: translate(-2px, -2px); }
+
+.btn-primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-ink);
+}
+
+.btn-primary:hover { background: var(--ink); border-color: var(--ink); color: var(--ground); }
+
+.btn svg { width: 20px; height: 20px; flex: none; }
+
+.btn small {
+  display: block;
+  font-weight: 400;
+  letter-spacing: 0.04em;
+  text-transform: none;
+  font-size: 12px;
+  line-height: 1.2;
+  opacity: 0.85;
+}
+
+.cta-note {
+  margin: 18px 0 0;
+  font-size: 14px;
+  color: var(--muted);
+  max-width: 40em;
+}
+
+.cta-note a { color: var(--ink-2); }
+
+.facts {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 8px 20px;
+  font-size: 14px;
+  align-self: start;
+  margin: 0;
+}
+
+.facts dt {
+  font-weight: 500;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  font-size: 12px;
+  color: var(--muted);
+  padding-top: 2px;
+}
+
+.facts dd { margin: 0; color: var(--ink-2); }
+.facts dd strong { color: var(--ink); font-weight: 500; }
+
+/* Install */
+.install {
+  display: grid;
+  grid-template-columns: 7fr 5fr;
+  gap: 48px;
+  padding: 40px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+h2 {
+  font-size: 13px;
+  font-weight: 500;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--ink-2);
+  margin: 0 0 14px;
+}
+
+/* A shell one-liner is wider than a 375px viewport and cannot be wrapped
+   without changing the command, so it scrolls inside its own box while the
+   page itself never scrolls sideways (criterion 7). */
+.snippet {
+  overflow-x: auto;
+}
+
+pre {
+  margin: 0;
+  padding: 18px 20px;
+  background: var(--code-bg);
+  color: var(--code-fg);
+  font-size: 14px;
+  line-height: 1.6;
+  border-left: 6px solid var(--rule);
+}
+
+pre .c { color: #9A9CA3; }
+pre .k { color: var(--rule); }
+
+.install p { margin: 12px 0 0; font-size: 15px; color: var(--ink-2); max-width: 40em; }
+
+.assets { list-style: none; margin: 0; padding: 0; }
+
+.assets li {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 16px;
+  padding: 10px 0;
+  border-top: 1px solid var(--line);
+  font-size: 14px;
+}
+
+.assets li:last-child { border-bottom: 1px solid var(--line); }
+.assets .mono { font-size: 13px; color: var(--ink); }
+.assets span:last-child { color: var(--muted); text-align: right; }
+
+/* Three shapes strip */
+.pillars {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 32px;
+  padding: 44px 0 8px;
+}
+
+.pillar { display: grid; gap: 12px; align-content: start; }
+.pillar .glyph { width: 28px; height: 28px; display: block; }
+
+.pillar h3 {
+  margin: 0;
+  font-size: 19px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  text-wrap: balance;
+}
+
+.pillar p { margin: 0; font-size: 15px; color: var(--ink-2); }
+
+footer {
+  margin-top: 48px;
+  padding-top: 22px;
+  border-top: 3px solid var(--ink);
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 12px 24px;
+  font-size: 13px;
+  color: var(--muted);
+  letter-spacing: 0.04em;
+}
+
+footer a { color: var(--ink-2); text-decoration: none; }
+footer a:hover { color: var(--accent); }
+
+@media (max-width: 820px) {
+  .hero, .actions, .install { grid-template-columns: 1fr; gap: 32px; }
+  .mark { justify-self: start; max-width: 220px; order: -1; }
+  .pillars { grid-template-columns: 1fr; gap: 26px; }
+  .bar nav { display: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .btn { transition: none; }
+  .btn:hover { transform: none; }
+}

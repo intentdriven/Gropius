@@ -278,6 +278,55 @@ jobs:
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+  # Publish the landing page from the release this run just made. NON-GATING by
+  # construction: it `needs: release`, so it cannot start until the Release, its
+  # assets and its attestations exist, and nothing it does can change a byte of
+  # them. A site failure turns this run red — a called workflow's failure is the
+  # caller's — and the release stands.
+  #
+  # PERMISSIONS are the CAP on the called workflow: a job inside it can never
+  # exceed what is granted here (the lesson of PR #4). site.yml's three jobs each
+  # ask for `contents: read` and nothing else, so that is all this grants. It is
+  # also within what auto-release.yml grants this workflow on the primary path.
+  #
+  # SECRETS. `inherit` rather than a named `secrets:` block, and the named form is
+  # not an option rather than a preference: a job that calls a reusable workflow
+  # may not declare `environment:`, so this caller can never resolve
+  # CLOUDFLARE_API_TOKEN out of the `site` environment in order to pass it on by
+  # name. The callee's `deploy` job resolves it from its own `environment: site`.
+  #
+  # The reasonable objection is that GitHub documents environment secrets as
+  # resolving at the callee's job level regardless of what a caller passes, which
+  # would make this line unnecessary. That is not what the two-level shape was
+  # MEASURED to do: abcd ran a canary environment secret through exactly this
+  # caller -> release -> site chain and found it empty at the deploy step unless
+  # `inherit` appears at every level; its production deploy failed on a
+  # credential that had never been conveyed until the missing line was added
+  # (iss-2608231912566984). auto-release.yml's own call to this workflow carries
+  # the matching line and names this one — the two are one mechanism, not two.
+  #
+  # What `inherit` conveys is this workflow's own secrets context, which reaches
+  # site.yml's uncredentialed `render` job as well as `deploy`. Here that set is
+  # empty: `gh api repos/<owner>/<repo>/actions/secrets` and the organization-
+  # secrets endpoint both report 0, so nothing but GITHUB_TOKEN crosses, and
+  # every credential this chain uses is environment-scoped. If this repository
+  # ever gains a repository-scoped or organization secret, revisit this line
+  # before that secret exists: at that point `inherit` would start handing it to
+  # a job the spec says holds none.
+  #
+  # inputs.tag on the auto-release path, github.ref_name on a tag push: the same
+  # derivation as the TAG env at the top of this file, repeated because the env
+  # context is not available in a job's `with:` block.
+  site:
+    needs: release
+    if: github.event_name != 'workflow_dispatch'
+    permissions:
+      contents: read
+    uses: ./.github/workflows/site.yml
+    with:
+      tag: ${{ inputs.tag || github.ref_name }}
+    secrets: inherit # zizmor: ignore[secrets-inherit]
+
   # The manual rehearsal (workflow_dispatch). It arms the full gate against a
   # SIMULATED changelog roll and reviewed-content commit — reproducing the
   # two-commit release-branch shape and the auto-release merge — proves the gate
