@@ -921,8 +921,8 @@ func residentWithin(t *testing.T, p *Pool) []Resident {
 // went through it: App.preload takes them from the hand-edited config, and the
 // load and unload endpoints pass the request body's raw value. Keying on the
 // exact string handed to Acquire therefore launched a second server for the
-// same weights, charged 1.2x against the same budget — the multi-minute swap
-// the residency work exists to avoid — and left the models list reporting a
+// same weights, charged 1.2x against the same budget — the swap the residency
+// work exists to avoid — and left the models list reporting a
 // warm model as not loaded, because the listing joins on the registry's
 // spelling.
 func TestAcquireHoldsOneEntryPerModelWhateverTheSpelling(t *testing.T) {

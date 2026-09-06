@@ -1223,7 +1223,7 @@ func entryByID(t *testing.T, entries []map[string]any, id string) map[string]any
 
 // On a keyed install the listing says which models are loaded, how busy each
 // one is and when it was last used, so a client can send its work to a warm
-// model instead of triggering the multi-minute swap it never knew about. The
+// model instead of triggering the load it never knew about. The
 // fields the list already served are untouched.
 func TestListModelsReportsResidencyOnAKeyedInstall(t *testing.T) {
 	lastUsed := time.Unix(1757145600, 0)
@@ -1407,7 +1407,7 @@ func TestListModelsDecidesOnTheConfigItWasAdmittedUnder(t *testing.T) {
 // Pool is an interface, so the string in Resident.State is not this package's
 // to trust: an implementation that leaves it unset would otherwise publish
 // "state": "", a fourth value the reference page does not define and no client
-// can act on. An unrecognised state means the listing cannot say the model is
+// can act on. An unrecognized state means the listing cannot say the model is
 // warm, which is exactly what not_loaded says.
 func TestListModelsRefusesAnUnknownResidencyState(t *testing.T) {
 	h := residencyGateway(t, "bh_secret", runtime.Resident{
@@ -1417,7 +1417,7 @@ func TestListModelsRefusesAnUnknownResidencyState(t *testing.T) {
 
 	entries, _ := listModelsEntries(t, h, "bh_secret")
 	if got := entryByID(t, entries, "org/warm")["state"]; got != "not_loaded" {
-		t.Errorf("state = %v for an unrecognised pool state, want %q", got, "not_loaded")
+		t.Errorf("state = %v for an unrecognized pool state, want %q", got, "not_loaded")
 	}
 }
 

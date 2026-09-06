@@ -169,6 +169,13 @@ const MaxRepoComponent = 96
 // client asking for one would be served the other's weights; were one to fold
 // more strictly, a model could be loaded twice.
 //
+// internal/archtest/repo_id_fold_test.go holds that: in the packages that key
+// by a repo id it refuses any case fold that is not on a reasoned allow-list,
+// and elsewhere under internal/ it refuses one whose argument is spelled like a
+// repo id. The first is what catches a fold hidden behind a local variable; the
+// second is a backstop, since those packages legitimately fold file names and
+// header names too.
+//
 // HuggingFace treats repo ids case-insensitively, and ValidRepoID keeps every
 // id in the registry to ASCII, so case is the whole of the rule today.
 func FoldRepoID(repoID string) string { return strings.ToLower(repoID) }

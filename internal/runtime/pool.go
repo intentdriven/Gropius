@@ -529,8 +529,8 @@ func (p *Pool) Resident() []Resident {
 	out := make([]Resident, 0, len(p.entries))
 	for _, e := range p.entries {
 		// isReady reads the ready channel without blocking, so a model in the
-		// middle of a multi-minute load is reported as loading rather than
-		// making every caller of Resident wait for it.
+		// middle of a load is reported as loading rather than making every
+		// caller of Resident wait for it.
 		state := ResidencyLoading
 		if isReady(e) {
 			state = ResidencyLoaded
