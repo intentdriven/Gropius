@@ -3,17 +3,17 @@
 # One-line installer for Gropius.
 #
 #   Server (menu-bar, Apple Silicon only):
-#     curl -fsSL https://raw.githubusercontent.com/REPPL/Gropius/main/install.sh | bash
+#     curl -fsSL https://raw.githubusercontent.com/intentdriven/Gropius/main/install.sh | bash
 #
 #   Client (GropiusChat, universal):
-#     curl -fsSL https://raw.githubusercontent.com/REPPL/Gropius/main/install.sh | bash -s -- client
+#     curl -fsSL https://raw.githubusercontent.com/intentdriven/Gropius/main/install.sh | bash -s -- client
 #
 # It downloads the latest release, installs the .app into /Applications, and (for
 # the server) allows it through the macOS firewall and launches it. A binary
 # fetched by curl is not Gatekeeper-quarantined, so no right-click-to-open dance.
 set -euo pipefail
 
-REPO="REPPL/Gropius"
+REPO="intentdriven/Gropius"
 
 # Public half of the minisign key the release workflow signs SHA256SUMS.txt with.
 # Safe to publish — it only verifies. The private half lives solely in the repo's
@@ -155,7 +155,7 @@ Gropius is running in the menu bar. Click its icon to open the control panel,
 download a model, and copy the address other machines should point at.
 
 Optional:
-  • Chat client:   curl -fsSL https://raw.githubusercontent.com/REPPL/Gropius/main/install.sh | bash -s -- client
+  • Chat client:   curl -fsSL https://raw.githubusercontent.com/intentdriven/Gropius/main/install.sh | bash -s -- client
   • Shared cache:  every account on this Mac can share one copy of each model —
                    see 'make install-shared' in the repo.
 DONE

@@ -13,12 +13,12 @@ GitHub release notes.
 
 ## [0.1.1] - 2026-07-29
 
-See the [v0.1.1 release](https://github.com/REPPL/Gropius/releases/tag/v0.1.1).
+See the [v0.1.1 release](https://github.com/intentdriven/Gropius/releases/tag/v0.1.1).
 
 ## [0.1.0] - 2026-07-29
 
-See the [v0.1.0 release](https://github.com/REPPL/Gropius/releases/tag/v0.1.0).
+See the [v0.1.0 release](https://github.com/intentdriven/Gropius/releases/tag/v0.1.0).
 
-[Unreleased]: https://github.com/REPPL/Gropius/compare/v0.1.1...HEAD
-[0.1.1]: https://github.com/REPPL/Gropius/compare/v0.1.0...v0.1.1
-[0.1.0]: https://github.com/REPPL/Gropius/releases/tag/v0.1.0
+[Unreleased]: https://github.com/intentdriven/Gropius/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/intentdriven/Gropius/compare/v0.1.0...v0.1.1
+[0.1.0]: https://github.com/intentdriven/Gropius/releases/tag/v0.1.0
