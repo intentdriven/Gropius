@@ -40,7 +40,7 @@ curl http://localhost:11535/v1/models
 | `max_model_len` | The same figure again, under the name vLLM-derived clients read. |
 | `state` | Whether the model is loaded, still loading, or not loaded. Only on an install with an API key. See below. |
 | `in_flight` | How many requests that model is already handling. Only on an install with an API key. |
-| `last_used` | Unix time of the last request for that model. Only on an install with an API key, and only while the model is loaded. |
+| `last_used` | Unix time at which Gropius last handled a request for that model. Only on an install with an API key, and only while the model is in memory — `loaded` or `loading`. |
 
 ## The context figure
 
@@ -132,13 +132,18 @@ On an install with a key, an entry reads:
 included, and is `0` for a model that is not loaded. Use it to spread work
 across two warm models rather than queueing behind one.
 
-`last_used` is Unix time in seconds. It is the loaded model's own record, so it
-is there exactly while the model is loaded and goes when the model does: a
-model that was busy a minute ago and has since been evicted reports
-`not_loaded` and no `last_used` at all. The field is absent rather than zero,
-which a client would read as 1970 rather than as "unknown". Read it as "this
-warm model was last touched then", never as "this model has not been used
-since".
+`last_used` is Unix time in seconds. It is the record kept alongside the model
+in memory, so it is there exactly while Gropius is holding the model — `loaded`
+or `loading` — and goes when the model does: a model that was busy a minute ago
+and has since been evicted reports `not_loaded` and no `last_used` at all. The
+field is absent rather than zero, which a client would read as 1970 rather than
+as "unknown". Read it as "this model was last touched then", never as "this
+model has not been used since"; `state` is what says whether it is warm.
+
+A model still loading already carries one, stamped when its load was asked for.
+The time moves when a request starts and again when it finishes, so a model in
+the middle of a long generation carries the time that generation began, not the
+time it will end — do not compute an idle-timeout deadline from it.
 
 **A snapshot, not a reservation.** The values describe the moment the list is
 built. Reading `loaded` holds nothing warm on your behalf: another client's
