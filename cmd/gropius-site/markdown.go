@@ -83,11 +83,12 @@ func readIdentity(path, heading string) (identity, error) {
 }
 
 // selectSpans applies one manifest selection to one file.
-func selectSpans(root string, src source) ([]span, error) {
-	if src.File == "" {
-		return nil, fmt.Errorf("no file named")
+func selectSpans(r repo, src source) ([]span, error) {
+	path, err := r.path(src.File)
+	if err != nil {
+		return nil, err
 	}
-	blocks, err := blocksUnder(joinRoot(root, src.File), src.Heading)
+	blocks, err := blocksUnder(path, src.Heading)
 	if err != nil {
 		return nil, err
 	}
@@ -104,7 +105,10 @@ func selectSpans(root string, src source) ([]span, error) {
 			if src.Limit > 0 && len(out) == src.Limit {
 				break
 			}
-			text := part(b.text, src.Part)
+			text, err := part(b.text, src.Part)
+			if err != nil {
+				return nil, err
+			}
 			if m := boldLeadRe.FindStringSubmatch(text); m != nil {
 				out = append(out, span{Title: m[1], Body: m[2]})
 				continue
@@ -129,7 +133,11 @@ func selectSpans(root string, src source) ([]span, error) {
 			if b.kind != src.Select || !strings.Contains(b.text, src.Match) {
 				continue
 			}
-			out = append(out, span{Body: part(b.text, src.Part)})
+			text, err := part(b.text, src.Part)
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, span{Body: text})
 			break
 		}
 		if len(out) == 0 {
@@ -144,21 +152,19 @@ func selectSpans(root string, src source) ([]span, error) {
 	return out, nil
 }
 
-func joinRoot(root, p string) string {
-	return strings.TrimSuffix(root, "/") + "/" + strings.TrimPrefix(p, "/")
-}
-
 // part narrows a block to the piece the manifest asked for. "first-sentence" is
 // the only narrowing: a landing page's fact line wants the requirement, not the
-// paragraph of qualification the tutorial rightly carries after it.
-func part(text, which string) string {
+// paragraph of qualification the tutorial rightly carries after it. An
+// unrecognised value is refused rather than treated as "all" — a typo would
+// otherwise put a whole paragraph of qualification on the page and say nothing.
+func part(text, which string) (string, error) {
 	switch which {
 	case "", "all":
-		return text
+		return text, nil
 	case "first-sentence":
-		return firstSentence(text)
+		return firstSentence(text), nil
 	default:
-		return text
+		return "", fmt.Errorf("unknown part %q (want first-sentence or all)", which)
 	}
 }
 
@@ -204,16 +210,25 @@ func blocksUnder(path, heading string) ([]block, error) {
 		return nil, err
 	}
 	lines := strings.Split(string(raw), "\n")
-	start, level := -1, 0
+	start, level, seen := -1, 0, 0
 	for i, line := range lines {
 		m := headingRe.FindStringSubmatch(line)
 		if m != nil && m[2] == heading {
-			start, level = i+1, len(m[1])
-			break
+			seen++
+			if start < 0 {
+				start, level = i+1, len(m[1])
+			}
 		}
 	}
 	if start < 0 {
 		return nil, fmt.Errorf("%s: no heading %q", path, heading)
+	}
+	// Two headings of the same name make the selection ambiguous, and the
+	// ambiguity is silent: the first one wins and the page carries whatever sits
+	// under it. A file that grows a second "Features" is exactly the case a page
+	// composed from a living README will meet, so it is refused.
+	if seen > 1 {
+		return nil, fmt.Errorf("%s: %d headings named %q; the selection would be ambiguous", path, seen, heading)
 	}
 	end := len(lines)
 	for i := start; i < len(lines); i++ {

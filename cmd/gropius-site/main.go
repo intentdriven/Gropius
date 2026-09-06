@@ -29,6 +29,7 @@ import (
 	"html/template"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 )
 
@@ -157,17 +158,28 @@ func render(root, manifestPath, out string) error {
 	if m.SchemaVersion != 1 {
 		return fmt.Errorf("%s: schema_version %d is not supported (this renderer speaks 1)", manifestPath, m.SchemaVersion)
 	}
-	resolve := func(p string) string { return filepath.Join(root, filepath.FromSlash(p)) }
+	src := repo{root: root}
 
+	uiPath, err := src.path(m.UIStrings)
+	if err != nil {
+		return fmt.Errorf("ui_strings: %w", err)
+	}
 	var ui uiStrings
-	if err := decodeStrict(resolve(m.UIStrings), &ui); err != nil {
+	if err := decodeStrict(uiPath, &ui); err != nil {
 		return err
 	}
-	if len(ui.Headline) == 0 {
-		return fmt.Errorf("%s: headline is empty", m.UIStrings)
+	// An allowlist that refuses an unknown key but accepts a missing one is only
+	// half a list: a deleted key renders an empty slot, and an empty download
+	// button is a page that still passes every check about where its link points.
+	if err := ui.validate(); err != nil {
+		return fmt.Errorf("%s: %w", m.UIStrings, err)
 	}
 
-	id, err := readIdentity(resolve(m.Identity.File), m.Identity.Heading)
+	idPath, err := src.path(m.Identity.File)
+	if err != nil {
+		return fmt.Errorf("identity: %w", err)
+	}
+	id, err := readIdentity(idPath, m.Identity.Heading)
 	if err != nil {
 		return err
 	}
@@ -178,7 +190,7 @@ func render(root, manifestPath, out string) error {
 	// the template draws one of the mark's three shapes beside each. A fourth
 	// would arrive without a shape, so the count is a hard requirement rather
 	// than a truncation.
-	pillarSpans, err := selectSpans(root, m.Sources.Pillars)
+	pillarSpans, err := selectSpans(src, m.Sources.Pillars)
 	if err != nil {
 		return fmt.Errorf("pillars: %w", err)
 	}
@@ -194,7 +206,7 @@ func render(root, manifestPath, out string) error {
 
 	// The install commands are the README's own, character for character: a
 	// command a visitor pastes must be the command the project documents.
-	installSpans, err := selectSpans(root, m.Sources.Install)
+	installSpans, err := selectSpans(src, m.Sources.Install)
 	if err != nil {
 		return fmt.Errorf("install: %w", err)
 	}
@@ -205,7 +217,7 @@ func render(root, manifestPath, out string) error {
 		data.Install = append(data.Install, installStep{Comment: ui.InstallComments[i], Command: s.Body})
 	}
 
-	noteSpans, err := selectSpans(root, m.Sources.InstallNote)
+	noteSpans, err := selectSpans(src, m.Sources.InstallNote)
 	if err != nil {
 		return fmt.Errorf("install_note: %w", err)
 	}
@@ -213,8 +225,8 @@ func render(root, manifestPath, out string) error {
 		data.InstallNote = append(data.InstallNote, inlineHTML(s.Body))
 	}
 
-	for i, src := range m.Sources.Requirements {
-		spans, err := selectSpans(root, src)
+	for i, requirement := range m.Sources.Requirements {
+		spans, err := selectSpans(src, requirement)
 		if err != nil {
 			return fmt.Errorf("requirements[%d]: %w", i, err)
 		}
@@ -226,13 +238,24 @@ func render(root, manifestPath, out string) error {
 		return fmt.Errorf("requirements: the manifest selected nothing; the page must state the platform it needs")
 	}
 
-	tmplPath := resolve(m.Template)
+	tmplPath, err := src.path(m.Template)
+	if err != nil {
+		return fmt.Errorf("template: %w", err)
+	}
 	tmpl, err := template.ParseFiles(tmplPath)
 	if err != nil {
 		return err
 	}
 
-	dir := filepath.Join(out, filepath.Base(m.OutSubdir))
+	// The output subdirectory is a NAME, not a path: filepath.Base(a) leaves
+	// ".." as "..", which would put the page in the parent of --out. "writes
+	// nothing outside --out" is the reason the deploy chain lets an
+	// uncredentialed job run this, so it is checked rather than assumed.
+	subdir, err := pathElement(m.OutSubdir)
+	if err != nil {
+		return fmt.Errorf("out_subdir: %w", err)
+	}
+	dir := filepath.Join(out, subdir)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
@@ -246,12 +269,20 @@ func render(root, manifestPath, out string) error {
 	// Static inputs land beside the page under their own base name, so every
 	// reference from the page stays relative — the page is served under a path,
 	// not a domain root, and an absolute "/site.css" would 404 there.
-	for _, s := range m.Static {
-		b, err := os.ReadFile(resolve(s))
+	for _, static := range m.Static {
+		from, err := src.path(static)
+		if err != nil {
+			return fmt.Errorf("static: %w", err)
+		}
+		name, err := pathElement(filepath.Base(static))
+		if err != nil {
+			return fmt.Errorf("static %q: %w", static, err)
+		}
+		b, err := os.ReadFile(from)
 		if err != nil {
 			return err
 		}
-		if err := os.WriteFile(filepath.Join(dir, filepath.Base(s)), b, 0o644); err != nil {
+		if err := os.WriteFile(filepath.Join(dir, name), b, 0o644); err != nil {
 			return err
 		}
 	}
@@ -290,6 +321,94 @@ func decodeStrict(path string, v any) error {
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(v); err != nil {
 		return fmt.Errorf("%s: %w", path, err)
+	}
+	return nil
+}
+
+// repo resolves a manifest path against the tree being composed. Every path in
+// the manifest is repository-relative by construction, and this is the only way
+// a file is opened: an absolute path, or one that climbs out of the tree, is
+// refused rather than quietly reinterpreted. One implementation, so the reads
+// and the writes cannot disagree about what a manifest path means.
+type repo struct{ root string }
+
+func (r repo) path(p string) (string, error) {
+	if p == "" {
+		return "", fmt.Errorf("no path given")
+	}
+	clean := filepath.Clean(filepath.FromSlash(p))
+	if filepath.IsAbs(clean) {
+		return "", fmt.Errorf("%q is absolute; manifest paths are repository-relative", p)
+	}
+	if clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("%q climbs out of the repository", p)
+	}
+	return filepath.Join(r.root, clean), nil
+}
+
+// pathElement admits one ordinary directory or file name and nothing else: no
+// separator, no "." or "..", no leading dot. It is what keeps the render inside
+// --out, which is the property the deploy chain rests on when it lets a job
+// with no credential run this code.
+func pathElement(name string) (string, error) {
+	switch {
+	case name == "":
+		return "", fmt.Errorf("is empty")
+	case name == "." || name == "..":
+		return "", fmt.Errorf("%q is not a name", name)
+	case strings.HasPrefix(name, "."):
+		return "", fmt.Errorf("%q starts with a dot", name)
+	case strings.ContainsRune(name, '/') || strings.ContainsRune(name, filepath.Separator):
+		return "", fmt.Errorf("%q contains a path separator; it must be a single name", name)
+	case filepath.Clean(name) != name:
+		return "", fmt.Errorf("%q is not a clean path element", name)
+	}
+	return name, nil
+}
+
+// validate refuses a missing interface string. The struct is walked rather than
+// listed, so a key added to uiStrings is covered the day it appears; _purpose is
+// documentation for a human reader and is the one field allowed to be absent.
+func (u uiStrings) validate() error {
+	v := reflect.ValueOf(u)
+	t := v.Type()
+	var missing []string
+	for i := 0; i < t.NumField(); i++ {
+		name := strings.SplitN(t.Field(i).Tag.Get("json"), ",", 2)[0]
+		if name == "" || name == "_purpose" {
+			continue
+		}
+		f := v.Field(i)
+		switch f.Kind() {
+		case reflect.String:
+			if strings.TrimSpace(f.String()) == "" {
+				missing = append(missing, name)
+			}
+		case reflect.Slice:
+			if f.Len() == 0 {
+				missing = append(missing, name)
+				continue
+			}
+			for j := 0; j < f.Len(); j++ {
+				e := f.Index(j)
+				switch e.Kind() {
+				case reflect.String:
+					if strings.TrimSpace(e.String()) == "" {
+						missing = append(missing, fmt.Sprintf("%s[%d]", name, j))
+					}
+				case reflect.Struct:
+					for k := 0; k < e.NumField(); k++ {
+						if e.Field(k).Kind() == reflect.String && strings.TrimSpace(e.Field(k).String()) == "" {
+							sub := strings.SplitN(e.Type().Field(k).Tag.Get("json"), ",", 2)[0]
+							missing = append(missing, fmt.Sprintf("%s[%d].%s", name, j, sub))
+						}
+					}
+				}
+			}
+		}
+	}
+	if len(missing) > 0 {
+		return fmt.Errorf("these interface strings are missing or empty, and the page would render an empty slot for each: %s", strings.Join(missing, ", "))
 	}
 	return nil
 }
