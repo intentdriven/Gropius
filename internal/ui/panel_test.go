@@ -47,13 +47,20 @@ func TestModelCardInfoLineShowsTheMaximumContext(t *testing.T) {
 	}
 }
 
-// modelInfoLine is only worth testing while the card is built from it. This
-// is the one seam the tests above cannot reach without a DOM, so it is kept
-// to a single line of the renderer.
+// modelInfoLine is only worth testing while the card is both built from it
+// and shows what it returns. Those two lines of the renderer are the seam the
+// tests above cannot reach without a DOM: one computes the string, the other
+// places it in the card's markup, and a card that computed the info line and
+// then dropped it would show no size and no context figure at all.
 func TestModelCardIsBuiltFromTheInfoLine(t *testing.T) {
 	body := extractFunction(t, readPanelSource(t), "renderModels")
-	if !strings.Contains(body, "const info = modelInfoLine(m);") {
-		t.Error("renderModels no longer builds the card's info line from modelInfoLine — the card's contents are then asserted by nothing")
+	for _, fragment := range []string{
+		"const info = modelInfoLine(m);",
+		`<div class="info">${info}</div>`,
+	} {
+		if !strings.Contains(body, fragment) {
+			t.Errorf("renderModels no longer contains %s — the card's info line is then asserted by nothing", fragment)
+		}
 	}
 }
 
@@ -114,9 +121,13 @@ func skipTo(s, terminator string) int {
 }
 
 // skipQuoted reports how far past the start of s its opening quote closes,
-// honouring backslash escapes. A template literal's ${...} substitutions are
-// skipped with it, which is what keeps the brace count honest — no function
-// in app.js declares another function inside one.
+// honoring backslash escapes. It scans for the next occurrence of the opening
+// quote character, so a template literal holding another template inside a
+// ${...} substitution — contextLabel has one — stops at the inner backtick and
+// leaves that substitution's braces to the caller's counter. That is safe
+// while every substitution is itself brace-balanced, which is true of app.js
+// and is what the unbalanced-function failure above would catch if it stopped
+// being true.
 func skipQuoted(s string) int {
 	quote := s[0]
 	for i := 1; i < len(s); i++ {

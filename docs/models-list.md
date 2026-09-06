@@ -77,9 +77,10 @@ context fields are missing. Treat an absent figure as "unknown", never as "no
 context".
 
 **On the model card.** The control panel shows the figure on each model's
-card, labelled `max context` and abbreviated to whole units of 1,024 rounded
-down — a model declaring 262,143 reads `max context 255K`. The models list
-carries the exact number.
+card, labelled `max context`. From 1,024 tokens upwards the card abbreviates
+it to whole units of 1,024, rounded down, so a model declaring 262,143 reads
+`max context 255K`; below 1,024 the card prints the number itself. The models
+list always carries the exact number.
 
 ## Compatibility
 
