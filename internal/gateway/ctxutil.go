@@ -4,8 +4,6 @@ import (
 	"context"
 	"net/http"
 	"time"
-
-	"github.com/intentdriven/Gropius/internal/config"
 )
 
 // contextWithTimeout is a small helper so handlers can spawn background work
@@ -14,27 +12,32 @@ func contextWithTimeout(d time.Duration) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(context.Background(), d)
 }
 
-// admittedConfigKey is the context key under which withAuth records the
-// configuration it admitted a request under.
-type admittedConfigKey struct{}
+// admittedKeyedKey is the context key under which withAuth records whether the
+// request was admitted on an install that has an API key configured.
+type admittedKeyedKey struct{}
 
-// withAdmittedConfig returns r carrying cfg, so a handler decides on exactly
-// the configuration the request was admitted under.
+// withAdmittedKeyed returns r carrying that one bit, so a handler decides on
+// exactly the admission withAuth made.
 //
 // The configuration is live: the control panel writes a new one the instant the
 // user clicks Save, which is what ConfigFunc exists for. A handler that read it
 // again would be reading a second, possibly different value, and for the API
 // key that difference is a request admitted under one rule and served under
 // another. One read per request, taken where the admission decision is made.
-func withAdmittedConfig(r *http.Request, cfg config.Config) *http.Request {
-	return r.WithContext(context.WithValue(r.Context(), admittedConfigKey{}, cfg))
+//
+// The bit travels rather than the configuration it came from: r.Context() is
+// handed to the pool and to the outbound relay request, and the API key has no
+// business being reachable from a RoundTripper for the length of a generation.
+func withAdmittedKeyed(r *http.Request, keyed bool) *http.Request {
+	return r.WithContext(context.WithValue(r.Context(), admittedKeyedKey{}, keyed))
 }
 
-// admittedConfig returns the configuration r was admitted under, falling back
-// to the live one for a handler reached without the middleware.
-func (g *Gateway) admittedConfig(r *http.Request) config.Config {
-	if cfg, ok := r.Context().Value(admittedConfigKey{}).(config.Config); ok {
-		return cfg
-	}
-	return g.cfg()
+// admittedKeyed reports whether r was admitted on a keyed install.
+//
+// It fails closed. A handler reached without withAuth in front of it has made
+// no admission decision at all, and answering "keyed" there would hand back
+// the live-configuration read this exists to remove.
+func (g *Gateway) admittedKeyed(r *http.Request) bool {
+	keyed, _ := r.Context().Value(admittedKeyedKey{}).(bool)
+	return keyed
 }

@@ -1172,7 +1172,7 @@ func withThousands(n int64) string {
 func listModelsEntries(t *testing.T, h http.Handler, key string) ([]map[string]any, string) {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
-	req.RemoteAddr = "192.168.1.50:9999"
+	req.RemoteAddr = "203.0.113.50:9999" // off-machine (RFC 5737 documentation range)
 	if key != "" {
 		req.Header.Set("Authorization", "Bearer "+key)
 	}
@@ -1275,14 +1275,25 @@ func TestListModelsReportsResidencyOnAKeyedInstall(t *testing.T) {
 // told "loaded" waits for the load anyway, one told "not loaded" may start a
 // second, competing load.
 func TestListModelsReportsALoadingModel(t *testing.T) {
+	// The pool stamps lastUsed at launch, so a model that is still loading
+	// already carries one — the moment its load was asked for.
+	launched := time.Unix(1757145600, 0)
 	h := residencyGateway(t, "bh_secret", runtime.Resident{
-		RepoID: "org/warm",
-		State:  runtime.ResidencyLoading,
+		RepoID:   "org/warm",
+		State:    runtime.ResidencyLoading,
+		LastUsed: launched,
 	})
 
 	entries, _ := listModelsEntries(t, h, "bh_secret")
-	if got := entryByID(t, entries, "org/warm")["state"]; got != "loading" {
+	warm := entryByID(t, entries, "org/warm")
+	if got := warm["state"]; got != "loading" {
 		t.Errorf("state = %v for a model still loading, want %q", got, "loading")
+	}
+	// last_used is the pool's record for a model it is holding, and it is
+	// holding this one. Suppressing it here would make an absent last_used
+	// mean two different things; state is what says whether the model is warm.
+	if n, ok := warm["last_used"].(float64); !ok || int64(n) != launched.Unix() {
+		t.Errorf("last_used = %v for a loading model, want %d", warm["last_used"], launched.Unix())
 	}
 }
 
@@ -1313,9 +1324,11 @@ func TestListModelsCarriesNoResidencyWithoutAnAPIKey(t *testing.T) {
 			}
 		}
 	}
-	// Byte-for-byte: not one of the residency names reaches an open server,
-	// under any spelling.
-	for _, name := range []string{"state", "in_flight", "last_used", "loaded", "loading", "pinned"} {
+	// Byte-for-byte: not one of the residency field names reaches an open
+	// server. The names only — a value like "loaded" is a substring of an id a
+	// future fixture could carry, and the exact key-set assertion above already
+	// covers the value side.
+	for _, name := range []string{"state", "in_flight", "last_used", "pinned"} {
 		if strings.Contains(body, name) {
 			t.Errorf("an unkeyed listing mentions %q: %s", name, body)
 		}
@@ -1425,4 +1438,251 @@ func TestListModelsOmitsLastUsedForAnEvictedModel(t *testing.T) {
 	if v, ok := entry["last_used"]; ok {
 		t.Errorf("last_used = %v for a model the pool is no longer holding, want the field to be absent", v)
 	}
+}
+
+// The listing joins the registry's models to the pool's entries, and the two
+// name a model with different spellings: the registry reports its canonical
+// one, the pool whatever string reached Acquire. A model warmed under a
+// hand-typed id must still be reported as loaded, or the client is told to go
+// cold on a model that is warm — the exact swap this feature exists to avoid.
+func TestListModelsJoinsResidencyWhateverTheSpelling(t *testing.T) {
+	h := residencyGateway(t, "bh_secret", runtime.Resident{
+		RepoID:   "ORG/WARM",
+		State:    runtime.ResidencyLoaded,
+		InFlight: 2,
+		LastUsed: time.Unix(1757145600, 0),
+	})
+
+	entries, _ := listModelsEntries(t, h, "bh_secret")
+	warm := entryByID(t, entries, "org/warm")
+	if warm["state"] != "loaded" {
+		t.Errorf("state = %v for a model the pool holds under another spelling, want %q",
+			warm["state"], "loaded")
+	}
+	if n, ok := warm["in_flight"].(float64); !ok || int(n) != 2 {
+		t.Errorf("in_flight = %v, want 2", warm["in_flight"])
+	}
+	// The other model must not have picked anything up from the join.
+	if cold := entryByID(t, entries, "org/cold"); cold["state"] != "not_loaded" {
+		t.Errorf("state = %v for the model that is not loaded, want %q", cold["state"], "not_loaded")
+	}
+}
+
+// The condition is the install's, not the request's.
+//
+// A same-machine client is exempt from the bearer check, and the docs and the
+// README both promise it never needs a key — so on a keyed install it sees the
+// residency fields with no Authorization header at all, the same picture the
+// control panel already shows it on loopback. Narrowing the gate to "this
+// request presented a bearer" is a plausible misreading of "key-gated" that
+// every other test in this package would survive; this is the one that does
+// not.
+func TestListModelsReportsResidencyToAnExemptLoopbackClient(t *testing.T) {
+	h := residencyGateway(t, "bh_secret", runtime.Resident{
+		RepoID:   "org/warm",
+		State:    runtime.ResidencyLoaded,
+		InFlight: 1,
+		LastUsed: time.Unix(1757145600, 0),
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	req.RemoteAddr = "127.0.0.1:5555"
+	req.Host = "localhost:11535"
+	// No Authorization header: this client is exempt and holds no key.
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("an exempt loopback request got %d, want 200: %s", w.Code, w.Body.String())
+	}
+	var out struct {
+		Data []map[string]any `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	warm := entryByID(t, out.Data, "org/warm")
+	for name, want := range map[string]any{"state": "loaded", "in_flight": float64(1)} {
+		if warm[name] != want {
+			t.Errorf("%s = %v for an exempt loopback client, want %v", name, warm[name], want)
+		}
+	}
+	if _, ok := warm["last_used"]; !ok {
+		t.Errorf("last_used missing for an exempt loopback client: %+v", warm)
+	}
+}
+
+// The exemption is narrow, and residency does not widen it. A loopback
+// connection carrying a foreign Host is the DNS-rebinding shape withAuth
+// deliberately drops through to the bearer check, so with no key presented it
+// is refused outright — and a refused request is served no fields at all.
+func TestForeignHostLoopbackRequestGetsNoResidency(t *testing.T) {
+	h := residencyGateway(t, "bh_secret", runtime.Resident{
+		RepoID: "org/warm",
+		State:  runtime.ResidencyLoaded,
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	req.RemoteAddr = "127.0.0.1:5555"
+	req.Host = "attacker.example"
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("a loopback request with a foreign Host and no key got %d, want 401", w.Code)
+	}
+	for _, name := range []string{"state", "in_flight", "last_used"} {
+		if strings.Contains(w.Body.String(), name) {
+			t.Errorf("a refused request was served %q: %s", name, w.Body.String())
+		}
+	}
+}
+
+// composedLauncher starts nothing: the pool's readiness probe is redirected to
+// a fake mlx server by composedTransport, so a Process that merely exists is
+// enough to carry the entry through startLocked.
+type composedLauncher struct{ launched int }
+
+func (l *composedLauncher) Precheck(runtime.Spec) error { return nil }
+
+func (l *composedLauncher) Launch(context.Context, runtime.Spec) (runtime.Process, error) {
+	l.launched++
+	return composedProc{done: make(chan struct{})}, nil
+}
+
+type composedProc struct{ done chan struct{} }
+
+func (p composedProc) Stop(context.Context) error { close(p.done); return nil }
+func (p composedProc) Done() <-chan struct{}      { return p.done }
+func (p composedProc) Err() error                 { return nil }
+func (p composedProc) Pid() int                   { return 0 }
+
+// composedTransport sends the pool's readiness probe to the fake server, since
+// the pool addresses model servers by a port it allocated itself.
+type composedTransport struct{ target string }
+
+func (t composedTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	out, err := http.NewRequestWithContext(req.Context(), req.Method, t.target+req.URL.Path, req.Body)
+	if err != nil {
+		return nil, err
+	}
+	out.Header = req.Header
+	return http.DefaultTransport.RoundTrip(out)
+}
+
+// registrySource adapts the registry to runtime.ModelSource, as the app does.
+type registrySource struct{ reg *registry.Registry }
+
+func (s registrySource) Resolve(repoID string) (string, int64, error) {
+	m, err := s.reg.Get(repoID)
+	if err != nil {
+		return "", 0, err
+	}
+	return m.Path, m.Bytes, nil
+}
+
+// Every other residency test stubs out one half of the path: the gateway tests
+// hand the projection a hand-written runtime.Resident, and the pool test never
+// reaches an HTTP handler. The seam between them — the pool's key space and the
+// registry's, joined in handleListModels — is then checked by nothing but the
+// compiler, and that seam is exactly where the spelling defect lived.
+//
+// This carries a real model directory through a real Registry.Rescan and a real
+// runtime.Pool to the bytes on the wire, the same shape as
+// TestContextLengthReachesTheWireFromAModelDirectory.
+func TestResidencyReachesTheWireFromARealPool(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "models", "mlx-community", "Qwen3-8B-4bit")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "config.json"),
+		[]byte(`{"model_type":"qwen3","max_position_embeddings":40960}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "model.safetensors"), make([]byte, 64), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	reg, err := registry.Open(filepath.Join(root, "registry.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := reg.Rescan(filepath.Join(root, "models")); err != nil {
+		t.Fatalf("Rescan: %v", err)
+	}
+
+	// The pool's readiness probe names the backend's --model value, which is
+	// the registry's own path for the model, so the fake must answer to it.
+	scanned, err := reg.Get("mlx-community/Qwen3-8B-4bit")
+	if err != nil {
+		t.Fatalf("the scanned model is not in the registry: %v", err)
+	}
+	fake := mlxtest.Start(mlxtest.Options{ModelArg: scanned.Path})
+	defer fake.Close()
+
+	launcher := &composedLauncher{}
+	pool := runtime.NewPool(runtime.PoolOptions{
+		Launcher:         launcher,
+		Models:           registrySource{reg},
+		MaxResidentBytes: 1 << 30,
+		ReadyTimeout:     10 * time.Second,
+		HTTP:             &http.Client{Timeout: 5 * time.Second, Transport: composedTransport{fake.URL()}},
+	})
+	defer pool.Close()
+
+	cfg := config.Default()
+	cfg.APIKey = "bh_secret"
+	g := New(Options{Config: cfg, Pool: pool, Models: reg})
+
+	// Cold first: the registry lists the model, the pool holds nothing.
+	cold := entryByID(t, mustList(t, g.Handler()), "mlx-community/Qwen3-8B-4bit")
+	if cold["state"] != "not_loaded" {
+		t.Errorf("state = %v before the load, want %q", cold["state"], "not_loaded")
+	}
+
+	// Warm it through the pool, under a spelling the registry does not use —
+	// the id an operator hand-types into preload.
+	_, release, err := pool.Acquire(context.Background(), "MLX-Community/Qwen3-8B-4bit")
+	if err != nil {
+		t.Fatalf("Acquire: %v", err)
+	}
+	release()
+
+	warm := entryByID(t, mustList(t, g.Handler()), "mlx-community/Qwen3-8B-4bit")
+	if warm["state"] != "loaded" {
+		t.Errorf("state = %v after the load, want %q", warm["state"], "loaded")
+	}
+	if _, ok := warm["last_used"].(float64); !ok {
+		t.Errorf("last_used = %v after the load, want a Unix time", warm["last_used"])
+	}
+	if launcher.launched != 1 {
+		t.Errorf("launched %d model servers, want 1", launcher.launched)
+	}
+	// The pre-existing fields still come from the registry, unchanged.
+	if warm["id"] != "mlx-community/Qwen3-8B-4bit" || warm["owned_by"] != "gropius" {
+		t.Errorf("the pre-existing fields changed: %+v", warm)
+	}
+	if n, ok := warm["context_length"].(float64); !ok || int(n) != 40960 {
+		t.Errorf("context_length = %v, want 40960", warm["context_length"])
+	}
+}
+
+// mustList lists the models as an exempt loopback client and returns the entries.
+func mustList(t *testing.T, h http.Handler) []map[string]any {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	req.RemoteAddr = "127.0.0.1:5555"
+	req.Host = "localhost:11535"
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("GET /v1/models = %d, want 200: %s", w.Code, w.Body.String())
+	}
+	var out struct {
+		Data []map[string]any `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	return out.Data
 }

@@ -124,11 +124,10 @@ func (g *Gateway) Handler() http.Handler {
 // included, so there is nothing here for either check to protect.
 func (g *Gateway) withAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// One read of the live configuration per request. Everything below, and
-		// every handler beyond it, decides on this one value.
-		cfg := g.cfg()
-		apiKey := cfg.APIKey
-		r = withAdmittedConfig(r, cfg)
+		// One read of the live configuration per request. Everything below,
+		// and every handler beyond it, decides on this one reading.
+		apiKey := g.cfg().APIKey
+		r = withAdmittedKeyed(r, apiKey != "")
 		if apiKey == "" {
 			next.ServeHTTP(w, r)
 			return
@@ -197,15 +196,22 @@ func (g *Gateway) handleListModels(w http.ResponseWriter, r *http.Request) {
 	// same picture the control panel already shows it. A nil map means no key
 	// and no projection, which an empty one would not.
 	//
-	// This is a read of the configured key, not a second authorization path:
-	// withAuth still decides who may call the listing at all, and this is the
-	// very value it decided on — read again, it could differ from the one the
-	// request was admitted under.
+	// This is withAuth's own admission bit, not a second authorization path:
+	// withAuth still decides who may call the listing at all. Reading the key
+	// again here would be a second reading of a live value, and a request
+	// admitted while no key was configured could then be served as if one had
+	// been.
 	var residency map[string]runtime.Resident
-	if g.admittedConfig(r).APIKey != "" {
+	if g.admittedKeyed(r) {
 		residency = make(map[string]runtime.Resident)
 		for _, res := range g.pool.Resident() {
-			residency[res.RepoID] = res
+			// Folded on both sides of the join. The registry reports a model's
+			// canonical spelling and the pool reports whatever string reached
+			// Acquire, and they are not always the same one; joining on the raw
+			// strings would report a warm model as cold, which is the swap this
+			// listing exists to prevent. Folding cannot mis-attribute: the
+			// registry allows at most one model per folded id.
+			residency[strings.ToLower(res.RepoID)] = res
 		}
 	}
 
@@ -233,7 +239,7 @@ func (g *Gateway) handleListModels(w http.ResponseWriter, r *http.Request) {
 			entry["max_model_len"] = m.ContextLength
 		}
 		if residency != nil {
-			addResidency(entry, residency[m.RepoID])
+			addResidency(entry, residency[strings.ToLower(m.RepoID)])
 		}
 		data = append(data, entry)
 	}
@@ -271,9 +277,10 @@ func addResidency(entry map[string]any, res runtime.Resident) {
 	// Zero for a model that is not loaded, which is the true count.
 	entry["in_flight"] = res.InFlight
 	// The last-used time lives on the pool's entry for the model, so it is
-	// there exactly while the model is loaded and goes when the model is
-	// evicted, unloaded or reaped. Absent rather than zero, which a client
-	// would read as 1970 rather than as "unknown".
+	// there exactly while the pool is holding the model — loading or loaded —
+	// and goes when the entry does: eviction, unload, the idle reaper, a crash.
+	// Absent rather than zero, which a client would read as 1970 rather than as
+	// "unknown". state, not this, is what says whether the model is warm.
 	if !res.LastUsed.IsZero() {
 		entry["last_used"] = res.LastUsed.Unix()
 	}
