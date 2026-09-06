@@ -333,7 +333,8 @@ func TestAnUnreachableModelServerIsRecordedAsOne(t *testing.T) {
 func TestAClientThatGoesAwayMidStreamIsRecordedAsCancelled(t *testing.T) {
 	srv, rec, _, _ := statsGateway(t, true, mlxtest.Options{
 		Reply:           "one two three four five six seven eight",
-		FirstTokenDelay: 30 * time.Millisecond,
+		FirstTokenDelay: 20 * time.Millisecond,
+		ChunkDelay:      40 * time.Millisecond,
 	})
 
 	ctx, cancel := context.WithCancel(context.Background())

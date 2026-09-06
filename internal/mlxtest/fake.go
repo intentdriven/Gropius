@@ -41,6 +41,8 @@ type Server struct {
 	Reply string
 	// FirstTokenDelay holds the first streamed chunk back; see Options.
 	FirstTokenDelay time.Duration
+	// ChunkDelay paces the chunks after the first; see Options.
+	ChunkDelay time.Duration
 
 	httpSrv   *httptest.Server
 	readyAt   time.Time
@@ -68,6 +70,10 @@ type Options struct {
 	// whole answer arrives inside a millisecond and a time-to-first-token
 	// measurement has nothing to measure.
 	FirstTokenDelay time.Duration
+	// ChunkDelay paces the chunks after the first, standing in for generation.
+	// Without it a whole answer is written before a client could act on any of
+	// it, so a test about what happens mid-stream has no mid-stream.
+	ChunkDelay time.Duration
 }
 
 // Start launches a fake server. It is closed automatically via t.Cleanup by the
@@ -77,6 +83,7 @@ func Start(opts Options) *Server {
 		ModelArg:        opts.ModelArg,
 		Reply:           opts.Reply,
 		FirstTokenDelay: opts.FirstTokenDelay,
+		ChunkDelay:      opts.ChunkDelay,
 		readyAt:         time.Now().Add(opts.LoadDelay),
 	}
 	if s.Reply == "" {
@@ -252,7 +259,10 @@ func (s *Server) streamReply(w http.ResponseWriter, includeUsage bool) {
 	if s.FirstTokenDelay > 0 {
 		time.Sleep(s.FirstTokenDelay)
 	}
-	for _, word := range splitWords(s.Reply) {
+	for i, word := range splitWords(s.Reply) {
+		if i > 0 && s.ChunkDelay > 0 {
+			time.Sleep(s.ChunkDelay)
+		}
 		chunk := map[string]any{
 			"id":     "chatcmpl-fake",
 			"object": "chat.completion.chunk",

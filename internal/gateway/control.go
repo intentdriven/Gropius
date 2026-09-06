@@ -20,6 +20,7 @@ import (
 	"github.com/intentdriven/Gropius/internal/hub"
 	"github.com/intentdriven/Gropius/internal/registry"
 	"github.com/intentdriven/Gropius/internal/runtime"
+	"github.com/intentdriven/Gropius/internal/stats"
 )
 
 // Control serves the app's own API and the web control panel.
@@ -60,6 +61,7 @@ func (c *Control) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/models/unload", c.handleUnload)
 	mux.HandleFunc("GET /api/settings", c.handleGetSettings)
 	mux.HandleFunc("POST /api/settings", c.handleSetSettings)
+	mux.HandleFunc("GET /api/stats", c.handleStats)
 	mux.HandleFunc("GET /api/events", c.handleEvents)
 	mux.HandleFunc("GET /api/instance", c.handleInstance)
 	if c.UI != nil {
@@ -142,6 +144,13 @@ type State struct {
 	Hostname  string   `json:"hostname"`
 	// Warnings surface things the user should know, e.g. an open LAN endpoint.
 	Warnings []string `json:"warnings"`
+	// Stats is the per-model summary, present only while the operator has
+	// recording on. The request rows and the minute buckets are deliberately
+	// not here: this snapshot is re-encoded and redrawn on every event and
+	// every couple of seconds, and a thousand rows on that path would cost the
+	// panel more than the figures are worth. They come from /api/stats
+	// instead, fetched while the Statistics view is open.
+	Stats []stats.ModelCounters `json:"stats,omitempty"`
 }
 
 // snapshot builds the state the UI renders.
@@ -168,7 +177,19 @@ func (c *Control) snapshot() State {
 		st.Warnings = append(st.Warnings,
 			"The MLX runtime is not installed yet — models cannot be served until setup finishes.")
 	}
+	st.Stats = c.App.Stats.Summary()
 	return st
+}
+
+// handleStats serves the live view of what this Mac has served: the recent
+// requests and the minute buckets, alongside the same per-model counters the
+// snapshot carries. It answers with an empty view while recording is off, so
+// the panel needs no separate way of asking whether there is anything to show.
+//
+// It is on the control plane, which is loopback-only: these figures are the
+// operator's, and the machine is the boundary (adr-2609061503319212).
+func (c *Control) handleStats(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, c.App.Stats.View())
 }
 
 func (c *Control) handleState(w http.ResponseWriter, r *http.Request) {

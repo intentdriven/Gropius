@@ -17,6 +17,7 @@ import (
 	"github.com/intentdriven/Gropius/internal/hub"
 	"github.com/intentdriven/Gropius/internal/registry"
 	"github.com/intentdriven/Gropius/internal/runtime"
+	"github.com/intentdriven/Gropius/internal/stats"
 )
 
 // App holds everything the daemon needs.
@@ -26,7 +27,10 @@ type App struct {
 	Registry    *registry.Registry
 	Pool        *runtime.Pool
 	Provisioner *runtime.Provisioner
-	Log         *slog.Logger
+	// Stats holds the live view of what this Mac has served, and holds nothing
+	// at all until the operator turns recording on (adr-2609061503319212).
+	Stats *stats.Recorder
+	Log   *slog.Logger
 
 	cfgMu sync.RWMutex
 	cfg   config.Config
@@ -98,6 +102,7 @@ func New(opts Options) (*App, error) {
 		Hub:         hc,
 		Registry:    reg,
 		Provisioner: runtime.NewProvisioner(opts.Paths),
+		Stats:       stats.New(stats.Options{}),
 		Log:         opts.Log,
 		cfg:         opts.Config,
 		downloads:   map[string]*download{},
@@ -128,7 +133,12 @@ func New(opts Options) (*App, error) {
 		SamplingFor: func(repoID string) config.Sampling {
 			return a.Config().EffectiveSampling(repoID)
 		},
+		// The pool reports loads and removals to the recorder, which ignores
+		// them while recording is off. Adapting here keeps internal/stats a
+		// leaf package that imports nothing of ours.
+		Observer: poolObserver{a.Stats},
 	})
+	a.Stats.SetEnabled(opts.Config.Statistics)
 
 	// Settings read from disk have not been through SetConfig's checks: the
 	// file can be hand-edited, restored from a backup, or written by another
@@ -197,8 +207,28 @@ func (a *App) SetConfig(c config.Config) error {
 	a.cfg = c
 	a.cfgMu.Unlock()
 
+	// The switch applies to the next request, not to the next start. Turning
+	// it off also empties what was recorded, which is what makes "off" the
+	// same state as a fresh start rather than a hidden one.
+	a.Stats.SetEnabled(c.Statistics)
+
 	a.Hub.Token = c.HFToken
 	return nil
+}
+
+// poolObserver adapts the pool's reports onto the recorder. The pool names its
+// own reasons and the recorder names its own; this is the one place that has
+// to know both.
+type poolObserver struct{ rec *stats.Recorder }
+
+func (o poolObserver) LoadStarted(repoID string) { o.rec.LoadStarted(repoID) }
+
+func (o poolObserver) LoadFinished(repoID string, took time.Duration, err error) {
+	o.rec.LoadFinished(repoID, took, err)
+}
+
+func (o poolObserver) EntryStopped(repoID string, reason runtime.StopReason) {
+	o.rec.Removed(repoID, string(reason))
 }
 
 // canonicalPerModel checks the keys of a per-model settings map submitted
