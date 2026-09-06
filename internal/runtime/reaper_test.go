@@ -1,7 +1,10 @@
 package runtime
 
 import (
+	"os"
 	"os/exec"
+	"path/filepath"
+	"strconv"
 	"syscall"
 	"testing"
 	"time"
@@ -102,5 +105,104 @@ func TestReapOrphansIgnoresDeadPIDs(t *testing.T) {
 
 	if reaped := l.reapOrphans(); reaped != 0 {
 		t.Errorf("reaped %d, want 0 for a dead pid", reaped)
+	}
+}
+
+// The ledger lives in the data root, which in shared mode is group-writable
+// and where the file is created lazily — so another local account can plant a
+// FIFO under its name. readLocked runs at startup (after the port is claimed)
+// and on every model launch, holding the ledger mutex; a blocking open would
+// wedge both with no way to recover from the app.
+func TestReadLockedDoesNotBlockOnFIFOLedger(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, pidFileName)
+	if err := syscall.Mkfifo(path, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if fd, err := syscall.Open(path, syscall.O_WRONLY|syscall.O_NONBLOCK, 0); err == nil {
+			syscall.Close(fd)
+		}
+	})
+
+	type result struct {
+		boot    int64
+		entries []pidEntry
+	}
+	done := make(chan result, 1)
+	go func() {
+		boot, entries := newPIDLedger(dir).readLocked()
+		done <- result{boot, entries}
+	}()
+	select {
+	case got := <-done:
+		if got.boot != 0 || len(got.entries) != 0 {
+			t.Errorf("a FIFO ledger must read as empty, got boot=%d entries=%v", got.boot, got.entries)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("readLocked blocked on a FIFO planted as the ledger")
+	}
+}
+
+// A symlinked ledger is never something writeLocked produced (it renames a
+// regular temp file into place); following it would parse — and later kill
+// process groups named by — a file from outside the root.
+func TestReadLockedDoesNotFollowSymlinkedLedger(t *testing.T) {
+	target := filepath.Join(t.TempDir(), "planted.pids")
+	if err := os.WriteFile(target, []byte("boot 1\n4242 0\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	if err := os.Symlink(target, filepath.Join(dir, pidFileName)); err != nil {
+		t.Fatal(err)
+	}
+	if _, entries := newPIDLedger(dir).readLocked(); len(entries) != 0 {
+		t.Errorf("readLocked followed a symlinked ledger: %v", entries)
+	}
+}
+
+// A planted ledger can name process groups Gropius never started. kill(-1, sig)
+// signals every process this uid may signal, kill(0, sig) our own group, and a
+// negative pgid flips sign into a single-pid kill — none can ever be a child we
+// recorded, so they are dropped at parse time before any signal is sent.
+func TestReadLockedDropsUnkillableProcessGroupIDs(t *testing.T) {
+	dir := t.TempDir()
+	body := "boot " + strconv.FormatInt(bootTimeNs(), 10) + "\n1 0\n0 0\n-5 0\n7 0\n"
+	if err := os.WriteFile(filepath.Join(dir, pidFileName), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, entries := newPIDLedger(dir).readLocked()
+	if len(entries) != 1 || entries[0].pgid != 7 {
+		t.Errorf("entries = %v, want only pgid 7", entries)
+	}
+}
+
+// In shared-cache mode another local account can plant a regular ledger in the
+// group-writable root, permanently (the sticky bit blocks our os.Remove), and
+// kern.boottime and kern.proc start times are readable cross-uid — so only
+// provenance protects the reaper. A ledger not owned by our euid is ignored.
+func TestReapOrphansIgnoresLedgerNotOwnedByUs(t *testing.T) {
+	dir := t.TempDir()
+	cmd := exec.Command("sleep", "30")
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		cmd.Wait()
+	}()
+	pgid := cmd.Process.Pid
+	newPIDLedger(dir).writeLocked(bootTimeNs(), []pidEntry{{pgid: pgid, startNs: 0}})
+
+	// Simulate a foreign owner: a real chown needs root, so the ledger's notion
+	// of "our uid" is the seam.
+	l := newPIDLedger(dir)
+	l.uid = os.Geteuid() + 1
+	if reaped := l.reapOrphans(); reaped != 0 {
+		t.Errorf("reaped %d from a ledger we do not own, want 0", reaped)
+	}
+	if err := syscall.Kill(-pgid, syscall.Signal(0)); err != nil {
+		t.Errorf("the reaper killed a process named by a foreign ledger: %v", err)
 	}
 }

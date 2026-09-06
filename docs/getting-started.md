@@ -91,8 +91,10 @@ By default anyone on your network can use the server. To require a key:
      -d '{"model":"mlx-community/Qwen3-0.6B-4bit","messages":[{"role":"user","content":"hi"}]}'
    ```
 
-Requests from the Mac itself (including other user accounts, over `localhost`)
-never need the key.
+Requests from the Mac itself (including other user accounts) never need the
+key, as long as they are addressed to `localhost` or `127.0.0.1`. A local proxy
+or tunnel that forwards another host name must send the key like any other
+client.
 
 ## 7. Sharing across user accounts (optional)
 
@@ -104,6 +106,11 @@ make install-shared     # creates /Users/Shared/Gropius, needs your password
 
 After that, whoever launches Gropius first runs the server; everyone else's
 menu-bar app just points at it. One copy on disk, one on the GPU.
+
+Gropius only uses `/Users/Shared/Gropius` when the installer created it: the
+directory must be owned by the administrator account (`root`), which is what
+`make install-shared` produces. A folder someone made by hand there is ignored
+and each account falls back to its own data directory.
 
 ## Troubleshooting
 
@@ -141,6 +148,11 @@ menu-bar app just points at it. One copy on disk, one on the GPU.
   moment you wake it. Keep the serving Mac awake while it serves: prevent
   automatic sleeping in **System Settings → Energy** (on a laptop, **Battery →
   Options**), or run `caffeinate` in a terminal for a headless session.
+- **The log says `config.json could not be read` and other machines cannot
+  connect.** Gropius refuses a `config.json` that is not an ordinary file (a
+  symlink from a dotfiles manager, say) and starts locked to this Mac only,
+  so a file it cannot trust never opens the server to the network. Replace
+  the link with a real copy of the file and restart.
 - **First request is slow.** That is the model loading into memory. Pre-load it
   from **My Models → Load**. With the default settings a loaded model stays
   resident forever; an idle timeout in **Settings** unloads it after that many

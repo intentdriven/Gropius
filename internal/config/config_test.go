@@ -286,3 +286,83 @@ func TestDefaultRootFallsBackToHomeWhenNoSharedDir(t *testing.T) {
 		t.Errorf("DefaultRoot() = %q, want the per-user Application Support path", got)
 	}
 }
+
+// Under a setgid shared root the layout directories are widened to 3775 at
+// startup. A symlink planted under one of their names (any local account can
+// create an absent name there, and the first launcher owns the real ones and
+// can swap them later) would make that chmod land on an arbitrary directory
+// the victim owns — group-writable by every account. EnsureDirs must refuse
+// anything that is not a real directory, and must not have touched the target.
+func TestEnsureDirsRefusesSymlinkedLayoutDirUnderSetgidRoot(t *testing.T) {
+	for _, name := range []string{"models", "hf", "logs", "bin"} {
+		t.Run(name, func(t *testing.T) {
+			root := t.TempDir()
+			if err := os.Chmod(root, 0o775|os.ModeSetgid|os.ModeSticky); err != nil {
+				t.Fatal(err)
+			}
+			victim := filepath.Join(t.TempDir(), "victim")
+			if err := os.Mkdir(victim, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(victim, filepath.Join(root, name)); err != nil {
+				t.Fatal(err)
+			}
+			if err := NewPaths(root).EnsureDirs(); err == nil {
+				t.Fatal("EnsureDirs accepted a symlinked layout directory")
+			}
+			fi, err := os.Stat(victim)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if fi.Mode().Perm() != 0o700 || fi.Mode()&os.ModeSetgid != 0 {
+				t.Errorf("victim mode = %v, want 0700 untouched", fi.Mode())
+			}
+			if _, err := os.Stat(filepath.Join(victim, "hub")); !os.IsNotExist(err) {
+				t.Error("EnsureDirs created hf/hub inside the victim directory")
+			}
+		})
+	}
+}
+
+// /Users/Shared is world-writable on stock macOS, so any unprivileged account
+// can pre-create the shared root and own every other account's data. Only a
+// directory the installer's `sudo mkdir` produced — root-owned and not
+// other-writable — may be adopted; anything else falls back to the per-user
+// root. A self-owned directory (what an attacker, or t.TempDir, produces) must
+// fail the shape check; the root filesystem is a handy root-owned directory
+// that passes it.
+func TestSharedRootShapeRequiresRootOwnershipAndNoOtherWrite(t *testing.T) {
+	mine := t.TempDir()
+	if err := os.Chmod(mine, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	if err := sharedRootShape(mine); err == nil {
+		t.Error("a self-owned, other-writable directory passed the shared-root shape check")
+	}
+	if err := sharedRootShape("/"); err != nil {
+		t.Errorf("a root-owned, non-other-writable directory failed the shape check: %v", err)
+	}
+	if err := sharedRootShape(filepath.Join(mine, "missing")); err == nil {
+		t.Error("a missing directory passed the shape check")
+	}
+	link := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink("/", link); err != nil {
+		t.Fatal(err)
+	}
+	if err := sharedRootShape(link); err == nil {
+		t.Error("a symlink to a root-owned directory passed the shape check")
+	}
+}
+
+// A per-user root has no hostile co-tenant, so a layout directory the user
+// pointed elsewhere (models on an external disk) keeps working.
+func TestEnsureDirsFollowsSymlinkedLayoutDirOnPerUserRoot(t *testing.T) {
+	root := t.TempDir()
+	external := t.TempDir()
+	if err := os.Symlink(external, filepath.Join(root, "models")); err != nil {
+		t.Fatal(err)
+	}
+	if err := NewPaths(root).EnsureDirs(); err != nil {
+		t.Fatalf("EnsureDirs refused a symlinked models directory on a per-user root: %v", err)
+	}
+}

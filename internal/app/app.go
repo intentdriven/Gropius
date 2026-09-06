@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -39,6 +40,9 @@ type App struct {
 
 // download is one in-flight fetch.
 type download struct {
+	// repoID is the spelling the download runs under (the registry's
+	// canonical one); the map key is its case-folded form.
+	repoID string
 	cancel context.CancelFunc
 	// done closes when the goroutine has stopped touching the model directory.
 	// Cancelling only *asks* it to stop; callers that are about to delete those
@@ -203,15 +207,22 @@ func (a *App) Download(repoID string) error {
 	if !config.ValidRepoID(repoID) {
 		return fmt.Errorf("%q is not a valid model id (expected <org>/<name>): %w", repoID, ErrInvalidRepoID)
 	}
+	// A known model keeps its recorded spelling: repo ids are case-insensitive
+	// on the Hub and alias one directory on APFS, so a re-cased id must reuse
+	// the existing entry and directory rather than mint a second row over it.
+	// The registry folds the lookup.
+	if known, err := a.Registry.Get(repoID); err == nil {
+		repoID = known.RepoID
+	}
 
 	a.dlMu.Lock()
-	if _, busy := a.downloads[repoID]; busy {
+	if _, busy := a.downloads[dlKey(repoID)]; busy {
 		a.dlMu.Unlock()
 		return ErrAlreadyDownloading
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	dl := &download{cancel: cancel, done: make(chan struct{})}
-	a.downloads[repoID] = dl
+	dl := &download{repoID: repoID, cancel: cancel, done: make(chan struct{})}
+	a.downloads[dlKey(repoID)] = dl
 	a.dlMu.Unlock()
 
 	dest := a.Paths.ModelDir(repoID)
@@ -219,7 +230,8 @@ func (a *App) Download(repoID string) error {
 	// failed re-download must not take away files that still validate
 	// (downloads stage into .part files and only replace a file once it
 	// completes, so an attempt that fails before any file finishes leaves
-	// the served set untouched).
+	// the served set untouched). Read after the busy check, so a download
+	// that finished in between is seen as ready, not as still in flight.
 	prior, priorErr := a.Registry.Get(repoID)
 	wasReady := priorErr == nil && prior.State == registry.StateReady
 	// A retry or re-download of a known repo must keep its original AddedAt;
@@ -246,6 +258,7 @@ func (a *App) Download(repoID string) error {
 
 		err := a.Hub.Download(ctx, hub.DownloadRequest{
 			RepoID:      repoID,
+			ModelsDir:   a.Paths.Models,
 			Dest:        dest,
 			Concurrency: 4,
 			OnProgress: func(p hub.Progress) {
@@ -335,9 +348,13 @@ func (a *App) restoreReady(repoID, dest string, wasReady bool, priorBytes int64,
 
 func (a *App) finishDownload(repoID string) {
 	a.dlMu.Lock()
-	delete(a.downloads, repoID)
+	delete(a.downloads, dlKey(repoID))
 	a.dlMu.Unlock()
 }
+
+// dlKey is the in-flight downloads map key: case-folded like the registry's,
+// so a case variant of a running download is seen as that download.
+func dlKey(repoID string) string { return strings.ToLower(repoID) }
 
 // CancelDownload stops an in-flight download.
 //
@@ -346,7 +363,7 @@ func (a *App) finishDownload(repoID string) {
 // failed so it can be retried or removed, rather than reporting a spurious error.
 func (a *App) CancelDownload(repoID string) error {
 	a.dlMu.Lock()
-	dl, ok := a.downloads[repoID]
+	dl, ok := a.downloads[dlKey(repoID)]
 	a.dlMu.Unlock()
 	if ok {
 		dl.cancel()
@@ -363,8 +380,8 @@ func (a *App) Downloading() []string {
 	a.dlMu.Lock()
 	defer a.dlMu.Unlock()
 	out := make([]string, 0, len(a.downloads))
-	for id := range a.downloads {
-		out = append(out, id)
+	for _, dl := range a.downloads {
+		out = append(out, dl.repoID)
 	}
 	return out
 }
@@ -377,11 +394,16 @@ func (a *App) Delete(repoID string) error {
 	if !config.ValidRepoID(repoID) {
 		return fmt.Errorf("%q is not a valid model id: %w", repoID, ErrInvalidRepoID)
 	}
+	// Use the recorded spelling (see Download) so the directory removed and the
+	// pool entry unloaded are the model's own.
+	if m, err := a.Registry.Get(repoID); err == nil {
+		repoID = m.RepoID
+	}
 	// Cancel any download of this model AND wait for it to stop. Cancelling alone
 	// is not enough: the goroutine would keep writing into the directory we are
 	// about to remove, and the model would reappear moments after being deleted.
 	a.dlMu.Lock()
-	dl, downloading := a.downloads[repoID]
+	dl, downloading := a.downloads[dlKey(repoID)]
 	a.dlMu.Unlock()
 	if downloading {
 		dl.cancel()
@@ -396,7 +418,9 @@ func (a *App) Delete(repoID string) error {
 			return err
 		}
 	}
-	return a.Registry.Remove(repoID)
+	// The directory comes from the validated id, never from the registry's
+	// stored path (see Registry.Remove).
+	return a.Registry.Remove(repoID, a.Paths.ModelDir(repoID))
 }
 
 // Close shuts the app down.

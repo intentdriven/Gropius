@@ -1,7 +1,7 @@
 ---
 schema_version: 1
 id: "iss-12"
-slug: "discovery-updatetext-races-with-the-running-mdns-responder"
+slug: "discovery-updatetext-races-with-the-running-mdns-respond"
 severity: "minor"
 category: "bug"
 source: "agent-finding"

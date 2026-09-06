@@ -112,24 +112,33 @@ func (g *Gateway) Handler() http.Handler {
 // Host locked to loopback, since the attack never touches either. When a key is
 // configured, a loopback request that does carry an Origin must therefore name a
 // loopback one before the exemption applies, the same guard the control plane's
-// loopbackOnly uses against the identical CSRF class. An unconfigured key (no
-// key, iss-1) leaves loopback exactly as open as it always was: that server is
-// already unauthenticated by the user's own explicit choice, key-bypass CSRF
-// included, so there is nothing here for the Origin check to protect.
+// loopbackOnly uses against the identical CSRF class. A DNS-rebound page is the
+// other half of that class: its GET is same-origin from the browser's view, so
+// it carries no Origin at all — only a Host naming the attacker's domain. With
+// a key configured, the exemption therefore also requires a loopback Host. A
+// foreign Host from loopback is not refused outright but falls through to the
+// bearer check, so a same-machine proxy or tunnel that preserves the client's
+// Host keeps working by sending the key it already holds. An unconfigured key
+// (no key, iss-1) leaves loopback exactly as open as it always was: that server
+// is already unauthenticated by the user's own explicit choice, key-bypass CSRF
+// included, so there is nothing here for either check to protect.
 func (g *Gateway) withAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		apiKey := g.cfg().APIKey
-		if isLoopback(r.RemoteAddr) {
-			if origin := r.Header.Get("Origin"); apiKey != "" && origin != "" && !isLoopbackOrigin(origin) {
-				writeError(w, http.StatusForbidden, "cross-origin request refused")
-				return
-			}
-			next.ServeHTTP(w, r)
-			return
-		}
 		if apiKey == "" {
 			next.ServeHTTP(w, r)
 			return
+		}
+		if isLoopback(r.RemoteAddr) {
+			if origin := r.Header.Get("Origin"); origin != "" && !isLoopbackOrigin(origin) {
+				writeError(w, http.StatusForbidden, "cross-origin request refused")
+				return
+			}
+			if isLoopbackHost(r.Host) {
+				next.ServeHTTP(w, r)
+				return
+			}
+			// Loopback connection with a foreign Host: require the key below.
 		}
 		token := bearerToken(r.Header.Get("Authorization"))
 		// Constant-time compare: a byte-wise early return would leak the key.

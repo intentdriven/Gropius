@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 )
 
 // Paths is the on-disk layout. All fields are absolute.
@@ -38,13 +39,14 @@ const SharedRoot = "/Users/Shared/Gropius"
 
 // DefaultRoot returns where Gropius keeps its data.
 //
-// Order: $GROPIUS_ROOT, then the shared directory if it exists and this account
-// can write to it, then the per-user Application Support directory.
+// Order: $GROPIUS_ROOT, then the shared directory if an administrator created
+// it (see sharedRootShape) and this account can write to it, then the per-user
+// Application Support directory.
 func DefaultRoot() (string, error) {
 	if env := os.Getenv("GROPIUS_ROOT"); env != "" {
 		return env, nil
 	}
-	if writableDir(SharedRoot) {
+	if sharedRootShape(SharedRoot) == nil && writableDir(SharedRoot) {
 		return SharedRoot, nil
 	}
 	home, err := os.UserHomeDir()
@@ -52,6 +54,37 @@ func DefaultRoot() (string, error) {
 		return "", fmt.Errorf("resolve home dir: %w", err)
 	}
 	return filepath.Join(home, "Library", "Application Support", "Gropius"), nil
+}
+
+// sharedRootShape reports whether dir is a shared root an administrator
+// created, i.e. what `make install-shared` produces: a real directory (not a
+// symlink), owned by root, and not writable by "other".
+//
+// Existence and writability are not enough. /Users/Shared itself is
+// world-writable on stock macOS, so any unprivileged account could pre-create
+// the shared root and become the owner of every other account's data —
+// config, tokens, registry, and the interpreter the model servers run under.
+// A root-owned directory can only have come from an administrator, and a
+// later `make install-shared` never changes ownership, so ownership is the
+// one property an attacker cannot forge. The exact mode is deliberately not
+// required (an administrator may tighten it); other-write is refused because
+// the design's protections all rest on the group boundary.
+func sharedRootShape(dir string) error {
+	fi, err := os.Lstat(dir)
+	if err != nil {
+		return err
+	}
+	if !fi.IsDir() {
+		return fmt.Errorf("%s is not a directory", dir)
+	}
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	if !ok || st.Uid != 0 {
+		return fmt.Errorf("%s is not owned by root — refusing to adopt a shared root an administrator did not create", dir)
+	}
+	if fi.Mode().Perm()&0o002 != 0 {
+		return fmt.Errorf("%s is world-writable — refusing to adopt it as the shared root", dir)
+	}
+	return nil
 }
 
 // writableDir reports whether dir exists and this process can create files in
@@ -139,6 +172,22 @@ func (p Paths) ModelDir(repoID string) string {
 
 // EnsureDirs creates every directory in the layout.
 //
+// Every entry is created and inspected relative to an os.Root opened at the
+// data root. Under a setgid (shared) root each must be a real directory: that
+// root is group-writable, so another local account can plant a symlink under
+// a layout name before it exists (and the account that launched first owns
+// the real ones and can swap them later). A path-based MkdirAll and Chmod
+// would follow that link and widen an arbitrary directory the victim owns to
+// 3775 — group-writable by every account on the machine. Startup fails
+// instead: the sticky bit means this account cannot remove the plant, and
+// serving from a redirected layout is never right. A per-user root has no
+// such adversary, so a layout directory the user symlinked elsewhere (models
+// on an external disk, say) is followed as before.
+//
+// venv and python are created here too, closed (0755, never widened) like bin:
+// they hold the interpreter every model server runs under, and an absent name
+// in the shared root is one any account could otherwise claim first.
+//
 // Under a setgid root — the shared cache, which the installer marks setgid
 // group-writable and sticky (mode 3775) so a model one account downloads is
 // writable by the next, and only its owner can delete or rename it — the data
@@ -154,14 +203,51 @@ func (p Paths) ModelDir(repoID string) string {
 // ignored — a directory created by another account cannot be re-moded by this
 // one, and startup must not fail over it.
 func (p Paths) EnsureDirs() error {
-	for _, d := range []string{p.Root, p.Bin, p.Models, p.HFCache, p.Logs} {
-		if err := os.MkdirAll(d, 0o755); err != nil {
-			return fmt.Errorf("create %s: %w", d, err)
-		}
+	if err := os.MkdirAll(p.Root, 0o755); err != nil {
+		return fmt.Errorf("create %s: %w", p.Root, err)
 	}
-	if fi, err := os.Stat(p.Root); err == nil && fi.Mode()&os.ModeSetgid != 0 {
-		for _, d := range []string{p.Models, filepath.Dir(p.HFCache), p.HFCache, p.Logs} {
-			_ = os.Chmod(d, 0o775|os.ModeSetgid|os.ModeSticky)
+	layout := []struct {
+		abs   string
+		widen bool // data directory: group-writable setgid sticky under a setgid root
+	}{
+		{p.Bin, false}, {p.Venv, false}, {p.Python, false},
+		{p.Models, true}, {filepath.Dir(p.HFCache), true}, {p.HFCache, true}, {p.Logs, true},
+	}
+	fi, err := os.Stat(p.Root)
+	if err != nil {
+		return fmt.Errorf("inspect %s: %w", p.Root, err)
+	}
+	if fi.Mode()&os.ModeSetgid == 0 {
+		// Per-user root: no co-tenant, so follow whatever the user set up.
+		for _, d := range layout {
+			if err := os.MkdirAll(d.abs, 0o755); err != nil {
+				return fmt.Errorf("create %s: %w", d.abs, err)
+			}
+		}
+		return nil
+	}
+	root, err := os.OpenRoot(p.Root)
+	if err != nil {
+		return fmt.Errorf("open %s: %w", p.Root, err)
+	}
+	defer root.Close()
+	for _, d := range layout {
+		rel, err := filepath.Rel(p.Root, d.abs)
+		if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+			return fmt.Errorf("%s is outside the data root %s", d.abs, p.Root)
+		}
+		if err := root.Mkdir(rel, 0o755); err != nil && !errors.Is(err, fs.ErrExist) {
+			return fmt.Errorf("create %s: %w", d.abs, err)
+		}
+		fi, err := root.Lstat(rel)
+		if err != nil {
+			return fmt.Errorf("inspect %s: %w", d.abs, err)
+		}
+		if !fi.IsDir() {
+			return fmt.Errorf("%s is not a directory (something else was planted under that name) — refusing to start", d.abs)
+		}
+		if d.widen {
+			_ = root.Chmod(rel, 0o775|os.ModeSetgid|os.ModeSticky)
 		}
 	}
 	return nil
@@ -241,9 +327,15 @@ func (c Config) ExposedToLAN() bool {
 // Load reads config from path, returning defaults if the file does not exist.
 // Unknown or missing fields fall back to their defaults, so a config written by
 // an older build still loads.
+//
+// The read is hardened (see OpenRegular): Load runs before the port is
+// claimed, so a FIFO planted under this name in a shared root would otherwise
+// hang startup before the fail-closed branch in main could ever run, and a
+// symlinked or oversized file is refused rather than applied. Any such refusal
+// is an error, which main treats as "lock down to loopback".
 func Load(path string) (Config, error) {
 	cfg := Default()
-	b, err := os.ReadFile(path)
+	b, err := ReadRegular(path, MaxConfigBytes)
 	if errors.Is(err, fs.ErrNotExist) {
 		return cfg, nil
 	}

@@ -443,6 +443,26 @@ func WantedFiles(files []File) []File {
 	return out
 }
 
+// caseCollision reports the first pair of wanted paths that differ only by
+// case. Such a pair cannot both exist on macOS's case-insensitive default
+// volume: two goroutines would race over one .gropius-part and, at best, the
+// download aborts. The repo is refused up front instead.
+func caseCollision(files []File) (a, b string, collide bool) {
+	seen := make(map[string]string, len(files))
+	for _, f := range files {
+		clean := path.Clean(f.Path)
+		folded := strings.ToLower(clean)
+		if prev, ok := seen[folded]; ok {
+			if prev != clean {
+				return prev, clean, true
+			}
+			continue
+		}
+		seen[folded] = clean
+	}
+	return "", "", false
+}
+
 // TotalSize sums the sizes of a file list.
 func TotalSize(files []File) int64 {
 	var n int64
