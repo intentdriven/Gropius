@@ -112,7 +112,8 @@ room that the machine refuses more work than eviction used to cost it.
 
 ## Audit Notes
 
-_Empty. Populated by intent-auditor when intent moves to shipped/._
+<!-- abcd-review: OWED receipt=rcp-4d0d60cfdaf8 -->
+Fidelity review OWED (receipt rcp-4d0d60cfdaf8).
 
 ## Grounds
 
