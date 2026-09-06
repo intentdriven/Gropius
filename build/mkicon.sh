@@ -1,8 +1,11 @@
 #!/bin/bash
-# Build AppIcon.icns from the 1024px source using Apple's own tooling.
+# Build AppIcon.icns from icon.svg using Apple's own tooling.
+# Rasterising the SVG needs rsvg-convert (brew install librsvg); the committed
+# AppIcon.icns means this only runs when the source art changes.
 set -e
 cd "$(dirname "$0")"
-[ -f AppIcon.icns ] && [ AppIcon.icns -nt icon-1024.png ] && exit 0
+[ -f AppIcon.icns ] && [ AppIcon.icns -nt icon.svg ] && exit 0
+rsvg-convert -w 1024 -h 1024 icon.svg -o icon-1024.png
 rm -rf AppIcon.iconset && mkdir AppIcon.iconset
 for sz in 16 32 64 128 256 512; do
   sips -z $sz $sz icon-1024.png --out AppIcon.iconset/icon_${sz}x${sz}.png >/dev/null

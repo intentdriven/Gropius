@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <!-- Gropius: the four primary forms on a dark tile. macOS applies its own
+       corner mask, so the tile is full-bleed. Cells are 340px on a 2x2 grid
+       with a 132px margin and a 80px gutter. -->
+  <rect width="1024" height="1024" fill="#17181d"/>
+  <!-- top-left: yellow triangle -->
+  <polygon points="302,132 472,472 132,472" fill="#F5C518"/>
+  <!-- top-right: grey square -->
+  <rect x="552" y="132" width="340" height="340" fill="#B4B6BB"/>
+  <!-- bottom-left: blue square -->
+  <rect x="132" y="552" width="340" height="340" fill="#2B5DAA"/>
+  <!-- bottom-right: red circle -->
+  <circle cx="722" cy="722" r="170" fill="#E63329"/>
+</svg>
