@@ -1,6 +1,7 @@
 package archtest_test
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -84,5 +85,45 @@ func TestTheStatisticsPageIsAHowTo(t *testing.T) {
 func TestGettingStartedPointsAtTheStatisticsPage(t *testing.T) {
 	if !strings.Contains(readDoc(t, "getting-started.md"), "request-statistics.md") {
 		t.Error("the getting-started walk-through does not point at the statistics page")
+	}
+}
+
+// The page names all three states and keeps them apart, because the reason
+// they are three is the whole reason recording could be made an opt-in without
+// also handing the operator a prompt transcript.
+func TestTheStatisticsPageNamesTheThreeStates(t *testing.T) {
+	page := readDoc(t, "request-statistics.md")
+	for _, phrase := range []string{
+		"three states",
+		"model server's own log level",
+		"this switch can never make it",
+	} {
+		if !containsAll(page, phrase) {
+			t.Errorf("the page does not say %q", phrase)
+		}
+	}
+}
+
+// And it says who else on this Mac can turn it on and read it. The control
+// plane asks nobody for a password and answers every local account by design,
+// so "nothing leaves this Mac" is true and, on a shared Mac, not the whole
+// answer.
+func TestTheStatisticsPageSaysWhoCanSeeIt(t *testing.T) {
+	page := readDoc(t, "request-statistics.md")
+	for _, phrase := range []string{
+		"Who can see it",
+		"any of them can open the control panel",
+		"The boundary is the Mac, not your account",
+	} {
+		if !containsAll(page, phrase) {
+			t.Errorf("the page does not say %q", phrase)
+		}
+	}
+	repoRoot, err := filepath.Abs("../..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsAll(readRepoFile(t, repoRoot, "README.md"), "The boundary is the Mac rather than your account") {
+		t.Error("the README claims a record for one account alone")
 	}
 }

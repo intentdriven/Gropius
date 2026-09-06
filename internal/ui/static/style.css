@@ -216,3 +216,11 @@ h3 { font-size: 14px; text-transform: uppercase; letter-spacing: .05em; color: v
 }
 .statcard .name { font-weight: 600; }
 .statcard .figures { color: var(--muted); font-size: 13px; margin-top: 4px; }
+
+/* Shown in the header for as long as requests are being recorded, so the
+   person whose requests they are can see it without opening Settings. */
+.recording {
+  padding: 2px 8px; border: 1px solid var(--red); color: var(--red);
+  font-size: 11px; text-transform: uppercase; letter-spacing: .05em;
+  text-decoration: none;
+}

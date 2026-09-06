@@ -25,6 +25,9 @@
   <div class="status" id="serverStatus">
     <span class="dot" id="statusDot"></span>
     <span id="statusText">connecting…</span>
+    <a href="#" id="recordingBadge" class="recording" hidden
+       onclick="showTab('stats');return false"
+       title="Request statistics are being recorded on this Mac. Anyone who can open this panel can read them.">Recording</a>
   </div>
 </header>
 
@@ -211,7 +214,10 @@
         long the whole request took, and how long it waited for the model. It never records
         a prompt, an answer, an API key or the address of the client that sent it, and
         nothing recorded leaves this Mac. Turning it off again empties what is held. See
-        the <a href="https://github.com/intentdriven/Gropius/blob/main/docs/request-statistics.md">what is recorded</a> page.</p>
+        Everyone who can open this panel can turn it on and read it, which on a Mac that
+        several people log into means every account on it — so on a shared Mac this is a
+        decision for all of them. While it is on, <strong>Recording</strong> appears beside
+        the server status at the top of this page.</p>
     </fieldset>
 
     <fieldset class="group">

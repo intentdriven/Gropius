@@ -187,7 +187,11 @@ func (c *Control) snapshot() State {
 // the panel needs no separate way of asking whether there is anything to show.
 //
 // It is on the control plane, which is loopback-only: these figures are the
-// operator's, and the machine is the boundary (adr-2609061503319212).
+// operator's, and the machine is the boundary (adr-2609061503319212). The
+// machine, not the account — the control plane deliberately answers every
+// local account (see Handler), so on a shared Mac these figures are readable
+// by anyone logged into it. That is what the panel's recording indicator and
+// the documentation's "Who can see it" section exist to say out loud.
 func (c *Control) handleStats(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, c.App.Stats.View())
 }

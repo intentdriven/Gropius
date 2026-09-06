@@ -140,9 +140,12 @@ request, and never the client's network address.
 
 Gropius collects no telemetry: nothing about usage, models, hardware or errors
 leaves your Mac, to the project or to anyone else. **Request statistics** is a
-local record for you alone, off unless you turn it on, and it holds token
-counts and timings — never a prompt, an answer, an API key or a client's
-address ([what is recorded](docs/request-statistics.md)).
+local record, off unless you turn it on, holding token counts and timings —
+never a prompt, an answer, an API key or a client's address. The boundary is
+the Mac rather than your account: the control panel answers anyone who can
+reach it on this Mac, so on a Mac several people log into, any of them can
+turn the switch on and read what it records
+([what is recorded, and who can see it](docs/request-statistics.md)).
 
 Gropius passes a request's prompt on to the model without reading it. The one
 exception is **Merge system messages**, a per-model setting that is off unless

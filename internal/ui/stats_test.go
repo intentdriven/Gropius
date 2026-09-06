@@ -2,6 +2,7 @@ package ui
 
 import (
 	"fmt"
+	"os"
 	"reflect"
 	"regexp"
 	"strings"
@@ -179,4 +180,36 @@ func TestEveryRecordedFigureReachesThePanel(t *testing.T) {
 			t.Errorf("the panel never reads %q, which the recorder keeps — a figure nobody can see", field)
 		}
 	}
+}
+
+// The panel says it is recording wherever it is open, not only on the tab that
+// shows the figures. On a Mac several people log into, the person whose
+// requests are being recorded is not necessarily the person who turned it on,
+// and the control panel asks nobody for a password.
+func TestThePanelSaysWhenItIsRecording(t *testing.T) {
+	src := readPanelSource(t)
+	want := regexp.MustCompile(`\$\('recordingBadge'\)\.hidden\s*=\s*!\(state\.config && state\.config\.statistics\)`)
+	if !want.MatchString(src) {
+		t.Error("the panel no longer shows a recording indicator driven by the switch")
+	}
+	if !strings.Contains(src, "renderWarnings();") {
+		t.Fatal("render() no longer looks like itself; the indicator's placement is unasserted")
+	}
+
+	markup := readPanelMarkup(t)
+	if !strings.Contains(markup, `id="recordingBadge"`) {
+		t.Error("the page has no recording indicator for the panel to show")
+	}
+	if !strings.Contains(markup, "every account on it") {
+		t.Error("the switch does not say who else on this Mac can turn it on and read it")
+	}
+}
+
+func readPanelMarkup(t *testing.T) string {
+	t.Helper()
+	b, err := os.ReadFile("static/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
 }

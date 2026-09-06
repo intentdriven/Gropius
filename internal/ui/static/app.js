@@ -93,6 +93,10 @@ function connect() {
 
 function render() {
   if (!state) return;
+  // Shown wherever the panel is open, not only on the Statistics tab: on a
+  // shared Mac the person whose requests are being recorded is not
+  // necessarily the person who turned it on.
+  $('recordingBadge').hidden = !(state.config && state.config.statistics);
   renderWarnings();
   renderSetup();
   renderModels();
