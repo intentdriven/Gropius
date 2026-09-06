@@ -44,7 +44,7 @@ type SamplingBound struct {
 }
 
 // samplingParam couples one bound to the field it governs, so validation,
-// sanitising and the range test all read the same table.
+// sanitizing and the range test all read the same table.
 type samplingParam struct {
 	bound SamplingBound
 	// get returns the field's value and whether it is set, as a float64 so one
@@ -165,7 +165,7 @@ type SamplingValue struct {
 // Values returns the parameters that are set, in SamplingBounds order.
 //
 // The caller renders these; iterating the same table validation and
-// sanitising use means a parameter cannot be added to the type and quietly
+// sanitizing use means a parameter cannot be added to the type and quietly
 // left out of the command line.
 func (s Sampling) Values() []SamplingValue {
 	out := make([]SamplingValue, 0, len(samplingParams))
@@ -232,11 +232,11 @@ func formatBound(v float64, integer bool) string {
 	return fmt.Sprintf("%g", v)
 }
 
-// Sanitised returns a copy with every out-of-range value dropped, and the
+// Sanitized returns a copy with every out-of-range value dropped, and the
 // names of the fields it dropped. It is how a preference read from a file
 // becomes safe to use: the value simply does not reach a launch flag, which
 // is the same as never having been set.
-func (s Sampling) Sanitised() (Sampling, []string) {
+func (s Sampling) Sanitized() (Sampling, []string) {
 	out := s.Clone()
 	var dropped []string
 	for _, p := range samplingParams {
@@ -337,7 +337,7 @@ func (c Config) EffectiveSampling(repoID string) Sampling {
 		return c.Sampling.Clone()
 	}
 	want := strings.ToLower(repoID)
-	// Sorted, not a map range: validateSampling and sanitiseSampling both
+	// Sorted, not a map range: validateSampling and sanitizeSampling both
 	// guarantee at most one entry folds to any one id, and iterating in a
 	// fixed order means a map that somehow held two could still not make one
 	// model load at different temperatures on different starts.
@@ -377,7 +377,7 @@ func (c Config) validateSampling() error {
 		}
 		// Two spellings of one repo id are two entries in the map but one
 		// model, so the effective set would depend on which the lookup reached
-		// first. sanitiseSampling drops the duplicate on the file path; here,
+		// first. sanitizeSampling drops the duplicate on the file path; here,
 		// where a human is waiting for an answer, say so instead.
 		folded := strings.ToLower(id)
 		if first, ok := seen[folded]; ok {
@@ -391,7 +391,7 @@ func (c Config) validateSampling() error {
 	return nil
 }
 
-// sanitiseSampling drops every sampling value the model server would reject,
+// sanitizeSampling drops every sampling value the model server would reject,
 // and every override that is not addressable, returning what it dropped.
 //
 // This is the file path, not the settings path. A configuration file can be
@@ -400,10 +400,10 @@ func (c Config) validateSampling() error {
 // would send the server into its fail-closed loopback-only mode — a
 // machine-wide outage caused by a number that only ever wanted to be ignored.
 // The strict, refusing check lives at /api/settings instead.
-func (c *Config) sanitiseSampling() []string {
+func (c *Config) sanitizeSampling() []string {
 	var dropped []string
-	sanitised, names := c.Sampling.Sanitised()
-	c.Sampling = sanitised
+	sanitized, names := c.Sampling.Sanitized()
+	c.Sampling = sanitized
 	for _, n := range names {
 		dropped = append(dropped, "sampling."+n)
 	}
@@ -431,7 +431,7 @@ func (c *Config) sanitiseSampling() []string {
 			continue
 		}
 		seen[folded] = id
-		s, names := c.ModelSampling[id].Sanitised()
+		s, names := c.ModelSampling[id].Sanitized()
 		for _, n := range names {
 			dropped = append(dropped, "model_sampling["+id+"]."+n)
 		}

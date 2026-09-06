@@ -348,7 +348,7 @@ func (c Config) Validate() error {
 	// A sampling default becomes a launch flag on every model server, and the
 	// model server validates the effective value of every request against it:
 	// a value it rejects turns one save into a 400 on every request that omits
-	// that parameter. Load sanitises before it validates, so this strictness
+	// that parameter. Load sanitizes before it validates, so this strictness
 	// only ever refuses a save, never a start-up.
 	return c.validateSampling()
 }
@@ -403,7 +403,7 @@ func Load(path string) (Config, []string, error) {
 	if err := json.Unmarshal(b, &cfg); err != nil {
 		return Default(), nil, fmt.Errorf("parse config %s: %w", path, err)
 	}
-	dropped := cfg.sanitiseSampling()
+	dropped := cfg.sanitizeSampling()
 	if err := cfg.Validate(); err != nil {
 		return Default(), nil, fmt.Errorf("invalid config %s: %w", path, err)
 	}

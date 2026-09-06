@@ -399,7 +399,7 @@ func TestSaveRefusesAConfigTooLargeToLoadBack(t *testing.T) {
 func TestValidRepoIDBoundsLength(t *testing.T) {
 	long := strings.Repeat("a", 200)
 	if ValidRepoID(long + "/name") {
-		t.Error("an unbounded organisation name was accepted")
+		t.Error("an unbounded organization name was accepted")
 	}
 	if ValidRepoID("org/" + long) {
 		t.Error("an unbounded repository name was accepted")
@@ -456,9 +456,9 @@ func TestSamplingValidateRefusesNaNAndInfinity(t *testing.T) {
 			if err := (Sampling{Temperature: &v}).Validate(); err == nil {
 				t.Errorf("Validate accepted a temperature of %v", v)
 			}
-			s, dropped := Sampling{Temperature: &v}.Sanitised()
+			s, dropped := Sampling{Temperature: &v}.Sanitized()
 			if s.Temperature != nil {
-				t.Errorf("Sanitised kept a temperature of %v", v)
+				t.Errorf("Sanitized kept a temperature of %v", v)
 			}
 			if len(dropped) != 1 {
 				t.Errorf("dropped = %v, want the field named", dropped)

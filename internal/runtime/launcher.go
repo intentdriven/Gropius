@@ -71,7 +71,7 @@ var samplingFlags = map[string]string{
 // request that omits that parameter, precisely the traffic these defaults
 // exist to serve.
 func samplingArgs(s config.Sampling) []string {
-	sane, _ := s.Sanitised()
+	sane, _ := s.Sanitized()
 	var args []string
 	for _, v := range sane.Values() {
 		flag, ok := samplingFlags[v.Field]
