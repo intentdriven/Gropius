@@ -1,0 +1,1502 @@
+{
+ "source": "model-bench lab, 2026-09-05 (80 runs) plus 2026-09-05 local reruns; sanitised: log paths and output tails removed",
+ "runs": [
+  {
+   "model": "glm-4.7-flash-local",
+   "model_id": "gropius/mlx-community/GLM-4.7-Flash-8bit",
+   "task": "01-landing-page",
+   "duration_s": 115.9,
+   "timed_out": false,
+   "exit_code": 0,
+   "score": 40,
+   "max": 40,
+   "checks": {
+    "R1_title": true,
+    "R2_nav": true,
+    "R3_hero": true,
+    "R4_pricing": true,
+    "R5_darkmode": true,
+    "R6_form": true,
+    "R7_media": true,
+    "R8_clean": true
+   }
+  },
+  {
+   "model": "glm-4.7-flash-local",
+   "model_id": "gropius/mlx-community/GLM-4.7-Flash-8bit",
+   "task": "02-debug-python",
+   "duration_s": 107.6,
+   "timed_out": false,
+   "exit_code": 0,
+   "score": 40,
+   "max": 40,
+   "checks": {
+    "tests_passed": 19,
+    "tests_total": 19,
+    "tests_unmodified": true
+   }
+  },
+  {
+   "model": "glm-4.7-flash-local",
+   "model_id": "gropius/mlx-community/GLM-4.7-Flash-8bit",
+   "task": "03-csv2json",
+   "duration_s": 186.9,
+   "timed_out": false,
+   "exit_code": 0,
+   "score": 35,
+   "max": 40,
+   "checks": {
+    "basic": true,
+    "limit": true,
+    "delim": false,
+    "cast": true,
+    "pretty": true,
+    "output_file": true,
+    "missing_input": true,
+    "empty": true
+   }
+  },
+  {
+   "model": "glm-4.7-flash-local",
+   "model_id": "gropius/mlx-community/GLM-4.7-Flash-8bit",
+   "task": "04-algorithms",
+   "duration_s": 104.5,
+   "timed_out": false,
+   "exit_code": 0,
+   "score": 40,
+   "max": 40,
+   "checks": {
+    "tests_passed": 18,
+    "tests_total": 18,
+    "tests_unmodified": true
+   }
+  },
+  {
+   "model": "glm-4.7-flash-local",
+   "model_id": "gropius/mlx-community/GLM-4.7-Flash-8bit",
+   "task": "05-http-api",
+   "duration_s": 81.3,
+   "timed_out": false,
+   "exit_code": 0,
+   "score": 17,
+   "max": 40,
+   "checks": {
+    "post_201": false,
+    "post_ids_increment": false,
+    "get_list": false,
+    "get_one": false,
+    "get_missing_404": true,
+    "put_merge": false,
+    "put_id_immutable": false,
+    "put_missing_404": true,
+    "bad_body_400": true,
+    "delete_204": false,
+    "deleted_gone": true,
+    "unknown_404": true
+   }
+  },
+  {
+   "model": "kimi-dev-72b-local",
+   "model_id": "gropius/mlx-community/Kimi-Dev-72B-6bit",
+   "task": "01-landing-page",
+   "duration_s": 466.0,
+   "timed_out": false,
+   "exit_code": 0,
+   "score": 0,
+   "max": 40,
+   "checks": {
+    "file_exists": false
+   }
+  },
+  {
+   "model": "kimi-dev-72b-local",
+   "model_id": "gropius/mlx-community/Kimi-Dev-72B-6bit",
+   "task": "02-debug-python",
+   "duration_s": 2399.9,
+   "timed_out": true,
+   "exit_code": -9,
+   "score": 40,
+   "max": 40,
+   "checks": {
+    "tests_passed": 19,
+    "tests_total": 19,
+    "tests_unmodified": true
+   }
+  },
+  {
+   "model": "kimi-dev-72b-local",
+   "model_id": "gropius/mlx-community/Kimi-Dev-72B-6bit",
+   "task": "03-csv2json",
+   "duration_s": 203.7,
+   "timed_out": false,
+   "exit_code": 0,
+   "score": 5,
+   "max": 40,
+   "checks": {
+    "basic": false,
+    "limit": false,
+    "delim": false,
+    "cast": false,
+    "pretty": false,
+    "output_file": false,
+    "missing_input": true,
+    "empty": false
+   }
+  },
+  {
+   "model": "kimi-dev-72b-local",
+   "model_id": "gropius/mlx-community/Kimi-Dev-72B-6bit",
+   "task": "04-algorithms",
+   "duration_s": 1120.9,
+   "timed_out": false,
+   "exit_code": 0,
+   "score": 2,
+   "max": 40,
+   "checks": {
+    "tests_passed": 1,
+    "tests_total": 18,
+    "tests_unmodified": true
+   }
+  },
+  {
+   "model": "kimi-dev-72b-local",
+   "model_id": "gropius/mlx-community/Kimi-Dev-72B-6bit",
+   "task": "05-http-api",
+   "duration_s": 1915.5,
+   "timed_out": false,
+   "exit_code": 1,
+   "score": 0,
+   "max": 40,
+   "checks": {
+    "post_201": false,
+    "post_ids_increment": false,
+    "get_list": false,
+    "get_one": false,
+    "get_missing_404": false,
+    "put_merge": false,
+    "put_id_immutable": false,
+    "put_missing_404": false,
+    "bad_body_400": false,
+    "delete_204": false,
+    "deleted_gone": false,
+    "unknown_404": false
+   }
+  },
+  {
+   "model": "laguna-s-2.1",
+   "model_id": "openrouter/poolside/laguna-s-2.1",
+   "task": "01-landing-page",
+   "duration_s": 31.7,
+   "timed_out": false,
+   "exit_code": 0,
+   "score": 40,
+   "max": 40,
+   "checks": {
+    "R1_title": true,
+    "R2_nav": true,
+    "R3_hero": true,
+    "R4_pricing": true,
+    "R5_darkmode": true,
+    "R6_form": true,
+    "R7_media": true,
+    "R8_clean": true
+   }
+  },
+  {
+   "model": "laguna-s-2.1",
+   "model_id": "openrouter/poolside/laguna-s-2.1",
+   "task": "02-debug-python",
+   "duration_s": 32.4,
+   "timed_out": false,
+   "exit_code": 0,
+   "score": 40,
+   "max": 40,
+   "checks": {
+    "tests_passed": 19,
+    "tests_total": 19,
+    "tests_unmodified": true
+   }
+  },
+  {
+   "model": "laguna-s-2.1",
+   "model_id": "openrouter/poolside/laguna-s-2.1",
+   "task": "03-csv2json",
+   "duration_s": 32.1,
+   "timed_out": false,
+   "exit_code": 0,
+   "score": 40,
+   "max": 40,
+   "checks": {
+    "basic": true,
+    "limit": true,
+    "delim": true,
+    "cast": true,
+    "pretty": true,
+    "output_file": true,
+    "missing_input": true,
+    "empty": true
+   }
+  },
+  {
+   "model": "laguna-s-2.1",
+   "model_id": "openrouter/poolside/laguna-s-2.1",
+   "task": "04-algorithms",
+   "duration_s": 70.9,
+   "timed_out": false,
+   "exit_code": 0,
+   "score": 40,
+   "max": 40,
+   "checks": {
+    "tests_passed": 18,
+    "tests_total": 18,
+    "tests_unmodified": true
+   }
+  },
+  {
+   "model": "laguna-s-2.1",
+   "model_id": "openrouter/poolside/laguna-s-2.1",
+   "task": "05-http-api",
+   "duration_s": 288.1,
+   "timed_out": false,
+   "exit_code": 0,
+   "score": 40,
+   "max": 40,
+   "checks": {
+    "post_201": true,
+    "post_ids_increment": true,
+    "get_list": true,
+    "get_one": true,
+    "get_missing_404": true,
+    "put_merge": true,
+    "put_id_immutable": true,
+    "put_missing_404": true,
+    "bad_body_400": true,
+    "delete_204": true,
+    "deleted_gone": true,
+    "unknown_404": true
+   }
+  },
+  {
+   "model": "ling-3.0-flash",
+   "model_id": "openrouter/inclusionai/ling-3.0-flash",
+   "task": "01-landing-page",
+   "duration_s": 19.6,
+   "timed_out": false,
+   "exit_code": 0,
+   "score": 40,
+   "max": 40,
+   "checks": {
+    "R1_title": true,
+    "R2_nav": true,
+    "R3_hero": true,
+    "R4_pricing": true,
+    "R5_darkmode": true,
+    "R6_form": true,
+    "R7_media": true,
+    "R8_clean": true
+   }
+  },
+  {
+   "model": "ling-3.0-flash",
+   "model_id": "openrouter/inclusionai/ling-3.0-flash",
+   "task": "02-debug-python",
+   "duration_s": 20.1,
+   "timed_out": false,
+   "exit_code": 0,
+   "score": 40,
+   "max": 40,
+   "checks": {
+    "tests_passed": 19,
+    "tests_total": 19,
+    "tests_unmodified": true
+   }
+  },
+  {
+   "model": "ling-3.0-flash",
+   "model_id": "openrouter/inclusionai/ling-3.0-flash",
+   "task": "03-csv2json",
+   "duration_s": 16.3,
+   "timed_out": false,
+   "exit_code": 0,
+   "score": 40,
+   "max": 40,
+   "checks": {
+    "basic": true,
+    "limit": true,
+    "delim": true,
+    "cast": true,
+    "pretty": true,
+    "output_file": true,
+    "missing_input": true,
+    "empty": true
+   }
+  },
+  {
+   "model": "ling-3.0-flash",
+   "model_id": "openrouter/inclusionai/ling-3.0-flash",
+   "task": "04-algorithms",
+   "duration_s": 35.2,
+   "timed_out": false,
+   "exit_code": 0,
+   "score": 40,
+   "max": 40,
+   "checks": {
+    "tests_passed": 18,
+    "tests_total": 18,
+    "tests_unmodified": true
+   }
+  },
+  {
+   "model": "ling-3.0-flash",
+   "model_id": "openrouter/inclusionai/ling-3.0-flash",
+   "task": "05-http-api",
+   "duration_s": 31.7,
+   "timed_out": false,
+   "exit_code": 0,
+   "score": 40,
+   "max": 40,
+   "checks": {
+    "post_201": true,
+    "post_ids_increment": true,
+    "get_list": true,
+    "get_one": true,
+    "get_missing_404": true,
+    "put_merge": true,
+    "put_id_immutable": true,
+    "put_missing_404": true,
+    "bad_body_400": true,
+    "delete_204": true,
+    "deleted_gone": true,
+    "unknown_404": true
+   }
+  },
+  {
+   "model": "muse-glimmer-30b",
+   "model_id": "openrouter/meta/muse-glimmer-30b",
+   "task": "01-landing-page",
+   "duration_s": 108.6,
+   "timed_out": false,
+   "exit_code": 0,
+   "score": 40,
+   "max": 40,
+   "checks": {
+    "R1_title": true,
+    "R2_nav": true,
+    "R3_hero": true,
+    "R4_pricing": true,
+    "R5_darkmode": true,
+    "R6_form": true,
+    "R7_media": true,
+    "R8_clean": true
+   }
+  },
+  {
+   "model": "muse-glimmer-30b",
+   "model_id": "openrouter/meta/muse-glimmer-30b",
+   "task": "02-debug-python",
+   "duration_s": 112.0,
+   "timed_out": false,
+   "exit_code": 0,
+   "score": 40,
+   "max": 40,
+   "checks": {
+    "tests_passed": 19,
+    "tests_total": 19,
+    "tests_unmodified": true
+   }
+  },
+  {
+   "model": "muse-glimmer-30b",
+   "model_id": "openrouter/meta/muse-glimmer-30b",
+   "task": "03-csv2json",
+   "duration_s": 173.4,
+   "timed_out": false,
+   "exit_code": 0,
+   "score": 40,
+   "max": 40,
+   "checks": {
+    "basic": true,
+    "limit": true,
+    "delim": true,
+    "cast": true,
+    "pretty": true,
+    "output_file": true,
+    "missing_input": true,
+    "empty": true
+   }
+  },
+  {
+   "model": "muse-glimmer-30b",
+   "model_id": "openrouter/meta/muse-glimmer-30b",
+   "task": "04-algorithms",
+   "duration_s": 163.6,
+   "timed_out": false,
+   "exit_code": 0,
+   "score": 40,
+   "max": 40,
+   "checks": {
+    "tests_passed": 18,
+    "tests_total": 18,
+    "tests_unmodified": true
+   }
+  },
+  {
+   "model": "muse-glimmer-30b",
+   "model_id": "openrouter/meta/muse-glimmer-30b",
+   "task": "05-http-api",
+   "duration_s": 128.7,
+   "timed_out": false,
+   "exit_code": 0,
+   "score": 40,
+   "max": 40,
+   "checks": {
+    "post_201": true,
+    "post_ids_increment": true,
+    "get_list": true,
+    "get_one": true,
+    "get_missing_404": true,
+    "put_merge": true,
+    "put_id_immutable": true,
+    "put_missing_404": true,
+    "bad_body_400": true,
+    "delete_204": true,
+    "deleted_gone": true,
+    "unknown_404": true
+   }
+  },
+  {
+   "model": "nemotron-3-super-120b",
+   "model_id": "openrouter/nvidia/nemotron-3-super-120b-a12b",
+   "task": "01-landing-page",
+   "duration_s": 59.6,
+   "timed_out": false,
+   "exit_code": 0,
+   "score": 40,
+   "max": 40,
+   "checks": {
+    "R1_title": true,
+    "R2_nav": true,
+    "R3_hero": true,
+    "R4_pricing": true,
+    "R5_darkmode": true,
+    "R6_form": true,
+    "R7_media": true,
+    "R8_clean": true
+   }
+  },
+  {
+   "model": "nemotron-3-super-120b",
+   "model_id": "openrouter/nvidia/nemotron-3-super-120b-a12b",
+   "task": "02-debug-python",
+   "duration_s": 53.4,
+   "timed_out": false,
+   "exit_code": 0,
+   "score": 40,
+   "max": 40,
+   "checks": {
+    "tests_passed": 19,
+    "tests_total": 19,
+    "tests_unmodified": true
+   }
+  },
+  {
+   "model": "nemotron-3-super-120b",
+   "model_id": "openrouter/nvidia/nemotron-3-super-120b-a12b",
+   "task": "03-csv2json",
+   "duration_s": 83.8,
+   "timed_out": false,
+   "exit_code": 0,
+   "score": 40,
+   "max": 40,
+   "checks": {
+    "basic": true,
+    "limit": true,
+    "delim": true,
+    "cast": true,
+    "pretty": true,
+    "output_file": true,
+    "missing_input": true,
+    "empty": true
+   }
+  },
+  {
+   "model": "nemotron-3-super-120b",
+   "model_id": "openrouter/nvidia/nemotron-3-super-120b-a12b",
+   "task": "04-algorithms",
+   "duration_s": 76.9,
+   "timed_out": false,
+   "exit_code": 0,
+   "score": 40,
+   "max": 40,
+   "checks": {
+    "tests_passed": 18,
+    "tests_total": 18,
+    "tests_unmodified": true
+   }
+  },
+  {
+   "model": "nemotron-3-super-120b",
+   "model_id": "openrouter/nvidia/nemotron-3-super-120b-a12b",
+   "task": "05-http-api",
+   "duration_s": 793.7,
+   "timed_out": false,
+   "exit_code": 0,
+   "score": 33,
+   "max": 40,
+   "checks": {
+    "post_201": true,
+    "post_ids_increment": false,
+    "get_list": true,
+    "get_one": true,
+    "get_missing_404": true,
+    "put_merge": true,
+    "put_id_immutable": true,
+    "put_missing_404": true,
+    "bad_body_400": true,
+    "delete_204": false,
+    "deleted_gone": true,
+    "unknown_404": true
+   }
+  },
+  {
+   "model": "nemotron-3.5-lightning",
+   "model_id": "openrouter/nvidia/nemotron-3.5-lightning",
+   "task": "01-landing-page",
+   "duration_s": 21.0,
+   "timed_out": false,
+   "exit_code": 0,
+   "score": 40,
+   "max": 40,
+   "checks": {
+    "R1_title": true,
+    "R2_nav": true,
+    "R3_hero": true,
+    "R4_pricing": true,
+    "R5_darkmode": true,
+    "R6_form": true,
+    "R7_media": true,
+    "R8_clean": true
+   }
+  },
+  {
+   "model": "nemotron-3.5-lightning",
+   "model_id": "openrouter/nvidia/nemotron-3.5-lightning",
+   "task": "02-debug-python",
+   "duration_s": 19.4,
+   "timed_out": false,
+   "exit_code": 0,
+   "score": 40,
+   "max": 40,
+   "checks": {
+    "tests_passed": 19,
+    "tests_total": 19,
+    "tests_unmodified": true
+   }
+  },
+  {
+   "model": "nemotron-3.5-lightning",
+   "model_id": "openrouter/nvidia/nemotron-3.5-lightning",
+   "task": "03-csv2json",
+   "duration_s": 40.0,
+   "timed_out": false,
+   "exit_code": 0,
+   "score": 40,
+   "max": 40,
+   "checks": {
+    "basic": true,
+    "limit": true,
+    "delim": true,
+    "cast": true,
+    "pretty": true,
+    "output_file": true,
+    "missing_input": true,
+    "empty": true
+   }
+  },
+  {
+   "model": "nemotron-3.5-lightning",
+   "model_id": "openrouter/nvidia/nemotron-3.5-lightning",
+   "task": "04-algorithms",
+   "duration_s": 34.1,
+   "timed_out": false,
+   "exit_code": 0,
+   "score": 40,
+   "max": 40,
+   "checks": {
+    "tests_passed": 18,
+    "tests_total": 18,
+    "tests_unmodified": true
+   }
+  },
+  {
+   "model": "nemotron-3.5-lightning",
+   "model_id": "openrouter/nvidia/nemotron-3.5-lightning",
+   "task": "05-http-api",
+   "duration_s": 284.4,
+   "timed_out": false,
+   "exit_code": 0,
+   "score": 40,
+   "max": 40,
+   "checks": {
+    "post_201": true,
+    "post_ids_increment": true,
+    "get_list": true,
+    "get_one": true,
+    "get_missing_404": true,
+    "put_merge": true,
+    "put_id_immutable": true,
+    "put_missing_404": true,
+    "bad_body_400": true,
+    "delete_204": true,
+    "deleted_gone": true,
+    "unknown_404": true
+   }
+  },
+  {
+   "model": "nemotron-3.5-lightning-4bit-local",
+   "model_id": "gropius-s/mlx-community/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-4bit",
+   "task": "01-landing-page",
+   "duration_s": 48.8,
+   "timed_out": false,
+   "exit_code": 0,
+   "score": 40,
+   "max": 40,
+   "checks": {
+    "R1_title": true,
+    "R2_nav": true,
+    "R3_hero": true,
+    "R4_pricing": true,
+    "R5_darkmode": true,
+    "R6_form": true,
+    "R7_media": true,
+    "R8_clean": true
+   }
+  },
+  {
+   "model": "nemotron-3.5-lightning-4bit-local",
+   "model_id": "gropius-s/mlx-community/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-4bit",
+   "task": "02-debug-python",
+   "duration_s": 51.9,
+   "timed_out": false,
+   "exit_code": 0,
+   "score": 40,
+   "max": 40,
+   "checks": {
+    "tests_passed": 19,
+    "tests_total": 19,
+    "tests_unmodified": true
+   }
+  },
+  {
+   "model": "nemotron-3.5-lightning-4bit-local",
+   "model_id": "gropius-s/mlx-community/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-4bit",
+   "task": "03-csv2json",
+   "duration_s": 132.5,
+   "timed_out": false,
+   "exit_code": 0,
+   "score": 40,
+   "max": 40,
+   "checks": {
+    "basic": true,
+    "limit": true,
+    "delim": true,
+    "cast": true,
+    "pretty": true,
+    "output_file": true,
+    "missing_input": true,
+    "empty": true
+   }
+  },
+  {
+   "model": "nemotron-3.5-lightning-4bit-local",
+   "model_id": "gropius-s/mlx-community/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-4bit",
+   "task": "04-algorithms",
+   "duration_s": 33.4,
+   "timed_out": false,
+   "exit_code": 0,
+   "score": 40,
+   "max": 40,
+   "checks": {
+    "tests_passed": 18,
+    "tests_total": 18,
+    "tests_unmodified": true
+   }
+  },
+  {
+   "model": "nemotron-3.5-lightning-4bit-local",
+   "model_id": "gropius-s/mlx-community/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-4bit",
+   "task": "05-http-api",
+   "duration_s": 57.6,
+   "timed_out": false,
+   "exit_code": 0,
+   "score": 37,
+   "max": 40,
+   "checks": {
+    "post_201": true,
+    "post_ids_increment": true,
+    "get_list": true,
+    "get_one": true,
+    "get_missing_404": true,
+    "put_merge": true,
+    "put_id_immutable": true,
+    "put_missing_404": true,
+    "bad_body_400": false,
+    "delete_204": true,
+    "deleted_gone": true,
+    "unknown_404": true
+   }
+  },
+  {
+   "model": "qwen3-coder-next",
+   "model_id": "openrouter/qwen/qwen3-coder-next",
+   "task": "01-landing-page",
+   "duration_s": 34.0,
+   "timed_out": false,
+   "exit_code": 0,
+   "score": 40,
+   "max": 40,
+   "checks": {
+    "R1_title": true,
+    "R2_nav": true,
+    "R3_hero": true,
+    "R4_pricing": true,
+    "R5_darkmode": true,
+    "R6_form": true,
+    "R7_media": true,
+    "R8_clean": true
+   }
+  },
+  {
+   "model": "qwen3-coder-next",
+   "model_id": "openrouter/qwen/qwen3-coder-next",
+   "task": "02-debug-python",
+   "duration_s": 17.9,
+   "timed_out": false,
+   "exit_code": 0,
+   "score": 40,
+   "max": 40,
+   "checks": {
+    "tests_passed": 19,
+    "tests_total": 19,
+    "tests_unmodified": true
+   }
+  },
+  {
+   "model": "qwen3-coder-next",
+   "model_id": "openrouter/qwen/qwen3-coder-next",
+   "task": "03-csv2json",
+   "duration_s": 29.2,
+   "timed_out": false,
+   "exit_code": 0,
+   "score": 40,
+   "max": 40,
+   "checks": {
+    "basic": true,
+    "limit": true,
+    "delim": true,
+    "cast": true,
+    "pretty": true,
+    "output_file": true,
+    "missing_input": true,
+    "empty": true
+   }
+  },
+  {
+   "model": "qwen3-coder-next",
+   "model_id": "openrouter/qwen/qwen3-coder-next",
+   "task": "04-algorithms",
+   "duration_s": 53.3,
+   "timed_out": false,
+   "exit_code": 0,
+   "score": 40,
+   "max": 40,
+   "checks": {
+    "tests_passed": 18,
+    "tests_total": 18,
+    "tests_unmodified": true
+   }
+  },
+  {
+   "model": "qwen3-coder-next",
+   "model_id": "openrouter/qwen/qwen3-coder-next",
+   "task": "05-http-api",
+   "duration_s": 17.0,
+   "timed_out": false,
+   "exit_code": 0,
+   "score": 40,
+   "max": 40,
+   "checks": {
+    "post_201": true,
+    "post_ids_increment": true,
+    "get_list": true,
+    "get_one": true,
+    "get_missing_404": true,
+    "put_merge": true,
+    "put_id_immutable": true,
+    "put_missing_404": true,
+    "bad_body_400": true,
+    "delete_204": true,
+    "deleted_gone": true,
+    "unknown_404": true
+   }
+  },
+  {
+   "model": "qwen3-coder-next-4bit-local",
+   "model_id": "gropius-s/mlx-community/Qwen3-Coder-Next-4bit",
+   "task": "01-landing-page",
+   "duration_s": 51.1,
+   "timed_out": false,
+   "exit_code": 0,
+   "score": 40,
+   "max": 40,
+   "checks": {
+    "R1_title": true,
+    "R2_nav": true,
+    "R3_hero": true,
+    "R4_pricing": true,
+    "R5_darkmode": true,
+    "R6_form": true,
+    "R7_media": true,
+    "R8_clean": true
+   }
+  },
+  {
+   "model": "qwen3-coder-next-4bit-local",
+   "model_id": "gropius-s/mlx-community/Qwen3-Coder-Next-4bit",
+   "task": "02-debug-python",
+   "duration_s": 26.7,
+   "timed_out": false,
+   "exit_code": 0,
+   "score": 40,
+   "max": 40,
+   "checks": {
+    "tests_passed": 19,
+    "tests_total": 19,
+    "tests_unmodified": true
+   }
+  },
+  {
+   "model": "qwen3-coder-next-4bit-local",
+   "model_id": "gropius-s/mlx-community/Qwen3-Coder-Next-4bit",
+   "task": "03-csv2json",
+   "duration_s": 31.0,
+   "timed_out": false,
+   "exit_code": 0,
+   "score": 40,
+   "max": 40,
+   "checks": {
+    "basic": true,
+    "limit": true,
+    "delim": true,
+    "cast": true,
+    "pretty": true,
+    "output_file": true,
+    "missing_input": true,
+    "empty": true
+   }
+  },
+  {
+   "model": "qwen3-coder-next-4bit-local",
+   "model_id": "gropius-s/mlx-community/Qwen3-Coder-Next-4bit",
+   "task": "04-algorithms",
+   "duration_s": 29.3,
+   "timed_out": false,
+   "exit_code": 0,
+   "score": 40,
+   "max": 40,
+   "checks": {
+    "tests_passed": 18,
+    "tests_total": 18,
+    "tests_unmodified": true
+   }
+  },
+  {
+   "model": "qwen3-coder-next-4bit-local",
+   "model_id": "gropius-s/mlx-community/Qwen3-Coder-Next-4bit",
+   "task": "05-http-api",
+   "duration_s": 22.5,
+   "timed_out": false,
+   "exit_code": 0,
+   "score": 40,
+   "max": 40,
+   "checks": {
+    "post_201": true,
+    "post_ids_increment": true,
+    "get_list": true,
+    "get_one": true,
+    "get_missing_404": true,
+    "put_merge": true,
+    "put_id_immutable": true,
+    "put_missing_404": true,
+    "bad_body_400": true,
+    "delete_204": true,
+    "deleted_gone": true,
+    "unknown_404": true
+   }
+  },
+  {
+   "model": "qwen3.5-122b-a10b",
+   "model_id": "openrouter/qwen/qwen3.5-122b-a10b",
+   "task": "01-landing-page",
+   "duration_s": 38.8,
+   "timed_out": false,
+   "exit_code": 0,
+   "score": 40,
+   "max": 40,
+   "checks": {
+    "R1_title": true,
+    "R2_nav": true,
+    "R3_hero": true,
+    "R4_pricing": true,
+    "R5_darkmode": true,
+    "R6_form": true,
+    "R7_media": true,
+    "R8_clean": true
+   }
+  },
+  {
+   "model": "qwen3.5-122b-a10b",
+   "model_id": "openrouter/qwen/qwen3.5-122b-a10b",
+   "task": "02-debug-python",
+   "duration_s": 25.2,
+   "timed_out": false,
+   "exit_code": 0,
+   "score": 40,
+   "max": 40,
+   "checks": {
+    "tests_passed": 19,
+    "tests_total": 19,
+    "tests_unmodified": true
+   }
+  },
+  {
+   "model": "qwen3.5-122b-a10b",
+   "model_id": "openrouter/qwen/qwen3.5-122b-a10b",
+   "task": "03-csv2json",
+   "duration_s": 26.7,
+   "timed_out": false,
+   "exit_code": 0,
+   "score": 40,
+   "max": 40,
+   "checks": {
+    "basic": true,
+    "limit": true,
+    "delim": true,
+    "cast": true,
+    "pretty": true,
+    "output_file": true,
+    "missing_input": true,
+    "empty": true
+   }
+  },
+  {
+   "model": "qwen3.5-122b-a10b",
+   "model_id": "openrouter/qwen/qwen3.5-122b-a10b",
+   "task": "04-algorithms",
+   "duration_s": 38.4,
+   "timed_out": false,
+   "exit_code": 0,
+   "score": 40,
+   "max": 40,
+   "checks": {
+    "tests_passed": 18,
+    "tests_total": 18,
+    "tests_unmodified": true
+   }
+  },
+  {
+   "model": "qwen3.5-122b-a10b",
+   "model_id": "openrouter/qwen/qwen3.5-122b-a10b",
+   "task": "05-http-api",
+   "duration_s": 13.5,
+   "timed_out": false,
+   "exit_code": 0,
+   "score": 20,
+   "max": 40,
+   "checks": {
+    "post_201": true,
+    "post_ids_increment": false,
+    "get_list": false,
+    "get_one": false,
+    "get_missing_404": true,
+    "put_merge": false,
+    "put_id_immutable": true,
+    "put_missing_404": true,
+    "bad_body_400": false,
+    "delete_204": false,
+    "deleted_gone": true,
+    "unknown_404": true
+   }
+  },
+  {
+   "model": "qwen3.5-35b-a3b",
+   "model_id": "openrouter/qwen/qwen3.5-35b-a3b",
+   "task": "01-landing-page",
+   "duration_s": 46.0,
+   "timed_out": false,
+   "exit_code": 0,
+   "score": 40,
+   "max": 40,
+   "checks": {
+    "R1_title": true,
+    "R2_nav": true,
+    "R3_hero": true,
+    "R4_pricing": true,
+    "R5_darkmode": true,
+    "R6_form": true,
+    "R7_media": true,
+    "R8_clean": true
+   }
+  },
+  {
+   "model": "qwen3.5-35b-a3b",
+   "model_id": "openrouter/qwen/qwen3.5-35b-a3b",
+   "task": "02-debug-python",
+   "duration_s": 52.6,
+   "timed_out": false,
+   "exit_code": 0,
+   "score": 40,
+   "max": 40,
+   "checks": {
+    "tests_passed": 19,
+    "tests_total": 19,
+    "tests_unmodified": true
+   }
+  },
+  {
+   "model": "qwen3.5-35b-a3b",
+   "model_id": "openrouter/qwen/qwen3.5-35b-a3b",
+   "task": "03-csv2json",
+   "duration_s": 64.5,
+   "timed_out": false,
+   "exit_code": 0,
+   "score": 40,
+   "max": 40,
+   "checks": {
+    "basic": true,
+    "limit": true,
+    "delim": true,
+    "cast": true,
+    "pretty": true,
+    "output_file": true,
+    "missing_input": true,
+    "empty": true
+   }
+  },
+  {
+   "model": "qwen3.5-35b-a3b",
+   "model_id": "openrouter/qwen/qwen3.5-35b-a3b",
+   "task": "04-algorithms",
+   "duration_s": 37.3,
+   "timed_out": false,
+   "exit_code": 0,
+   "score": 40,
+   "max": 40,
+   "checks": {
+    "tests_passed": 18,
+    "tests_total": 18,
+    "tests_unmodified": true
+   }
+  },
+  {
+   "model": "qwen3.5-35b-a3b",
+   "model_id": "openrouter/qwen/qwen3.5-35b-a3b",
+   "task": "05-http-api",
+   "duration_s": 38.7,
+   "timed_out": false,
+   "exit_code": 0,
+   "score": 40,
+   "max": 40,
+   "checks": {
+    "post_201": true,
+    "post_ids_increment": true,
+    "get_list": true,
+    "get_one": true,
+    "get_missing_404": true,
+    "put_merge": true,
+    "put_id_immutable": true,
+    "put_missing_404": true,
+    "bad_body_400": true,
+    "delete_204": true,
+    "deleted_gone": true,
+    "unknown_404": true
+   }
+  },
+  {
+   "model": "qwen3.6-35b-a3b",
+   "model_id": "openrouter/qwen/qwen3.6-35b-a3b",
+   "task": "01-landing-page",
+   "duration_s": 13.1,
+   "timed_out": false,
+   "exit_code": 0,
+   "score": 40,
+   "max": 40,
+   "checks": {
+    "R1_title": true,
+    "R2_nav": true,
+    "R3_hero": true,
+    "R4_pricing": true,
+    "R5_darkmode": true,
+    "R6_form": true,
+    "R7_media": true,
+    "R8_clean": true
+   }
+  },
+  {
+   "model": "qwen3.6-35b-a3b",
+   "model_id": "openrouter/qwen/qwen3.6-35b-a3b",
+   "task": "02-debug-python",
+   "duration_s": 19.1,
+   "timed_out": false,
+   "exit_code": 0,
+   "score": 40,
+   "max": 40,
+   "checks": {
+    "tests_passed": 19,
+    "tests_total": 19,
+    "tests_unmodified": true
+   }
+  },
+  {
+   "model": "qwen3.6-35b-a3b",
+   "model_id": "openrouter/qwen/qwen3.6-35b-a3b",
+   "task": "03-csv2json",
+   "duration_s": 20.5,
+   "timed_out": false,
+   "exit_code": 0,
+   "score": 40,
+   "max": 40,
+   "checks": {
+    "basic": true,
+    "limit": true,
+    "delim": true,
+    "cast": true,
+    "pretty": true,
+    "output_file": true,
+    "missing_input": true,
+    "empty": true
+   }
+  },
+  {
+   "model": "qwen3.6-35b-a3b",
+   "model_id": "openrouter/qwen/qwen3.6-35b-a3b",
+   "task": "04-algorithms",
+   "duration_s": 13.0,
+   "timed_out": false,
+   "exit_code": 0,
+   "score": 40,
+   "max": 40,
+   "checks": {
+    "tests_passed": 18,
+    "tests_total": 18,
+    "tests_unmodified": true
+   }
+  },
+  {
+   "model": "qwen3.6-35b-a3b",
+   "model_id": "openrouter/qwen/qwen3.6-35b-a3b",
+   "task": "05-http-api",
+   "duration_s": 39.6,
+   "timed_out": false,
+   "exit_code": 0,
+   "score": 40,
+   "max": 40,
+   "checks": {
+    "post_201": true,
+    "post_ids_increment": true,
+    "get_list": true,
+    "get_one": true,
+    "get_missing_404": true,
+    "put_merge": true,
+    "put_id_immutable": true,
+    "put_missing_404": true,
+    "bad_body_400": true,
+    "delete_204": true,
+    "deleted_gone": true,
+    "unknown_404": true
+   }
+  },
+  {
+   "model": "qwen3.8-27b",
+   "model_id": "openrouter/qwen/qwen3.8-27b",
+   "task": "01-landing-page",
+   "duration_s": 109.4,
+   "timed_out": false,
+   "exit_code": 0,
+   "score": 40,
+   "max": 40,
+   "checks": {
+    "R1_title": true,
+    "R2_nav": true,
+    "R3_hero": true,
+    "R4_pricing": true,
+    "R5_darkmode": true,
+    "R6_form": true,
+    "R7_media": true,
+    "R8_clean": true
+   }
+  },
+  {
+   "model": "qwen3.8-27b",
+   "model_id": "openrouter/qwen/qwen3.8-27b",
+   "task": "02-debug-python",
+   "duration_s": 34.9,
+   "timed_out": false,
+   "exit_code": 0,
+   "score": 40,
+   "max": 40,
+   "checks": {
+    "tests_passed": 19,
+    "tests_total": 19,
+    "tests_unmodified": true
+   }
+  },
+  {
+   "model": "qwen3.8-27b",
+   "model_id": "openrouter/qwen/qwen3.8-27b",
+   "task": "03-csv2json",
+   "duration_s": 206.1,
+   "timed_out": false,
+   "exit_code": 0,
+   "score": 40,
+   "max": 40,
+   "checks": {
+    "basic": true,
+    "limit": true,
+    "delim": true,
+    "cast": true,
+    "pretty": true,
+    "output_file": true,
+    "missing_input": true,
+    "empty": true
+   }
+  },
+  {
+   "model": "qwen3.8-27b",
+   "model_id": "openrouter/qwen/qwen3.8-27b",
+   "task": "04-algorithms",
+   "duration_s": 55.9,
+   "timed_out": false,
+   "exit_code": 0,
+   "score": 40,
+   "max": 40,
+   "checks": {
+    "tests_passed": 18,
+    "tests_total": 18,
+    "tests_unmodified": true
+   }
+  },
+  {
+   "model": "qwen3.8-27b",
+   "model_id": "openrouter/qwen/qwen3.8-27b",
+   "task": "05-http-api",
+   "duration_s": 273.1,
+   "timed_out": false,
+   "exit_code": 0,
+   "score": 40,
+   "max": 40,
+   "checks": {
+    "post_201": true,
+    "post_ids_increment": true,
+    "get_list": true,
+    "get_one": true,
+    "get_missing_404": true,
+    "put_merge": true,
+    "put_id_immutable": true,
+    "put_missing_404": true,
+    "bad_body_400": true,
+    "delete_204": true,
+    "deleted_gone": true,
+    "unknown_404": true
+   }
+  },
+  {
+   "model": "qwen3.8-27b-4bit-local",
+   "model_id": "gropius-s/mlx-community/Qwen3.8-27B-4bit",
+   "task": "01-landing-page",
+   "duration_s": 848.7,
+   "timed_out": false,
+   "exit_code": 0,
+   "score": 40,
+   "max": 40,
+   "checks": {
+    "R1_title": true,
+    "R2_nav": true,
+    "R3_hero": true,
+    "R4_pricing": true,
+    "R5_darkmode": true,
+    "R6_form": true,
+    "R7_media": true,
+    "R8_clean": true
+   }
+  },
+  {
+   "model": "qwen3.8-27b-4bit-local",
+   "model_id": "gropius-s/mlx-community/Qwen3.8-27B-4bit",
+   "task": "02-debug-python",
+   "duration_s": 124.5,
+   "timed_out": false,
+   "exit_code": 0,
+   "score": 40,
+   "max": 40,
+   "checks": {
+    "tests_passed": 19,
+    "tests_total": 19,
+    "tests_unmodified": true
+   }
+  },
+  {
+   "model": "qwen3.8-27b-4bit-local",
+   "model_id": "gropius-s/mlx-community/Qwen3.8-27B-4bit",
+   "task": "03-csv2json",
+   "duration_s": 738.0,
+   "timed_out": false,
+   "exit_code": 0,
+   "score": 40,
+   "max": 40,
+   "checks": {
+    "basic": true,
+    "limit": true,
+    "delim": true,
+    "cast": true,
+    "pretty": true,
+    "output_file": true,
+    "missing_input": true,
+    "empty": true
+   }
+  },
+  {
+   "model": "qwen3.8-27b-4bit-local",
+   "model_id": "gropius-s/mlx-community/Qwen3.8-27B-4bit",
+   "task": "04-algorithms",
+   "duration_s": 308.2,
+   "timed_out": false,
+   "exit_code": 0,
+   "score": 40,
+   "max": 40,
+   "checks": {
+    "tests_passed": 18,
+    "tests_total": 18,
+    "tests_unmodified": true
+   }
+  },
+  {
+   "model": "qwen3.8-27b-4bit-local",
+   "model_id": "gropius-s/mlx-community/Qwen3.8-27B-4bit",
+   "task": "05-http-api",
+   "duration_s": 1867.0,
+   "timed_out": false,
+   "exit_code": 1,
+   "score": 0,
+   "max": 40,
+   "checks": {
+    "post_201": false,
+    "post_ids_increment": false,
+    "get_list": false,
+    "get_one": false,
+    "get_missing_404": false,
+    "put_merge": false,
+    "put_id_immutable": false,
+    "put_missing_404": false,
+    "bad_body_400": false,
+    "delete_204": false,
+    "deleted_gone": false,
+    "unknown_404": false
+   }
+  },
+  {
+   "model": "qwen3.8-27b-8bit-local",
+   "model_id": "gropius-s/mlx-community/Qwen3.8-27B-8bit",
+   "task": "01-landing-page",
+   "duration_s": 610.1,
+   "timed_out": false,
+   "exit_code": 0,
+   "score": 40,
+   "max": 40,
+   "checks": {
+    "R1_title": true,
+    "R2_nav": true,
+    "R3_hero": true,
+    "R4_pricing": true,
+    "R5_darkmode": true,
+    "R6_form": true,
+    "R7_media": true,
+    "R8_clean": true
+   }
+  },
+  {
+   "model": "qwen3.8-27b-8bit-local",
+   "model_id": "gropius-s/mlx-community/Qwen3.8-27B-8bit",
+   "task": "02-debug-python",
+   "duration_s": 159.2,
+   "timed_out": false,
+   "exit_code": 0,
+   "score": 40,
+   "max": 40,
+   "checks": {
+    "tests_passed": 19,
+    "tests_total": 19,
+    "tests_unmodified": true
+   }
+  },
+  {
+   "model": "qwen3.8-27b-8bit-local",
+   "model_id": "gropius-s/mlx-community/Qwen3.8-27B-8bit",
+   "task": "03-csv2json",
+   "duration_s": 732.3,
+   "timed_out": false,
+   "exit_code": 0,
+   "score": 40,
+   "max": 40,
+   "checks": {
+    "basic": true,
+    "limit": true,
+    "delim": true,
+    "cast": true,
+    "pretty": true,
+    "output_file": true,
+    "missing_input": true,
+    "empty": true
+   }
+  },
+  {
+   "model": "qwen3.8-27b-8bit-local",
+   "model_id": "gropius-s/mlx-community/Qwen3.8-27B-8bit",
+   "task": "04-algorithms",
+   "duration_s": 371.8,
+   "timed_out": false,
+   "exit_code": 0,
+   "score": 40,
+   "max": 40,
+   "checks": {
+    "tests_passed": 18,
+    "tests_total": 18,
+    "tests_unmodified": true
+   }
+  },
+  {
+   "model": "qwen3.8-27b-8bit-local",
+   "model_id": "gropius-s/mlx-community/Qwen3.8-27B-8bit",
+   "task": "05-http-api",
+   "duration_s": 679.2,
+   "timed_out": false,
+   "exit_code": 0,
+   "score": 40,
+   "max": 40,
+   "checks": {
+    "post_201": true,
+    "post_ids_increment": true,
+    "get_list": true,
+    "get_one": true,
+    "get_missing_404": true,
+    "put_merge": true,
+    "put_id_immutable": true,
+    "put_missing_404": true,
+    "bad_body_400": true,
+    "delete_204": true,
+    "deleted_gone": true,
+    "unknown_404": true
+   }
+  }
+ ]
+}

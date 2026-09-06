@@ -1,0 +1,28 @@
+# Gropius ADRs
+
+Architecture Decision Records: settled decisions, their context, the
+alternatives rejected, and their consequences. Written after the decision is
+made, so that a future reader who was not in the room can see why.
+
+An ADR is filed only when all three hold:
+
+1. **Hard to reverse.** Changing it later costs something real.
+2. **Surprising without context.** A future reader would ask "why this way?"
+3. **The result of a real trade-off.** There were genuine alternatives.
+
+Otherwise the rationale lives inline, or as a dated line in
+`.abcd/work/DECISIONS.md`. User-facing capability is an intent, not an ADR.
+
+Records are minted with `abcd decide "<title>"`, which allocates the id
+(`adr-<yymmddHHMMSS><rrrr>`), the date and the filename, and writes the four
+sections empty. The author writes the sections and sets `status: accepted`
+in the same change that puts the decision in force. Appending the row to the
+index below is a hand edit.
+
+## Index
+
+| ID | Title | Status | Date |
+|---|---|---|---|
+| [adr-2609061503319212](2609061503319212-no-public-telemetry-local-telemetry-only-as-a-strict-opt-in.md) | No public telemetry; local telemetry only, as a strict opt-in | accepted | 2026-09-06 |
+| [adr-2609061610102325](2609061610102325-the-gateway-may-rewrite-prompt-content-only-to-merge-system.md) | The gateway may rewrite prompt content only to merge system messages, per model, opt-in, and never logs, retains or counts what it reads | accepted | 2026-09-06 |
+| [adr-2609061610107154](2609061610107154-statistics-store-format-json-lines-size-rotated-per-account.md) | Statistics store format: JSON Lines, size-rotated, per account, with months and size caps in Settings | accepted | 2026-09-06 |

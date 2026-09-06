@@ -1,0 +1,165 @@
+# Decomposition calibration (itd-84 hand-run)
+
+One graded entry per proposal put through the routing table before filing.
+The corpus gates the automated pre-pass; record whether the initial routing
+survived the human's confirmation, not just the final table.
+
+## 2026-09-06 — Gropius landing page, updated on release via Cloudflare Workers
+
+Proposal as stated: "Build a Gropius landing page (intentdriven.sh/Gropius for
+now) updated via Cloudflare workers when a new release is cut."
+
+Initial routing proposed: FILE-AS-IS as one intent.
+
+| Part | Type | Home |
+| --- | --- | --- |
+| Alice opens one link and gets the current release download plus the repository | user-facing capability | intent itd-2609061353254616 |
+| The page reflects a new release without anyone editing it | user-facing capability | intent itd-2609061353258535 (builds on the first) |
+| Cloudflare Worker; pull from the Releases API vs push from release.yml | plumbing | the second intent's spec |
+| Page copy renders from the canonical identity block | existing invariant | IDENTITY.md; the first intent refines it by adding a surface |
+| Hosting at intentdriven.sh "for now" | decision | .abcd/work/DECISIONS.md, 2026-09-06 |
+| Page and Worker source location, second toolchain, dependency sign-off | scope question | open questions on both drafts, for the planning interview |
+
+Typed links: the first intent `refines` the canonical identity invariant. No
+supersedes, reverses, or duplicates. No existing `abcd site` composition.
+
+Verdict adopted by the human: SPLIT. The initial FILE-AS-IS routing did not
+survive: the human separated the static page (which already tracks the primary
+download through the latest-release asset URL) from release-driven updating,
+so the page can ship ahead of the Worker. Grade: routing of parts to homes
+held; the verdict did not.
+
+## 2026-09-06 — Expose model parameters (seed, temperature) via Settings
+
+Proposal as stated: "expose model parameters (seed, temperature) via Gropius.
+Make this configurable via Settings."
+
+Initial routing proposed: FILE-AS-IS as one intent plus one issue capture.
+
+| Part | Type | Home |
+| --- | --- | --- |
+| Alice sets default sampling parameters in Settings; requests that omit them get those values | user-facing capability | intent (sampling defaults) |
+| Reproducible generation via a seed set in Settings | user-facing capability | intent (seed), gated on the verification issue |
+| Per-request values from the client still pass through | existing behaviour | docs; stated as a scope condition on both intents |
+| Whether mlx-lm 0.31.3 honours a per-request seed | fact to establish | issue capture |
+| Precedence between request and Settings values; global vs per-model | open questions | planning interview |
+| Injecting defaults into the buffered request body | plumbing | the spec; gateway trust boundary, security review at PR |
+
+Typed links: none to existing records. The gateway's "rewrite only the model
+field" stance is a code comment, not a recorded invariant; the spec must name
+that this is the first feature merging fields into request bodies.
+
+Verdict adopted by the human: SPLIT. The initial FILE-AS-IS routing did not
+survive: the human separated temperature (and the other accepted sampling
+parameters) from seed, because seed depends on an unverified upstream
+behaviour and must not block the rest. Grade: parts-to-homes held; the
+verdict did not. Second consecutive SPLIT where FILE-AS-IS was proposed.
+
+## 2026-09-06 — Manage context size and tell clients the context size per model
+
+Proposal as stated: "Carefully manage context size and let clients know what
+the current context size is for each model (if possible)."
+
+Initial routing proposed: SPLIT into two intents, measurement as an open
+question on the second.
+
+| Part | Type | Home |
+| --- | --- | --- |
+| Alice's client reads each model's context length from the models list | user-facing capability | intent (context window visible) |
+| Gropius serves only up to the context it can hold, reports it, rejects over-long prompts clearly | user-facing capability | intent (effective context managed) |
+| Architectural cap read from the model's config at rescan | plumbing | first intent's spec |
+| Effective cap = min(architectural cap, KV headroom under the budget) | mechanism claim | second intent; refines iss-3 |
+| Measuring the effective window per model | fact to establish | issue capture |
+| Token counting in the gateway vs relying on the server's rejection | open question | planning interview |
+
+Typed links: the second intent `refines` iss-3 (memory budget ignores KV
+cache from decode concurrency). Nothing superseded or reversed.
+
+Verdict adopted by the human: SPLIT, plus an issue capture for the
+measurement. The proposed split survived; the human additionally promoted
+the measurement from an open question to its own ledger record so it is
+tracked. Grade: parts-to-homes held; verdict held with one part re-homed
+from "open question" to "issue capture". First run where the proposed
+verdict survived, after two FILE-AS-IS proposals that were split.
+
+## 2026-09-06 — Model-bench lab review: five intents and three captures
+
+Proposal as stated: the human adopted, verbatim, the list of lab-derived
+recommendations the session had presented ("All of it"). Each item had
+already been routed in that presentation, so this run records the routing
+as confirmed rather than re-proposed.
+
+| Part | Type | Home |
+| --- | --- | --- |
+| Client sees which models are loaded, picks the warm one | user-facing capability | intent (residency visible) |
+| Models Alice pins stay resident; evicting request refused | user-facing capability | intent (pinned models) |
+| Alice sets the resident memory budget in Settings | user-facing capability | intent (configurable budget) |
+| Recently used models get a grace interval; requests wait bounded time | user-facing capability | intent (eviction grace) |
+| Opt-in per-model merging of system messages | user-facing capability | intent (system-message merging); first gateway feature reading prompt content, named in its open questions |
+| Docs omit budget default, eviction rule, preload-does-not-pin | defect | issue capture, docs category |
+| KV-cache cost per architecture | evidence | appended to existing iss-3 |
+| Lab measurements and co-residency arithmetic | evidence | dated research note 2026-09-06-model-bench-findings |
+
+Typed links: the eviction-grace intent `refines` the pool's LRU rule, which is
+a code comment and README sentence rather than a recorded invariant; the
+configurable-budget intent `refines` iss-3 and iss-6 (budget accounting);
+the docs capture `refines` the README's "LRU memory budget" claim. Nothing
+superseded or reversed.
+
+Verdict adopted by the human: FILE-AS-IS for all eight parts. Grade: routing
+survived unchanged. Note for calibration: this run's routing was proposed in
+prose a turn earlier and adopted as a batch, so it is weaker evidence than a
+table confirmed part by part.
+
+## 2026-09-06 — Local telemetry: statistics, on-disk store, telemetry pack, dashboard
+
+Proposal as stated: the local-telemetry research recommendation "plus we also
+need it to be stored on disk so that we can later build a dashboard with
+insights into token use, latency etc. -- we want to use Gropius to learn
+about the use of local models; we also want to enable clients to request a
+'telemetry pack' for their session(s)".
+
+Initial routing proposed: SPLIT into three intents, dashboard drafted or held.
+
+| Part | Type | Home |
+| --- | --- | --- |
+| Opt-in statistics shown per model in the control panel | user-facing capability | intent (local request statistics) |
+| Records kept on disk with stated retention and format | user-facing capability | intent (durable store), builds on the first |
+| A client fetches a telemetry pack for its own sessions | user-facing capability | intent (telemetry pack), builds on both |
+| A dashboard over the store | user-facing capability, later | intent (usage dashboard), drafted |
+| "Learn about the use of local models" | conjecture | grounds at each gate, not a record |
+| On-disk format and retention (JSON Lines vs SQLite, a new dependency) | decision | ADR when the store's spec decides it |
+| What a session is on an API with none; who may fetch whose pack | trust-boundary rule | open question on the pack intent; likely its own ADR |
+| No prompt text, completions, keys or client addresses in statistics | existing invariant | adr-2609061503319212; all four refine it |
+
+Typed links: all four `refine` adr-2609061503319212. The statistics intent
+`refines` itd-2609061441228998 (residency visible). Context-fill figures
+depend on itd-2609061431463108. The research note's advice against SQLite
+was scoped to a bounded ring; a durable dataset reopens it, no reversal.
+
+Verdict adopted by the human: SPLIT, with the dashboard drafted as a fourth
+intent. Grade: parts-to-homes held; the verdict held, with the human choosing
+the "draft it" branch of the one open choice offered.
+
+## 2026-09-06 — Planning interview across the store: re-routing after review
+
+The interactive planning interview (fifteen drafts, two adversarial
+reviewers per theme) changed four earlier routings. Recorded here because a
+decomposition that survives filing and then falls at planning is the signal
+the calibration corpus exists to catch.
+
+| Record | Earlier routing | Outcome at planning | Why |
+| --- | --- | --- | --- |
+| itd-2609061429516182 (seed in Settings) | intent, gated on a verification issue | superseded by itd-2609061429508050 | The verification found the server ignores seed entirely; the capability cannot exist. A gated intent was the wrong home for an unverified premise; a capture plus a documented fact would have sufficed. |
+| itd-2609061521134968 (telemetry pack) | intent, with an access-rule ADR to follow | dropped, superseded by adr-2609061503319212 | Both reviewers found it contradicted the ADR's "for the operator of that Mac". The decomposition should have flagged the reversal at filing rather than routing the conflict to a future ADR. |
+| itd-2609061431481936 (effective context) | intent, refines iss-3 | held | Needs an ADR on the budget rule and a measurement now confounded by a newly found gateway timeout; three prerequisites, none in the original table. |
+| itd-2609061602043757 (summary before deletion) | not present | new intent, builds on the store | Surfaced by the maintainer while answering the retention question; the store's decomposition missed that deleting detailed records loses the history the dashboard exists for. |
+
+Two ADRs were minted at planning rather than filed as parts at capture time
+(store format; the gateway's one permitted prompt rewrite); both had been
+named as "ADR when the spec decides" in earlier tables, which held.
+
+Grade for the corpus: of fifteen filed intents, eleven survived the
+interview as routed, one was re-homed as a new intent's parent, and three
+changed bucket. The two that fell were both cases where a trust-boundary or
+upstream-behaviour question had been routed forward instead of resolved.

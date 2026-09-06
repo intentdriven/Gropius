@@ -1,0 +1,281 @@
+{
+ "mlx-community/Qwen3-Coder-Next-4bit": {
+  "temp0_deterministic": true,
+  "seed_honoured": true,
+  "seed_differentiates": false,
+  "temperature_effective": true,
+  "load_first_call_s": 0.9,
+  "detail": {
+   "A1_temp0": {
+    "text": "apple  \nmountain  \nwhisper  \ngalaxy  \nkangaroo  \numbrella  \nhorizon  \nbutterfly",
+    "ttft_total_s": 0.9,
+    "completion_tokens": 25,
+    "finish": "stop",
+    "msg_keys": [
+     "role",
+     "content"
+    ]
+   },
+   "A2_temp0": {
+    "text": "apple  \nmountain  \nwhisper  \ngalaxy  \nkangaroo  \numbrella  \nhorizon  \nbutterfly",
+    "ttft_total_s": 0.4,
+    "completion_tokens": 25,
+    "finish": "stop",
+    "msg_keys": [
+     "role",
+     "content"
+    ]
+   },
+   "B1_seed42": {
+    "text": "luminous  \nquasar  \nfjord  \ngossamer  \npetrichor  \nlimerick  \nzenith  \nmurmur",
+    "ttft_total_s": 0.4,
+    "completion_tokens": 30,
+    "finish": "stop",
+    "msg_keys": [
+     "role",
+     "content"
+    ]
+   },
+   "B2_seed42": {
+    "text": "luminous  \nquasar  \nfjord  \ngossamer  \npetrichor  \nlimerick  \nzenith  \nmurmur",
+    "ttft_total_s": 0.4,
+    "completion_tokens": 30,
+    "finish": "stop",
+    "msg_keys": [
+     "role",
+     "content"
+    ]
+   },
+   "B3_seed999": {
+    "text": "luminous  \nquasar  \nfjord  \ngossamer  \npetrichor  \nlimerick  \nzenith  \nmurmur",
+    "ttft_total_s": 0.4,
+    "completion_tokens": 30,
+    "finish": "stop",
+    "msg_keys": [
+     "role",
+     "content"
+    ]
+   },
+   "B4_temp15": {
+    "text": "\u9c91\u9c91\u9c91\u9c91\u9c91\u9c91\u9c91\u9c91\u9c91\u9c91\u9c91\u9c91\u9c91\u9c91\u9c91\u9c91\u9c91\u9c91\u9c91\u9c91\u9c91\u9c91\u9c91\u9c91\u9c91\u9c91\u9c91\u9c91\u9c91\u9c91\u9c91\u9c91\u9c91\u9c91\u9c91\u9c91\u9c91\u9c91\u9c91\u9c91\u9c91\u9c91\u9c91\u9c91\u9c91\u9c91\u9c91\u9c91\u9c91\u9c91\u9c91\u9c91\u9c91\u9c91\u9c91\u9c91\u9c91\u9c91\u9c91\u9c91\u9c91\u9c91\u9c91\u9c91",
+    "ttft_total_s": 1.0,
+    "completion_tokens": 64,
+    "finish": "length",
+    "msg_keys": [
+     "role",
+     "content"
+    ]
+   }
+  }
+ },
+ "mlx-community/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-4bit": {
+  "temp0_deterministic": true,
+  "seed_honoured": true,
+  "seed_differentiates": false,
+  "temperature_effective": true,
+  "load_first_call_s": 0.8,
+  "detail": {
+   "A1_temp0": {
+    "text": "Here's a thinking process:\n\n1.  **Analyze User Input:**\n   - User wants: \"List eight arbitrary English words, one per line.\"\n   - Constraints: No numbering, no commentary.\n   - Format: Just 8 words, each on its own line.\n\n2.  **Identify Requirements",
+    "ttft_total_s": 0.8,
+    "completion_tokens": 64,
+    "finish": "length",
+    "msg_keys": [
+     "role",
+     "reasoning"
+    ]
+   },
+   "A2_temp0": {
+    "text": "Here's a thinking process:\n\n1.  **Analyze User Input:**\n   - User wants: \"List eight arbitrary English words, one per line.\"\n   - Constraints: No numbering, no commentary.\n   - Format: Just 8 words, each on its own line.\n\n2.  **Identify Requirements",
+    "ttft_total_s": 0.6,
+    "completion_tokens": 64,
+    "finish": "length",
+    "msg_keys": [
+     "role",
+     "reasoning"
+    ]
+   },
+   "B1_seed42": {
+    "text": "Here's a thinking process:\n\n1.  **Analyze User Input:**\n   - \"List eight arbitrary English words, one per line.\"\n   - \"No numbering, no commentary.\"\n   - So output should be exactly 8 lines, each containing one English word, no numbers, no extra text/commentary.",
+    "ttft_total_s": 0.6,
+    "completion_tokens": 64,
+    "finish": "length",
+    "msg_keys": [
+     "role",
+     "reasoning"
+    ]
+   },
+   "B2_seed42": {
+    "text": "Here's a thinking process:\n\n1.  **Analyze User Input:**\n   - \"List eight arbitrary English words, one per line.\"\n   - \"No numbering, no commentary.\"\n   - So output should be exactly 8 lines, each containing one English word, no numbers, no extra text/commentary.",
+    "ttft_total_s": 0.5,
+    "completion_tokens": 64,
+    "finish": "length",
+    "msg_keys": [
+     "role",
+     "reasoning"
+    ]
+   },
+   "B3_seed999": {
+    "text": "Here's a thinking process:\n\n1.  **Analyze User Input:**\n   - \"List eight arbitrary English words, one per line.\"\n   - \"No numbering, no commentary.\"\n   - So output should be exactly 8 lines, each containing one English word, no numbers, no extra text/commentary.",
+    "ttft_total_s": 0.5,
+    "completion_tokens": 64,
+    "finish": "length",
+    "msg_keys": [
+     "role",
+     "reasoning"
+    ]
+   },
+   "B4_temp15": {
+    "text": "Here's a thinking process:\n\n1.  Read and understand the user's request.\n   - List eight arbitrary English words.\n   - One per line.\n   - No numbering.\n   - No commentary.\n\n2.  Identify the key constraints:\n   - Exactly eight words.\n   - All must be English words",
+    "ttft_total_s": 0.6,
+    "completion_tokens": 64,
+    "finish": "length",
+    "msg_keys": [
+     "role",
+     "reasoning"
+    ]
+   }
+  }
+ },
+ "mlx-community/GLM-4.7-Flash-8bit": {
+  "temp0_deterministic": true,
+  "seed_honoured": true,
+  "seed_differentiates": false,
+  "temperature_effective": true,
+  "load_first_call_s": 8.5,
+  "detail": {
+   "A1_temp0": {
+    "text": "1.  **Analyze the Request:**\n    *   **Task:** List eight arbitrary English words.\n    *   **Format:** One word per line.\n    *   **Constraints:** No numbering, no commentary.\n\n2.  **Select Words:**\n    *   I need 8 distinct, common English",
+    "ttft_total_s": 8.5,
+    "completion_tokens": 64,
+    "finish": "length",
+    "msg_keys": [
+     "role",
+     "reasoning"
+    ]
+   },
+   "A2_temp0": {
+    "text": "1.  **Analyze the Request:**\n    *   **Task:** List eight arbitrary English words.\n    *   **Format:** One word per line.\n    *   **Constraints:** No numbering, no commentary.\n\n2.  **Select Words:**\n    *   I need 8 distinct, common English",
+    "ttft_total_s": 1.1,
+    "completion_tokens": 64,
+    "finish": "length",
+    "msg_keys": [
+     "role",
+     "reasoning"
+    ]
+   },
+   "B1_seed42": {
+    "text": "1.  **Analyze the Request:**\n    *   Quantity: Eight words.\n    *   Format: One per line.\n    *   Constraints: No numbering, no commentary.\n\n2.  **Generate Words:**\n    *   I need arbitrary English words. \"Arbitrary\" means chosen at random or",
+    "ttft_total_s": 1.1,
+    "completion_tokens": 64,
+    "finish": "length",
+    "msg_keys": [
+     "role",
+     "reasoning"
+    ]
+   },
+   "B2_seed42": {
+    "text": "1.  **Analyze the Request:**\n    *   Quantity: Eight words.\n    *   Format: One per line.\n    *   Constraints: No numbering, no commentary.\n\n2.  **Generate Words:**\n    *   I need arbitrary English words. \"Arbitrary\" means chosen at random or",
+    "ttft_total_s": 1.6,
+    "completion_tokens": 64,
+    "finish": "length",
+    "msg_keys": [
+     "role",
+     "reasoning"
+    ]
+   },
+   "B3_seed999": {
+    "text": "1.  **Analyze the Request:**\n    *   Quantity: Eight words.\n    *   Format: One per line.\n    *   Constraints: No numbering, no commentary.\n\n2.  **Generate Words:**\n    *   I need arbitrary English words. \"Arbitrary\" means chosen at random or",
+    "ttft_total_s": 1.8,
+    "completion_tokens": 64,
+    "finish": "length",
+    "msg_keys": [
+     "role",
+     "reasoning"
+    ]
+   },
+   "B4_temp15": {
+    "text": "1.  **Analyze the Request:**\n    *   Quantity: 8 words.\n    *   Language: English.\n    *   Format: One per line.\n    *   Constraints: No numbering, no commentary.\n\n2.  **Definition Strategy (Definition Strategy):**\n    *   Strategy 1 (",
+    "ttft_total_s": 1.1,
+    "completion_tokens": 64,
+    "finish": "length",
+    "msg_keys": [
+     "role",
+     "reasoning"
+    ]
+   }
+  }
+ },
+ "mlx-community/Qwen3.8-27B-8bit": {
+  "temp0_deterministic": true,
+  "seed_honoured": true,
+  "seed_differentiates": false,
+  "temperature_effective": true,
+  "load_first_call_s": 11.9,
+  "detail": {
+   "A1_temp0": {
+    "text": "We need to answer user: \"List eight arbitrary English words, one per line. No numbering, no commentary.\" Need final only 8 words one per line. Ensure arbitrary English words. No numbering/commentary. Could be:\napple\nbridge\ncandle\ndrift\nember\nfable\ngrove",
+    "ttft_total_s": 11.9,
+    "completion_tokens": 64,
+    "finish": "length",
+    "msg_keys": [
+     "role",
+     "reasoning"
+    ]
+   },
+   "A2_temp0": {
+    "text": "We need to answer user: \"List eight arbitrary English words, one per line. No numbering, no commentary.\" Need final only 8 words one per line. Ensure arbitrary English words. No numbering/commentary. Could be:\napple\nbridge\ncandle\ndrift\nember\nfable\ngrove",
+    "ttft_total_s": 4.2,
+    "completion_tokens": 64,
+    "finish": "length",
+    "msg_keys": [
+     "role",
+     "reasoning"
+    ]
+   },
+   "B1_seed42": {
+    "text": "apple\nbridge\ncloud\ndrift\nember\nflint\ngrove",
+    "ttft_total_s": 4.2,
+    "completion_tokens": 64,
+    "finish": "length",
+    "msg_keys": [
+     "role",
+     "content",
+     "reasoning"
+    ]
+   },
+   "B2_seed42": {
+    "text": "apple\nbridge\ncloud\ndrift\nember\nflint\ngrove",
+    "ttft_total_s": 4.1,
+    "completion_tokens": 64,
+    "finish": "length",
+    "msg_keys": [
+     "role",
+     "content",
+     "reasoning"
+    ]
+   },
+   "B3_seed999": {
+    "text": "apple\nbridge\ncloud\ndrift\nember\nflint\ngrove",
+    "ttft_total_s": 4.1,
+    "completion_tokens": 64,
+    "finish": "length",
+    "msg_keys": [
+     "role",
+     "content",
+     "reasoning"
+    ]
+   },
+   "B4_temp15": {
+    "text": "We need to answer user: \"List eight arbitrary English words, one per line. No numbering, no commentary.\" Simple. Output exactly 8 lines, arbitrary English words. Ensure no numbering/commentary. Could be common words: ultrap ultrap ultrap ultrap ultrap ultrap ultrap ultrap ultrap ultrap ultrap ultrap ultrap ultrap ultrap ultrap ultrap ultrap",
+    "ttft_total_s": 4.4,
+    "completion_tokens": 64,
+    "finish": "length",
+    "msg_keys": [
+     "role",
+     "reasoning"
+    ]
+   }
+  }
+ }
+}
