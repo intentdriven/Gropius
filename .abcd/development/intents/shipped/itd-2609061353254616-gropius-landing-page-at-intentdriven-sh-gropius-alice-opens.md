@@ -106,7 +106,8 @@ counts stay flat after the page ships.
 
 ## Audit Notes
 
-_Empty. Populated by intent-auditor when intent moves to shipped/._
+<!-- abcd-review: OWED receipt=rcp-4e582cc5457f -->
+Fidelity review OWED (receipt rcp-4e582cc5457f).
 
 ## Grounds
 
