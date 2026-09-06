@@ -710,9 +710,15 @@ func streamRewriteSSE(w http.ResponseWriter, src io.Reader, modelArg, requested 
 			} else if isBlankLine(line) && dropBlank {
 				dropBlank = false
 				continue
-			} else if _, werr := w.Write(line); werr != nil {
-				out.truncated = true
-				return out
+			} else {
+				// Anything else relayed ends the removed event's reach: only
+				// the blank line immediately after it belongs to it, and a
+				// later blank belongs to whatever came between.
+				dropBlank = false
+				if _, werr := w.Write(line); werr != nil {
+					out.truncated = true
+					return out
+				}
 			}
 			// A flush error means the connection does not support flushing; the
 			// data is still written, so keep going rather than truncating.

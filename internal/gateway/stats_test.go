@@ -571,3 +571,34 @@ func TestTheFirstChunkOfAnAnswerIsWhatIsTimed(t *testing.T) {
 		}
 	}
 }
+
+// Removing an event takes the blank line that terminates it and nothing else.
+// A line between the removed event and the next blank one is a line that owns
+// that blank, and swallowing it would leave the client's stream one
+// terminator short.
+func TestRemovingTheCountsEventTakesOnlyItsOwnTerminator(t *testing.T) {
+	// The comment line between the removed event and the next blank one is
+	// what makes this test bite: the blank belongs to the comment, not to the
+	// event that was removed two lines earlier.
+	body := "data: {\"model\":\"backend\",\"choices\":[{\"index\":0}]}\n\n" +
+		"data: {\"model\":\"backend\",\"choices\":[],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":2}}\n" +
+		": keep-alive\n\n" +
+		"data: [DONE]\n\n"
+	want := "data: {\"choices\":[{\"index\":0}],\"model\":\"friendly\"}\n\n" +
+		": keep-alive\n\n" +
+		"data: [DONE]\n\n"
+
+	w := httptest.NewRecorder()
+	out := streamRewriteSSE(w, strings.NewReader(body), "backend", "friendly",
+		relayOptions{observing: true, keepUsage: false})
+
+	if got := w.Body.String(); got != want {
+		t.Errorf("the relayed stream is\n%q\nwant\n%q", got, want)
+	}
+	if out.usage == nil || out.usage.Completion != 2 {
+		t.Errorf("the counts were removed without being read: %+v", out.usage)
+	}
+	if out.truncated {
+		t.Error("a stream that ran to its end was reported as cut short")
+	}
+}
