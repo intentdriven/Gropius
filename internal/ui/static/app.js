@@ -15,13 +15,31 @@ function bytes(n) {
 
 // contextLabel renders a model's architectural maximum context for its card.
 // The label says "max context" so the figure is not read as the window this
-// Mac can hold at once, which is a smaller and separate number. The result is
-// composed from a number, so it is safe in the innerHTML the card is built
-// from; anything that is not a positive number gives no label at all.
+// Mac can hold at once, which is a smaller and separate number. The
+// abbreviation rounds DOWN: rounding 262,143 up to 256K would show a token
+// more than the model declares, and under-reporting is the safe direction for
+// a reader sizing a prompt from the card. The result is composed from a
+// number, so it is safe in the innerHTML the card is built from; anything
+// that is not a positive number gives no label at all.
 function contextLabel(m) {
   const n = m.context_length;
   if (typeof n !== 'number' || !Number.isFinite(n) || n <= 0) return '';
-  return `max context ${n >= 1024 ? `${Math.round(n / 1024)}K` : n}`;
+  return `max context ${n >= 1024 ? `${Math.floor(n / 1024)}K` : n}`;
+}
+
+// modelInfoLine is the whole info line of a model's card: what it says
+// about a download in flight, a failure, or a model on disk. It is a pure
+// function of the model, so the panel's one piece of real logic can be
+// tested without a DOM (see panel_test.go); renderModels does nothing with
+// it but place the string it returns.
+function modelInfoLine(m) {
+  if (m.state === 'downloading') {
+    const of = m.size_bytes ? ` of ${bytes(m.size_bytes)}` : '';
+    return `downloading… ${m.progress.toFixed(0)}%${of}`;
+  }
+  if (m.state === 'failed') return escapeHtml(m.err || 'failed');
+  const ctx = contextLabel(m);
+  return ctx ? `${bytes(m.bytes)} · ${ctx}` : bytes(m.bytes);
 }
 
 async function api(path, opts) {
@@ -121,17 +139,7 @@ function renderModels() {
       : '<span class="pill ready">ready</span>';
     else if (m.state === 'failed') pill = '<span class="pill failed">failed</span>';
 
-    let info = '';
-    if (m.state === 'downloading') {
-      const of = m.size_bytes ? ` of ${bytes(m.size_bytes)}` : '';
-      info = `downloading… ${m.progress.toFixed(0)}%${of}`;
-    } else if (m.state === 'failed') {
-      info = escapeHtml(m.err || 'failed');
-    } else {
-      info = bytes(m.bytes);
-      const ctx = contextLabel(m);
-      if (ctx) info += ` · ${ctx}`;
-    }
+    const info = modelInfoLine(m);
 
     card.innerHTML = `
       <div class="meta">
