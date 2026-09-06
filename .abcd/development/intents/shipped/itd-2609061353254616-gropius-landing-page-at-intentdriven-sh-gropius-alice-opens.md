@@ -103,11 +103,16 @@ counts stay flat after the page ships.
   for it.
 - Depends on: iss-2609061543584785, which raises the app bundle's declared
   minimum to the version the page promises.
+- As built: the renderer, the identity check and the checks behind criteria 1
+  and 7 differ from what the spec described. The divergences are stated in the
+  spec's "As built (2026-09-06)" section.
 
 ## Audit Notes
 
 <!-- abcd-review: OWED receipt=rcp-4e582cc5457f -->
-Fidelity review OWED (receipt rcp-4e582cc5457f).
+Fidelity review OWED (receipt rcp-4e582cc5457f). The audit runs after the
+branch merges: it reads the delivered diff against these acceptance criteria,
+and the diff is not final until review closes.
 
 ## Grounds
 

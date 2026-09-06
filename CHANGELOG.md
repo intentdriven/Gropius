@@ -31,6 +31,11 @@ GitHub release notes.
 
 ### Changed
 
+- The app icon is redrawn as the four-form mark — a yellow triangle, a grey
+  square, a blue square and a red circle on a dark tile — and `build/icon.svg`
+  is now its source. The shipped icon used different shapes and colours, so the
+  Dock and menu-bar icon changes with this release. The landing page draws the
+  same mark, so the icon on the page is the one that arrives in the Dock.
 - The server's request log records the method, path, status and duration of a
   request, and never the client's network address. A handler panic is reported
   the same way, so no line the server writes identifies a caller.

@@ -195,3 +195,41 @@ boundary this record does move is the release chain's:
 - Whether `internal/sitetest` renders through the tool's binary or against a
   committed golden render is the implementer's call; the bars above must hold
   either way, and `make test` must not require a network.
+
+## As built (2026-09-06)
+
+Three things this record describes were built differently. They are stated here
+rather than edited into the paragraphs above, so what was planned and what
+shipped both stay readable.
+
+**The renderer is `cmd/gropius-site`, not `abcd site`.** abcd's `site` verb
+renders its own fixed site shape — a home page plus chapters from `docs/` — and
+its manifest schema carries no template key, so it cannot render this page
+today. A standard-library renderer in this repository composes it instead, from
+the same `.abcd/site.json` manifest in abcd's identity/ui_strings shape, so the
+verb can take the page over when it grows the capability
+(itd-2609061543533170 in that repository). Consequently `abcd site check` — and
+with it the hero gate, the mobile gate and the browser leg this record names —
+does not exist in this repository's flow.
+
+**`abcd identity` does not run in CI; `make site` plus a Go test hold the
+surface.** The `landing-hero` surface is registered and names the rendered page,
+which is a build artefact, so on an unrendered checkout the check reports it
+*absent* and stays green. What holds the page to the block on every run is
+`internal/sitetest`, which renders the page, compiles that surface's own
+patterns from `.abcd/positioning.json`, runs them over the render and compares
+the capture with the block — and which also binds the registration to the path
+`make site` writes. Running the identity binary in CI was declined for now: it
+is not installed on the runners, and fetching another repository's release into
+this repository's release path needs its own sign-off.
+
+**Criteria 1 and 7 are held by static models, with no browser leg.** Criterion 1
+sums the stylesheet's own paddings, type sizes, leadings and tracking at
+1280x800, estimates how many rows the two actions occupy, and fails if the
+download button starts below the fold. Criterion 7 asserts the viewport meta,
+the scrolling container above the install block, `img { max-width: 100% }`, the
+absence of any fixed width above 390px, and that the download button is the
+first action. Neither observes a rendered viewport: `make test` reaches no
+browser and no network, which this record requires of it. The residual is
+stated plainly — a font-metric change can move the real layout without moving
+the model — and the models are labelled as models where they are implemented.
