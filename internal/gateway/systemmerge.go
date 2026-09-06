@@ -3,6 +3,7 @@ package gateway
 import (
 	"encoding/json"
 	"strings"
+	"unicode/utf8"
 )
 
 // chatCompletionsPath is the one route on which merging can apply. A plain
@@ -41,21 +42,50 @@ const mergedSystemSeparator = "\n\n"
 // which is the boundary internal/archtest holds Gropius to.
 const messagesField = "messages"
 
-// mergeSystemMessagesInto folds the system messages of a buffered chat
-// completion request, in place, and reports whether it rewrote anything. The
-// caller hands over the whole request and learns nothing about its contents.
-func mergeSystemMessagesInto(payload map[string]json.RawMessage) bool {
-	merged, ok := mergeSystemMessages(payload[messagesField])
-	if !ok {
-		return false
+// mergeOutcome says what merging did with a request, so the caller can tell a
+// conversation that needed no rewrite from one it could not rewrite. Reporting
+// both as "not merged" put a line in the log for every ordinary request and
+// told the operator their client's messages were unreadable when they were
+// simply already in order.
+type mergeOutcome int
+
+const (
+	// mergeNotNeeded: the conversation is already the shape the template
+	// wants, so it is relayed untouched.
+	mergeNotNeeded mergeOutcome = iota
+	// mergeDone: the messages were folded.
+	mergeDone
+	// mergeRefused: a shape merging cannot rebuild faithfully. Relayed
+	// untouched, and worth a line in the log, because the operator switched
+	// merging on and is not getting it.
+	mergeRefused
+)
+
+func (o mergeOutcome) String() string {
+	switch o {
+	case mergeNotNeeded:
+		return "not needed"
+	case mergeDone:
+		return "done"
+	default:
+		return "refused"
 	}
-	payload[messagesField] = merged
-	return true
+}
+
+// mergeSystemMessagesInto folds the system messages of a buffered chat
+// completion request, in place, and reports what it did. The caller hands over
+// the whole request and learns nothing about its contents beyond that.
+func mergeSystemMessagesInto(payload map[string]json.RawMessage) mergeOutcome {
+	merged, outcome := mergeSystemMessages(payload[messagesField])
+	if outcome == mergeDone {
+		payload[messagesField] = merged
+	}
+	return outcome
 }
 
 // mergeSystemMessages folds every system-role message of a chat completion's
 // messages array into a single leading system message, returning the rebuilt
-// array and whether it rebuilt one.
+// array and what it did.
 //
 // This is the only place in Gropius that reads the content of a request's
 // messages, it runs only for a model the operator switched merging on for, and
@@ -73,40 +103,52 @@ func mergeSystemMessagesInto(payload map[string]json.RawMessage) bool {
 // is carried over as its original bytes, so its content reaches the model
 // exactly as the client sent it.
 //
-// It returns false — relay the request exactly as it came — for every shape it
-// cannot rebuild faithfully, rather than rebuild one lossily:
+// The merged message is the conversation's own leading system message with its
+// content replaced by the join, when the conversation begins with one. Its
+// other fields — a name, a cache directive — therefore stay on the message
+// that owned them, and nothing is invented: the later instructions are
+// appended to the text of the message that was already there. A conversation
+// that does not begin with a system message has no such owner, so the merged
+// message is written from role and content alone.
+//
+// It returns mergeRefused — relay the request exactly as it came — for every
+// shape it cannot rebuild faithfully, rather than rebuild one lossily:
 //
 //   - an array it cannot decode, or an element that is not an object;
-//   - a system message whose content is not a plain string (a list of content
-//     parts, say) or is absent;
-//   - a system message carrying any field beyond "role" and "content", since
-//     the merged message is written from those two alone and the rest would
-//     silently go missing;
-//   - the conversations that need no rewrite at all, which are the ones with
-//     no system message and the ones whose single system message is already
-//     leading — rewriting those would re-encode a message that was already the
-//     shape the template wants.
-func mergeSystemMessages(raw json.RawMessage) (json.RawMessage, bool) {
+//   - a system message whose content is not a plain string: a list of content
+//     parts, JSON null, absent, or bytes that are not valid UTF-8, which Go's
+//     own string decoding would quietly repair into characters the client
+//     never sent;
+//   - a system message that is not the leading one and carries any field
+//     beyond "role" and "content". Its text is appended to another message, so
+//     a name on it would have to be dropped or reattributed, and neither is
+//     something the gateway gets to decide.
+//
+// It returns mergeNotNeeded for the conversations that are already the shape
+// the template wants — no system message, or a single one already leading —
+// which are relayed untouched and are not a refusal.
+func mergeSystemMessages(raw json.RawMessage) (json.RawMessage, mergeOutcome) {
 	var elements []json.RawMessage
 	if err := json.Unmarshal(raw, &elements); err != nil {
-		return nil, false
+		return nil, mergeRefused
 	}
 
 	var (
-		texts         []string
-		others        []json.RawMessage
-		firstSystemAt = -1
+		texts   []string
+		others  []json.RawMessage
+		leading map[string]json.RawMessage
+		systems int
 	)
 	for i, element := range elements {
 		var fields map[string]json.RawMessage
 		if err := json.Unmarshal(element, &fields); err != nil {
-			return nil, false // not an object; not a conversation this can rebuild
+			return nil, mergeRefused // not an object; not a conversation this can rebuild
 		}
 
 		var role string
 		if raw, ok := fields[roleField]; ok {
 			if err := json.Unmarshal(raw, &role); err != nil {
-				return nil, false
+				return nil, mergeRefused
 			}
 		}
 		if role != systemRole {
@@ -115,44 +157,79 @@ func mergeSystemMessages(raw json.RawMessage) (json.RawMessage, bool) {
 			others = append(others, element)
 			continue
 		}
+		systems++
 
-		// A merged message is written from these two fields alone, so a system
-		// message carrying anything else — a name, a cache directive, a
-		// case-variant of either key — is one merging cannot rebuild without
-		// quietly dropping part of it. Relay the request instead.
-		if len(fields) != 2 {
-			return nil, false
-		}
-		// The one content read, and only for the role whose position the
-		// template objects to.
-		raw, ok := fields[contentField]
+		text, ok := instructionText(fields)
 		if !ok {
-			return nil, false
+			return nil, mergeRefused
 		}
-		var text string
-		if err := json.Unmarshal(raw, &text); err != nil {
-			return nil, false // a list of content parts, say
+		if i == 0 {
+			// The message the merged one is built from: everything it carries
+			// besides its text is kept, because it keeps its own identity.
+			leading = fields
+		} else if len(fields) != 2 {
+			// Its text is about to be appended to another message. Anything
+			// else it carries has nowhere faithful to go.
+			return nil, mergeRefused
 		}
-		if firstSystemAt < 0 {
-			firstSystemAt = i
+		// An instruction that renders to nothing contributes nothing, rather
+		// than a separator with no text on one side of it.
+		if text != "" {
+			texts = append(texts, text)
 		}
-		texts = append(texts, text)
 	}
 
-	if len(texts) == 0 || (len(texts) == 1 && firstSystemAt == 0) {
-		return nil, false // already the shape the template wants
+	if systems == 0 || (systems == 1 && leading != nil) {
+		return nil, mergeNotNeeded // already the shape the template wants
 	}
 
-	merged, err := json.Marshal(map[string]string{
-		"role":    systemRole,
-		"content": strings.Join(texts, mergedSystemSeparator),
-	})
+	content, err := json.Marshal(strings.Join(texts, mergedSystemSeparator))
 	if err != nil {
-		return nil, false
+		return nil, mergeRefused
 	}
-	rebuilt, err := json.Marshal(append([]json.RawMessage{merged}, others...))
+	merged := leading
+	if merged == nil {
+		role, err := json.Marshal(systemRole)
+		if err != nil {
+			return nil, mergeRefused
+		}
+		merged = map[string]json.RawMessage{roleField: role}
+	}
+	merged[contentField] = content
+
+	mergedRaw, err := json.Marshal(merged)
 	if err != nil {
-		return nil, false
+		return nil, mergeRefused
 	}
-	return rebuilt, true
+	rebuilt, err := json.Marshal(append([]json.RawMessage{mergedRaw}, others...))
+	if err != nil {
+		return nil, mergeRefused
+	}
+	return rebuilt, mergeDone
+}
+
+// instructionText returns the text of a system message's content, and whether
+// it is text merging can join at all.
+//
+// The UTF-8 check is on the bytes as they arrived, not on the decoded string:
+// decoding is what does the damage. Go replaces an invalid byte sequence with
+// U+FFFD and re-encodes it as valid UTF-8, so a merged prompt would carry
+// characters the client never sent while an unmerged relay passes the same
+// bytes through untouched. Substituting a character is a rewrite of content
+// beyond merging, so a request carrying one is relayed instead.
+func instructionText(fields map[string]json.RawMessage) (string, bool) {
+	raw, ok := fields[contentField]
+	if !ok {
+		return "", false
+	}
+	if !utf8.Valid(raw) {
+		return "", false
+	}
+	// A pointer tells JSON null apart from an empty string: null is the
+	// canonical absent value and is refused with the absent one.
+	var text *string
+	if err := json.Unmarshal(raw, &text); err != nil || text == nil {
+		return "", false
+	}
+	return *text, true
 }

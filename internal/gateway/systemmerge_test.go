@@ -2,8 +2,10 @@ package gateway
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -180,20 +182,75 @@ func TestMergingMovesALoneSystemMessageToTheFront(t *testing.T) {
 	}
 }
 
-// A conversation whose system message is already the leading one needs no
-// rewrite, and must not get one: rebuilding it would re-encode a message from
-// the two fields merging knows and drop anything else it carries.
+// A conversation whose only system message is already the leading one is
+// already the shape the template wants, so it is not rebuilt at all. The
+// fixture carries nothing but role and content, so the only thing that can
+// leave it alone is the guard for that case.
 func TestMergingLeavesAnAlreadyLeadingSystemMessageAlone(t *testing.T) {
 	srv, _, fake, _ := newMergeGateway(t, mergingOn)
 
 	in := []any{
-		map[string]any{"role": "system", "content": "You are Alice's assistant.", "name": "house-rules"},
+		map[string]any{"role": "system", "content": "You are Alice's assistant."},
 		map[string]any{"role": "user", "content": "hi"},
 	}
 	got := postMerge(t, srv, fake, map[string]any{"model": mergeModel, "messages": in})
 
 	if want := decodedMessages(t, in); !reflect.DeepEqual(got, want) {
 		t.Errorf("upstream messages =\n %#v\nwant them untouched\n %#v", got, want)
+	}
+}
+
+// The merged message is the conversation's own leading system message with its
+// text extended, not a new message written from scratch, so a field the client
+// put on that message — a name, a cache directive — stays on the message that
+// owned it. Nothing is invented: the later instructions are appended to the
+// text of the message that was already there.
+func TestMergingKeepsTheLeadingSystemMessagesOwnFields(t *testing.T) {
+	srv, _, fake, _ := newMergeGateway(t, mergingOn)
+
+	got := postMerge(t, srv, fake, map[string]any{
+		"model": mergeModel,
+		"messages": []any{
+			map[string]any{"role": "system", "content": "You are Alice's assistant.", "name": "house-rules"},
+			map[string]any{"role": "user", "content": "hi"},
+			map[string]any{"role": "system", "content": "Answer briefly."},
+		},
+	})
+
+	want := decodedMessages(t, []any{
+		map[string]any{
+			"role":    "system",
+			"content": "You are Alice's assistant.\n\nAnswer briefly.",
+			"name":    "house-rules",
+		},
+		map[string]any{"role": "user", "content": "hi"},
+	})
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("upstream messages =\n %#v\nwant\n %#v", got, want)
+	}
+}
+
+// An instruction message that renders to nothing — an unset system-prompt
+// setting, a template with nothing in it — must not put a blank line at the
+// front of the merged prompt, which is text the client never sent.
+func TestMergingDropsEmptyInstructionsFromTheJoin(t *testing.T) {
+	srv, _, fake, _ := newMergeGateway(t, mergingOn)
+
+	got := postMerge(t, srv, fake, map[string]any{
+		"model": mergeModel,
+		"messages": []any{
+			map[string]any{"role": "system", "content": ""},
+			map[string]any{"role": "user", "content": "hi"},
+			map[string]any{"role": "system", "content": "Answer briefly."},
+		},
+	})
+
+	want := decodedMessages(t, []any{
+		map[string]any{"role": "system", "content": "Answer briefly."},
+		map[string]any{"role": "user", "content": "hi"},
+	})
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("upstream messages =\n %#v\nwant\n %#v", got, want)
 	}
 }
 
@@ -289,6 +346,58 @@ func TestMergingMatchesTheResolvedModelNotTheRequestedName(t *testing.T) {
 	}
 }
 
+// The log line is for the operator who switched merging on and is not getting
+// it. A conversation that was already in order is the ordinary case, not a
+// problem, and must not put a line in the log on every request — which is also
+// what keeps the line's own wording true when it does appear.
+func TestOnlyARefusalIsLogged(t *testing.T) {
+	cases := []struct {
+		name     string
+		messages []any
+		wantLine bool
+	}{
+		{
+			name: "already in order",
+			messages: []any{
+				map[string]any{"role": "system", "content": "You are Alice's assistant."},
+				map[string]any{"role": "user", "content": "hi"},
+			},
+		},
+		{
+			name:     "nothing to merge",
+			messages: []any{map[string]any{"role": "user", "content": "hi"}},
+		},
+		{
+			name: "merged",
+			messages: []any{
+				map[string]any{"role": "system", "content": "You are Alice's assistant."},
+				map[string]any{"role": "user", "content": "hi"},
+				map[string]any{"role": "system", "content": "Answer briefly."},
+			},
+		},
+		{
+			name: "refused",
+			messages: []any{
+				map[string]any{"role": "user", "content": "hi"},
+				map[string]any{"role": "system", "content": []any{map[string]any{"type": "text", "text": "a"}}},
+				map[string]any{"role": "system", "content": "b"},
+			},
+			wantLine: true,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			srv, _, fake, rec := newMergeGateway(t, mergingOn)
+			postMerge(t, srv, fake, map[string]any{"model": mergeModel, "messages": c.messages})
+
+			logged := strings.Contains(rec.text(), "unmerged")
+			if logged != c.wantLine {
+				t.Errorf("logged=%v, want %v. Log was:\n%s", logged, c.wantLine, rec.text())
+			}
+		})
+	}
+}
+
 // The rule the whole feature is granted under: nothing merging reads is kept.
 // The prompt carries a canary, the gateway logs at debug level into a handler
 // that records every message and attribute, and the canary must appear
@@ -367,24 +476,47 @@ func postRawMerge(t *testing.T, srv *httptest.Server, fake *mlxtest.Server, body
 	return upstream
 }
 
-// blockingUpstream answers a chat completion with an SSE stream that emits one
-// chunk, waits to be released, then emits the rest — so a test can prove the
-// first chunk reached the client before the upstream response completed.
-type blockingUpstream struct {
-	release chan struct{}
-	srv     *httptest.Server
+// recordingUpstream stands in for the model server and keeps the exact bytes
+// of the request it was sent. Exact bytes are the point: the recording fake
+// decodes what it receives, and a JSON decoder repairs invalid UTF-8 on the
+// way in, so content that must be relayed byte-for-byte can only be seen here.
+//
+// When release is non-nil it answers a streamed completion by emitting one
+// chunk, waiting to be released, then emitting the rest — which is how a test
+// sees that the first chunk reached the client before the response completed.
+type recordingUpstream struct {
+	srv      *httptest.Server
+	release  chan struct{}
+	modelArg string
+
+	mu   sync.Mutex
+	body []byte
 }
 
-func newBlockingUpstream(t *testing.T, modelArg string) *blockingUpstream {
+func newRecordingUpstream(t *testing.T, modelArg string, streaming bool) *recordingUpstream {
 	t.Helper()
-	u := &blockingUpstream{release: make(chan struct{})}
+	u := &recordingUpstream{modelArg: modelArg}
+	if streaming {
+		u.release = make(chan struct{})
+	}
 	u.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		u.mu.Lock()
+		u.body = body
+		u.mu.Unlock()
+
+		if u.release == nil {
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprintf(w, `{"id":"chatcmpl-fake","object":"chat.completion","model":%q,"choices":[]}`, u.modelArg)
+			return
+		}
+
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(http.StatusOK)
 		flush := w.(http.Flusher)
 		chunk := func(text string) {
 			b, _ := json.Marshal(map[string]any{
-				"id": "chatcmpl-fake", "object": "chat.completion.chunk", "model": modelArg,
+				"id": "chatcmpl-fake", "object": "chat.completion.chunk", "model": u.modelArg,
 				"choices": []any{map[string]any{"index": 0, "delta": map[string]any{"content": text}}},
 			})
 			w.Write([]byte("data: " + string(b) + "\n\n"))
@@ -404,6 +536,43 @@ func newBlockingUpstream(t *testing.T, modelArg string) *blockingUpstream {
 	return u
 }
 
+// rawBody is the request the upstream received, byte for byte.
+func (u *recordingUpstream) rawBody() []byte {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	return u.body
+}
+
+// messages is the relayed messages array as a value.
+func (u *recordingUpstream) messages(t *testing.T) []any {
+	t.Helper()
+	var payload map[string]any
+	if err := json.Unmarshal(u.rawBody(), &payload); err != nil {
+		t.Fatalf("upstream body is not JSON: %v", err)
+	}
+	out, _ := payload["messages"].([]any)
+	return out
+}
+
+// newRecordingGateway puts a recording upstream behind the gateway.
+func newRecordingGateway(t *testing.T, cfg func() config.Config, streaming bool) (*httptest.Server, *recordingUpstream) {
+	t.Helper()
+	const modelPath = "/models/mlx-community/Qwen3-8B-4bit"
+	upstream := newRecordingUpstream(t, modelPath, streaming)
+	models := &stubModels{models: []registry.Model{{
+		RepoID: mergeModel, Path: modelPath, State: registry.StateReady,
+	}}}
+	g := New(Options{
+		ConfigFunc: cfg,
+		Pool:       &urlPool{baseURL: upstream.srv.URL, modelArg: modelPath},
+		Models:     models,
+		Log:        slog.New(&logRecorder{}),
+	})
+	srv := httptest.NewServer(g.Handler())
+	t.Cleanup(srv.Close)
+	return srv, upstream
+}
+
 // urlPool hands out one upstream at a fixed URL, so a test can put a stub
 // other than the fake mlx server behind the gateway.
 type urlPool struct {
@@ -418,24 +587,13 @@ func (p *urlPool) Resident() []runtime.Resident { return nil }
 func (p *urlPool) Unload(string) error          { return nil }
 
 // Merging is done once, on the body the gateway has already buffered, so a
-// streamed completion still streams: the first chunk reaches the client while
-// the upstream is still generating, and every chunk names the model the client
-// asked for rather than the backend's path.
+// streamed completion is merged exactly like any other and still streams: the
+// model server receives the folded messages, the first chunk reaches the
+// client while the upstream is still generating, and every chunk names the
+// model the client asked for rather than the backend's path.
 func TestMergedStreamingRequestStillStreams(t *testing.T) {
 	const modelPath = "/models/mlx-community/Qwen3-8B-4bit"
-	upstream := newBlockingUpstream(t, modelPath)
-
-	models := &stubModels{models: []registry.Model{{
-		RepoID: mergeModel, Path: modelPath, State: registry.StateReady,
-	}}}
-	g := New(Options{
-		ConfigFunc: mergingOn,
-		Pool:       &urlPool{baseURL: upstream.srv.URL, modelArg: modelPath},
-		Models:     models,
-		Log:        slog.New(&logRecorder{}),
-	})
-	srv := httptest.NewServer(g.Handler())
-	t.Cleanup(srv.Close)
+	srv, upstream := newRecordingGateway(t, mergingOn, true)
 
 	resp := post(t, srv, "/v1/chat/completions", map[string]any{
 		"model":  mergeModel,
@@ -473,6 +631,17 @@ func TestMergedStreamingRequestStillStreams(t *testing.T) {
 		t.Fatalf("first chunk is not an SSE event: %q", firstLine)
 	}
 
+	// The criterion is about a *merged* streaming request, so the relayed body
+	// is the half that matters most: a streaming path routed around the merge
+	// would still stream perfectly.
+	want := decodedMessages(t, []any{
+		map[string]any{"role": "system", "content": "You are Alice's assistant.\n\nAnswer briefly."},
+		map[string]any{"role": "user", "content": "hi"},
+	})
+	if got := upstream.messages(t); !reflect.DeepEqual(got, want) {
+		t.Errorf("the streamed request reached the model server as\n %#v\nwant\n %#v", got, want)
+	}
+
 	close(upstream.release)
 	rest, err := io.ReadAll(br)
 	if err != nil {
@@ -502,6 +671,64 @@ func TestMergedStreamingRequestStillStreams(t *testing.T) {
 	}
 }
 
+// Merging is for chat completions. A plain completion carries a prompt rather
+// than a conversation, and the route is the only thing that makes "Gropius
+// reads prompt content on exactly one route" true — so a client that posts a
+// messages array to /v1/completions has it relayed untouched.
+func TestPlainCompletionsAreNeverMerged(t *testing.T) {
+	srv, upstream := newRecordingGateway(t, mergingOn, false)
+
+	in := []any{
+		map[string]any{"role": "system", "content": "You are Alice's assistant."},
+		map[string]any{"role": "user", "content": "hi"},
+		map[string]any{"role": "system", "content": "Answer briefly."},
+	}
+	resp := post(t, srv, "/v1/completions", map[string]any{
+		"model": mergeModel, "prompt": "hi", "messages": in,
+	}, nil)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+
+	if got, want := upstream.messages(t), decodedMessages(t, in); !reflect.DeepEqual(got, want) {
+		t.Errorf("a plain completion reached the model server as\n %#v\nwant it unmerged\n %#v", got, want)
+	}
+}
+
+// Go repairs an invalid UTF-8 byte sequence into U+FFFD when it decodes a JSON
+// string, and re-encodes it as valid UTF-8. Merging such a message would hand
+// the model characters the client never sent, while relaying it passes the
+// same bytes through untouched — so it is relayed. Only raw bytes can show
+// this: every JSON decoder between here and the assertion would repair them.
+func TestMergingRefusesInvalidUTF8InSystemContent(t *testing.T) {
+	srv, upstream := newRecordingGateway(t, mergingOn, false)
+
+	// 0xFF 0xFE is not a valid UTF-8 sequence, and the JSON scanner does not
+	// object to it inside a string.
+	body := `{"model":"` + mergeModel + `","messages":[` +
+		"{\"role\":\"system\",\"content\":\"a\xff\xfeb\"}," +
+		`{"role":"user","content":"hi"},` +
+		`{"role":"system","content":"Answer briefly."}]}`
+
+	resp, err := srv.Client().Post(srv.URL+"/v1/chat/completions", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+
+	raw := upstream.rawBody()
+	if !bytes.Contains(raw, []byte{0xff, 0xfe}) {
+		t.Errorf("the model server received %q; the invalid bytes were repaired rather than relayed through", raw)
+	}
+	if bytes.Contains(raw, []byte(`a\ufffd`)) || bytes.Contains(raw, []byte(`\n\nAnswer briefly.`)) {
+		t.Errorf("the request was merged despite content merging cannot re-encode: %q", raw)
+	}
+}
+
 // The unit the criteria above exercise through HTTP, checked directly on the
 // shapes a client can send that it must refuse to rewrite.
 func TestMergeSystemMessagesRefusesShapesItCannotRebuild(t *testing.T) {
@@ -514,14 +741,39 @@ func TestMergeSystemMessagesRefusesShapesItCannotRebuild(t *testing.T) {
 		{"a role that is not a string", `[{"role":5},{"role":"system","content":"a"}]`},
 		{"system content that is a list of parts", `[{"role":"system","content":[{"type":"text","text":"a"}]},{"role":"user","content":"hi"},{"role":"system","content":"b"}]`},
 		{"a system message with no content", `[{"role":"system"},{"role":"user","content":"hi"},{"role":"system","content":"b"}]`},
-		{"a system message carrying another field", `[{"role":"user","content":"hi"},{"role":"system","content":"a","name":"house-rules"}]`},
-		{"a system message with a case-variant of content", `[{"role":"user","content":"hi"},{"role":"system","content":"a","Content":"b"}]`},
-		{"no system message at all", `[{"role":"user","content":"hi"}]`},
+		{"a system message whose content is null", `[{"role":"system","content":"a"},{"role":"user","content":"hi"},{"role":"system","content":null}]`},
+		{"a non-leading system message carrying another field", `[{"role":"user","content":"hi"},{"role":"system","content":"a","name":"house-rules"},{"role":"system","content":"b"}]`},
+		{"a non-leading system message with a case-variant of content", `[{"role":"user","content":"hi"},{"role":"system","content":"a","Content":"b"},{"role":"system","content":"c"}]`},
+		{"a leading system message whose content is not a string", `[{"role":"system","content":[{"type":"text","text":"a"}],"name":"x"},{"role":"system","content":"b"}]`},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if _, ok := mergeSystemMessages(json.RawMessage(c.messages)); ok {
-				t.Errorf("mergeSystemMessages rewrote %s; it must relay a shape it cannot rebuild faithfully", c.messages)
+			if _, outcome := mergeSystemMessages(json.RawMessage(c.messages)); outcome != mergeRefused {
+				t.Errorf("mergeSystemMessages returned %v for %s; it must refuse a shape it cannot rebuild faithfully",
+					outcome, c.messages)
+			}
+		})
+	}
+}
+
+// The conversations that are already the shape the template wants. These are
+// not refusals — there is nothing wrong with them — and telling the two apart
+// is what keeps the log quiet on the ordinary request.
+func TestMergeSystemMessagesLeavesAConversationThatNeedsNoRewrite(t *testing.T) {
+	cases := []struct {
+		name     string
+		messages string
+	}{
+		{"one system message, already leading", `[{"role":"system","content":"a"},{"role":"user","content":"hi"}]`},
+		{"one leading system message carrying another field", `[{"role":"system","content":"a","name":"house-rules"},{"role":"user","content":"hi"}]`},
+		{"no system message at all", `[{"role":"user","content":"hi"}]`},
+		{"no messages at all", `[]`},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if _, outcome := mergeSystemMessages(json.RawMessage(c.messages)); outcome != mergeNotNeeded {
+				t.Errorf("mergeSystemMessages returned %v for %s; it needs no rewrite and is not a refusal",
+					outcome, c.messages)
 			}
 		})
 	}
