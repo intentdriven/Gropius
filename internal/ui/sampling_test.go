@@ -1,0 +1,124 @@
+package ui
+
+import (
+	"encoding/json"
+	"reflect"
+	"strings"
+	"testing"
+
+	"github.com/intentdriven/Gropius/internal/config"
+)
+
+// Every sampling parameter the configuration holds must be reachable from the
+// panel, machine-wide and per model, or a default exists that only someone
+// editing the file by hand can set.
+func TestSettingsFormOffersEverySamplingParameter(t *testing.T) {
+	page, err := assets.ReadFile("static/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script, err := assets.ReadFile("static/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, field := range samplingJSONFields(t) {
+		if !strings.Contains(string(script), "'"+field+"'") {
+			t.Errorf("app.js never names the sampling parameter %q, so the panel cannot send it", field)
+		}
+	}
+
+	// Both editors, and the field that carries the overrides.
+	for _, id := range []string{"setTemp", "setTopP", "setTopK", "setMinP", "setMaxTokens",
+		"ovTemp", "ovTopP", "ovTopK", "ovMinP", "ovMaxTokens", "ovModel"} {
+		if !strings.Contains(string(page), `id="`+id+`"`) {
+			t.Errorf("the settings form has no control with id %q", id)
+		}
+	}
+	if !strings.Contains(string(script), "model_sampling") {
+		t.Error("app.js never posts model_sampling, so a per-model override cannot be saved")
+	}
+	// A blank field must reach the server as null. parseInt(x) || 0 turns a
+	// blank field into a real zero, which is a temperature, not "unset".
+	if !strings.Contains(string(script), "numberOrNull") {
+		t.Error("app.js does not send a blank sampling field as null")
+	}
+}
+
+// samplingJSONFields returns the JSON names of every field on config.Sampling.
+func samplingJSONFields(t *testing.T) []string {
+	t.Helper()
+	rt := reflect.TypeOf(config.Sampling{})
+	out := make([]string, 0, rt.NumField())
+	for i := range rt.NumField() {
+		name, _, _ := strings.Cut(rt.Field(i).Tag.Get("json"), ",")
+		if name == "" {
+			t.Fatalf("config.Sampling field %s has no json tag", rt.Field(i).Name)
+		}
+		out = append(out, name)
+	}
+	return out
+}
+
+// The placeholders tell the user what a blank field means, so they must be the
+// model server's own defaults — the ones recorded from the pinned server.
+func TestBlankSamplingFieldsShowTheModelServerDefaults(t *testing.T) {
+	page, err := assets.ReadFile("static/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for id, want := range map[string]string{
+		"setTemp":      "0",
+		"setTopP":      "1",
+		"setTopK":      "0",
+		"setMinP":      "0",
+		"setMaxTokens": "512",
+	} {
+		idx := strings.Index(string(page), `id="`+id+`"`)
+		if idx < 0 {
+			t.Fatalf("no control with id %q", id)
+		}
+		tag := string(page)[idx:]
+		if end := strings.Index(tag, ">"); end >= 0 {
+			tag = tag[:end]
+		}
+		ph := placeholderOf(tag)
+		if !strings.HasPrefix(ph, want) {
+			t.Errorf("%s placeholder is %q, want it to open with the model server's own default %q", id, ph, want)
+		}
+	}
+}
+
+func placeholderOf(tag string) string {
+	idx := strings.Index(tag, `placeholder="`)
+	if idx < 0 {
+		return ""
+	}
+	rest := tag[idx+len(`placeholder="`):]
+	end := strings.Index(rest, `"`)
+	if end < 0 {
+		return ""
+	}
+	return rest[:end]
+}
+
+// The panel's own record of the parameters must not drift from the wire
+// format: what it posts is decoded straight into config.Sampling.
+func TestPostedSamplingShapeDecodesIntoTheConfigType(t *testing.T) {
+	fields := samplingJSONFields(t)
+	body := map[string]any{}
+	for _, f := range fields {
+		body[f] = nil
+	}
+	b, err := json.Marshal(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var s config.Sampling
+	if err := json.Unmarshal(b, &s); err != nil {
+		t.Fatalf("a form post of every field as null does not decode: %v", err)
+	}
+	if !s.IsZero() {
+		t.Errorf("sampling = %+v, want every field unset", s)
+	}
+}
