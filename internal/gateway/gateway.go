@@ -185,12 +185,28 @@ func (g *Gateway) handleListModels(w http.ResponseWriter, r *http.Request) {
 	ready := g.models.Ready()
 	data := make([]any, 0, len(ready))
 	for _, m := range ready {
-		data = append(data, map[string]any{
+		entry := map[string]any{
 			"id":       m.RepoID,
 			"object":   "model",
 			"created":  m.AddedAt.Unix(),
 			"owned_by": "gropius",
-		})
+		}
+		// Gropius's extensions to the OpenAI shape are top-level fields with
+		// names already common elsewhere. The context length is given under
+		// both spellings on purpose: context_length is what OpenRouter- and
+		// Ollama-style listings publish, max_model_len what vLLM-derived
+		// clients read. It is the model's architectural maximum, not the
+		// window this Mac can hold at once, and nothing here enforces it.
+		//
+		// An unknown figure is absent rather than 0, which a client that
+		// trims its history would read as "no context". The upper bound is
+		// applied on every path into the registry, and again here because
+		// this is where the figure leaves the machine.
+		if m.ContextLength > 0 && m.ContextLength <= registry.MaxContextLength {
+			entry["context_length"] = m.ContextLength
+			entry["max_model_len"] = m.ContextLength
+		}
+		data = append(data, entry)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"object": "list", "data": data})
 }

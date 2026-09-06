@@ -11,6 +11,18 @@ GitHub release notes.
 
 ## [Unreleased]
 
+### Added
+
+- Every ready model on `GET /v1/models` carries its maximum context in tokens,
+  under both `context_length` and `max_model_len`, so a client can size its
+  prompts instead of discovering the limit by failure. The figure is the
+  architectural maximum read from the model's own configuration, not the
+  window a given Mac can serve, and nothing is enforced by it; a model whose
+  configuration declares no range is listed as before. The control panel shows
+  the same figure on each model card, and
+  [docs/models-list.md](docs/models-list.md) is a new reference page for every
+  field the models list serves.
+
 ### Changed
 
 - The server's request log records the method, path, status and duration of a

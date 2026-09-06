@@ -19,7 +19,7 @@ import (
 func fakeHub(t *testing.T) *httptest.Server {
 	t.Helper()
 	files := map[string][]byte{
-		"config.json":       []byte(`{"model_type":"qwen3"}`),
+		"config.json":       []byte(`{"model_type":"qwen3","max_position_embeddings":40960}`),
 		"model.safetensors": make([]byte, 2048),
 		"tokenizer.json":    []byte(`{}`),
 	}
@@ -604,5 +604,100 @@ func TestDownloadRejectsCaseVariantOfInFlightDownload(t *testing.T) {
 	}
 	if ids := a.Downloading(); len(ids) != 1 || ids[0] != "org/repo" {
 		t.Errorf("Downloading() = %v, want [org/repo]", ids)
+	}
+}
+
+// A model must carry its context length the moment the download completes,
+// not only after the next startup rescan.
+func TestDownloadRecordsContextLength(t *testing.T) {
+	a := newTestApp(t)
+	hub := fakeHub(t)
+	a.Hub.BaseURL = hub.URL
+
+	if err := a.Download("org/repo"); err != nil {
+		t.Fatalf("Download: %v", err)
+	}
+	waitFor(t, "the model to become ready", func() bool {
+		m, err := a.Registry.Get("org/repo")
+		return err == nil && m.Ready()
+	})
+
+	m, _ := a.Registry.Get("org/repo")
+	if m.ContextLength != 40960 {
+		t.Errorf("ContextLength = %d, want 40960", m.ContextLength)
+	}
+}
+
+// Restoring a ready model after a failed re-download must not strip the
+// figure the record already carried.
+func TestRestoredReadyModelKeepsItsContextLength(t *testing.T) {
+	a := newTestApp(t)
+	hub := fakeHub(t)
+	a.Hub.BaseURL = hub.URL
+
+	if err := a.Download("org/repo"); err != nil {
+		t.Fatalf("Download: %v", err)
+	}
+	waitFor(t, "the first download to finish", func() bool {
+		m, err := a.Registry.Get("org/repo")
+		return err == nil && m.Ready()
+	})
+
+	// A second attempt against a dead hub fails, and the ready model on disk
+	// is restored rather than demoted.
+	a.Hub.BaseURL = "http://127.0.0.1:1"
+	if err := a.Download("org/repo"); err != nil {
+		t.Fatalf("re-download: %v", err)
+	}
+	waitFor(t, "the failed attempt to settle", func() bool {
+		m, err := a.Registry.Get("org/repo")
+		return err == nil && m.Ready() && m.Progress == 100
+	})
+
+	m, _ := a.Registry.Get("org/repo")
+	if m.ContextLength != 40960 {
+		t.Errorf("ContextLength = %d, want 40960 — the restored record lost the figure", m.ContextLength)
+	}
+}
+
+// restoreReady deliberately restores the record the model had before the
+// failed attempt — its size and its first-download time — rather than
+// re-measuring a directory the attempt has been writing into. The context
+// length must come from the same place: a re-download that got as far as
+// writing the new revision's config.json before failing on a weight shard
+// would otherwise restore a record whose size is the old revision's and whose
+// context figure is the new one's.
+func TestRestoredReadyModelKeepsTheRecordedContextLengthNotTheNewConfig(t *testing.T) {
+	a := newTestApp(t)
+	hub := fakeHub(t)
+	a.Hub.BaseURL = hub.URL
+
+	if err := a.Download("org/repo"); err != nil {
+		t.Fatalf("Download: %v", err)
+	}
+	waitFor(t, "the first download to finish", func() bool {
+		m, err := a.Registry.Get("org/repo")
+		return err == nil && m.Ready()
+	})
+	m, _ := a.Registry.Get("org/repo")
+
+	// A failed attempt that already replaced config.json with a revision
+	// declaring a different range.
+	if err := os.WriteFile(filepath.Join(m.Path, "config.json"),
+		[]byte(`{"model_type":"qwen3","max_position_embeddings":131072}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	a.Hub.BaseURL = "http://127.0.0.1:1"
+	if err := a.Download("org/repo"); err != nil {
+		t.Fatalf("re-download: %v", err)
+	}
+	waitFor(t, "the failed attempt to settle", func() bool {
+		m, err := a.Registry.Get("org/repo")
+		return err == nil && m.Ready() && m.Progress == 100
+	})
+
+	restored, _ := a.Registry.Get("org/repo")
+	if restored.ContextLength != 40960 {
+		t.Errorf("ContextLength = %d, want 40960 — the restored record took the figure from the failed attempt's config.json", restored.ContextLength)
 	}
 }

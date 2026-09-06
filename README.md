@@ -37,6 +37,9 @@ Cross-machine LAN use works; TLS and notarized distribution are not yet included
   resume interrupted transfers.
 - **OpenAI-compatible server** — `/v1/chat/completions`, `/v1/completions`,
   `/v1/models`, streaming included. Drop-in for any OpenAI SDK.
+- **Context window published** — the models list gives each model's maximum
+  context, so a client can size its prompts instead of discovering the limit
+  by failure ([reference](docs/models-list.md)).
 - **Runs many models** — one process per model, with an LRU memory budget so a
   request for a second model evicts an idle one instead of OOMing the machine.
 - **Network-shared** — bind the LAN, discoverable over Bonjour, optional API key.
@@ -117,7 +120,7 @@ request, and never the client's network address.
 - [`internal/`](internal/) — the engine: `hub` (HuggingFace client + downloader),
   `runtime` (Python/MLX provisioning + process pool), `gateway` (OpenAI + control
   API), `registry`, `discovery`, `config`, `capability`, `ui`, `app`.
-- [`docs/`](docs/) — getting-started guide.
+- [`docs/`](docs/) — getting-started guide and the models-list reference.
 
 Design decisions and the empirical facts behind them: [`DECISIONS.md`](.abcd/development/decisions/DECISIONS.md).
 

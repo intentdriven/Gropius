@@ -9,6 +9,9 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -912,4 +915,231 @@ func TestLoopbackRebindingHostRequiresKey(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Errorf("with no key configured loopback must stay open regardless of Host, got %d", w.Code)
 	}
+}
+
+// Gropius's extensions to the OpenAI-shaped models list are top-level fields
+// with names already common elsewhere: context_length is what OpenRouter- and
+// Ollama-style listings publish, max_model_len what vLLM-derived clients read.
+// Both carry the same figure, and the four fields the list already served are
+// untouched.
+func TestListModelsPublishesContextLengthUnderBothNames(t *testing.T) {
+	fake := mlxtest.Start(mlxtest.Options{ModelArg: "/m"})
+	defer fake.Close()
+
+	models := &stubModels{models: []registry.Model{
+		{RepoID: "org/wide", State: registry.StateReady, ContextLength: 262144},
+	}}
+	g := New(Options{Config: config.Default(), Pool: &stubPool{srv: fake}, Models: models})
+	srv := httptest.NewServer(g.Handler())
+	defer srv.Close()
+
+	entry := firstModelEntry(t, srv)
+	for _, name := range []string{"context_length", "max_model_len"} {
+		n, ok := entry[name].(float64)
+		if !ok || int64(n) != 262144 {
+			t.Errorf("%s = %v, want 262144", name, entry[name])
+		}
+	}
+	want := map[string]bool{"id": true, "object": true, "created": true, "owned_by": true,
+		"context_length": true, "max_model_len": true}
+	for k := range entry {
+		if !want[k] {
+			t.Errorf("unexpected field %q on the models list", k)
+		}
+	}
+	for k := range want {
+		if _, ok := entry[k]; !ok {
+			t.Errorf("field %q missing from the models list", k)
+		}
+	}
+}
+
+// A model whose configuration declares no positional range is listed exactly
+// as it is without one: no figure, and still ready to serve.
+func TestListModelsOmitsAnUnknownContextLength(t *testing.T) {
+	fake := mlxtest.Start(mlxtest.Options{ModelArg: "/m"})
+	defer fake.Close()
+
+	models := &stubModels{models: []registry.Model{
+		{RepoID: "org/quiet", State: registry.StateReady},
+	}}
+	g := New(Options{Config: config.Default(), Pool: &stubPool{srv: fake}, Models: models})
+	srv := httptest.NewServer(g.Handler())
+	defer srv.Close()
+
+	entry := firstModelEntry(t, srv)
+	if entry["id"] != "org/quiet" {
+		t.Fatalf("the model was not listed: %+v", entry)
+	}
+	for _, name := range []string{"context_length", "max_model_len"} {
+		if v, ok := entry[name]; ok {
+			t.Errorf("%s = %v, want the field to be absent", name, v)
+		}
+	}
+}
+
+// The registry bounds the figure on every path into it, but the models list
+// is the LAN-facing edge: a figure that somehow got past those bounds must
+// not be published from here either.
+func TestListModelsRefusesAnAbsurdContextLength(t *testing.T) {
+	fake := mlxtest.Start(mlxtest.Options{ModelArg: "/m"})
+	defer fake.Close()
+
+	models := &stubModels{models: []registry.Model{
+		{RepoID: "org/absurd", State: registry.StateReady, ContextLength: registry.MaxContextLength + 1},
+	}}
+	g := New(Options{Config: config.Default(), Pool: &stubPool{srv: fake}, Models: models})
+	srv := httptest.NewServer(g.Handler())
+	defer srv.Close()
+
+	entry := firstModelEntry(t, srv)
+	if _, ok := entry["context_length"]; ok {
+		t.Errorf("an out-of-range figure was published: %v", entry["context_length"])
+	}
+}
+
+// firstModelEntry decodes GET /v1/models and returns the single entry, as a
+// raw map so a test can see exactly which fields are on the wire.
+func firstModelEntry(t *testing.T, srv *httptest.Server) map[string]any {
+	t.Helper()
+	resp, err := srv.Client().Get(srv.URL + "/v1/models")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var out struct {
+		Data []map[string]any `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Data) != 1 {
+		t.Fatalf("data = %+v, want exactly one model", out.Data)
+	}
+	return out.Data[0]
+}
+
+// The models list is a documented interface, and the reference page is where
+// a reader looks it up. This pins the page to the handler: every field served
+// is described there, and nothing is described that is not served.
+func TestModelsListReferenceDocumentsEveryFieldServed(t *testing.T) {
+	fake := mlxtest.Start(mlxtest.Options{ModelArg: "/m"})
+	defer fake.Close()
+
+	models := &stubModels{models: []registry.Model{
+		{RepoID: "org/m", State: registry.StateReady, ContextLength: 131072},
+	}}
+	g := New(Options{Config: config.Default(), Pool: &stubPool{srv: fake}, Models: models})
+	srv := httptest.NewServer(g.Handler())
+	defer srv.Close()
+
+	served := map[string]bool{}
+	for k := range firstModelEntry(t, srv) {
+		served[k] = true
+	}
+
+	page, err := os.ReadFile(filepath.Join("..", "..", "docs", "models-list.md"))
+	if err != nil {
+		t.Fatalf("the models-list reference page is missing: %v", err)
+	}
+	// Only the "## Fields" section is the field table; another table
+	// elsewhere on the page must not be read as phantom fields.
+	_, fields, ok := strings.Cut(string(page), "\n## Fields\n")
+	if !ok {
+		t.Fatal("the reference page has no `## Fields` section")
+	}
+	if next := strings.Index(fields, "\n## "); next >= 0 {
+		fields = fields[:next]
+	}
+	documented := map[string]bool{}
+	for _, line := range strings.Split(fields, "\n") {
+		if !strings.HasPrefix(line, "| `") {
+			continue
+		}
+		field, _, ok := strings.Cut(strings.TrimPrefix(line, "| `"), "`")
+		if ok {
+			documented[field] = true
+		}
+	}
+
+	for field := range served {
+		if !documented[field] {
+			t.Errorf("the models list serves %q, which the reference page does not describe", field)
+		}
+	}
+	for field := range documented {
+		if !served[field] {
+			t.Errorf("the reference page describes %q, which the models list does not serve", field)
+		}
+	}
+
+	// The things a reader must not have to infer: what the figure is, that it
+	// is not what this Mac can necessarily serve, and the ceiling above which
+	// a declared figure is refused — which the acceptance criterion calls the
+	// documented ceiling, so it has to be a number on a user-facing page and
+	// has to be the number the code enforces.
+	for _, phrase := range []string{
+		"architectural maximum",
+		"may be smaller",
+		withThousands(registry.MaxContextLength),
+	} {
+		if !strings.Contains(string(page), phrase) {
+			t.Errorf("the reference page never says %q", phrase)
+		}
+	}
+}
+
+// The acceptance criterion is written against the composed path, and every
+// test above stubs out one half of it. This one carries a real model
+// directory through a real Registry.Rescan to the bytes on the wire.
+func TestContextLengthReachesTheWireFromAModelDirectory(t *testing.T) {
+	fake := mlxtest.Start(mlxtest.Options{ModelArg: "/m"})
+	defer fake.Close()
+
+	root := t.TempDir()
+	dir := filepath.Join(root, "models", "mlx-community", "Qwen3-Coder-Next-4bit")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// A config.json of the shape mlx-community publishes.
+	if err := os.WriteFile(filepath.Join(dir, "config.json"),
+		[]byte(`{"model_type":"qwen3_next","max_position_embeddings":262144,"rope_scaling":null}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "model.safetensors"), make([]byte, 64), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	reg, err := registry.Open(filepath.Join(root, "registry.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := reg.Rescan(filepath.Join(root, "models")); err != nil {
+		t.Fatalf("Rescan: %v", err)
+	}
+
+	g := New(Options{Config: config.Default(), Pool: &stubPool{srv: fake}, Models: reg})
+	srv := httptest.NewServer(g.Handler())
+	defer srv.Close()
+
+	entry := firstModelEntry(t, srv)
+	if entry["id"] != "mlx-community/Qwen3-Coder-Next-4bit" {
+		t.Fatalf("the scanned model was not listed: %+v", entry)
+	}
+	for _, name := range []string{"context_length", "max_model_len"} {
+		if n, ok := entry[name].(float64); !ok || int64(n) != 262144 {
+			t.Errorf("%s = %v, want 262144", name, entry[name])
+		}
+	}
+}
+
+// withThousands renders n the way the documentation writes a large number,
+// so the ceiling on the reference page is checked against the constant the
+// code enforces rather than a copy that can drift.
+func withThousands(n int64) string {
+	s := strconv.FormatInt(n, 10)
+	for i := len(s) - 3; i > 0; i -= 3 {
+		s = s[:i] + "," + s[i:]
+	}
+	return s
 }
