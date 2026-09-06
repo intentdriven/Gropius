@@ -49,7 +49,7 @@ One line — installs `Gropius.app` (the menu-bar server) to `/Applications`, al
 it through the firewall, and launches it:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/REPPL/Gropius/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/intentdriven/Gropius/main/install.sh | bash
 ```
 
 The **server needs Apple Silicon** (MLX runs on Metal). For the native chat client
@@ -57,7 +57,7 @@ The **server needs Apple Silicon** (MLX runs on Metal). For the native chat clie
 network):
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/REPPL/Gropius/main/install.sh | bash -s -- client
+curl -fsSL https://raw.githubusercontent.com/intentdriven/Gropius/main/install.sh | bash -s -- client
 ```
 
 The installer **verifies the download's signature before installing it**, so you
