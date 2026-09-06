@@ -108,6 +108,7 @@ h1 { margin: 0; font-size: 26px; letter-spacing: -0.02em; }
 .pill.loaded { color: var(--blue); }
 .pill.failed { color: var(--red); }
 .pill.quant  { color: var(--muted); }
+.pill.pinned { color: var(--yellow); }
 
 /* Progress */
 .bar { height: 6px; background: var(--line); margin-top: 8px; overflow: hidden; }

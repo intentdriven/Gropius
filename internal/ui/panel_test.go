@@ -179,3 +179,40 @@ func evalJS(t *testing.T, snippet string) string {
 	}
 	return string(out)
 }
+
+// evalPanelArray evaluates an expression returning an array against the named
+// functions lifted out of app.js.
+func evalPanelArray(t *testing.T, expr string, functions ...string) []any {
+	t.Helper()
+	out := evalPanelExpr(t, expr, functions...)
+	var v []any
+	if err := json.Unmarshal([]byte(out), &v); err != nil {
+		t.Fatalf("the panel returned %q, which is not an array: %v", out, err)
+	}
+	return v
+}
+
+// evalPanelNumber evaluates an expression returning a number.
+func evalPanelNumber(t *testing.T, expr string, functions ...string) float64 {
+	t.Helper()
+	out := evalPanelExpr(t, expr, functions...)
+	var v float64
+	if err := json.Unmarshal([]byte(out), &v); err != nil {
+		t.Fatalf("the panel returned %q, which is not a number: %v", out, err)
+	}
+	return v
+}
+
+// evalPanelExpr is the JSON text of one expression evaluated against the named
+// functions lifted out of app.js.
+func evalPanelExpr(t *testing.T, expr string, functions ...string) string {
+	t.Helper()
+	src := readPanelSource(t)
+	var b strings.Builder
+	for _, name := range functions {
+		b.WriteString(extractFunction(t, src, name))
+		b.WriteString("\n")
+	}
+	fmt.Fprintf(&b, "process.stdout.write(JSON.stringify(%s));", expr)
+	return evalJS(t, b.String())
+}

@@ -139,6 +139,11 @@ type State struct {
 	Resident []runtime.Resident  `json:"resident"`
 	Setup    runtime.SetupStatus `json:"setup"`
 	Config   config.Config       `json:"config"`
+	// MemoryBudget is the ceiling on the total charged size of resident
+	// models, so the panel can say what a pinned set leaves for everything
+	// else. The pool resolves it, since the default is a share of this Mac's
+	// physical RAM rather than a stored setting.
+	MemoryBudget int64 `json:"memory_budget"`
 	// Endpoints are the URLs other machines should use.
 	Endpoints []string `json:"endpoints"`
 	Hostname  string   `json:"hostname"`
@@ -162,12 +167,13 @@ type State struct {
 func (c *Control) snapshot() State {
 	cfg := c.App.Config()
 	st := State{
-		Models:    c.App.Registry.List(),
-		Resident:  c.App.Pool.Resident(),
-		Setup:     c.App.Provisioner.Status(),
-		Config:    redactConfig(cfg),
-		Endpoints: Endpoints(cfg),
-		Hostname:  hostname(),
+		Models:       c.App.Registry.List(),
+		Resident:     c.App.Pool.Resident(),
+		Setup:        c.App.Provisioner.Status(),
+		Config:       redactConfig(cfg),
+		MemoryBudget: c.App.Pool.MemoryBudget(),
+		Endpoints:    Endpoints(cfg),
+		Hostname:     hostname(),
 	}
 	if cfg.ExposedToLAN() && cfg.APIKey == "" {
 		st.Warnings = append(st.Warnings,

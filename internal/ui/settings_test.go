@@ -107,3 +107,63 @@ func TestSettingsFormIsWiredToThePerModelSwitches(t *testing.T) {
 		}
 	}
 }
+
+// The pinned list a save posts is the whole list, not a patch: the server
+// replaces what it holds with what the form sends, which is how unticking a
+// box unpins a model. A pin for a model the form does not list — one that is
+// not downloaded yet — is carried through, because the form has nothing to say
+// about it.
+func TestSettingsFormPostsThePinnedListWhole(t *testing.T) {
+	cases := []struct {
+		name string
+		expr string
+		want []any
+	}{
+		{
+			name: "a ticked box pins the model",
+			expr: `pinnedModels([], ["org/a", "org/b"], ["org/a"])`,
+			want: []any{"org/a"},
+		},
+		{
+			name: "an unticked box leaves the model out",
+			expr: `pinnedModels(["org/a"], ["org/a"], [])`,
+			want: []any{},
+		},
+		{
+			name: "a pin for a model the form does not list survives",
+			expr: `pinnedModels(["org/not-downloaded"], ["org/a"], ["org/a"])`,
+			want: []any{"org/not-downloaded", "org/a"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := evalPanelArray(t, tc.expr, "pinnedModels")
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("%s = %v, want %v", tc.expr, got, tc.want)
+			}
+		})
+	}
+}
+
+// The figure beside the field is what makes an impossible pinned set visible
+// at pin time rather than at the first refused request, so it has to charge
+// each model what the pool charges it: its size on disk plus a fifth.
+func TestSettingsFormChargesPinnedModelsWhatThePoolCharges(t *testing.T) {
+	const models = `[{"repo_id":"org/a","bytes":1000},{"repo_id":"org/b","bytes":500}]`
+	cases := []struct {
+		expr string
+		want float64
+	}{
+		{fmt.Sprintf(`pinnedCharge(%s, [])`, models), 0},
+		{fmt.Sprintf(`pinnedCharge(%s, ["org/a"])`, models), 1200},
+		{fmt.Sprintf(`pinnedCharge(%s, ["org/a","org/b"])`, models), 1800},
+		// A pinned model this Mac has not downloaded has no size to charge.
+		{fmt.Sprintf(`pinnedCharge(%s, ["org/not-downloaded"])`, models), 0},
+	}
+	for _, tc := range cases {
+		got := evalPanelNumber(t, tc.expr, "pinnedCharge")
+		if got != tc.want {
+			t.Errorf("%s = %v, want %v", tc.expr, got, tc.want)
+		}
+	}
+}

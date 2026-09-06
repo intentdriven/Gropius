@@ -136,6 +136,10 @@ function renderModels() {
   const list = $('modelList');
   const models = state.models || [];
   const resident = new Set((state.resident || []).map((r) => r.repo_id));
+  // The settings hold the registry's own spelling of every model this Mac has,
+  // so the ids match exactly, and a pinned model that nothing has loaded is
+  // marked too — "pinned" is a fact about the model, not about its memory.
+  const pinned = new Set(state.config.pinned || []);
 
   $('modelsEmpty').hidden = models.length > 0;
   list.innerHTML = '';
@@ -150,6 +154,11 @@ function renderModels() {
       ? '<span class="pill loaded">loaded</span>'
       : '<span class="pill ready">ready</span>';
     else if (m.state === 'failed') pill = '<span class="pill failed">failed</span>';
+    if (m.state === 'ready' && pinned.has(m.repo_id)) {
+      pill += loaded
+        ? '<span class="pill pinned">pinned</span>'
+        : '<span class="pill pinned">pinned, not loaded</span>';
+    }
 
     const info = modelInfoLine(m);
 
@@ -423,6 +432,97 @@ function renderSettings() {
   overrides = { ...(c.model_sampling || {}) };
   renderOverrides();
   renderMergeSwitches();
+  renderPinSwitches();
+}
+
+// renderPinSwitches draws one box per downloaded model, and the figure that
+// says what the ticked ones leave of the memory budget. The figure is what
+// makes a pinned set that cannot fit visible while it is being chosen, rather
+// than at the first request Gropius has to refuse.
+function renderPinSwitches() {
+  const box = $('pinList');
+  const models = state.models || [];
+  const pinned = new Set(state.config.pinned || []);
+  box.innerHTML = '';
+  if (!models.length) {
+    box.innerHTML = '<p class="hint">Download a model and it appears here.</p>';
+    updatePinBudget();
+    return;
+  }
+  models.forEach((m) => {
+    const row = document.createElement('label');
+    row.className = 'switch';
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.dataset.model = m.repo_id;
+    cb.checked = pinned.has(m.repo_id);
+    cb.addEventListener('change', () => { settingsTouched = true; updatePinBudget(); });
+    const name = document.createElement('span');
+    name.textContent = m.repo_id;
+    row.appendChild(cb);
+    row.appendChild(name);
+    box.appendChild(row);
+  });
+  updatePinBudget();
+}
+
+// pinBoxes are the boxes drawn above, one per model the form lists.
+function pinBoxes() {
+  return Array.from(document.querySelectorAll('#pinList input[type=checkbox]'));
+}
+
+// listedPinModels lists the models the form drew a box for.
+function listedPinModels() {
+  return pinBoxes().map((cb) => cb.dataset.model);
+}
+
+// checkedPinModels lists the models whose box is ticked.
+function checkedPinModels() {
+  return pinBoxes().filter((cb) => cb.checked).map((cb) => cb.dataset.model);
+}
+
+// pinnedModels returns the whole pinned list a save posts. The server replaces
+// what it holds with this, so a model whose box is clear is simply left out —
+// a list cannot be shortened by omission any other way. A pin for a model the
+// form does not list is carried through, because a model can be pinned before
+// it is downloaded and a form with no box for it has nothing to say about it.
+function pinnedModels(current, listed, checked) {
+  const shown = new Set(listed || []);
+  const out = (current || []).filter((id) => !shown.has(id));
+  (checked || []).forEach((id) => out.push(id));
+  return out;
+}
+
+// pinnedCharge is what the pinned models cost against the memory budget: each
+// one's size on disk plus a fifth, which is what the pool charges a loaded
+// model (runtime.LoadCost). A pinned model this Mac has not downloaded has no
+// size to charge, and protects nothing until something loads it.
+function pinnedCharge(models, pinned) {
+  const want = new Set(pinned || []);
+  return (models || []).reduce((sum, m) => {
+    if (!want.has(m.repo_id)) return sum;
+    const b = m.bytes || 0;
+    return sum + b + Math.floor(b / 5);
+  }, 0);
+}
+
+// updatePinBudget writes the line beside the boxes: what the ticked models
+// cost, and what that leaves for everything else.
+function updatePinBudget() {
+  const line = $('pinBudget');
+  if (!line) return;
+  const budget = state.memory_budget || 0;
+  const charge = pinnedCharge(state.models || [], checkedPinModels());
+  if (!budget) {
+    line.textContent = charge ? `Pinned models use about ${bytes(charge)}.` : '';
+    line.className = 'hint';
+    return;
+  }
+  const left = budget - charge;
+  line.textContent = left >= 0
+    ? `Pinned models use about ${bytes(charge)} of the ${bytes(budget)} memory budget, leaving ${bytes(left)} for everything else.`
+    : `Pinned models use about ${bytes(charge)}, more than the ${bytes(budget)} memory budget — this cannot be saved.`;
+  line.className = left >= 0 ? 'hint' : 'msg err';
 }
 
 // renderMergeSwitches draws one box per downloaded model. Merging is per model
@@ -611,6 +711,7 @@ $('settingsForm').addEventListener('submit', async (e) => {
     sampling:           readSampling('input'),
     model_sampling:     overrides,
     per_model:         perModelSettings(state.config.per_model, listedMergeModels(), checkedMergeModels()),
+    pinned:            pinnedModels(state.config.pinned, listedPinModels(), checkedPinModels()),
   };
   try {
     const res = await api('/api/settings', {
