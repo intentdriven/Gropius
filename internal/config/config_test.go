@@ -489,3 +489,37 @@ func TestLoadDropsADuplicatePerModelSpelling(t *testing.T) {
 		t.Errorf("dropped = %v, want the duplicate spelling named", dropped)
 	}
 }
+
+// Statistics is off in a fresh install and stays off through a save-and-load
+// round trip that never names it: adr-2609061503319212 makes local recording a
+// strict opt-in, so a configuration file written by a build that predates the
+// switch must come back with it off rather than absent-meaning-on.
+func TestStatisticsIsOffByDefaultAndSurvivesARoundTrip(t *testing.T) {
+	if Default().Statistics {
+		t.Error("a fresh install records request statistics; it must be off until the operator turns it on")
+	}
+
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(`{"host":"127.0.0.1","port":11535,"decode_concurrency":1}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	loaded, _, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Statistics {
+		t.Error("a configuration file that does not name the switch loaded with statistics on")
+	}
+
+	loaded.Statistics = true
+	if err := Save(path, loaded); err != nil {
+		t.Fatal(err)
+	}
+	again, _, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !again.Statistics {
+		t.Error("the switch did not survive being saved and read back")
+	}
+}

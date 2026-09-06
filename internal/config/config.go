@@ -330,6 +330,14 @@ type Config struct {
 	// A model with no entry is served with the machine-wide set.
 	ModelSampling map[string]Sampling `json:"model_sampling,omitempty"`
 
+	// Statistics turns on content-free recording of the requests this Mac
+	// serves: which model, how it ended, how many tokens and how long it took.
+	// It is off until the operator turns it on, and while it is off nothing
+	// worked out from a request is recorded or shown
+	// (adr-2609061503319212). Nothing recorded leaves the Mac, and no prompt,
+	// completion, key or client address is ever part of it.
+	Statistics bool `json:"statistics,omitempty"`
+
 	// PerModel holds the per-model settings that are not sampling parameters,
 	// keyed by the registry's canonical repo id. A model with no entry runs on
 	// the machine-wide settings above, which is what every model does until the
