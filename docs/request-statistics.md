@@ -33,8 +33,8 @@ One record per request, made of these and nothing else:
   the name the client asked for is never kept.
 - `at` — when the request arrived, to the second.
 - `class` — how it ended: answered, rejected, too busy, no room, could not
-  start, never ready, no answer, the model server's own refusal, or the client
-  leaving before the answer was done.
+  start, never ready, no answer, the model server's own refusal, the client
+  leaving before the answer was done, or Gropius's own failure.
 - `streamed` — whether the client asked for the answer a chunk at a time.
 - `prompt_tokens` and `completion_tokens` — the model server's own count of
   what went in and what came out. Only an answered request carries them.
@@ -46,8 +46,11 @@ One record per request, made of these and nothing else:
 - `load_wait_ms` — how long it waited for the model to load.
 
 Alongside those, Gropius counts per model how many requests each outcome
-accounted for, how many times the model loaded and how long the last load
-took, and how many times it was evicted to make room for another.
+accounted for, how many tokens went in and came out altogether, how many
+times the model loaded and how many times it failed to, how long the last
+load took, how many times it was evicted to make room for another, and the
+last request's own timings. It also keeps a per-minute total of requests and
+tokens for the last day.
 
 Everything held is in memory, and a restart empties it. The Statistics tab
 shows the most recent thousand requests one by one, and the totals for the
