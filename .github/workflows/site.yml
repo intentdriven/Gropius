@@ -90,6 +90,28 @@ jobs:
       sha: ${{ steps.resolve.outputs.sha }}
       deploy: ${{ steps.resolve.outputs.deploy }}
     steps:
+      - name: Refuse a ref the deploy environments would not admit
+        # The {main, v*} restriction is a deployment policy on the two
+        # environments — dashboard state that the tree cannot otherwise hold, and
+        # that a fork or an edited policy silently removes. Assert it here too,
+        # so the constraint the header claims is one the repository itself
+        # states. It FAILS rather than skipping: a skipped deploy leaves a green
+        # run beside an unchanged page, which reads as success.
+        env:
+          REF: ${{ github.ref }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          case "$REF" in
+            "refs/heads/${DEFAULT_BRANCH}") ;;
+            refs/tags/v*) ;;
+            *)
+              echo "refusing to run the site workflow from $REF: the site-render and site environments admit the default branch and v* tags only" >&2
+              exit 1
+              ;;
+          esac
+          echo "$REF is a ref both environments admit."
+
       - name: Resolve the tag and the tagged commit
         id: resolve
         # No ${{ }} interpolation in this script (injection-safe): the tag input
@@ -314,3 +336,32 @@ jobs:
           # the bump, mirroring dependabot's cooldown. 4.123.0 was published
           # 2026-08-13.
           wranglerVersion: '4.123.0'
+
+      - name: Check that both spellings of the address answer
+        # A DIAGNOSTIC, not a gate — hence continue-on-error: the deploy has
+        # already succeeded by this point, and the zone's DNS is outside this
+        # repository's control, so a failure here must never turn a successful
+        # release red. It runs because the page is served under a PATH: every
+        # reference on it is relative, so if /Gropius does not redirect to
+        # /Gropius/, "site.css" resolves to /site.css — a path the route does not
+        # match — and the first visitor who types the address without a trailing
+        # slash gets an unstyled page. Better read here than discovered there.
+        continue-on-error: true
+        env:
+          BASE: https://intentdriven.sh
+        run: |
+          set -uo pipefail
+          fail=0
+          for suffix in /Gropius /Gropius/; do
+            code="$(curl -sS -o /dev/null -w '%{http_code}' -L --max-time 20 "${BASE}${suffix}" || echo 000)"
+            echo "${suffix} -> ${code}"
+            [ "$code" = 200 ] || fail=1
+          done
+          css="$(curl -sS -o /dev/null -w '%{http_code}' -L --max-time 20 "${BASE}/Gropius/site.css" || echo 000)"
+          echo "/Gropius/site.css -> ${css}"
+          [ "$css" = 200 ] || fail=1
+          if [ "$fail" != 0 ]; then
+            echo "::warning::the deploy succeeded but the address did not answer as expected; check the route, the zone's DNS record, and html_handling in wrangler.jsonc"
+            exit 1
+          fi
+          echo "both spellings of the address serve the page, and its stylesheet resolves."
