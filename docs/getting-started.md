@@ -124,9 +124,12 @@ request's contents reaches the log, the model server's command line, or any
 file on disk. Clear the box and save to switch it off; the next request goes
 to the model exactly as it arrives.
 
-A request whose instructions arrive as a list of content parts rather than as
-plain text is passed on unchanged rather than rewritten, as is one to any model
-whose box is clear.
+Merging never rewrites a request it cannot rebuild exactly. A request whose
+instructions arrive as a list of content parts rather than as plain text is
+passed on unchanged, and so is one whose instruction messages carry anything
+beyond the role and the text itself — as is every request to a model whose box
+is clear.
+
 ## 7. Choose what an omitted parameter means (optional)
 
 Clients that never send a `temperature` are served with the model server's

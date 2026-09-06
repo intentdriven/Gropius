@@ -15,9 +15,15 @@ import (
 // exactly one purpose, and only for a model the operator switched merging on
 // for: adr-2609061610102325 grants that and nothing else. The grant is only
 // worth as much as the boundary around it, and a boundary made of prose erodes
-// one feature at a time. This is the boundary: a second reader of prompt
-// content has to be added to this list, in a diff someone reviews, rather than
-// appearing quietly in a package that had no business with prompts.
+// one feature at a time. This is a speed bump on that erosion: a second reader
+// of prompt content has to be added to this list, in a diff someone reviews,
+// rather than appearing quietly in a package that had no business with prompts.
+//
+// It is a scan for the field names, not a proof. A reader that goes through a
+// type declared in a file on this list, or builds the key by concatenation,
+// passes it silently. What it does catch is the ordinary way a second reader
+// appears — someone decoding a request's messages in a new place — and it
+// makes the list of exceptions a thing that exists and has to be edited.
 var promptContentReaders = map[string]string{
 	"internal/gateway/systemmerge.go": "the merge itself — the one reader adr-2609061610102325 grants",
 	"internal/runtime/pool.go":        "builds the readiness probe's own one-line conversation; reads nothing from a client",

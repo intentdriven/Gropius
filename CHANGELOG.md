@@ -23,7 +23,7 @@ GitHub release notes.
   prompt: it reads the system messages of requests to that model and nothing
   else, and keeps none of what it reads — nothing of a request's contents
   reaches the log, the model server's command line or any file. A request whose
-  system content arrives as a list of parts is passed on unrewritten. The rule
+  system content arrives as a list of parts, or whose system messages carry anything beyond the role and the text, is passed on unrewritten. The rule
   this runs under is
   [an architecture decision](.abcd/development/decisions/adrs/2609061610102325-the-gateway-may-rewrite-prompt-content-only-to-merge-system.md),
   and an architecture test holds the reading to the single file that does it.
