@@ -36,6 +36,10 @@ go.work.sum
 /dist/
 /client/dist/
 /release-artifacts/
+# The rendered landing page (make site). Composed from committed files by
+# cmd/gropius-site and rendered again by the deploy workflow, so it is an
+# artefact, not a source.
+/site/
 # NOTE: build/AppIcon.icns IS committed (the 1024px source PNG isn't in the repo,
 # and make icon short-circuits when the .icns already exists) so CI can build the
 # server app on a clean checkout. Only the transient iconset staging dir is ignored.

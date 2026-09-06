@@ -3,7 +3,7 @@ BUNDLE  := dist/$(APP).app
 BIN     := bin/gropius
 PKG     := ./cmd/gropius
 
-.PHONY: all test build app icon install run clean fmt vet lint allow-firewall install-shared
+.PHONY: all test build app icon install run clean fmt vet lint allow-firewall install-shared site
 
 all: test build
 
@@ -19,6 +19,12 @@ vet:
 	go vet ./...
 
 lint: fmt vet test
+
+## site: render the landing page into site/ (gitignored). Reads only the files
+## .abcd/site.json names, writes only under site/, and reaches no network, so
+## the deploy workflow can render in a job that holds no credential.
+site:
+	go run ./cmd/gropius-site --out site
 
 ## build: the plain binary. LDFLAGS is empty for dev builds (keeps debug symbols
 ## for delve); the app/release build overrides it to strip. VERSION is stamped
