@@ -47,6 +47,7 @@ func TestRepoIDFoldHasOneHome(t *testing.T) {
 		`if len(header) > len(prefix) && strings.EqualFold(header[:len(prefix)], prefix) {`: "the Bearer scheme name, which HTTP defines as case-insensitive",
 		`if hopByHopHeaders[strings.ToLower(k)] {`:                                          "an HTTP header name, likewise",
 		`if strings.EqualFold(m.Name(), requested) {`:                                       "resolveModel's short-name convenience match, which is a lookup and not a key: the identity path is registry.Get, and this only decides whether a bare model name is unambiguous",
+		`if strings.EqualFold(k, field) {`:                                                  "a settings JSON field name (model_sampling, per_model) matched the way encoding/json matches struct fields; not a repo id",
 	}
 
 	anyFold := regexp.MustCompile(`strings\.(ToLower|ToUpper|EqualFold)\(`)

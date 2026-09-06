@@ -423,7 +423,7 @@ func (c *Config) sanitizePerModel() []string {
 		// Two spellings of one repo id would make the effective settings
 		// depend on map iteration order. Keep the first in sorted order so the
 		// outcome is the same on every start.
-		folded := strings.ToLower(id)
+		folded := FoldRepoID(id)
 		if first, ok := seen[folded]; ok {
 			dropped = append(dropped, "per_model["+id+"] (duplicate of "+first+")")
 			continue

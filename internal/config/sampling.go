@@ -5,7 +5,6 @@ import (
 	"math"
 	"sort"
 	"strconv"
-	"strings"
 )
 
 // Sampling holds machine-wide defaults for the sampling parameters the pinned
@@ -347,13 +346,13 @@ func (c Config) EffectiveSampling(repoID string) Sampling {
 	if len(c.ModelSampling) == 0 {
 		return c.Sampling.Clone()
 	}
-	want := strings.ToLower(repoID)
+	want := FoldRepoID(repoID)
 	// Sorted, not a map range: validateSampling and sanitizeSampling both
 	// guarantee at most one entry folds to any one id, and iterating in a
 	// fixed order means a map that somehow held two could still not make one
 	// model load at different temperatures on different starts.
 	for _, k := range sortedKeys(c.ModelSampling) {
-		if strings.ToLower(k) == want {
+		if FoldRepoID(k) == want {
 			return c.Sampling.merge(c.ModelSampling[k])
 		}
 	}
@@ -390,7 +389,7 @@ func (c Config) validateSampling() error {
 		// model, so the effective set would depend on which the lookup reached
 		// first. sanitizeSampling drops the duplicate on the file path; here,
 		// where a human is waiting for an answer, say so instead.
-		folded := strings.ToLower(id)
+		folded := FoldRepoID(id)
 		if first, ok := seen[folded]; ok {
 			return fmt.Errorf("sampling overrides %q and %q name the same model", first, id)
 		}
@@ -431,7 +430,7 @@ func (c *Config) sanitizeSampling() []string {
 		// Two spellings of one repo id would make the effective set depend on
 		// map iteration order. Keep the first in sorted order so the outcome
 		// is the same on every start.
-		folded := strings.ToLower(id)
+		folded := FoldRepoID(id)
 		if first, ok := seen[folded]; ok {
 			dropped = append(dropped, "model_sampling["+id+"] (duplicate of "+first+")")
 			continue
