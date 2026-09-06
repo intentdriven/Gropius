@@ -701,3 +701,64 @@ func TestRestoredReadyModelKeepsTheRecordedContextLengthNotTheNewConfig(t *testi
 		t.Errorf("ContextLength = %d, want 40960 — the restored record took the figure from the failed attempt's config.json", restored.ContextLength)
 	}
 }
+
+// A per-model setting is keyed by the id a request resolves to. The registry
+// matches an id case-insensitively and answers under one canonical spelling,
+// so a key typed in another case must be rewritten to that spelling on the way
+// in — otherwise the setting is stored under a key no request ever matches.
+func TestSetConfigCanonicalisesPerModelKeys(t *testing.T) {
+	a := newTestApp(t)
+	if err := a.Registry.Put(registry.Model{
+		RepoID: "org/Repo",
+		Path:   filepath.Join(a.Paths.Models, "org", "Repo"),
+		State:  registry.StateReady,
+	}); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	c := a.Config()
+	c.PerModel = map[string]config.ModelSettings{
+		"ORG/repo": {MergeSystemMessages: true},
+	}
+	if err := a.SetConfig(c); err != nil {
+		t.Fatalf("SetConfig: %v", err)
+	}
+
+	got := a.Config().PerModel
+	if len(got) != 1 {
+		t.Fatalf("PerModel = %+v, want one entry", got)
+	}
+	if !got["org/Repo"].MergeSystemMessages {
+		t.Errorf("PerModel = %+v, want the setting under the registry's spelling %q", got, "org/Repo")
+	}
+}
+
+// A key that names no model is refused, and the refusal leaves the settings
+// file exactly as it was — a rejected save must not half-apply.
+func TestSetConfigRejectsInvalidPerModelKeyAndLeavesTheFileAlone(t *testing.T) {
+	a := newTestApp(t)
+	if err := a.SetConfig(a.Config()); err != nil {
+		t.Fatalf("SetConfig: %v", err)
+	}
+	before, err := os.ReadFile(a.Paths.Config)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	c := a.Config()
+	c.PerModel = map[string]config.ModelSettings{"../../etc": {MergeSystemMessages: true}}
+	if err := a.SetConfig(c); err == nil {
+		t.Fatal("expected a per-model key that is not a model id to be refused")
+	}
+
+	after, err := os.ReadFile(a.Paths.Config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(before) {
+		t.Errorf("the refused save rewrote the settings file:\n before %s\n after  %s", before, after)
+	}
+	if len(a.Config().PerModel) != 0 {
+		t.Errorf("the refused save reached the live config: %+v", a.Config().PerModel)
+	}
+}

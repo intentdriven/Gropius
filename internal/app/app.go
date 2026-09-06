@@ -178,6 +178,11 @@ func (a *App) SetConfig(c config.Config) error {
 	if err := c.Validate(); err != nil {
 		return err
 	}
+	perModel, err := a.canonicalPerModel(c.PerModel)
+	if err != nil {
+		return err
+	}
+	c.PerModel = perModel
 	if err := config.Save(a.Paths.Config, c); err != nil {
 		return err
 	}
@@ -187,6 +192,36 @@ func (a *App) SetConfig(c config.Config) error {
 
 	a.Hub.Token = c.HFToken
 	return nil
+}
+
+// canonicalPerModel checks the keys of a per-model settings map and rewrites
+// each to the registry's spelling of the model it names.
+//
+// The registry matches an id case-insensitively but answers under one
+// spelling, and that spelling is what a request resolves to. A key stored in
+// another case would therefore name a model the operator can see and still
+// match no request, so the case is folded once here — on the way in, where the
+// operator is present to be told about a key that names nothing — rather than
+// on every request. A key for a model this machine does not have is kept as it
+// was typed: a model can be downloaded after its settings are set.
+func (a *App) canonicalPerModel(in map[string]config.ModelSettings) (map[string]config.ModelSettings, error) {
+	if len(in) == 0 {
+		return nil, nil
+	}
+	if err := config.ValidatePerModelKeys(in); err != nil {
+		return nil, err
+	}
+	out := make(map[string]config.ModelSettings, len(in))
+	for id, settings := range in {
+		if m, err := a.Registry.Get(id); err == nil {
+			id = m.RepoID
+		}
+		if _, dup := out[id]; dup {
+			return nil, fmt.Errorf("per-model settings name %s more than once", id)
+		}
+		out[id] = settings
+	}
+	return out, nil
 }
 
 // modelSource adapts the registry to runtime.ModelSource.

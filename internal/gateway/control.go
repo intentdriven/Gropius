@@ -484,13 +484,21 @@ func (c *Control) handleSetSettings(w http.ResponseWriter, r *http.Request) {
 	// decoding a posted model_sampling object into the current one reinstates
 	// every override the object leaves out — which is every override the user
 	// just deleted. Naming the field means "these are the overrides", so start
-	// from nothing; omitting it still keeps what is there.
+	// from nothing; omitting it still keeps what is there. The same holds for
+	// per_model, where leaving a model out is how Settings switches its
+	// merging off.
 	if namesModelSampling(raw) {
 		incoming.ModelSampling = nil
+	}
+	if namesPerModel(raw) {
+		incoming.PerModel = nil
 	}
 	if err := json.Unmarshal(raw, &incoming); err != nil {
 		writeError(w, http.StatusBadRequest, "settings body is not valid JSON")
 		return
+	}
+	if incoming.PerModel == nil {
+		incoming.PerModel = current.PerModel
 	}
 	// The UI is served the redacted placeholder; echoing it back must not
 	// overwrite the real secret with literal asterisks.
@@ -521,16 +529,24 @@ func (c *Control) handleSetSettings(w http.ResponseWriter, r *http.Request) {
 
 // namesModelSampling reports whether the posted body carries a model_sampling
 // field at all, however it is spelled — including as null.
-func namesModelSampling(body []byte) bool {
+func namesModelSampling(body []byte) bool { return namesField(body, "model_sampling") }
+
+// namesPerModel reports the same for per_model, the other collection a save
+// replaces rather than merges into.
+func namesPerModel(body []byte) bool { return namesField(body, "per_model") }
+
+// namesField reports whether the posted body carries this field at all,
+// however it is spelled — including as null.
+func namesField(body []byte, field string) bool {
 	var named map[string]json.RawMessage
 	if err := json.Unmarshal(body, &named); err != nil {
 		return false
 	}
 	// Folded, because the decode this guards matches struct field names
 	// case-insensitively: an exact lookup would let one spelling skip the
-	// reset and reinstate every override the caller asked to remove.
+	// reset and reinstate every entry the caller asked to remove.
 	for k := range named {
-		if strings.EqualFold(k, "model_sampling") {
+		if strings.EqualFold(k, field) {
 			return true
 		}
 	}
