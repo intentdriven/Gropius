@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="{{ .UI.Lang }}">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{ .Identity.Title }}</title>
+<meta name="description" content="{{ .Identity.Tagline }}">
+<link rel="stylesheet" href="site.css">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Jost:wght@400;500;700;800&amp;family=IBM+Plex+Mono:wght@400;500&amp;display=swap">
+</head>
+<body>
+<div class="page">
+  <header class="bar">
+    <a class="wordmark" href="{{ .Links.Home }}"><svg class="dot" viewBox="0 0 36 36" aria-hidden="true">
+      <polygon points="9,1 17,17 1,17" fill="var(--mark-yellow)"/>
+      <rect x="19" y="1" width="16" height="16" fill="var(--mark-grey)"/>
+      <rect x="1" y="19" width="16" height="16" fill="var(--mark-blue)"/>
+      <circle cx="27" cy="27" r="8" fill="var(--mark-red)"/>
+    </svg>{{ .Identity.Title }}</a>
+    <nav aria-label="{{ .UI.NavLabel }}">
+      <a href="#download">{{ .UI.NavDownload }}</a>
+      <a href="#install">{{ .UI.NavInstall }}</a>
+      <a href="{{ .Links.Repository }}">{{ .UI.NavSource }}</a>
+      <a href="{{ .Links.GettingStarted }}">{{ .UI.NavGettingStarted }}</a>
+    </nav>
+  </header>
+
+  <section class="hero">
+    <div>
+      <p class="eyebrow">{{ .UI.Eyebrow }}</p>
+      <h1>{{ range $i, $line := .UI.Headline }}{{ if $i }}<br>{{ end }}{{ if eq $line $.UI.HeadlineAccent }}<em>{{ $line }}</em>{{ else }}{{ $line }}{{ end }}{{ end }}</h1>
+      <p class="lede">{{ .Identity.Tagline }}</p>
+      <p class="pitch">{{ .Identity.Pitch }}</p>
+    </div>
+    <svg class="mark" viewBox="0 0 360 360" role="img" aria-label="{{ .UI.MarkLabel }}">
+      <polygon points="90,10 170,170 10,170" fill="var(--mark-yellow)"/>
+      <rect x="190" y="10" width="160" height="160" fill="var(--mark-grey)"/>
+      <rect x="10" y="190" width="160" height="160" fill="var(--mark-blue)"/>
+      <circle cx="270" cy="270" r="80" fill="var(--mark-red)"/>
+    </svg>
+  </section>
+
+  <section class="actions" id="download">
+    <div>
+      <div class="cta-row">
+        <a class="btn btn-primary" href="{{ .Links.Download }}">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="square" aria-hidden="true">
+            <path d="M12 3v13M6 10l6 6 6-6M4 21h16"/>
+          </svg>
+          <span>{{ .UI.DownloadLabel }}<small>{{ .UI.DownloadNote }}</small></span>
+        </a>
+        <a class="btn" href="{{ .Links.Repository }}">
+          <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+            <path d="M12 2a10 10 0 0 0-3.16 19.49c.5.09.68-.22.68-.48v-1.7c-2.78.6-3.37-1.34-3.37-1.34-.45-1.16-1.11-1.47-1.11-1.47-.91-.62.07-.61.07-.61 1 .07 1.53 1.03 1.53 1.03.9 1.53 2.34 1.09 2.91.83.09-.65.35-1.09.63-1.34-2.22-.25-4.56-1.11-4.56-4.94 0-1.09.39-1.98 1.03-2.68-.1-.25-.45-1.27.1-2.65 0 0 .84-.27 2.75 1.02a9.6 9.6 0 0 1 5 0c1.91-1.29 2.75-1.02 2.75-1.02.55 1.38.2 2.4.1 2.65.64.7 1.03 1.59 1.03 2.68 0 3.84-2.34 4.68-4.57 4.93.36.31.68.92.68 1.85v2.74c0 .27.18.58.69.48A10 10 0 0 0 12 2z"/>
+          </svg>
+          <span>{{ .UI.RepositoryLabel }}<small>{{ .Links.RepositoryName }}</small></span>
+        </a>
+      </div>
+      <p class="cta-note">{{ .UI.CtaNote }}</p>
+    </div>
+    <dl class="facts">
+      <dt>{{ .UI.FactRequires }}</dt><dd>{{ range $i, $r := .Requirements }}{{ if $i }} {{ end }}{{ $r }}{{ end }}</dd>
+      <dt>{{ .UI.FactEndpoint }}</dt><dd><span class="mono">{{ .UI.Endpoint }}</span></dd>
+      <dt>{{ .UI.FactRuntime }}</dt><dd>{{ .UI.Runtime }}</dd>
+      <dt>{{ .UI.FactLicence }}</dt><dd>{{ .UI.Licence }}</dd>
+    </dl>
+  </section>
+
+  <section class="install" id="install">
+    <div>
+      <h2>{{ .UI.InstallHeading }}</h2>
+      <div class="snippet"><pre>{{ range $i, $step := .Install }}{{ if $i }}
+
+{{ end }}<span class="c">{{ $step.Comment }}</span>
+{{ $step.Command }}{{ end }}</pre></div>
+      <p>{{ range $i, $n := .InstallNote }}{{ if $i }} {{ end }}{{ $n }}{{ end }}</p>
+    </div>
+    <div class="release-facts">
+      <!-- release facts: begin. This region names the assets a release carries and
+           nothing else. The version, the date, each asset's size and the link to
+           the checksums are itd-2609061353258535's; it replaces this list rather
+           than adding a second one beside it. Nothing here may carry a version
+           literal: the download button resolves the latest release at request
+           time, and a stale number on the page would contradict it. -->
+      <h2>{{ .UI.AssetsHeading }}</h2>
+      <ul class="assets">
+        {{- range .UI.Assets }}
+        <li><span class="mono">{{ .File }}</span><span>{{ .Note }}</span></li>
+        {{- end }}
+      </ul>
+      <!-- release facts: end -->
+    </div>
+  </section>
+
+  <!-- One glyph per pillar, in the mark's own order: the triangle, the square,
+       the circle. cmd/gropius-site refuses to render unless the manifest selects
+       exactly three pillars, so a fourth bullet in the README's feature list
+       cannot silently arrive here without a shape. -->
+  <section class="pillars" aria-label="{{ .UI.PillarsLabel }}">
+    {{- range $i, $pillar := .Pillars }}
+    <div class="pillar">
+      {{ if eq $i 0 -}}
+      <svg class="glyph" viewBox="0 0 28 28" aria-hidden="true"><polygon points="14,0 28,28 0,28" fill="var(--mark-yellow)"/></svg>
+      {{- else if eq $i 1 -}}
+      <svg class="glyph" viewBox="0 0 28 28" aria-hidden="true"><rect width="28" height="28" fill="var(--mark-blue)"/></svg>
+      {{- else -}}
+      <svg class="glyph" viewBox="0 0 28 28" aria-hidden="true"><circle cx="14" cy="14" r="14" fill="var(--mark-red)"/></svg>
+      {{- end }}
+      <h3>{{ $pillar.Title }}</h3>
+      <p>{{ $pillar.Body }}</p>
+    </div>
+    {{- end }}
+  </section>
+
+  <footer>
+    <span>{{ .UI.FooterNote }}</span>
+    <span>
+      <a href="{{ .Links.Releases }}">{{ .UI.FooterReleases }}</a> &nbsp;&middot;&nbsp;
+      <a href="{{ .Links.Repository }}">{{ .UI.FooterSource }}</a>
+    </span>
+  </footer>
+</div>
+</body>
+</html>
