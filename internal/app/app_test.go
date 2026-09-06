@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -949,7 +950,7 @@ func TestSetConfigAcceptsPinsThatFitAndOnesNotYetDownloaded(t *testing.T) {
 // spelling, and that spelling is what the operator sees everywhere else. A pin
 // typed in another case is folded onto it on the way in, where the operator is
 // present; a pin for a model this machine does not have is kept as typed.
-func TestSetConfigCanonicalisesPinnedModelIDs(t *testing.T) {
+func TestSetConfigCanonicalizesPinnedModelIDs(t *testing.T) {
 	a := newTestApp(t)
 	putReady(t, a, "org/Writer", 1<<20)
 
@@ -1005,5 +1006,138 @@ func TestPinsFromTheSettingsFileReachThePoolAtStartup(t *testing.T) {
 
 	if got := a.Pool.Pinned(); !reflect.DeepEqual(got, []string{"org/keeper"}) {
 		t.Errorf("the pool holds %v at startup, want the pinned model from the settings file", got)
+	}
+}
+
+// A pin read from the settings file has not been through SetConfig's checks:
+// the file can be hand-edited, restored from a backup, or written by another
+// build. Folded onto the registry's spelling here, or the panel draws an
+// unticked box for a model that is in fact protected — and ticking it posts
+// both spellings, which Validate refuses, wedging every settings change there
+// is, the API key included.
+func TestPinsFromTheSettingsFileAreFoldedOntoTheRegistrySpelling(t *testing.T) {
+	paths := config.NewPaths(t.TempDir())
+	seedReadyModel(t, paths, "org/Writer", 1<<20)
+
+	cfg := config.Default()
+	cfg.Pinned = []string{"ORG/writer", "org/not-downloaded"}
+	a, err := New(Options{Paths: paths, Config: cfg})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	t.Cleanup(func() { a.Close() })
+
+	want := []string{"org/Writer", "org/not-downloaded"}
+	if got := a.Config().Pinned; !reflect.DeepEqual(got, want) {
+		t.Errorf("Pinned = %v after startup, want %v", got, want)
+	}
+	if got := a.Pool.Pinned(); !reflect.DeepEqual(got, want) {
+		t.Errorf("the pool holds %v, want %v", got, want)
+	}
+	// The whole point: what loaded is a configuration the next save accepts.
+	if err := a.SetConfig(a.Config()); err != nil {
+		t.Errorf("the next settings save was refused: %v", err)
+	}
+}
+
+// Two spellings of one model in the settings file are one model. The later one
+// is dropped and named, rather than refused, because refusing at startup is
+// the wedge above by another route.
+func TestDuplicatePinsFromTheSettingsFileAreDropped(t *testing.T) {
+	paths := config.NewPaths(t.TempDir())
+	seedReadyModel(t, paths, "org/writer", 1<<20)
+
+	cfg := config.Default()
+	cfg.Pinned = []string{"org/writer", "ORG/Writer"}
+	a, err := New(Options{Paths: paths, Config: cfg})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	t.Cleanup(func() { a.Close() })
+
+	if got := a.Config().Pinned; !reflect.DeepEqual(got, []string{"org/writer"}) {
+		t.Errorf("Pinned = %v, want one spelling of the one model", got)
+	}
+}
+
+// A model that is still downloading has no size on disk yet, but it declares
+// one from the first byte. Charging it zero is how a pinned pair that cannot
+// possibly fit gets accepted: tick both boxes while they download and the
+// machine is over budget the moment they land, permanently, with every
+// unpinned request refused and no hint of why.
+func TestSetConfigChargesAModelThatIsStillDownloading(t *testing.T) {
+	a := newTestApp(t)
+	if err := a.Registry.Put(registry.Model{
+		RepoID: "org/incoming", Path: a.Paths.ModelDir("org/incoming"),
+		SizeBytes: 1 << 50, State: registry.StateDownloading, Progress: 3,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	c := a.Config()
+	c.Pinned = []string{"org/incoming"}
+	err := a.SetConfig(c)
+	if err == nil {
+		t.Fatal("SetConfig accepted a pin on a download far larger than the whole budget")
+	}
+	if want := runtime.HumanBytes(runtime.LoadCost(1 << 50)); !strings.Contains(err.Error(), want) {
+		t.Errorf("error = %q, want it to charge the declared download size %s", err, want)
+	}
+}
+
+// The fit check cannot run when the settings file is read — a hand-edited file
+// can pin anything — so an over-budget set reaches the pool. Say so in the log
+// at startup, where the operator can act on it, rather than leaving it to be
+// discovered as a refusal of every unpinned request.
+func TestStartupWarnsWhenThePinnedSetCannotFit(t *testing.T) {
+	paths := config.NewPaths(t.TempDir())
+	seedReadyModel(t, paths, "org/enormous", 1<<50)
+
+	var logged bytes.Buffer
+	cfg := config.Default()
+	cfg.Pinned = []string{"org/enormous"}
+	a, err := New(Options{
+		Paths:  paths,
+		Config: cfg,
+		Log:    slog.New(slog.NewTextHandler(&logged, nil)),
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	t.Cleanup(func() { a.Close() })
+
+	if !strings.Contains(logged.String(), "pinned") {
+		t.Errorf("startup logged %q, want a warning that the pinned set does not fit", logged.String())
+	}
+	// Warned, not refused: refusing here would take the whole install down
+	// over a setting, and the pins still protect what they name.
+	if got := a.Pool.Pinned(); len(got) != 1 {
+		t.Errorf("the pool holds %v, want the pin applied anyway", got)
+	}
+}
+
+// seedReadyModel writes a registry file recording one ready model, as a
+// previous run would have left it, so New reads a registry that already knows
+// the model a pin names.
+func seedReadyModel(t *testing.T, paths config.Paths, repoID string, size int64) {
+	t.Helper()
+	if err := paths.EnsureDirs(); err != nil {
+		t.Fatal(err)
+	}
+	// The directory has to exist or the startup rescan reads its absence as a
+	// model deleted outside the app and drops the record; it is left empty so
+	// the rescan leaves the recorded size alone rather than re-deriving it.
+	if err := os.MkdirAll(paths.ModelDir(repoID), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	reg, err := registry.Open(paths.State)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := reg.Put(registry.Model{
+		RepoID: repoID, Path: paths.ModelDir(repoID), Bytes: size,
+		State: registry.StateReady, Progress: 100,
+	}); err != nil {
+		t.Fatal(err)
 	}
 }

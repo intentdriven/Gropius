@@ -13,6 +13,11 @@ function bytes(n) {
   return `${n.toFixed(i === 0 ? 0 : 1)} ${u[i]}`;
 }
 
+// size is bytes() for a figure that is genuinely a measurement: nothing pinned
+// is "0 B", not the em dash bytes() shows for a size it does not know. This
+// line is read before anything is ticked, so zero is its opening state.
+function size(n) { return n ? bytes(n) : '0 B'; }
+
 // contextLabel renders a model's architectural maximum context for its card.
 // The label says "max context" so the figure is not read as the window this
 // Mac can hold at once, which is a smaller and separate number. The
@@ -136,9 +141,10 @@ function renderModels() {
   const list = $('modelList');
   const models = state.models || [];
   const resident = new Set((state.resident || []).map((r) => r.repo_id));
-  // The settings hold the registry's own spelling of every model this Mac has,
-  // so the ids match exactly, and a pinned model that nothing has loaded is
-  // marked too — "pinned" is a fact about the model, not about its memory.
+  // The settings hold the registry's own spelling of every model this Mac has
+  // — the app folds a pin onto it when the file is read and when a save is
+  // made — so the ids match exactly. A pinned model that nothing has loaded is
+  // marked too: "pinned" is a fact about the model, not about its memory.
   const pinned = new Set(state.config.pinned || []);
 
   $('modelsEmpty').hidden = models.length > 0;
@@ -441,29 +447,50 @@ function renderSettings() {
 // than at the first request Gropius has to refuse.
 function renderPinSwitches() {
   const box = $('pinList');
-  const models = state.models || [];
-  const pinned = new Set(state.config.pinned || []);
+  const rows = pinRows(state.models || [], state.config.pinned || []);
   box.innerHTML = '';
-  if (!models.length) {
+  if (!rows.length) {
     box.innerHTML = '<p class="hint">Download a model and it appears here.</p>';
     updatePinBudget();
     return;
   }
-  models.forEach((m) => {
+  rows.forEach((r) => {
     const row = document.createElement('label');
     row.className = 'switch';
     const cb = document.createElement('input');
     cb.type = 'checkbox';
-    cb.dataset.model = m.repo_id;
-    cb.checked = pinned.has(m.repo_id);
+    cb.dataset.model = r.id;
+    cb.checked = r.checked;
     cb.addEventListener('change', () => { settingsTouched = true; updatePinBudget(); });
     const name = document.createElement('span');
-    name.textContent = m.repo_id;
+    name.textContent = r.absent ? `${r.id} (not on this Mac)` : r.id;
     row.appendChild(cb);
     row.appendChild(name);
     box.appendChild(row);
   });
   updatePinBudget();
+}
+
+// pinRows is the whole list of boxes the form draws: one per model on this
+// Mac, then one per pin that names a model this Mac does not have.
+//
+// The second half is not a nicety. The form carries through every pin it does
+// not list (see pinnedModels), so a pin with no box could never be removed —
+// and a model deleted after it was pinned, or pinned before it was downloaded,
+// leaves exactly that. Showing it is what makes every pin removable by the
+// form that made it.
+function pinRows(models, pinned) {
+  const want = pinned || [];
+  const have = new Set((models || []).map((m) => m.repo_id));
+  const rows = (models || []).map((m) => ({
+    id: m.repo_id,
+    checked: want.includes(m.repo_id),
+    absent: false,
+  }));
+  want.filter((id) => !have.has(id)).forEach((id) => {
+    rows.push({ id, checked: true, absent: true });
+  });
+  return rows;
 }
 
 // pinBoxes are the boxes drawn above, one per model the form lists.
@@ -494,14 +521,16 @@ function pinnedModels(current, listed, checked) {
 }
 
 // pinnedCharge is what the pinned models cost against the memory budget: each
-// one's size on disk plus a fifth, which is what the pool charges a loaded
-// model (runtime.LoadCost). A pinned model this Mac has not downloaded has no
-// size to charge, and protects nothing until something loads it.
+// one's size plus a fifth, which is what the pool charges a loaded model
+// (runtime.LoadCost). A model still downloading is charged the size it
+// declares, because ticking its box now is a promise about the memory it will
+// take when it lands. A pin naming a model this Mac does not have at all has
+// no size to charge.
 function pinnedCharge(models, pinned) {
   const want = new Set(pinned || []);
   return (models || []).reduce((sum, m) => {
     if (!want.has(m.repo_id)) return sum;
-    const b = m.bytes || 0;
+    const b = m.bytes || m.size_bytes || 0;
     return sum + b + Math.floor(b / 5);
   }, 0);
 }
@@ -514,14 +543,14 @@ function updatePinBudget() {
   const budget = state.memory_budget || 0;
   const charge = pinnedCharge(state.models || [], checkedPinModels());
   if (!budget) {
-    line.textContent = charge ? `Pinned models use about ${bytes(charge)}.` : '';
+    line.textContent = charge ? `Pinned models use about ${size(charge)}.` : '';
     line.className = 'hint';
     return;
   }
   const left = budget - charge;
   line.textContent = left >= 0
-    ? `Pinned models use about ${bytes(charge)} of the ${bytes(budget)} memory budget, leaving ${bytes(left)} for everything else.`
-    : `Pinned models use about ${bytes(charge)}, more than the ${bytes(budget)} memory budget — this cannot be saved.`;
+    ? `Pinned models use about ${size(charge)} of the ${size(budget)} memory budget, leaving ${size(left)} for everything else.`
+    : `Pinned models use about ${size(charge)}, more than the ${size(budget)} memory budget — this cannot be saved.`;
   line.className = left >= 0 ? 'hint' : 'msg err';
 }
 

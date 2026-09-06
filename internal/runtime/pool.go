@@ -240,13 +240,16 @@ func (p *Pool) SetPinned(ids []string) {
 // a pinned set fits has to be against the figure eviction actually uses.
 func (p *Pool) MemoryBudget() int64 { return p.opts.MaxResidentBytes }
 
-// Pinned lists the protected models, in the spelling they were pinned under
-// and sorted, so a caller can report what is protected as well as ask.
+// Pinned lists the protected models, in the spelling they were pinned under.
 //
-// It is independent of what is loaded: a pinned model the pool is not holding
-// is still pinned, which is why the models list reads its pinned field from
-// here rather than from a Resident record that would only exist for a model
-// already in memory.
+// It answers from the pool rather than from the stored settings on purpose:
+// this is the set actually being enforced, which is what the models list is
+// reporting on. It is independent of what is loaded — a pinned model the pool
+// is not holding is still pinned — which is why the pinned field cannot come
+// from a Resident record, one of which exists only for a model in memory.
+//
+// Sorted, so that two calls with nothing in between answer the same way; a map
+// range would not.
 func (p *Pool) Pinned() []string {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -295,6 +298,17 @@ func (p *Pool) Acquire(ctx context.Context, repoID string) (*Upstream, func(), e
 		e, err = p.startLocked(repoID)
 		if err != nil {
 			p.mu.Unlock()
+			// Logged out here, not where the refusal is built: p.mu is the
+			// pool's one lock — every Acquire, Resident, Pinned and Unload
+			// takes it, and the models list takes it on every request — so a
+			// slow log sink would let a client that can provoke refusals stall
+			// every other caller for the length of a write.
+			var noRoom *NoRoomError
+			if errors.As(err, &noRoom) {
+				p.opts.Log.Info("refused a model load: no model in memory could be freed",
+					"model", repoID, "protected", noRoom.Protected,
+					"limit", HumanBytes(noRoom.Limit))
+			}
 			return nil, nil, err
 		}
 	}
@@ -599,15 +613,10 @@ func (p *Pool) evictForLocked(need int64) error {
 			}
 		}
 		if victim == nil {
-			// Deliberately generic. handleCompletions writes a pool error
-			// verbatim into the 503 body, which every LAN client reads, and
-			// which models the operator chose to protect is not a client's
-			// business. The names go to this machine's own log instead.
-			p.opts.Log.Info("refused a model load: no model in memory could be freed",
-				"protected", p.pinnedResidentLocked(), "limit", HumanBytes(p.opts.MaxResidentBytes))
-			return fmt.Errorf(
-				"not enough memory to load another model: every model in memory is protected or serving a request (limit %s): %w",
-				HumanBytes(p.opts.MaxResidentBytes), ErrBusy)
+			return &NoRoomError{
+				Limit:     p.opts.MaxResidentBytes,
+				Protected: p.pinnedResidentLocked(),
+			}
 		}
 		p.stopEntryLocked(victim, StopEvicted)
 	}
@@ -758,8 +767,34 @@ func (p *Pool) Close() error {
 	return nil
 }
 
+// NoRoomError is the refusal a load gets when nothing in memory can be freed
+// for it — every model there is protected by a pin or serving a request.
+//
+// The protected names are a field rather than part of the message on purpose:
+// handleCompletions writes a pool error verbatim into the 503 body every LAN
+// client reads, and which models the operator chose to protect is not a
+// client's business. Error() is what goes on the wire; Protected is what goes
+// to this machine's own log.
+type NoRoomError struct {
+	// Limit is the memory budget the load was measured against.
+	Limit int64
+	// Protected names the pinned models in memory, for the log only.
+	Protected []string
+}
+
+// Error is the text a network client reads. It names no model.
+func (e *NoRoomError) Error() string {
+	return fmt.Sprintf(
+		"not enough memory to load another model, and no model in memory can be freed (limit %s)",
+		HumanBytes(e.Limit))
+}
+
+// Unwrap makes this one of the refusals errors.Is(err, ErrBusy) matches: the
+// machine is occupied, rather than anything being wrong with the request.
+func (e *NoRoomError) Unwrap() error { return ErrBusy }
+
 // pinnedResidentLocked names the protected models currently in memory, for the
-// log line the refusal above writes. Callers must hold p.mu.
+// log line Acquire writes once the lock is released. Callers must hold p.mu.
 func (p *Pool) pinnedResidentLocked() []string {
 	var out []string
 	for _, e := range p.entries {

@@ -7,6 +7,8 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+
+	"github.com/intentdriven/Gropius/internal/runtime"
 )
 
 // evalPanelValue evaluates one expression against the named functions lifted
@@ -155,8 +157,9 @@ func TestSettingsFormChargesPinnedModelsWhatThePoolCharges(t *testing.T) {
 		want float64
 	}{
 		{fmt.Sprintf(`pinnedCharge(%s, [])`, models), 0},
-		{fmt.Sprintf(`pinnedCharge(%s, ["org/a"])`, models), 1200},
-		{fmt.Sprintf(`pinnedCharge(%s, ["org/a","org/b"])`, models), 1800},
+		{fmt.Sprintf(`pinnedCharge(%s, ["org/a"])`, models), float64(runtime.LoadCost(1000))},
+		{fmt.Sprintf(`pinnedCharge(%s, ["org/a","org/b"])`, models),
+			float64(runtime.LoadCost(1000) + runtime.LoadCost(500))},
 		// A pinned model this Mac has not downloaded has no size to charge.
 		{fmt.Sprintf(`pinnedCharge(%s, ["org/not-downloaded"])`, models), 0},
 	}
@@ -165,5 +168,36 @@ func TestSettingsFormChargesPinnedModelsWhatThePoolCharges(t *testing.T) {
 		if got != tc.want {
 			t.Errorf("%s = %v, want %v", tc.expr, got, tc.want)
 		}
+	}
+}
+
+// Every pin has to be removable from the form that made it. A pin whose model
+// is not in the list — one deleted since it was pinned, or one pinned before
+// it was downloaded — gets a row of its own, or it can never be unticked: the
+// form carries through what it does not list, so a pin with no row is a pin
+// for good.
+func TestSettingsFormDrawsARowForEveryPin(t *testing.T) {
+	const models = `[{"repo_id":"org/here","bytes":10}]`
+	got := evalPanelValue(t,
+		fmt.Sprintf(`{"rows": pinRows(%s, ["org/here", "org/gone"])}`, models),
+		"pinRows")
+	want := map[string]any{"rows": []any{
+		map[string]any{"id": "org/here", "checked": true, "absent": false},
+		map[string]any{"id": "org/gone", "checked": true, "absent": true},
+	}}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("pinRows = %v, want %v", got, want)
+	}
+}
+
+// A model that is still downloading declares its size from the first byte.
+// Charging it nothing is how a pinned pair that cannot fit gets ticked: the
+// figure reads 0 while both boxes are ticked, and the machine is over budget
+// the moment the downloads land.
+func TestSettingsFormChargesADownloadItsDeclaredSize(t *testing.T) {
+	const models = `[{"repo_id":"org/incoming","bytes":0,"size_bytes":1000}]`
+	got := evalPanelNumber(t, fmt.Sprintf(`pinnedCharge(%s, ["org/incoming"])`, models), "pinnedCharge")
+	if want := float64(runtime.LoadCost(1000)); got != want {
+		t.Errorf("pinnedCharge = %v, want %v", got, want)
 	}
 }

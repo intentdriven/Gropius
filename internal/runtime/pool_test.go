@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"slices"
 	"strings"
@@ -1098,7 +1099,7 @@ func TestSetPinnedProtectsAModelWithoutANewPool(t *testing.T) {
 		clock.advance(time.Minute)
 	}
 
-	// Pinned under a spelling the pool never saw: Settings canonicalises, but
+	// Pinned under a spelling the pool never saw: Settings canonicalizes, but
 	// a hand-edited settings file need not, and a pin that silently matched
 	// nothing would be the worst failure this feature has.
 	p.SetPinned([]string{"ORG/Keep"})
@@ -1136,14 +1137,27 @@ func TestUnloadSucceedsOnAPinnedModel(t *testing.T) {
 }
 
 // The fit check the app runs before a settings save is against this figure, so
-// the pool has to be able to state it.
+// it has to be the figure the pool actually enforces — not a second number the
+// pool merely remembers. A model charged one byte over what MemoryBudget()
+// reports must be refused, and one charged exactly it must load.
 func TestMemoryBudgetReportsTheCeilingEvictionUses(t *testing.T) {
 	l := newFakeLauncher()
-	src := &fakeSource{models: map[string]int64{}}
-	p := newTestPool(t, l, src, PoolOptions{MaxResidentBytes: 4242})
+	// LoadCost is 1.2x, so these are charged 240 and 246.
+	src := &fakeSource{models: map[string]int64{"org/fits": 200, "org/over": 205}}
+	p := newTestPool(t, l, src, PoolOptions{MaxResidentBytes: 240})
 
-	if got := p.MemoryBudget(); got != 4242 {
-		t.Errorf("MemoryBudget() = %d, want 4242", got)
+	if got := p.MemoryBudget(); got != 240 {
+		t.Fatalf("MemoryBudget() = %d, want 240", got)
+	}
+	if _, _, err := p.Acquire(context.Background(), "org/over"); err == nil {
+		t.Errorf("a model charged %d loaded under a budget of %d",
+			LoadCost(205), p.MemoryBudget())
+	}
+	_, release, err := p.Acquire(context.Background(), "org/fits")
+	if err != nil {
+		t.Errorf("a model charged exactly the budget was refused: %v", err)
+	} else {
+		release()
 	}
 }
 
@@ -1176,3 +1190,84 @@ func residentIDs(p *Pool) []string {
 	slices.Sort(out)
 	return out
 }
+
+// The refusal's log line names the protected models, and the names travel on
+// the error rather than being written while p.mu is held. p.mu is the pool's
+// one lock: Acquire, Resident, Pinned and Unload all take it, and the models
+// list takes it on every request, so a slow log sink — a stalled stderr pipe,
+// a busy disk — would let a client that can provoke refusals stall every other
+// caller for the length of a write.
+func TestRefusalLogsTheProtectedModelsWithoutHoldingTheLock(t *testing.T) {
+	l := newFakeLauncher()
+	src := &fakeSource{models: map[string]int64{"org/pinned": 100, "org/other": 100}}
+	h := &blockingHandler{enter: make(chan struct{}), leave: make(chan struct{})}
+	p := newTestPool(t, l, src, PoolOptions{
+		MaxResidentBytes: 150,
+		Pinned:           []string{"org/pinned"},
+		Log:              slog.New(h),
+	})
+	// Registered after the pool, so it runs before the pool's own Close: a
+	// failing assertion below leaves the handler mid-write, and Close would
+	// then wait on the lock this test is claiming is free.
+	t.Cleanup(h.release)
+
+	_, release, err := p.Acquire(context.Background(), "org/pinned")
+	if err != nil {
+		t.Fatal(err)
+	}
+	release()
+
+	refused := make(chan error, 1)
+	go func() {
+		_, _, err := p.Acquire(context.Background(), "org/other")
+		refused <- err
+	}()
+
+	select {
+	case <-h.enter:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the refusal never reached the log")
+	}
+	// The log sink is stuck mid-write. Every other caller must still be served.
+	done := make(chan []Resident, 1)
+	go func() { done <- p.Resident() }()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Resident() blocked behind the refusal's log write, so the log runs under p.mu")
+	}
+	h.release()
+
+	err = <-refused
+	var noRoom *NoRoomError
+	if !errors.As(err, &noRoom) {
+		t.Fatalf("error = %v, want a *NoRoomError carrying the protected names", err)
+	}
+	if !slices.Equal(noRoom.Protected, []string{"org/pinned"}) {
+		t.Errorf("Protected = %v, want the pinned model", noRoom.Protected)
+	}
+	if strings.Contains(err.Error(), "org/pinned") {
+		t.Errorf("the names reached the message a LAN client reads: %v", err)
+	}
+}
+
+// blockingHandler is a slog handler that stalls inside Handle until it is let
+// go, so a test can see what else is held up while it writes.
+type blockingHandler struct {
+	enter     chan struct{}
+	leave     chan struct{}
+	entered   sync.Once
+	releasing sync.Once
+}
+
+func (h *blockingHandler) Enabled(context.Context, slog.Level) bool { return true }
+func (h *blockingHandler) Handle(context.Context, slog.Record) error {
+	h.entered.Do(func() { close(h.enter) })
+	<-h.leave
+	return nil
+}
+
+// release lets every stalled write through. Safe to call more than once.
+func (h *blockingHandler) release()                           { h.releasing.Do(func() { close(h.leave) }) }
+func (h *blockingHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h *blockingHandler) WithGroup(string) slog.Handler      { return h }
