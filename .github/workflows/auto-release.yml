@@ -168,6 +168,8 @@ jobs:
       && (needs.tag.result == 'success' || needs.tag.result == 'skipped')
     permissions:
       contents: write        # release.yml: create the Release + verify the tag
+      id-token: write        # release.yml: OIDC for the build-provenance attestation
+      attestations: write    # release.yml: publish that attestation (public repo)
     uses: ./.github/workflows/release.yml
     with:
       tag: v${{ needs.detect.outputs.version }}
