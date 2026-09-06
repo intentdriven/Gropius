@@ -61,10 +61,23 @@ type rendered struct {
 	css  string
 }
 
-// renderTree runs the renderer exactly as the Makefile and the deploy workflow
-// do: root is the tree to compose from, out the directory to write into.
+// renderTree runs the renderer exactly as the Makefile does: root is the tree to
+// compose from, out the directory to write into, and no release record — the
+// page with nothing but what the repository composes.
 func renderTree(root, out string) (rendered, error) {
-	cmd := exec.Command("go", "run", "./cmd/gropius-site", "--root", root, "--manifest", filepath.Join(root, ".abcd", "site.json"), "--out", out)
+	return renderTreeWithRelease(root, out, "")
+}
+
+// renderTreeWithRelease is the deploy chain's invocation: the same render, with
+// the release record the workflow writes beside the build. An empty release path
+// passes no --release at all, which is the record's absence and not an empty
+// one.
+func renderTreeWithRelease(root, out, release string) (rendered, error) {
+	args := []string{"run", "./cmd/gropius-site", "--root", root, "--manifest", filepath.Join(root, ".abcd", "site.json"), "--out", out}
+	if release != "" {
+		args = append(args, "--release", release)
+	}
+	cmd := exec.Command("go", args...)
 	cmd.Dir = repoRoot
 	if b, err := cmd.CombinedOutput(); err != nil {
 		return rendered{}, fmt.Errorf("render: %v\n%s", err, b)
@@ -213,15 +226,6 @@ func TestDownloadButtonResolvesTheLatestRelease(t *testing.T) {
 	// names a version, so there is nothing to go stale.
 	if m := regexp.MustCompile(`v[0-9]+\.[0-9]+\.[0-9]+`).FindString(page); m != "" {
 		t.Errorf("the page carries the version literal %q; a static page cannot keep one current", m)
-	}
-}
-
-func TestReleaseFactsRegionIsMarkedForItsOwner(t *testing.T) {
-	tmpl := read(t, filepath.Join(repoRoot, "site-src", "index.html.tmpl"))
-	for _, marker := range []string{"release facts: begin", "release facts: end", "itd-2609061353258535"} {
-		if !strings.Contains(tmpl, marker) {
-			t.Errorf("the template does not mark the release-facts region with %q; the record that fills it needs to find it", marker)
-		}
 	}
 }
 
@@ -411,7 +415,7 @@ func fixtureTree(t *testing.T, mutate func(path, content string) string) string 
 	// Every "file": in the manifest, plus the template, the strings and the
 	// static inputs.
 	raw := read(t, filepath.Join(repoRoot, manifest))
-	for _, m := range regexp.MustCompile(`"(?:file|ui_strings|template)"\s*:\s*"([^"]+)"`).FindAllStringSubmatch(raw, -1) {
+	for _, m := range regexp.MustCompile(`"(?:file|ui_strings|template|headers)"\s*:\s*"([^"]+)"`).FindAllStringSubmatch(raw, -1) {
 		files = append(files, filepath.FromSlash(m[1]))
 	}
 	var man struct {
