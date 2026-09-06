@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"maps"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -153,13 +154,11 @@ func New(opts Options) (*App, error) {
 	// exists to say what was dropped.
 	a.cfg.PerModel = a.adoptPerModel(a.cfg.PerModel)
 
-	// The fit check cannot run against a file — a hand-edited one can pin
-	// anything — so an over-budget set reaches the pool whatever this says.
-	// Warning is what turns it from a refusal of every unpinned request with
-	// no hint of why into something the operator can act on.
-	if err := a.checkPinnedFit(a.cfg.Pinned); err != nil {
-		a.Log.Warn("the pinned models do not fit the memory budget", "err", err)
-	}
+	// The fit check cannot refuse a file — a hand-edited one can pin anything —
+	// so an over-budget set reaches the pool whatever this says. Passing the
+	// same list as both the incoming and the current set is what says "nothing
+	// was added here": every problem it finds is warned about, none refused.
+	_ = a.checkPinnedFit(a.cfg.Pinned, a.cfg.Pinned)
 
 	if len(opts.Config.Preload) > 0 {
 		go a.preload(opts.Config.Preload)
@@ -216,7 +215,7 @@ func (a *App) SetConfig(c config.Config) error {
 	}
 	c.PerModel = perModel
 	c.Pinned = a.canonicalPinned(c.Pinned)
-	if err := a.checkPinnedFit(c.Pinned); err != nil {
+	if err := a.checkPinnedFit(c.Pinned, a.Config().Pinned); err != nil {
 		return err
 	}
 	if err := config.Save(a.Paths.Config, c); err != nil {
@@ -301,32 +300,48 @@ func (a *App) adoptPinned(in []string) []string {
 	return out
 }
 
-// checkPinnedFit refuses a pinned set whose models cannot all be in memory at
-// once.
+// checkPinnedFit refuses a save that pins more than can be in memory at once.
 //
 // A pinned model is never evicted, so a set that overshoots the budget does not
 // fail at save time by itself — it fails later, as a refusal of every request
-// for a model that is not pinned, with no hint of why. The whole incoming
-// intention is judged at once, against the budget the pool actually enforces.
+// for a model that is not pinned, with no hint of why.
 //
-// A model that is still downloading is charged the size it declares. Charging
-// it nothing is how a pinned pair that cannot possibly fit gets accepted: tick
-// both boxes while they download, and the machine is over budget the moment
-// they land. A pinned model this machine does not have at all is not counted —
-// there is no size to charge, and it protects nothing until something loads it.
-func (a *App) checkPinnedFit(pinned []string) error {
-	var sum int64
-	for _, id := range pinned {
-		m, err := a.Registry.Get(id)
-		if err != nil {
-			continue
-		}
-		sum += runtime.LoadCost(chargedSize(m))
+// What is refused is a save that makes the set worse: one that adds a pin. A
+// set the operator did not touch is accepted and warned about, however badly it
+// fits, because the fit is a fact about this Mac and the set may have arrived
+// from another one — and a settings page that will not save an API key until an
+// unrelated setting is fixed is the wedge adoptPinned exists to prevent. When
+// the memory budget itself becomes settable, a save that lowers it is the other
+// way to make the set worse and belongs in the same test here.
+//
+// A pin that names a model this Mac cannot measure is refused as it is added,
+// for the same reason: a fit check that silently skips a model is a promise it
+// cannot keep. One already in the set is warned about, not refused.
+func (a *App) checkPinnedFit(incoming, current []string) error {
+	sum, unsized := a.pinnedCharge(incoming)
+	budget := a.Pool.MemoryBudget()
+	if len(unsized) == 0 && sum <= budget {
+		return nil
 	}
-	if budget := a.Pool.MemoryBudget(); sum > budget {
-		return fmt.Errorf(
+
+	worse := addsAPin(incoming, current)
+	if len(unsized) > 0 {
+		err := fmt.Errorf(
+			"cannot measure %s against the memory budget — this Mac does not record how large it is",
+			strings.Join(unsized, ", "))
+		if worse {
+			return err
+		}
+		a.Log.Warn("a pinned model cannot be measured against the memory budget", "err", err)
+	}
+	if sum > budget {
+		err := fmt.Errorf(
 			"the pinned models need about %s of memory but the budget is %s — pin fewer models, or choose smaller quantizations",
 			runtime.HumanBytes(sum), runtime.HumanBytes(budget))
+		if worse {
+			return err
+		}
+		a.Log.Warn("the pinned models do not fit the memory budget", "err", err)
 	}
 	return nil
 }
@@ -372,6 +387,55 @@ var stopReasons = map[runtime.StopReason]string{
 	runtime.StopLoadFailed: stats.ReasonLoadFailed,
 	runtime.StopCrashed:    stats.ReasonCrashed,
 	runtime.StopShutdown:   stats.ReasonShutdown,
+}
+
+// pinnedCharge is what a pinned set costs the memory budget, and the names of
+// any pinned models this Mac cannot measure.
+//
+// Only a model the pool could actually load is charged: one that is ready, and
+// one that is still downloading, which is charged the size it declares —
+// charging a download nothing is how a pinned pair that cannot possibly fit
+// gets accepted while the bytes are still arriving. A failed download is
+// charged nothing, because modelSource.Resolve refuses anything that is not
+// ready, so it can never occupy a byte however large it declared itself. A pin
+// naming a model this Mac does not have at all is not counted either; it
+// protects nothing until something loads it.
+func (a *App) pinnedCharge(pinned []string) (sum int64, unsized []string) {
+	for _, id := range pinned {
+		m, err := a.Registry.Get(id)
+		if err != nil || !chargeable(m) {
+			continue
+		}
+		size := chargedSize(m)
+		if size <= 0 {
+			unsized = append(unsized, m.RepoID)
+			continue
+		}
+		sum += runtime.LoadCost(size)
+	}
+	return sum, unsized
+}
+
+// chargeable reports whether a model could occupy memory at all. Anything the
+// pool would refuse to load costs the budget nothing, whatever its record says
+// about its size.
+func chargeable(m registry.Model) bool {
+	return m.Ready() || m.State == registry.StateDownloading
+}
+
+// addsAPin reports whether the incoming set names a model the current one does
+// not. Folded, because two spellings of one id are one pin.
+func addsAPin(incoming, current []string) bool {
+	have := make(map[string]bool, len(current))
+	for _, id := range current {
+		have[config.FoldRepoID(id)] = true
+	}
+	for _, id := range incoming {
+		if !have[config.FoldRepoID(id)] {
+			return true
+		}
+	}
+	return false
 }
 
 // canonicalPerModel checks the keys of a per-model settings map submitted
@@ -444,7 +508,9 @@ func (a *App) adoptPerModel(in map[string]config.ModelSettings) map[string]confi
 // chargedSize is what a model costs the memory budget: what is on disk once it
 // is downloaded, and what the download declares before that. The two are the
 // same figure at different moments, and a model in flight is the case the
-// check exists for.
+// check exists for. The disk figure wins where both are recorded, because it
+// is the one the pool charges. Zero from both means this Mac does not know how
+// large the model is — see pinnedCharge, which refuses to guess.
 func chargedSize(m registry.Model) int64 {
 	if m.Bytes > 0 {
 		return m.Bytes

@@ -1141,3 +1141,124 @@ func seedReadyModel(t *testing.T, paths config.Paths, repoID string, size int64)
 		t.Fatal(err)
 	}
 }
+
+// A settings file carried from a larger Mac names a pinned set this one cannot
+// hold. The operator did not choose that here, and must not have to notice it
+// before they can change the API key: the fit check judges what this save
+// makes worse, not what it inherited. Refusing the whole save over a setting
+// the form did not touch is the wedge this branch already closed once.
+func TestAnInheritedOverBudgetPinnedSetDoesNotBlockAnUnrelatedSave(t *testing.T) {
+	paths := config.NewPaths(t.TempDir())
+	seedReadyModel(t, paths, "org/enormous", 1<<50)
+
+	cfg := config.Default()
+	cfg.Pinned = []string{"org/enormous"}
+	a, err := New(Options{Paths: paths, Config: cfg})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	t.Cleanup(func() { a.Close() })
+
+	c := a.Config()
+	c.APIKey = "bh_secret"
+	if err := a.SetConfig(c); err != nil {
+		t.Fatalf("an unrelated save was refused over a pinned set the operator did not touch: %v", err)
+	}
+	if got := a.Config().APIKey; got != "bh_secret" {
+		t.Errorf("APIKey = %q, want the save to have gone through", got)
+	}
+
+	// But making it worse is still refused: this is the moment the operator is
+	// choosing it.
+	seedReadyModel(t, paths, "org/second", 1<<50)
+	if err := a.Registry.Rescan(paths.Models); err != nil {
+		t.Fatal(err)
+	}
+	c = a.Config()
+	c.Pinned = append(append([]string(nil), c.Pinned...), "org/second")
+	if err := a.SetConfig(c); err == nil {
+		t.Error("adding a pin to a set that already does not fit was accepted")
+	}
+
+	// And so is shedding one, which leaves the set no worse than it was.
+	c = a.Config()
+	c.Pinned = nil
+	if err := a.SetConfig(c); err != nil {
+		t.Errorf("unpinning was refused: %v", err)
+	}
+}
+
+// A failed download can never be loaded — modelSource.Resolve refuses anything
+// that is not ready — so it can never occupy a byte of the budget. Its declared
+// size survives the failure in the registry, though, so charging by size alone
+// refuses a save over memory a pin cannot take.
+func TestAPinOnAFailedDownloadIsChargedNothing(t *testing.T) {
+	a := newTestApp(t)
+	if err := a.Registry.Put(registry.Model{
+		RepoID: "org/broken", Path: a.Paths.ModelDir("org/broken"),
+		SizeBytes: 1 << 50, State: registry.StateFailed, Err: "no usable weights",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	c := a.Config()
+	c.Pinned = []string{"org/broken"}
+	if err := a.SetConfig(c); err != nil {
+		t.Errorf("a pin on a model that can never load was charged the memory it never takes: %v", err)
+	}
+}
+
+// A model the registry holds with no size at all cannot be measured against
+// the budget, so pinning it would make the fit check a promise it cannot keep.
+// Say so at the moment the pin is added rather than accept it silently.
+func TestAPinOnAModelOfUnknownSizeIsRefusedWhenItIsAdded(t *testing.T) {
+	a := newTestApp(t)
+	if err := a.Registry.Put(registry.Model{
+		RepoID: "org/sizeless", Path: a.Paths.ModelDir("org/sizeless"),
+		State: registry.StateReady, Progress: 100,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	c := a.Config()
+	c.Pinned = []string{"org/sizeless"}
+	err := a.SetConfig(c)
+	if err == nil {
+		t.Fatal("a pin on a model of unknown size was accepted")
+	}
+	if !strings.Contains(err.Error(), "org/sizeless") {
+		t.Errorf("error = %q, want it to name the model it cannot measure", err)
+	}
+}
+
+// The gate is "no greater than the budget", so a set that exactly fills it is
+// allowed and one byte more is not. Without this the boundary could move a
+// byte in either direction and every other test would stay green.
+func TestThePinnedFitCheckIsInclusiveOfTheBudget(t *testing.T) {
+	a := newTestApp(t)
+	budget := a.Pool.MemoryBudget()
+	// LoadCost is size + size/5, so a size of 5k is charged exactly 6k: pick
+	// the largest such size that fits, and the next one that cannot.
+	fits := 5 * (budget / 6)
+	over := fits + 6
+
+	putReady(t, a, "org/exact", fits)
+	c := a.Config()
+	c.Pinned = []string{"org/exact"}
+	if err := a.SetConfig(c); err != nil {
+		t.Errorf("a pinned model charged %s against a budget of %s was refused: %v",
+			runtime.HumanBytes(runtime.LoadCost(fits)), runtime.HumanBytes(budget), err)
+	}
+
+	putReady(t, a, "org/exact", over)
+	c = a.Config()
+	c.Pinned = nil
+	if err := a.SetConfig(c); err != nil {
+		t.Fatal(err)
+	}
+	c.Pinned = []string{"org/exact"}
+	if err := a.SetConfig(c); err == nil {
+		t.Errorf("a pinned model charged %s against a budget of %s was accepted",
+			runtime.HumanBytes(runtime.LoadCost(over)), runtime.HumanBytes(budget))
+	}
+}
