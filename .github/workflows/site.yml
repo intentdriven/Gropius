@@ -239,7 +239,6 @@ jobs:
 
       # release record: begin
       - name: Read the release the forge flags as latest
-        id: release
         # THE PAGE'S RELEASE FACTS. `gh release view` with no tag is the forge's
         # `releases/latest` — the same election the download button and
         # install.sh follow — so it excludes drafts and pre-releases and is NOT
@@ -384,9 +383,14 @@ jobs:
             exit 1
           fi
           test -s "$staging/Gropius/index.html"
+          # The response policy is served from the root of the assets directory,
+          # so it has to survive the artifact round trip; a page deployed without
+          # it is served with no policy at all and nothing else would say so.
+          test -s "$staging/_headers"
           mkdir -p site
           cp -R "$staging/." site/
           test -s site/Gropius/index.html
+          test -s site/_headers
 
       - name: Deploy to the Worker
         uses: cloudflare/wrangler-action@ebbaa1584979971c8614a24965b4405ff95890e0 # v4.0.0
