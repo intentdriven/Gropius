@@ -62,6 +62,7 @@ type manifest struct {
 	UIStrings string   `json:"ui_strings"`
 	Template  string   `json:"template"`
 	Static    []string `json:"static"`
+	Headers   string   `json:"headers"`
 	OutSubdir string   `json:"out_subdir"`
 	Forge     struct {
 		Base          string `json:"base"`
@@ -338,6 +339,25 @@ func render(root, manifestPath, out, releasePath string) error {
 			return err
 		}
 		if err := os.WriteFile(filepath.Join(dir, name), b, 0o644); err != nil {
+			return err
+		}
+	}
+	// The response headers the host serves these files with. They belong at the
+	// ROOT of the output tree and not beside the page: the platform reads one
+	// map for the whole assets directory, while the page is served from a path
+	// under it. The written name is fixed here rather than taken from the
+	// manifest, so this is the only file a render puts outside out_subdir and a
+	// manifest cannot name a second one.
+	if m.Headers != "" {
+		from, err := src.path(m.Headers)
+		if err != nil {
+			return fmt.Errorf("headers: %w", err)
+		}
+		b, err := os.ReadFile(from)
+		if err != nil {
+			return err
+		}
+		if err := os.WriteFile(filepath.Join(out, "_headers"), b, 0o644); err != nil {
 			return err
 		}
 	}

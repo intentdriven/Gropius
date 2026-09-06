@@ -83,6 +83,7 @@ func tree(t *testing.T) string {
 		filepath.Join("site-src", "index.html.tmpl"),
 		filepath.Join("site-src", "site.css"),
 		filepath.Join("site-src", "ui.json"),
+		filepath.Join("site-src", "headers"),
 		filepath.Join(".abcd", "site.json"),
 	} {
 		b, err := os.ReadFile(filepath.Join("..", "..", f))

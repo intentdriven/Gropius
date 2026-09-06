@@ -1,0 +1,22 @@
+# Response headers for the landing page.
+#
+# cmd/gropius-site copies this file to the ROOT of the output directory as
+# `_headers`, which is where the host reads it: one map for the whole assets
+# directory, while the page itself is served from a path under it.
+#
+# The policy is the serve-time half of a bar internal/sitetest also holds at
+# build time — the page must request nothing but its own origin and the web font
+# service. Two checks rather than one because they fail differently: the test
+# fails a build when a reference is added, and the header stops a browser from
+# following one that reached the page some other way.
+#
+# It is derived from what the page actually references, and the test refuses a
+# host in it that the page never fetches. The page carries no script, no form
+# and no frame, so those are refused outright rather than left to default-src.
+# Fonts: the stylesheet comes from fonts.googleapis.com and the face files it
+# names come from fonts.gstatic.com, so both are needed and neither is enough.
+
+/Gropius/*
+  Content-Security-Policy: default-src 'none'; script-src 'none'; style-src 'self' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'
+  Referrer-Policy: no-referrer
+  X-Content-Type-Options: nosniff
