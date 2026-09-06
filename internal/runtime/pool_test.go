@@ -819,3 +819,59 @@ func TestHumanBytes(t *testing.T) {
 		}
 	}
 }
+
+// The pool is the source of truth for residency, and a model mid-load is
+// neither warm nor cold: a caller told "loaded" would send work and wait for
+// the load anyway, one told "not loaded" might start a second, competing load.
+// Loading means exactly "the entry is in the pool, its readiness probe has not
+// answered yet"; the read must not block on that probe.
+func TestResidentDistinguishesLoadingFromLoaded(t *testing.T) {
+	l := newFakeLauncher()
+	l.loadDelay = 300 * time.Millisecond
+	src := &fakeSource{models: map[string]int64{"org/m": 1 << 20}}
+	p := newTestPool(t, l, src, PoolOptions{MaxResidentBytes: 1 << 30})
+
+	acquired := make(chan struct{})
+	go func() {
+		defer close(acquired)
+		_, release, err := p.Acquire(context.Background(), "org/m")
+		if err != nil {
+			t.Errorf("Acquire: %v", err)
+			return
+		}
+		release()
+	}()
+
+	// The load is under way and the probe has not answered.
+	deadline := time.Now().Add(2 * time.Second)
+	var loading []Resident
+	for time.Now().Before(deadline) {
+		start := time.Now()
+		loading = p.Resident()
+		// A read that waited on the readiness probe would be the bug: the
+		// answer is already known without it.
+		if took := time.Since(start); took > 100*time.Millisecond {
+			t.Fatalf("Resident() blocked for %s during a load", took)
+		}
+		if len(loading) == 1 {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if len(loading) != 1 {
+		t.Fatalf("Resident() = %+v during a load, want the loading entry", loading)
+	}
+	if loading[0].State != ResidencyLoading {
+		t.Errorf("State = %q while the model was loading, want %q", loading[0].State, ResidencyLoading)
+	}
+
+	<-acquired
+
+	loaded := p.Resident()
+	if len(loaded) != 1 {
+		t.Fatalf("Resident() = %+v after the load, want one entry", loaded)
+	}
+	if loaded[0].State != ResidencyLoaded {
+		t.Errorf("State = %q once the probe answered, want %q", loaded[0].State, ResidencyLoaded)
+	}
+}
