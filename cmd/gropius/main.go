@@ -283,18 +283,27 @@ func withLogging(next http.Handler, log *slog.Logger) http.Handler {
 	})
 }
 
-// statusRecorder remembers the response status so the log can report it.
+// statusRecorder remembers the response status so the log can report it, and
+// is otherwise transparent: every call is forwarded to the writer underneath,
+// return value and all.
 //
-// Unwrap keeps http.NewResponseController working through the wrapper: the
-// streaming completions path flushes each SSE chunk that way, and without it
-// a stream would arrive as one blob at the end.
+// Handlers running under it must reach optional writer features through
+// http.NewResponseController, never an http.Flusher or http.Hijacker type
+// assertion — embedding the interface means this type satisfies neither.
+// Unwrap is what makes the controller work: the streaming completions path
+// flushes each SSE chunk that way, and without it the flush fails and chunks
+// only leave when net/http's own buffer fills, so a stream arrives in lumps
+// with its tail delayed.
 type statusRecorder struct {
 	http.ResponseWriter
 	code int
 }
 
 func (s *statusRecorder) WriteHeader(code int) {
-	if s.code == 0 {
+	// 1xx codes are interim responses: net/http allows repeated WriteHeader
+	// calls for them and the terminal status arrives later, so latching one
+	// would report 103 for a request that ended 200 (or 500).
+	if s.code == 0 && code >= 200 {
 		s.code = code
 	}
 	s.ResponseWriter.WriteHeader(code)
