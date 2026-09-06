@@ -60,18 +60,20 @@ network):
 curl -fsSL https://raw.githubusercontent.com/intentdriven/Gropius/main/install.sh | bash -s -- client
 ```
 
-The installer **verifies the download's signature before installing it**, so you
-need [minisign](https://jedisct1.github.io/minisign/) on your PATH:
+The installer **verifies the download before installing it**: it fetches the
+checksums file published on the same GitHub release and refuses anything that
+does not match. Every release asset also carries a GitHub build-provenance
+attestation binding it to the release workflow run; check it yourself with
+[`gh attestation verify`](https://cli.github.com/manual/gh_attestation_verify):
 
 ```sh
-brew install minisign
+gh attestation verify Gropius.app.zip --repo intentdriven/Gropius
 ```
 
-The release workflow signs a checksums file with a key held only in CI; the
-installer carries the matching public key and refuses to install anything that
-does not verify against it. The binaries are ad-hoc signed, not notarized; because
-the installer has already cryptographically verified the app, it clears the
-Gatekeeper quarantine so it launches without a prompt. The first launch installs
+There is no offline signing key; building from source is the escape hatch. The
+binaries are ad-hoc signed, not notarized; because the installer has verified
+the download, it clears the Gatekeeper quarantine so it launches without a
+prompt. The first launch installs
 the MLX runtime (a few minutes, shown in the control panel), then you can download
 and serve models. New here? See **[docs/getting-started.md](docs/getting-started.md)**.
 

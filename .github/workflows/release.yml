@@ -127,7 +127,9 @@ jobs:
     timeout-minutes: 30
     runs-on: macos-26
     permissions:
-      contents: write       # create the Release (no branch push, no attestation)
+      contents: write       # create the Release and upload its assets (no branch push)
+      id-token: write       # mint the OIDC token attest-build-provenance signs with
+      attestations: write   # publish the build-provenance attestations (public repo)
     steps:
       - name: Check out the pushed commit
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -187,50 +189,35 @@ jobs:
       # Package each .app so it extracts to `<App>.app` at the archive root —
       # exactly what install.sh's `ditto -x -k` step expects (--keepParent keeps
       # the .app directory as the top-level entry).
-      - name: Package the apps
+      # The checksums file is what install.sh verifies against: it is published
+      # on the same Release as the zips (same origin), and the attestation below
+      # binds every asset to this workflow run. No offline signing key: the trust
+      # bar is same-origin checksums plus GitHub build provenance, with building
+      # from source as the escape hatch.
+      - name: Package the apps and write the checksums
         run: |
           set -euo pipefail
           ditto -c -k --keepParent dist/Gropius.app Gropius.app.zip
           ditto -c -k --keepParent client/dist/GropiusChat.app GropiusChat.app.zip
-          shasum -a 256 Gropius.app.zip GropiusChat.app.zip
+          shasum -a 256 Gropius.app.zip GropiusChat.app.zip | tee SHA256SUMS.txt
 
-      # Sign the checksums so install.sh can prove the downloaded .app is the one
-      # this workflow built, not one swapped onto the Release. The private key
-      # lives only in the MINISIGN_SECRET_KEY secret; install.sh carries the
-      # matching public key. Signing the SHA256SUMS.txt covers both zips with one
-      # signature. Fail closed: if the secret is unset, the release stops here
-      # rather than publishing assets install.sh will (correctly) refuse.
-      # Install minisign in its own step so the network-fetched, unpinned brew
-      # formula never executes with the signing key in its environment.
-      - name: Install minisign
-        run: brew install minisign
-
-      - name: Sign the release checksums (minisign)
-        env:
-          MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
-        run: |
-          set -euo pipefail
-          if [ -z "${MINISIGN_SECRET_KEY:-}" ]; then
-            echo "::error::MINISIGN_SECRET_KEY secret is not set — install.sh requires a signature. See install.sh for the one-time key setup." >&2
-            exit 1
-          fi
-          shasum -a 256 Gropius.app.zip GropiusChat.app.zip > SHA256SUMS.txt
-          printf '%s\n' "$MINISIGN_SECRET_KEY" > minisign.key
-          # The key is generated passwordless (minisign -G -W), so signing needs
-          # no interactive prompt; </dev/null guards against a hang if it ever does.
-          minisign -S -s minisign.key \
-            -c "gropius release $TAG" \
-            -t "gropius $TAG checksums" \
-            -m SHA256SUMS.txt </dev/null
-          rm -f minisign.key
-          echo "Signed SHA256SUMS.txt:"; cat SHA256SUMS.txt.minisig
+      # Build-provenance attestation over exactly the bytes published below.
+      # Anyone can verify an asset came from this workflow on this repository:
+      #   gh attestation verify Gropius.app.zip --repo <owner>/<repo>
+      - name: Attest the release assets
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: |
+            Gropius.app.zip
+            GropiusChat.app.zip
+            SHA256SUMS.txt
 
       # Create the Release if it doesn't exist yet, otherwise attach/replace the
       # assets on the existing one. --clobber makes re-runs idempotent. install.sh
       # fetches `releases/latest/download/<asset>`, so the Release must be a
       # normal (non-draft, non-prerelease) published release — which is the
-      # default for both paths here. The checksums file and its .minisig ride
-      # alongside the zips; install.sh verifies the signature before installing.
+      # default for both paths here. The checksums file rides alongside the
+      # zips; install.sh verifies the download against it before installing.
       # --verify-tag: refuse to publish unless the tag already exists remotely —
       # existence only; it does not check what the tag points at (see the contract
       # note at the top of this file). --generate-notes lists the merged PRs since
@@ -241,7 +228,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          assets="Gropius.app.zip GropiusChat.app.zip SHA256SUMS.txt SHA256SUMS.txt.minisig"
+          assets="Gropius.app.zip GropiusChat.app.zip SHA256SUMS.txt"
           if gh release view "$TAG" >/dev/null 2>&1; then
             echo "Release $TAG exists — uploading assets."
             gh release upload "$TAG" $assets --clobber
