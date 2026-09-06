@@ -103,6 +103,30 @@ key, as long as they are addressed to `localhost` or `127.0.0.1`. A local proxy
 or tunnel that forwards another host name must send the key like any other
 client.
 
+### What Gropius reads of a request
+
+Gropius passes a request on to the model without reading what is in it. There
+is one exception, it is per model, and it is off until you switch it on:
+**Settings → Merge system messages**.
+
+Some models refuse a conversation whose instructions are not all at the top.
+That breaks any assistant which repeats its instructions as the conversation
+goes on — the model answers the first message and returns a template error on
+the next one. Tick the box beside that model in **Settings** and save. For
+requests to that model, Gropius then gathers the instruction (`system`)
+messages into a single message at the front, in the order they were sent and
+separated by a blank line, and passes every other message and field on
+untouched.
+
+For a model you switch it on for, Gropius reads the instruction messages of
+each request and nothing else. It keeps none of what it reads: nothing of a
+request's contents reaches the log, the model server's command line, or any
+file on disk. Clear the box and save to switch it off; the next request goes
+to the model exactly as it arrives.
+
+A request whose instructions arrive as a list of content parts rather than as
+plain text is passed on unchanged rather than rewritten, as is one to any model
+whose box is clear.
 ## 7. Choose what an omitted parameter means (optional)
 
 Clients that never send a `temperature` are served with the model server's
@@ -151,6 +175,10 @@ and each account falls back to its own data directory.
   connections". Only the Gropius app needs this; its Python helper only ever
   listens on loopback.
 
+- **A model answers the first message, then fails with a template error once the
+  assistant repeats its instructions.** That model's chat template refuses a
+  system message that is not the first one. Switch on **Merge system messages**
+  for that model in **Settings** (section 6 explains exactly what it does).
 - **The menu-bar icon never appears.** Run it in the foreground to see errors:
   `./dist/Gropius.app/Contents/MacOS/gropius`.
 - **A model stays "downloading" forever / fails.** Check the panel for the error.
