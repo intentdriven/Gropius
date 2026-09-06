@@ -7,9 +7,12 @@ package sitetest_test
 // run produces and not a second description of it.
 //
 // No network and no forge: the record arrives as a file, which is the whole
-// point of the transport. Which release the record describes is the forge's
-// `releases/latest` election, asserted here as the shape of the workflow step
-// that reads it (see TestTheReleaseRecordIsTheFlaggedLatestRelease).
+// point of the transport. WHICH release the record describes is decided by
+// electLatest in cmd/gropius-site and tested against a fixture there
+// (TestTheFlaggedLatestIsElectedAndNotTheNewest); what is held here is the shape
+// of the workflow that calls it — that it lists the releases with the forge's
+// own flag, elects through `gropius-site select`, fetches the elected tag, and
+// validates the record before the render commits to it.
 
 import (
 	"encoding/json"
@@ -209,12 +212,20 @@ func TestTheReleaseSectionMatchesTheRecordFieldByField(t *testing.T) {
 // "Given a release created more recently than the one flagged latest, when the
 // page is produced, then the page names the release flagged latest."
 //
-// The election is the forge's: `gh release view` with no tag reads the same
-// `releases/latest` the download button and install.sh follow, which by
-// definition excludes drafts and pre-releases and is not the newest created
-// release. There is no selection logic in this repository to unit-test, so what
-// is held here is the shape of the step that reads it: it asks for latest, and
-// it cannot be steered by the tag the run happens to carry.
+// The election is a function in this repository — electLatest, reached through
+// `gropius-site select --from <list>` — and the criterion's own case is a
+// fixture test of it in cmd/gropius-site: a list whose two newest-published
+// entries are a pre-release and a draft, with an older release flagged, must
+// elect the flagged one. That case cannot be produced against a live forge
+// without hand-making a stale release, which is why the election was moved here
+// rather than left to the forge's `releases/latest` endpoint (which makes the
+// same election, correctly, but gives nothing that can fail).
+//
+// What THIS test holds is the wiring the fixture cannot reach: that the workflow
+// hands electLatest a list carrying the forge's flag and both exclusions, that
+// it elects through the verb rather than in shell, that the release it then
+// fetches is the elected one, and that no name the run's own tag could arrive
+// under is read anywhere in the step.
 
 func TestTheReleaseRecordIsTheFlaggedLatestRelease(t *testing.T) {
 	step := releaseStep(t)
@@ -315,6 +326,53 @@ func TestTheRenderProceedsWhenTheRecordCannotBeRead(t *testing.T) {
 	if !regexp.MustCompile(`go run \./cmd/gropius-site --out site\s`).MatchString(render) {
 		t.Errorf("the render step has no invocation without --release; the record's absence must still produce a page:\n%s", render)
 	}
+}
+
+// The other half of criterion 1: "when Bob merges a changelog roll that
+// publishes a newer release". Every other check on this branch exercises
+// site.yml's insides, and every one of them would still pass if the release
+// chain stopped calling site.yml at all — at which point the page freezes at
+// whatever release it was last rendered from, which is the exact staleness this
+// record exists to prevent. So the call itself is held here.
+func TestTheReleaseChainRendersThePage(t *testing.T) {
+	wf := read(t, filepath.Join(repoRoot, ".github", "workflows", "release.yml"))
+	job := jobIn(t, wf, "site")
+
+	if !strings.Contains(job, "uses: ./.github/workflows/site.yml") {
+		t.Errorf("release.yml's site job does not call site.yml:\n%s", job)
+	}
+	// After the release, not beside it: the page must render from a release that
+	// exists, and a site failure must not be able to precede or replace the
+	// publish.
+	if !regexp.MustCompile(`(?m)^\s*needs:\s*release\s*$`).MatchString(job) {
+		t.Errorf("release.yml's site job does not need the release job:\n%s", job)
+	}
+	// And it is told which tag was released. The page elects its own release, but
+	// the call carries the tag because site.yml resolves the commit to render
+	// from it.
+	if !regexp.MustCompile(`(?m)^\s*tag:\s*\S`).MatchString(job) {
+		t.Errorf("release.yml's site job passes no tag to site.yml:\n%s", job)
+	}
+	// A called workflow cannot exceed its caller's grants, so the call has to
+	// carry the permission site.yml's own jobs ask for.
+	if !strings.Contains(job, "contents: read") {
+		t.Errorf("release.yml's site job grants site.yml no contents: read; its jobs would be refused:\n%s", job)
+	}
+}
+
+// jobIn returns one job's block from a workflow: everything from its key at two
+// spaces of indent up to the next key at that indent.
+func jobIn(t *testing.T, wf, name string) string {
+	t.Helper()
+	start := regexp.MustCompile(`(?m)^  ` + regexp.QuoteMeta(name) + `:$`).FindStringIndex(wf)
+	if start == nil {
+		t.Fatalf("the workflow has no %q job", name)
+	}
+	rest := wf[start[1]:]
+	if end := regexp.MustCompile(`(?m)^  [A-Za-z0-9_-]+:$`).FindStringIndex(rest); end != nil {
+		rest = rest[:end[0]]
+	}
+	return rest
 }
 
 func renderStep(t *testing.T) string {
