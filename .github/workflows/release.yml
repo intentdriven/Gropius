@@ -261,8 +261,6 @@ jobs:
             gh release create "$TAG" $assets \
               --verify-tag --title "$TAG" --latest="$latest" --generate-notes
           fi
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Assert the release job pushed nothing to the default branch
         # Close the no-branch-commit tripwire opened at job start. Runs last so it
