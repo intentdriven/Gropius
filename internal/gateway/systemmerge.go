@@ -103,13 +103,12 @@ func mergeSystemMessagesInto(payload map[string]json.RawMessage) mergeOutcome {
 // is carried over as its original bytes, so its content reaches the model
 // exactly as the client sent it.
 //
-// The merged message is the conversation's own leading system message with its
-// content replaced by the join, when the conversation begins with one. Its
-// other fields — a name, a cache directive — therefore stay on the message
-// that owned them, and nothing is invented: the later instructions are
-// appended to the text of the message that was already there. A conversation
-// that does not begin with a system message has no such owner, so the merged
-// message is written from role and content alone.
+// The merged message is the conversation's own first system message with its
+// content replaced by the join. Its other fields — a name, a cache directive —
+// therefore stay on the message that owned them, and nothing is invented: that
+// message's text starts the join and the later instructions are appended to
+// it. A lone system message that is merely in the wrong place is moved with
+// everything it carries, since nothing is appended to it at all.
 //
 // It returns mergeRefused — relay the request exactly as it came — for every
 // shape it cannot rebuild faithfully, rather than rebuild one lossily:
@@ -119,10 +118,10 @@ func mergeSystemMessagesInto(payload map[string]json.RawMessage) mergeOutcome {
 //     parts, JSON null, absent, or bytes that are not valid UTF-8, which Go's
 //     own string decoding would quietly repair into characters the client
 //     never sent;
-//   - a system message that is not the leading one and carries any field
-//     beyond "role" and "content". Its text is appended to another message, so
-//     a name on it would have to be dropped or reattributed, and neither is
-//     something the gateway gets to decide.
+//   - a system message after the first one that carries any field beyond
+//     "role" and "content". Its text is appended to the first one, so a name on
+//     it would have to be dropped or reattributed, and neither is something
+//     the gateway gets to decide.
 //
 // It returns mergeNotNeeded for the conversations that are already the shape
 // the template wants — no system message, or a single one already leading —
@@ -134,10 +133,11 @@ func mergeSystemMessages(raw json.RawMessage) (json.RawMessage, mergeOutcome) {
 	}
 
 	var (
-		texts   []string
-		others  []json.RawMessage
-		leading map[string]json.RawMessage
-		systems int
+		texts         []string
+		others        []json.RawMessage
+		owner         map[string]json.RawMessage
+		firstSystemAt = -1
+		systems       int
 	)
 	for i, element := range elements {
 		var fields map[string]json.RawMessage
@@ -163,13 +163,17 @@ func mergeSystemMessages(raw json.RawMessage) (json.RawMessage, mergeOutcome) {
 		if !ok {
 			return nil, mergeRefused
 		}
-		if i == 0 {
-			// The message the merged one is built from: everything it carries
-			// besides its text is kept, because it keeps its own identity.
-			leading = fields
+		if firstSystemAt < 0 {
+			// The message the merged one is built from. Its text starts the
+			// join and every later instruction is appended to it, so it keeps
+			// its own identity: everything it carries besides its text stays.
+			firstSystemAt = i
+			owner = fields
 		} else if len(fields) != 2 {
-			// Its text is about to be appended to another message. Anything
-			// else it carries has nowhere faithful to go.
+			// Its text is about to be appended to the message above. Anything
+			// else it carries has nowhere faithful to go — dropping it loses
+			// what the client set, and moving it onto another message
+			// reattributes it.
 			return nil, mergeRefused
 		}
 		// An instruction that renders to nothing contributes nothing, rather
@@ -179,7 +183,7 @@ func mergeSystemMessages(raw json.RawMessage) (json.RawMessage, mergeOutcome) {
 		}
 	}
 
-	if systems == 0 || (systems == 1 && leading != nil) {
+	if systems == 0 || (systems == 1 && firstSystemAt == 0) {
 		return nil, mergeNotNeeded // already the shape the template wants
 	}
 
@@ -187,14 +191,9 @@ func mergeSystemMessages(raw json.RawMessage) (json.RawMessage, mergeOutcome) {
 	if err != nil {
 		return nil, mergeRefused
 	}
-	merged := leading
-	if merged == nil {
-		role, err := json.Marshal(systemRole)
-		if err != nil {
-			return nil, mergeRefused
-		}
-		merged = map[string]json.RawMessage{roleField: role}
-	}
+	// owner is set whenever there is a system message at all, and the guard
+	// above returned for the conversations that have none.
+	merged := owner
 	merged[contentField] = content
 
 	mergedRaw, err := json.Marshal(merged)

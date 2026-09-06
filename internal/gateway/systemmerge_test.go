@@ -205,9 +205,11 @@ func TestMergingMovesALoneSystemMessageToTheFront(t *testing.T) {
 }
 
 // A conversation whose only system message is already the leading one is
-// already the shape the template wants, so it is not rebuilt at all. The
-// fixture carries nothing but role and content, so the only thing that can
-// leave it alone is the guard for that case.
+// already the shape the template wants, so it reaches the model as it was
+// sent. The guard that skips the rebuild is held by
+// TestMergeSystemMessagesLeavesAConversationThatNeedsNoRewrite, which asserts
+// the outcome directly; removing it leaves this relay value-identical, so what
+// this test holds is the value, which is what the client can see.
 func TestMergingLeavesAnAlreadyLeadingSystemMessageAlone(t *testing.T) {
 	srv, _, fake, _ := newMergeGateway(t, mergingOn)
 
@@ -246,6 +248,61 @@ func TestMergingKeepsTheLeadingSystemMessagesOwnFields(t *testing.T) {
 			"name":    "house-rules",
 		},
 		map[string]any{"role": "user", "content": "hi"},
+	})
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("upstream messages =\n %#v\nwant\n %#v", got, want)
+	}
+}
+
+// A conversation with one instruction message that is not at the front is the
+// simplest shape this feature exists to fix, and nothing is appended to
+// anything when it is fixed: the message is moved. So it keeps what it
+// carries, exactly as a leading one does — the merged message is always the
+// first instruction message the conversation has.
+func TestMergingMovesALoneSystemMessageWithItsOwnFields(t *testing.T) {
+	srv, _, fake, _ := newMergeGateway(t, mergingOn)
+
+	got := postMerge(t, srv, fake, map[string]any{
+		"model": mergeModel,
+		"messages": []any{
+			map[string]any{"role": "user", "content": "hi"},
+			map[string]any{"role": "system", "content": "Answer briefly.", "name": "house-rules"},
+		},
+	})
+
+	want := decodedMessages(t, []any{
+		map[string]any{"role": "system", "content": "Answer briefly.", "name": "house-rules"},
+		map[string]any{"role": "user", "content": "hi"},
+	})
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("upstream messages =\n %#v\nwant\n %#v", got, want)
+	}
+}
+
+// The same holds when there is more than one: the first instruction message
+// owns the merged one, wherever it sits, because the rest are appended to its
+// text. Only the messages after it have nowhere to put a field of their own.
+func TestMergingKeepsTheFirstSystemMessagesFieldsWhereverItSits(t *testing.T) {
+	srv, _, fake, _ := newMergeGateway(t, mergingOn)
+
+	got := postMerge(t, srv, fake, map[string]any{
+		"model": mergeModel,
+		"messages": []any{
+			map[string]any{"role": "user", "content": "hi"},
+			map[string]any{"role": "system", "content": "You are Alice's assistant.", "name": "house-rules"},
+			map[string]any{"role": "assistant", "content": "hello"},
+			map[string]any{"role": "system", "content": "Answer briefly."},
+		},
+	})
+
+	want := decodedMessages(t, []any{
+		map[string]any{
+			"role":    "system",
+			"content": "You are Alice's assistant.\n\nAnswer briefly.",
+			"name":    "house-rules",
+		},
+		map[string]any{"role": "user", "content": "hi"},
+		map[string]any{"role": "assistant", "content": "hello"},
 	})
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("upstream messages =\n %#v\nwant\n %#v", got, want)
@@ -423,8 +480,12 @@ func TestOnlyARefusalIsLogged(t *testing.T) {
 // The rule the whole feature is granted under: nothing merging reads is kept.
 // The prompt carries a canary, the gateway logs at debug level into a handler
 // that records every message and attribute, and the canary must appear
-// nowhere — not in the log, and not in anything handed to the pool, which is
-// all a model server's launch arguments are ever built from.
+// nowhere.
+//
+// The launch-argument half of that rule is asserted through what the pool is
+// handed, which is a proxy and is named as one: a launch spec is built from
+// the model id the pool is given, and the gateway gives it nothing else, so
+// there is no path from a request body to a spec for a test to walk.
 func TestMergedRequestLeavesNoPromptContentBehind(t *testing.T) {
 	srv, pool, fake, rec := newMergeGateway(t, mergingOn)
 
@@ -764,9 +825,9 @@ func TestMergeSystemMessagesRefusesShapesItCannotRebuild(t *testing.T) {
 		{"system content that is a list of parts", `[{"role":"system","content":[{"type":"text","text":"a"}]},{"role":"user","content":"hi"},{"role":"system","content":"b"}]`},
 		{"a system message with no content", `[{"role":"system"},{"role":"user","content":"hi"},{"role":"system","content":"b"}]`},
 		{"a system message whose content is null", `[{"role":"system","content":"a"},{"role":"user","content":"hi"},{"role":"system","content":null}]`},
-		{"a non-leading system message carrying another field", `[{"role":"user","content":"hi"},{"role":"system","content":"a","name":"house-rules"},{"role":"system","content":"b"}]`},
-		{"a non-leading system message with a case-variant of content", `[{"role":"user","content":"hi"},{"role":"system","content":"a","Content":"b"},{"role":"system","content":"c"}]`},
-		{"a leading system message whose content is not a string", `[{"role":"system","content":[{"type":"text","text":"a"}],"name":"x"},{"role":"system","content":"b"}]`},
+		{"a system message after the first carrying another field", `[{"role":"user","content":"hi"},{"role":"system","content":"a"},{"role":"system","content":"b","name":"house-rules"}]`},
+		{"a system message after the first with a case-variant of content", `[{"role":"system","content":"a"},{"role":"user","content":"hi"},{"role":"system","content":"b","Content":"c"}]`},
+		{"the first system message's content is not a string", `[{"role":"system","content":[{"type":"text","text":"a"}],"name":"x"},{"role":"system","content":"b"}]`},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

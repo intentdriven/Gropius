@@ -136,3 +136,28 @@ func TestARefusedSaveDoesNotRewriteTheLivePreloadList(t *testing.T) {
 		t.Errorf("preload after a refused save = %v, want it untouched %v", st.Config.Preload, want)
 	}
 }
+
+// Naming a collection in the posted body means "these are its members", and
+// null names it. The sampling overrides beside these settings clear on a
+// posted null, and a handler that treated one collection's null as "keep what
+// you have" and the other's as "clear it" would be a difference nobody could
+// predict from the outside.
+func TestSavingSettingsWithAPerModelNullClearsIt(t *testing.T) {
+	cfg := config.Default()
+	cfg.PerModel = map[string]config.ModelSettings{
+		"mlx-community/Qwen3-8B-4bit": {MergeSystemMessages: true},
+	}
+	cfg.ModelSampling = map[string]config.Sampling{
+		"mlx-community/Qwen3-8B-4bit": {},
+	}
+	srv := newTestControl(t, cfg)
+
+	got := perModelAfterSave(t, srv, srv.URL,
+		`{"host":"0.0.0.0","port":11535,"api_key":"","decode_concurrency":4,"idle_timeout_sec":0,`+
+			`"per_model":null,"model_sampling":null}`,
+		http.StatusOK)
+
+	if len(got) != 0 {
+		t.Errorf("per-model settings after a posted null = %+v, want none — model_sampling clears on the same body", got)
+	}
+}

@@ -706,7 +706,7 @@ func TestRestoredReadyModelKeepsTheRecordedContextLengthNotTheNewConfig(t *testi
 // matches an id case-insensitively and answers under one canonical spelling,
 // so a key typed in another case must be rewritten to that spelling on the way
 // in — otherwise the setting is stored under a key no request ever matches.
-func TestSetConfigCanonicalisesPerModelKeys(t *testing.T) {
+func TestSetConfigCanonicalizesPerModelKeys(t *testing.T) {
 	a := newTestApp(t)
 	if err := a.Registry.Put(registry.Model{
 		RepoID: "org/Repo",
@@ -768,7 +768,7 @@ func TestSetConfigRejectsInvalidPerModelKeyAndLeavesTheFileAlone(t *testing.T) {
 // therefore folded to the registry's spelling when they are read, not only
 // when they are saved — otherwise a key differing only in case sits in the
 // file looking effective, shows as off in the panel, and matches no request.
-func TestNewCanonicalisesPerModelKeysFromDisk(t *testing.T) {
+func TestNewCanonicalizesPerModelKeysFromDisk(t *testing.T) {
 	root := t.TempDir()
 	paths := config.NewPaths(root)
 

@@ -497,9 +497,6 @@ func (c *Control) handleSetSettings(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "settings body is not valid JSON")
 		return
 	}
-	if incoming.PerModel == nil {
-		incoming.PerModel = current.PerModel
-	}
 	// The UI is served the redacted placeholder; echoing it back must not
 	// overwrite the real secret with literal asterisks.
 	if incoming.APIKey == redacted {

@@ -417,7 +417,7 @@ func TestValidatePerModelKeys(t *testing.T) {
 		wantErr bool
 	}{
 		{"a repo id", "mlx-community/Qwen3-8B-4bit", false},
-		{"no organisation", "Qwen3-8B-4bit", true},
+		{"no organization", "Qwen3-8B-4bit", true},
 		{"a path traversal", "../../etc", true},
 		{"an empty key", "", true},
 		{"a trailing segment", "mlx-community/Qwen3/extra", true},
