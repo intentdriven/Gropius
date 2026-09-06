@@ -151,6 +151,7 @@ func ValidRepoID(s string) bool {
 // unbounded key would let a legal number of entries write a file Load then
 // refuses to read.
 const MaxRepoComponent = 96
+
 // FoldRepoID maps a repo id to the single key that identifies the model it
 // names. Two ids naming the same model fold to the same string.
 //
