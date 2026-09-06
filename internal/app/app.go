@@ -293,7 +293,7 @@ func (a *App) Download(repoID string) error {
 				// path and the rescan apply one key rule; a model carries its
 				// context length from the moment it is ready, not only after
 				// the next startup rescan.
-				ContextLength: registry.ContextLength(dest),
+				ContextLength: registry.ReadContextLength(dest),
 				State:         registry.StateReady,
 				Progress:      100,
 				AddedAt:       addedAt,
@@ -308,7 +308,7 @@ func (a *App) Download(repoID string) error {
 		case errors.Is(err, context.Canceled):
 			// A cancelled download leaves .part files behind on purpose: they let
 			// the next attempt resume instead of starting over.
-			if a.restoreReady(repoID, dest, wasReady, prior.Bytes, prior.AddedAt) {
+			if a.restoreReady(repoID, dest, wasReady, prior) {
 				a.Log.Info("download cancelled; the ready model is untouched", "model", repoID)
 			} else {
 				a.Registry.SetState(repoID, registry.StateFailed, 0, "cancelled")
@@ -316,7 +316,7 @@ func (a *App) Download(repoID string) error {
 			}
 
 		default:
-			if a.restoreReady(repoID, dest, wasReady, prior.Bytes, prior.AddedAt) {
+			if a.restoreReady(repoID, dest, wasReady, prior) {
 				a.Log.Warn("download failed; the ready model is untouched", "model", repoID, "err", err)
 			} else {
 				a.Registry.SetState(repoID, registry.StateFailed, 0, err.Error())
@@ -330,21 +330,27 @@ func (a *App) Download(repoID string) error {
 
 // restoreReady puts a model back into the ready state after a failed or
 // cancelled download attempt, provided it was ready before the attempt and its
-// files still validate. It reports whether the model was restored. The size is
-// the one recorded while the model was ready: measuring the directory now
-// would count the failed attempt's .part leftovers.
-func (a *App) restoreReady(repoID, dest string, wasReady bool, priorBytes int64, priorAddedAt time.Time) bool {
+// files still validate. It reports whether the model was restored.
+//
+// Everything it restores comes from prior — the record the model had before
+// the attempt — rather than from the directory: measuring the directory now
+// would count the failed attempt's .part leftovers, and a config.json the
+// attempt had already replaced before failing would hand back the new
+// revision's context length beside the old revision's size. A record that
+// predates the figure still gains it, because the startup rescan re-derives
+// it from the directory that is actually being served.
+func (a *App) restoreReady(repoID, dest string, wasReady bool, prior registry.Model) bool {
 	if !wasReady || validateModelDir(dest) != nil {
 		return false
 	}
 	if perr := a.Registry.Put(registry.Model{
 		RepoID:        repoID,
 		Path:          dest,
-		Bytes:         priorBytes,
-		ContextLength: registry.ContextLength(dest),
+		Bytes:         prior.Bytes,
+		ContextLength: prior.ContextLength,
 		State:         registry.StateReady,
 		Progress:      100,
-		AddedAt:       priorAddedAt,
+		AddedAt:       prior.AddedAt,
 	}); perr != nil {
 		a.Log.Error("could not restore the ready model record", "model", repoID, "err", perr)
 		return false

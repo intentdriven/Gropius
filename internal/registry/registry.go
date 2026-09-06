@@ -641,13 +641,17 @@ func inspectModelDir(dir string) (complete bool, size int64, contextLength int64
 	if err != nil {
 		return false, 0, 0
 	}
-	// One decode of config.json serves both questions the scan asks of it —
-	// whether the directory is a model at all, and what positional range it
-	// declares — so adding the figure adds no file access to the scan path.
+	// The cheap flags gate the reads, as they always have: a directory with
+	// no config.json, a .part marker, or an irregular weight file is skipped
+	// without opening anything. Past that gate one decode of config.json
+	// serves both questions the scan asks of it — whether the directory is a
+	// model at all, and what positional range it declares — so the figure
+	// costs the scan no read it was not already making.
+	if !hasConfig || !hasWeights || partial || irregular {
+		return false, size, 0
+	}
 	cfg, cfgOK := readModelConfig(dir)
-	complete = hasConfig && hasWeights && !partial && !irregular &&
-		cfgOK && plausibleConfig(cfg) && CheckShards(dir) == nil
-	if !complete {
+	if !cfgOK || !plausibleConfig(cfg) || CheckShards(dir) != nil {
 		return false, size, 0
 	}
 	return true, size, contextLengthFrom(cfg)
@@ -691,13 +695,13 @@ func plausibleConfig(cfg map[string]any) bool {
 	return cfg["model_type"] != nil || cfg["architectures"] != nil
 }
 
-// ContextLength reports the architectural context length declared by the
+// ReadContextLength reports the architectural context length declared by the
 // model configuration in dir, or 0 when it declares none or declares one that
 // is not plausible. It is exported so the app layer's download paths read the
 // figure through this one primitive, rather than a second copy of the key
 // rule that could drift from the rescan's — the same reason CheckShards is
 // exported.
-func ContextLength(dir string) int64 {
+func ReadContextLength(dir string) int64 {
 	cfg, ok := readModelConfig(dir)
 	if !ok {
 		return 0
