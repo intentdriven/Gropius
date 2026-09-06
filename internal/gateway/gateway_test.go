@@ -57,6 +57,10 @@ type stubPool struct {
 	// baseURL, if set, replaces the fake server's own address, so a test can
 	// hand the gateway an upstream it cannot even build a request for.
 	baseURL string
+	// releaseDelay holds the handler up inside release(), which runs before
+	// the deferred bookkeeping. It gives a test a window in which a client's
+	// disconnect is delivered while the handler is still finishing.
+	releaseDelay time.Duration
 
 	mu       sync.Mutex
 	acquired []string
@@ -81,6 +85,9 @@ func (p *stubPool) Acquire(ctx context.Context, repoID string) (*runtime.Upstrea
 	p.mu.Unlock()
 
 	release := func() {
+		if p.releaseDelay > 0 {
+			time.Sleep(p.releaseDelay)
+		}
 		p.mu.Lock()
 		p.released++
 		p.mu.Unlock()

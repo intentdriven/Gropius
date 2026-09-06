@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -8,9 +9,11 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -28,6 +31,43 @@ const testModelID = "mlx-community/Qwen3-8B-4bit"
 // because a time to first token measured against an answer that arrives inside
 // a millisecond asserts nothing.
 func statsGateway(t *testing.T, on bool, opts mlxtest.Options) (*httptest.Server, *stats.Recorder, *mlxtest.Server, *stubPool) {
+	srv, rec, fake, pool, _ := statsGatewayWithStore(t, on, opts)
+	return srv, rec, fake, pool
+}
+
+// countingStore is a seam into the recorder that does not short-circuit on
+// whether recording is on: Recorder.View() returns an empty view whenever the
+// switch is off, however much the recorder holds, so a test that asks it
+// whether anything was recorded while off is asking a question with only one
+// possible answer. The store is offered a record only when one is actually
+// kept.
+type countingStore struct {
+	mu       sync.Mutex
+	requests []stats.Record
+	events   []stats.Event
+}
+
+func (s *countingStore) AppendRequest(r stats.Record) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.requests = append(s.requests, r)
+	return nil
+}
+
+func (s *countingStore) AppendEvent(e stats.Event) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.events = append(s.events, e)
+	return nil
+}
+
+func (s *countingStore) kept() []stats.Record {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]stats.Record(nil), s.requests...)
+}
+
+func statsGatewayWithStore(t *testing.T, on bool, opts mlxtest.Options) (*httptest.Server, *stats.Recorder, *mlxtest.Server, *stubPool, *countingStore) {
 	t.Helper()
 
 	const modelPath = "/models/" + testModelID
@@ -45,7 +85,8 @@ func statsGateway(t *testing.T, on bool, opts mlxtest.Options) (*httptest.Server
 	}}}
 	pool := &stubPool{srv: fake}
 
-	rec := stats.New(stats.Options{})
+	store := &countingStore{}
+	rec := stats.New(stats.Options{Store: store})
 	rec.SetEnabled(on)
 	cfg := config.Default()
 	cfg.Statistics = on
@@ -53,7 +94,7 @@ func statsGateway(t *testing.T, on bool, opts mlxtest.Options) (*httptest.Server
 	g := New(Options{Config: cfg, Pool: pool, Models: models, Stats: rec})
 	srv := httptest.NewServer(g.Handler())
 	t.Cleanup(srv.Close)
-	return srv, rec, fake, pool
+	return srv, rec, fake, pool, store
 }
 
 // completion posts a chat completion and returns the raw response body.
@@ -441,14 +482,23 @@ func TestNothingFromTheRequestReachesTheRecordOrTheLog(t *testing.T) {
 // the model server on the client's behalf, and the answer is the one the
 // client would have received from the build before any of this existed.
 func TestOffLeavesTheGatewayAsItWas(t *testing.T) {
-	srv, rec, fake, _ := statsGateway(t, false, mlxtest.Options{})
+	// The recorder is left switched ON and the configuration's switch OFF, so
+	// that "nothing is recorded" is a fact about the gateway rather than about
+	// a recorder that would have refused anyway. A gateway that stopped
+	// consulting the switch would record here, and this test would say so;
+	// asking a switched-off recorder what it holds could not.
+	srv, rec, fake, _, store := statsGatewayWithStore(t, false, mlxtest.Options{})
+	rec.SetEnabled(true)
 
 	status, body := completion(t, srv, `{"model":"`+testModelID+`","stream":true,"messages":[{"role":"user","content":"hi"}]}`)
 	if status != http.StatusOK {
 		t.Fatalf("status = %d, want 200", status)
 	}
-	if view := rec.View(); view.Enabled || len(view.Requests) != 0 || len(view.Models) != 0 {
-		t.Errorf("the recorder holds %+v with the switch off, want nothing", view)
+	if kept := store.kept(); len(kept) != 0 {
+		t.Errorf("the recorder was handed %+v with the switch off, want nothing", kept)
+	}
+	if view := rec.View(); len(view.Requests) != 0 {
+		t.Errorf("the view holds %d requests with the switch off, want none", len(view.Requests))
 	}
 	if _, merged := fake.LastBody()["stream_options"]; merged {
 		t.Error("with the switch off the gateway still asked the model server for token counts")
@@ -467,7 +517,11 @@ func TestTheSwitchAppliesToTheNextRequest(t *testing.T) {
 	models := &stubModels{models: []registry.Model{{RepoID: testModelID, Path: modelPath, State: registry.StateReady}}}
 	pool := &stubPool{srv: fake}
 
-	rec := stats.New(stats.Options{})
+	store := &countingStore{}
+	rec := stats.New(stats.Options{Store: store})
+	// On throughout, so what changes between the two requests below is the
+	// configuration the gateway reads and nothing else.
+	rec.SetEnabled(true)
 	cfg := config.Default()
 	live := func() config.Config { return cfg }
 
@@ -476,15 +530,14 @@ func TestTheSwitchAppliesToTheNextRequest(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	completion(t, srv, `{"model":"`+testModelID+`","messages":[{"role":"user","content":"hi"}]}`)
-	if len(rec.View().Requests) != 0 {
-		t.Fatal("a request was recorded before the switch was turned on")
+	if kept := store.kept(); len(kept) != 0 {
+		t.Fatalf("the recorder was handed %+v before the switch was turned on", kept)
 	}
 
 	cfg.Statistics = true
-	rec.SetEnabled(true)
 	completion(t, srv, `{"model":"`+testModelID+`","messages":[{"role":"user","content":"hi"}]}`)
-	if len(rec.View().Requests) != 1 {
-		t.Error("the switch did not reach the next request")
+	if kept := store.kept(); len(kept) != 1 {
+		t.Errorf("the recorder was handed %d requests after the switch went on, want 1", len(kept))
 	}
 }
 
@@ -770,5 +823,290 @@ func TestTheLegacyCompletionsEndpointIsRecordedToo(t *testing.T) {
 	got := onlyRecord(t, rec)
 	if got.Model != testModelID || got.Class != stats.ClassOK || got.CompletionTokens != 4 {
 		t.Errorf("the request was recorded as %+v, want an answered request with its counts", got)
+	}
+}
+
+// A client that reads to "data: [DONE]" and closes its socket without draining
+// to EOF has had the whole answer. Go's server sees the close and cancels the
+// handler's request context while the deferred bookkeeping is still running,
+// so a request that went perfectly can look cancelled from the context alone —
+// with its token counts thrown away and its model's totals short by them.
+//
+// The relay is what actually knows: it wrote every byte and read to EOF. Its
+// verdict is the observable outcome and it wins over the context.
+func TestAnAnswerDeliveredInFullIsNotCancelledByAClientHangingUp(t *testing.T) {
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	gone := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil).WithContext(cancelled)
+
+	t.Run("the relay delivered it all", func(t *testing.T) {
+		rec := stats.New(stats.Options{})
+		rec.SetEnabled(true)
+		obs := &observation{rec: rec, started: time.Now(),
+			record: stats.Record{Model: "org/a", Class: stats.ClassOK, FirstTokenMS: stats.NoFirstToken}}
+		obs.relayed(relayOutcome{usage: &usageCounts{Prompt: 11, Completion: 22}})
+
+		obs.finish(gone)
+
+		got := onlyRecord(t, rec)
+		if got.Class != stats.ClassOK {
+			t.Errorf("an answer delivered in full is recorded as %q, want %q", got.Class, stats.ClassOK)
+		}
+		if got.PromptTokens != 11 || got.CompletionTokens != 22 {
+			t.Errorf("its counts are %d/%d, want 11/22 — they were thrown away", got.PromptTokens, got.CompletionTokens)
+		}
+	})
+
+	t.Run("the relay says the client went away", func(t *testing.T) {
+		rec := stats.New(stats.Options{})
+		rec.SetEnabled(true)
+		obs := &observation{rec: rec, started: time.Now(),
+			record: stats.Record{Model: "org/a", Class: stats.ClassOK, FirstTokenMS: stats.NoFirstToken}}
+		obs.relayed(relayOutcome{clientGone: true})
+
+		obs.finish(gone)
+
+		if got := onlyRecord(t, rec).Class; got != stats.ClassCancelled {
+			t.Errorf("a client that went away mid-answer is recorded as %q, want %q", got, stats.ClassCancelled)
+		}
+	})
+
+	t.Run("the request never reached the relay", func(t *testing.T) {
+		rec := stats.New(stats.Options{})
+		rec.SetEnabled(true)
+		obs := &observation{rec: rec, started: time.Now(),
+			record: stats.Record{Model: "org/a", Class: stats.ClassOK, FirstTokenMS: stats.NoFirstToken}}
+
+		obs.finish(gone)
+
+		if got := onlyRecord(t, rec).Class; got != stats.ClassCancelled {
+			t.Errorf("a request that never reached the relay is recorded as %q, want %q — the context is all there is to go on",
+				got, stats.ClassCancelled)
+		}
+	})
+}
+
+// The same thing again, through a real socket: a client that reads to
+// "data: [DONE]" and closes without draining, while the handler still has
+// work to do. This is the shape an aborted fetch reader, a curl with a
+// deadline, and any SSE client that treats [DONE] as the end all produce.
+func TestASocketClosedOnDoneStillCountsAsAnAnswer(t *testing.T) {
+	srv, rec, _, pool := statsGateway(t, true, mlxtest.Options{Reply: "one two three"})
+	// The handler releases its slot before it records, so this is the window
+	// in which the client's disconnect reaches the server's context.
+	pool.releaseDelay = 80 * time.Millisecond
+
+	conn, err := net.Dial("tcp", srv.Listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := `{"model":"` + testModelID + `","stream":true,"messages":[{"role":"user","content":"hi"}]}`
+	fmt.Fprintf(conn, "POST /v1/chat/completions HTTP/1.1\r\nHost: 127.0.0.1\r\n"+
+		"Content-Type: application/json\r\nContent-Length: %d\r\n\r\n%s", len(body), body)
+
+	// Read until the terminal event, then hang up mid-handler.
+	br := bufio.NewReader(conn)
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		conn.SetReadDeadline(deadline)
+		line, err := br.ReadString('\n')
+		if err != nil {
+			t.Fatalf("the answer never reached [DONE]: %v", err)
+		}
+		if strings.Contains(line, "[DONE]") {
+			break
+		}
+	}
+	conn.Close()
+
+	got := waitForRecord(t, rec)
+	if got.Class != stats.ClassOK {
+		t.Errorf("a client that hung up on [DONE] was recorded as %q, want %q — it had the whole answer",
+			got.Class, stats.ClassOK)
+	}
+	if got.CompletionTokens != 4 {
+		t.Errorf("its counts are %d completion tokens, want 4", got.CompletionTokens)
+	}
+}
+
+// waitForRecord blocks until exactly one request has been recorded.
+func waitForRecord(t *testing.T, rec *stats.Recorder) stats.Record {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if got := rec.View().Requests; len(got) == 1 {
+			return got[0]
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("the request was never recorded")
+	return stats.Record{}
+}
+
+// A read that fails on the same call that returned the last line — which is
+// what a reset connection does — must still be reported. The line the failure
+// arrived with is the counts event being removed, so the path that removes it
+// is the path that has to carry the failure out with it.
+func TestAFailureArrivingWithTheRemovedEventIsStillReported(t *testing.T) {
+	src := &oneShotReader{data: []byte("data: {\"choices\":[],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":2}}\n"),
+		err: errors.New("connection reset")}
+
+	out := streamRewriteSSE(httptest.NewRecorder(), src, "backend", "friendly",
+		relayOptions{observing: true, dropUsage: true})
+
+	if !out.upstreamCut {
+		t.Error("the model server going away was lost on the path that removes an event")
+	}
+	if out.usage == nil || out.usage.Completion != 2 {
+		t.Errorf("the counts on the removed event were not read: %+v", out.usage)
+	}
+}
+
+// oneShotReader hands back its data and its error in one Read, the way a
+// connection that dies mid-body does, and then keeps failing.
+type oneShotReader struct {
+	data []byte
+	err  error
+	done bool
+}
+
+func (r *oneShotReader) Read(p []byte) (int, error) {
+	if r.done {
+		return 0, r.err
+	}
+	r.done = true
+	n := copy(p, r.data)
+	return n, r.err
+}
+
+// Counts can ride a chunk that also carries a choice. Such a chunk is not the
+// counts-only event and is never removed — but its counts are the model
+// server's own, and a request recorded without them is a success that appears
+// to have cost nothing.
+func TestCountsAreReadFromAChunkThatAlsoCarriesAnAnswer(t *testing.T) {
+	body := "data: {\"model\":\"backend\",\"choices\":[{\"index\":0}]}\n\n" +
+		"data: {\"model\":\"backend\",\"choices\":[{\"index\":0}],\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":9}}\n\n" +
+		"data: [DONE]\n\n"
+	w := httptest.NewRecorder()
+
+	out := streamRewriteSSE(w, strings.NewReader(body), "backend", "friendly",
+		relayOptions{observing: true, dropUsage: true})
+
+	if out.usage == nil || out.usage.Prompt != 7 || out.usage.Completion != 9 {
+		t.Errorf("the counts riding a chunk of the answer were not read: %+v", out.usage)
+	}
+	if strings.Count(w.Body.String(), "data: ") != 3 {
+		t.Errorf("an event carrying a choice was removed:\n%s", w.Body.String())
+	}
+}
+
+// The same question, asked of "stream": several OpenAI SDK wrappers send 1
+// rather than true, the model server streams for them, and a gateway that read
+// the field as a Go bool called every one of those requests unstreamed —
+// asked nothing for their counts and recorded them as costing nothing.
+func TestWhetherAnAnswerStreamsIsDecidedTheModelServersWay(t *testing.T) {
+	cases := []struct {
+		body string
+		want bool
+	}{
+		{`{"stream":true}`, true},
+		{`{"stream":1}`, true},
+		{`{"stream":"true"}`, true},
+		{`{"stream":"false"}`, true}, // a non-empty string is true in Python
+		{`{"stream":false}`, false},
+		{`{"stream":0}`, false},
+		{`{"stream":null}`, false},
+		{`{"stream":""}`, false},
+		{`{"model":"org/a"}`, false},
+	}
+	for _, c := range cases {
+		payload, ok := decodeEvent([]byte(c.body))
+		if !ok {
+			t.Fatalf("%s is not an object", c.body)
+		}
+		if got := streamRequested(payload); got != c.want {
+			t.Errorf("streamRequested(%s) = %v, want %v", c.body, got, c.want)
+		}
+	}
+}
+
+// A number is judged by its value, not by how it was written down. All of
+// these reach the model server as zero and are refusals there.
+func TestAZeroIsAZeroHoweverItIsSpelled(t *testing.T) {
+	for _, spelling := range []string{"0", "0.0", "-0", "-0.0", "0e0", "0E1", "1e-400"} {
+		if truthy([]byte(spelling)) {
+			t.Errorf("truthy(%s) = true; the model server reads it as zero and refuses", spelling)
+		}
+	}
+	for _, spelling := range []string{"1", "0.1", "-1", "1e-3", "2E2"} {
+		if !truthy([]byte(spelling)) {
+			t.Errorf("truthy(%s) = false; the model server acts on it", spelling)
+		}
+	}
+}
+
+// And end to end: a client that streams with 1 is recorded as streaming, with
+// its counts.
+func TestARequestThatStreamsWithOneIsRecordedAsStreaming(t *testing.T) {
+	srv, rec, fake, _ := statsGateway(t, true, mlxtest.Options{})
+
+	completion(t, srv, `{"model":"`+testModelID+`","stream":1,"messages":[{"role":"user","content":"hi"}]}`)
+
+	if _, asked := fake.LastBody()["stream_options"]; !asked {
+		t.Error("the model server was not asked for the token counts on a request that streams with 1")
+	}
+	got := onlyRecord(t, rec)
+	if !got.Streamed {
+		t.Error("a request that streams with 1 was recorded as not streaming")
+	}
+	if got.CompletionTokens != 4 {
+		t.Errorf("it was recorded with %d completion tokens, want 4", got.CompletionTokens)
+	}
+}
+
+// The counts are the child process's numbers, not Gropius's. A negative one
+// summed into a model's totals would drag them below zero, and no count is a
+// truer answer than a wrong one.
+func TestNegativeTokenCountsAreRefused(t *testing.T) {
+	ev, ok := decodeEvent([]byte(`{"usage":{"prompt_tokens":-1000000,"completion_tokens":-5}}`))
+	if !ok {
+		t.Fatal("not an object")
+	}
+	got := readUsage(ev)
+	if got == nil || got.Prompt != 0 || got.Completion != 0 {
+		t.Errorf("readUsage returned %+v, want both counts at zero", got)
+	}
+}
+
+// What "time to first token" lands on when a server opens its stream with a
+// chunk that carries only the assistant's role and no words.
+//
+// Gropius times the first chunk that is about the generation at all, and reads
+// nothing inside it: reading the text would make the gateway a second reader
+// of a model's output, which is a boundary the project holds elsewhere
+// (adr-2609061610102325 and internal/archtest). So against a server that opens
+// with a role-only chunk, the figure is the time to that chunk — the moment
+// the client first hears from the model — rather than to the first word. This
+// test says which of the two it is, rather than leaving it to be inferred from
+// a server whose behaviour is not established here.
+func TestTimeToFirstTokenIsTheFirstChunkAboutTheAnswer(t *testing.T) {
+	srv, rec, _, _ := statsGateway(t, true, mlxtest.Options{
+		RolePreamble:    true,
+		FirstTokenDelay: 40 * time.Millisecond,
+		ChunkDelay:      40 * time.Millisecond,
+		Reply:           "one two three",
+	})
+
+	completion(t, srv, `{"model":"`+testModelID+`","stream":true,"messages":[{"role":"user","content":"hi"}]}`)
+
+	got := onlyRecord(t, rec)
+	if got.FirstTokenMS < 30 {
+		t.Errorf("time to first token is %d ms; the server held its first chunk back 40 ms", got.FirstTokenMS)
+	}
+	// Three words at 40 ms apart follow the preamble, so a figure that had
+	// waited for the first word would be at least a chunk later.
+	if got.FirstTokenMS >= 70 {
+		t.Errorf("time to first token is %d ms, which is past the role-only chunk — the figure is meant to be the first chunk about the answer, not the first word",
+			got.FirstTokenMS)
 	}
 }
