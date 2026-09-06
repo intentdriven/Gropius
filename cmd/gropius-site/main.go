@@ -13,7 +13,14 @@
 //
 // Usage:
 //
-//	go run ./cmd/gropius-site --out site
+//	go run ./cmd/gropius-site --out site                        render the page
+//	go run ./cmd/gropius-site select --from releases.json       print the elected tag
+//	go run ./cmd/gropius-site validate-release release.json     check a release record
+//
+// The two extra verbs exist so the release run's decisions are this program's
+// decisions rather than shell: which release the page names is electLatest, and
+// whether a record is fit to render is loadRelease, and both are testable
+// against a fixture instead of only readable in a workflow file.
 //
 // Why this lives here rather than in abcd's `site` verb: that verb renders its
 // own fixed site shape (a home page plus chapters from docs/) and has no
@@ -34,19 +41,85 @@ import (
 )
 
 func main() {
-	root := flag.String("root", ".", "repository root; every path in the manifest is resolved against it")
-	manifestPath := flag.String("manifest", "", "composition manifest (default <root>/.abcd/site.json)")
-	out := flag.String("out", "site", "directory to render into; nothing outside it is written")
-	release := flag.String("release", "", "release record to render the release facts from; without it the page carries none")
-	flag.Parse()
-
-	if *manifestPath == "" {
-		*manifestPath = filepath.Join(*root, ".abcd", "site.json")
-	}
-	if err := render(*root, *manifestPath, *out, *release); err != nil {
+	if err := run(os.Args[1:]); err != nil {
 		fmt.Fprintln(os.Stderr, "gropius-site:", err)
 		os.Exit(1)
 	}
+}
+
+// run dispatches the three things this command does. A leading word that is not
+// a flag is the verb; without one the verb is "render", so the invocation the
+// Makefile and every earlier caller use is unchanged.
+func run(args []string) error {
+	verb := "render"
+	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
+		verb, args = args[0], args[1:]
+	}
+	switch verb {
+	case "render":
+		fs := flag.NewFlagSet("render", flag.ContinueOnError)
+		root := fs.String("root", ".", "repository root; every path in the manifest is resolved against it")
+		manifestPath := fs.String("manifest", "", "composition manifest (default <root>/.abcd/site.json)")
+		out := fs.String("out", "site", "directory to render into; nothing outside it is written")
+		release := fs.String("release", "", "release record to render the release facts from; without it the page carries none")
+		if err := fs.Parse(args); err != nil {
+			return err
+		}
+		return render(*root, manifestOr(*root, *manifestPath), *out, *release)
+
+	case "select":
+		// Print the tag of the release the page names. The workflow feeds the
+		// forge's release list in and hands the answer to the fetch that follows.
+		fs := flag.NewFlagSet("select", flag.ContinueOnError)
+		from := fs.String("from", "", "release list, as `gh release list --json tagName,isLatest,isDraft,isPrerelease,publishedAt` writes it")
+		if err := fs.Parse(args); err != nil {
+			return err
+		}
+		if *from == "" {
+			return fmt.Errorf("select: --from names the release list to elect from")
+		}
+		tag, err := electLatestFrom(*from)
+		if err != nil {
+			return err
+		}
+		fmt.Println(tag)
+		return nil
+
+	case "validate-release":
+		// Answer whether a record is fit to render, without rendering. The
+		// release run asks before it commits to the record, so an unacceptable
+		// one costs the page its release facts instead of costing it the deploy.
+		fs := flag.NewFlagSet("validate-release", flag.ContinueOnError)
+		root := fs.String("root", ".", "repository root; the manifest names the repository the record must belong to")
+		manifestPath := fs.String("manifest", "", "composition manifest (default <root>/.abcd/site.json)")
+		if err := fs.Parse(args); err != nil {
+			return err
+		}
+		if fs.NArg() != 1 {
+			return fmt.Errorf("validate-release: name exactly one release record")
+		}
+		m, err := loadManifest(manifestOr(*root, *manifestPath))
+		if err != nil {
+			return err
+		}
+		if _, err := loadRelease(fs.Arg(0), repoURL(m)); err != nil {
+			return err
+		}
+		fmt.Printf("gropius-site: %s is a release record this page can render\n", fs.Arg(0))
+		return nil
+
+	default:
+		return fmt.Errorf("unknown verb %q; this command renders, selects, or validates a release record", verb)
+	}
+}
+
+// manifestOr resolves the default manifest path, which is the same for every
+// verb that reads one.
+func manifestOr(root, given string) string {
+	if given != "" {
+		return given
+	}
+	return filepath.Join(root, ".abcd", "site.json")
 }
 
 // manifest is the composition: where each block of the page comes from. Unknown
@@ -173,12 +246,9 @@ type pageData struct {
 }
 
 func render(root, manifestPath, out, releasePath string) error {
-	var m manifest
-	if err := decodeStrict(manifestPath, &m); err != nil {
+	m, err := loadManifest(manifestPath)
+	if err != nil {
 		return err
-	}
-	if m.SchemaVersion != 1 {
-		return fmt.Errorf("%s: schema_version %d is not supported (this renderer speaks 1)", manifestPath, m.SchemaVersion)
 	}
 	src := repo{root: root}
 
@@ -213,7 +283,7 @@ func render(root, manifestPath, out, releasePath string) error {
 	// the release run and is never committed, so it is an ARGUMENT to a render
 	// and not part of the composition.
 	if releasePath != "" {
-		release, err := loadRelease(releasePath)
+		release, err := loadRelease(releasePath, repoURL(m))
 		if err != nil {
 			return err
 		}
@@ -370,7 +440,7 @@ func render(root, manifestPath, out, releasePath string) error {
 // no version, so the page cannot go stale between releases and there is nothing
 // on it for a release job to rewrite.
 func forgeLinks(m manifest) links {
-	repo := strings.TrimSuffix(m.Forge.Base, "/") + "/" + m.Forge.Repository
+	repo := repoURL(m)
 	return links{
 		// Relative: the page is served from a path under a shared domain.
 		Home:           "./",
@@ -380,6 +450,27 @@ func forgeLinks(m manifest) links {
 		Releases:       repo + "/releases",
 		GettingStarted: repo + "/blob/" + m.Forge.Branch + "/docs/getting-started.md",
 	}
+}
+
+// loadManifest reads the composition manifest and refuses a shape this renderer
+// does not speak. Every verb that needs the manifest goes through here, so they
+// cannot disagree about what a manifest is.
+func loadManifest(path string) (manifest, error) {
+	var m manifest
+	if err := decodeStrict(path, &m); err != nil {
+		return m, err
+	}
+	if m.SchemaVersion != 1 {
+		return m, fmt.Errorf("%s: schema_version %d is not supported (this renderer speaks 1)", path, m.SchemaVersion)
+	}
+	return m, nil
+}
+
+// repoURL is this repository's own address on the forge. It is where every
+// outbound link on the page points, and what the release record's URLs are
+// pinned to.
+func repoURL(m manifest) string {
+	return strings.TrimSuffix(m.Forge.Base, "/") + "/" + m.Forge.Repository
 }
 
 // decodeStrict reads a JSON file into v and refuses any key v does not carry.
@@ -396,6 +487,12 @@ func decodeStrict(path string, v any) error {
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(v); err != nil {
 		return fmt.Errorf("%s: %w", path, err)
+	}
+	// One document per file. Decode stops after the first value, so a second
+	// object appended to a generated record would otherwise be silently ignored
+	// — which is exactly the shape a truncated-and-rewritten file takes.
+	if dec.More() {
+		return fmt.Errorf("%s: more than one JSON document; this file holds exactly one", path)
 	}
 	return nil
 }

@@ -17,6 +17,10 @@ import (
 	"testing"
 )
 
+// The repository goodRecord's links belong to. loadRelease pins every URL in a
+// record to this, so a fixture that is not pinned to it is refused.
+const fixtureRepo = "https://example.invalid"
+
 const goodRecord = `{
   "version": "v1.2.3",
   "published_at": "2026-09-05T09:41:07Z",
@@ -54,7 +58,7 @@ func patchRecord(t *testing.T, edit func(m map[string]any)) string {
 }
 
 func TestTheGoodRecordLoads(t *testing.T) {
-	r, err := loadRelease(writeRecord(t, goodRecord))
+	r, err := loadRelease(writeRecord(t, goodRecord), fixtureRepo)
 	if err != nil {
 		t.Fatalf("the good record must load: %v", err)
 	}
@@ -100,12 +104,31 @@ func TestTheRecordIsRefused(t *testing.T) {
 		{"a version carrying markup", patchRecord(t, func(m map[string]any) { m["version"] = "v1.2.3<script>" }), "version"},
 		{"a date that is not one", patchRecord(t, func(m map[string]any) { m["published_at"] = "yesterday" }), "published_at"},
 		{"a release page that is not https", patchRecord(t, func(m map[string]any) { m["html_url"] = "javascript:alert(1)" }), "html_url"},
+		{"a release page on another host", patchRecord(t, func(m map[string]any) {
+			m["html_url"] = "https://evil.invalid/releases/tag/v1.2.3"
+		}), "html_url"},
+		{"a release page for another version", patchRecord(t, func(m map[string]any) {
+			m["html_url"] = fixtureRepo + "/releases/tag/v9.9.9"
+		}), "html_url"},
 		{"an absurd size", patchAsset(t, 0, func(a map[string]any) { a["size_bytes"] = 1 << 44 }), "size_bytes"},
 		{"a size of nothing", patchAsset(t, 0, func(a map[string]any) { a["size_bytes"] = 0 }), "size_bytes"},
 		{"a negative size", patchAsset(t, 0, func(a map[string]any) { a["size_bytes"] = -1 }), "size_bytes"},
 		{"an asset name that is a path", patchAsset(t, 0, func(a map[string]any) { a["name"] = "../etc/passwd" }), "name"},
 		{"an asset name carrying markup", patchAsset(t, 0, func(a map[string]any) { a["name"] = `<img src=x onerror=alert(1)>` }), "name"},
 		{"an asset URL that is not https", patchAsset(t, 0, func(a map[string]any) { a["url"] = "javascript:alert(1)" }), "url"},
+		{"an asset served from another host", patchAsset(t, 0, func(a map[string]any) {
+			a["url"] = "https://cdn.evil.invalid/Gropius.app.zip"
+		}), "url"},
+		{"an asset from another repository", patchAsset(t, 0, func(a map[string]any) {
+			a["url"] = "https://example.invalid/someone-else/releases/download/v1.2.3/Gropius.app.zip"
+		}), "url"},
+		{"an asset from another release", patchAsset(t, 0, func(a map[string]any) {
+			a["url"] = fixtureRepo + "/releases/download/v0.0.1/Gropius.app.zip"
+		}), "url"},
+		{"a checksums link on another host", patchRecord(t, func(m map[string]any) {
+			m["checksums_url"] = "https://evil.invalid/SHA256SUMS.txt"
+		}), "checksums_url"},
+		{"a second JSON document appended", goodRecord + "\n" + goodRecord, "one JSON document"},
 		{"two assets with one name", patchRecord(t, func(m map[string]any) {
 			as := m["assets"].([]any)
 			m["assets"] = append(as, as[0])
@@ -119,7 +142,7 @@ func TestTheRecordIsRefused(t *testing.T) {
 		}), "checksums_url"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := loadRelease(writeRecord(t, tc.record))
+			_, err := loadRelease(writeRecord(t, tc.record), fixtureRepo)
 			if err == nil {
 				t.Fatalf("%s was accepted; it must be refused", tc.name)
 			}
@@ -142,7 +165,7 @@ func patchAsset(t *testing.T, i int, edit func(a map[string]any)) string {
 // outage: the workflow decides whether a record exists and passes the flag only
 // then, so a missing file here means the two disagree.
 func TestAMissingRecordFileIsRefused(t *testing.T) {
-	if _, err := loadRelease(filepath.Join(t.TempDir(), "absent.json")); err == nil {
+	if _, err := loadRelease(filepath.Join(t.TempDir(), "absent.json"), fixtureRepo); err == nil {
 		t.Fatal("a --release pointing at nothing was accepted")
 	}
 }
@@ -154,6 +177,10 @@ func TestHumanSizeNeverOverReports(t *testing.T) {
 		bytes int64
 		want  string
 	}{
+		// validate refuses these before humanSize sees them; the rows pin what
+		// the formatter does with them anyway, so the two cannot drift.
+		{0, "0 bytes"},
+		{-1, "-1 bytes"},
 		{1, "1 byte"},
 		{210, "210 bytes"},
 		{999, "999 bytes"},
@@ -170,5 +197,123 @@ func TestHumanSizeNeverOverReports(t *testing.T) {
 		if got := humanSize(tc.bytes); got != tc.want {
 			t.Errorf("humanSize(%d) = %q; want %q", tc.bytes, got, tc.want)
 		}
+	}
+}
+
+// --- Which release the page names ------------------------------------------
+//
+// The criterion: "given a release created more recently than the one flagged
+// latest, when the page is produced, then the page names the release flagged
+// latest." That case cannot be produced against the real forge without
+// hand-making a stale release, which is precisely why the election is a
+// function here and the fixture below is the test of it.
+
+func TestTheFlaggedLatestIsElectedAndNotTheNewest(t *testing.T) {
+	// The newest-published entry is NOT the flagged one, twice over: a
+	// pre-release cut after it, and a draft after that.
+	list := []forgeRelease{
+		{TagName: "v2.0.0-rc.2", IsPrerelease: true, PublishedAt: "2026-09-08T00:00:00Z"},
+		{TagName: "v2.0.0-draft", IsDraft: true, PublishedAt: "2026-09-09T00:00:00Z"},
+		{TagName: "v1.4.0", IsLatest: true, PublishedAt: "2026-09-01T00:00:00Z"},
+		{TagName: "v1.3.0", PublishedAt: "2026-08-01T00:00:00Z"},
+	}
+	got, err := electLatest(list)
+	if err != nil {
+		t.Fatalf("the flagged release must be elected: %v", err)
+	}
+	if got.TagName != "v1.4.0" {
+		t.Errorf("elected %q; the flagged latest is v1.4.0, and the newer entries are a pre-release and a draft", got.TagName)
+	}
+}
+
+func TestTheElectionIsRefused(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		list []forgeRelease
+		says string
+	}{
+		{"an empty list", nil, "flagged latest"},
+		{"nothing flagged", []forgeRelease{
+			{TagName: "v1.0.0", PublishedAt: "2026-09-01T00:00:00Z"},
+		}, "flagged latest"},
+		{"two flagged", []forgeRelease{
+			{TagName: "v1.0.0", IsLatest: true},
+			{TagName: "v1.1.0", IsLatest: true},
+		}, "exactly one"},
+		{"the flagged one is a draft", []forgeRelease{
+			{TagName: "v1.0.0", IsLatest: true, IsDraft: true},
+		}, "draft"},
+		{"the flagged one is a pre-release", []forgeRelease{
+			{TagName: "v1.0.0-rc.1", IsLatest: true, IsPrerelease: true},
+		}, "pre-release"},
+		{"the flagged one is not a release tag", []forgeRelease{
+			{TagName: "nightly", IsLatest: true},
+		}, "not a release tag"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := electLatest(tc.list)
+			if err == nil {
+				t.Fatalf("%s elected %q; it must be refused", tc.name, got.TagName)
+			}
+			if !strings.Contains(err.Error(), tc.says) {
+				t.Errorf("the refusal does not say why (%q): %v", tc.says, err)
+			}
+		})
+	}
+}
+
+// The forge's own list, as `gh release list --json …` writes it, reaches the
+// election unchanged: the field names are the forge's and the decode is strict,
+// so a renamed field fails here rather than silently electing nothing.
+func TestTheForgesReleaseListElects(t *testing.T) {
+	list := `[
+	  {"isDraft":false,"isLatest":false,"isPrerelease":true,"publishedAt":"2026-09-09T00:00:00Z","tagName":"v0.2.0-rc.1"},
+	  {"isDraft":false,"isLatest":true,"isPrerelease":false,"publishedAt":"2026-09-06T15:54:37Z","tagName":"v0.1.2"},
+	  {"isDraft":false,"isLatest":false,"isPrerelease":false,"publishedAt":"2026-09-06T14:50:11Z","tagName":"v0.1.1"}
+	]`
+	path := filepath.Join(t.TempDir(), "releases.json")
+	if err := os.WriteFile(path, []byte(list), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tag, err := electLatestFrom(path)
+	if err != nil {
+		t.Fatalf("the forge's own list must elect: %v", err)
+	}
+	if tag != "v0.1.2" {
+		t.Errorf("elected %q; the flagged latest is v0.1.2 and the newest published is a pre-release", tag)
+	}
+}
+
+// The verbs the release run calls, through the same entry point the run uses.
+func TestTheVerbsAnswer(t *testing.T) {
+	root := tree(t)
+	list := filepath.Join(t.TempDir(), "releases.json")
+	if err := os.WriteFile(list, []byte(`[{"isDraft":false,"isLatest":true,"isPrerelease":false,"publishedAt":"2026-09-06T15:54:37Z","tagName":"v0.1.2"}]`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := run([]string{"select", "--from", list}); err != nil {
+		t.Errorf("select: %v", err)
+	}
+	// A record pinned to the fixture manifest's own repository.
+	var forge struct {
+		Forge struct {
+			Base       string `json:"base"`
+			Repository string `json:"repository"`
+		} `json:"forge"`
+	}
+	if err := json.Unmarshal([]byte(read(t, root, filepath.Join(".abcd", "site.json"))), &forge); err != nil {
+		t.Fatal(err)
+	}
+	repo := strings.TrimSuffix(forge.Forge.Base, "/") + "/" + forge.Forge.Repository
+	record := writeRecord(t, strings.ReplaceAll(goodRecord, fixtureRepo, repo))
+	if err := run([]string{"validate-release", "--root", root, record}); err != nil {
+		t.Errorf("validate-release on a good record: %v", err)
+	}
+	bad := writeRecord(t, strings.ReplaceAll(goodRecord, fixtureRepo, "https://evil.invalid"))
+	if err := run([]string{"validate-release", "--root", root, bad}); err == nil {
+		t.Error("validate-release accepted a record whose links point at another host")
+	}
+	if err := run([]string{"conjure"}); err == nil {
+		t.Error("an unknown verb was accepted")
 	}
 }

@@ -26,6 +26,16 @@ package main
 // sends is a schema that renders whatever the forge sends, and this one is
 // small enough to state completely and check completely.
 //
+// Every URL is PINNED to this repository's own release path — `html_url` to
+// `<forge>/<owner>/<repo>/releases/tag/<version>` and each asset to
+// `.../releases/download/<version>/` — because the asset URLs are where a
+// reader's binary comes from, and "it starts with https://" is the loosest
+// possible grammar for the most consequential field in the record. Pinning also
+// closes the case where the version and the URLs name different releases.
+//
+// WHICH release this is comes from electLatest below, not from the tag the run
+// carries.
+//
 // WHY REFUSING IS THE RIGHT FAILURE. A record that is wrong in a way the
 // renderer accepts becomes a wrong fact on a public page — a version that is
 // not one, an asset three orders of magnitude too large, a checksums link
@@ -95,12 +105,12 @@ type assetView struct {
 }
 
 // loadRelease reads one release record and turns it into what the page shows.
-func loadRelease(path string) (*releaseView, error) {
+func loadRelease(path, repoURL string) (*releaseView, error) {
 	var rec releaseRecord
 	if err := decodeStrict(path, &rec); err != nil {
 		return nil, fmt.Errorf("release record: %w", err)
 	}
-	published, err := rec.validate()
+	published, err := rec.validate(repoURL)
 	if err != nil {
 		return nil, fmt.Errorf("release record %s: %w", path, err)
 	}
@@ -119,8 +129,9 @@ func loadRelease(path string) (*releaseView, error) {
 }
 
 // validate refuses everything the page must not show, and returns the instant
-// the release was published.
-func (r releaseRecord) validate() (time.Time, error) {
+// the release was published. repoURL is this repository's own address on the
+// forge; every URL in the record is required to sit under its release path.
+func (r releaseRecord) validate(repoURL string) (time.Time, error) {
 	var zero time.Time
 	if !versionRe.MatchString(r.Version) {
 		return zero, fmt.Errorf("version %q is not a release tag (vX.Y.Z, with the leading v)", r.Version)
@@ -129,11 +140,19 @@ func (r releaseRecord) validate() (time.Time, error) {
 	if err != nil {
 		return zero, fmt.Errorf("published_at %q is not an RFC 3339 instant", r.PublishedAt)
 	}
-	if err := httpsURL("html_url", r.HTMLURL); err != nil {
-		return zero, err
+	if repoURL == "" {
+		return zero, fmt.Errorf("no repository URL to pin the record's links to")
 	}
-	if err := httpsURL("checksums_url", r.ChecksumsURL); err != nil {
-		return zero, err
+	// The release's own page, and the prefix every asset download sits under.
+	// Both carry the version, so a record whose version and links name different
+	// releases is refused rather than rendered.
+	releasePage := repoURL + "/releases/tag/" + r.Version
+	downloads := repoURL + "/releases/download/" + r.Version + "/"
+	if r.HTMLURL != releasePage {
+		return zero, fmt.Errorf("html_url %q is not this release's page (%q)", r.HTMLURL, releasePage)
+	}
+	if !strings.HasPrefix(r.ChecksumsURL, downloads) {
+		return zero, fmt.Errorf("checksums_url %q is not a download of this release (%q…)", r.ChecksumsURL, downloads)
 	}
 	if len(r.Assets) == 0 {
 		return zero, fmt.Errorf("assets is empty; a release the page names carries files")
@@ -152,8 +171,8 @@ func (r releaseRecord) validate() (time.Time, error) {
 		if a.SizeBytes <= 0 || a.SizeBytes > maxAssetBytes {
 			return zero, fmt.Errorf("assets[%d] (%s): size_bytes %d is outside 1..%d", i, a.Name, a.SizeBytes, int64(maxAssetBytes))
 		}
-		if err := httpsURL(fmt.Sprintf("assets[%d] (%s): url", i, a.Name), a.URL); err != nil {
-			return zero, err
+		if !strings.HasPrefix(a.URL, downloads) {
+			return zero, fmt.Errorf("assets[%d] (%s): url %q is not a download of this release (%q…)", i, a.Name, a.URL, downloads)
 		}
 		if a.Name == checksumsAsset {
 			checksums = a.URL
@@ -170,16 +189,6 @@ func (r releaseRecord) validate() (time.Time, error) {
 	return published, nil
 }
 
-// httpsURL admits one shape and names the field when it refuses. Only https:
-// because every URL in the record points at the forge, and anything else in a
-// href on a public page is a scheme nobody chose.
-func httpsURL(field, u string) error {
-	if !strings.HasPrefix(u, "https://") || strings.ContainsAny(u, " \t\r\n\"'<>") {
-		return fmt.Errorf("%s %q is not an https URL", field, u)
-	}
-	return nil
-}
-
 // humanSize is a byte count in the units a download page is read in.
 //
 // THE ROUNDING RULE, because a page that overstates a download is a page that
@@ -188,6 +197,10 @@ func httpsURL(field, u string) error {
 // the fraction TRUNCATED to one decimal place rather than rounded. 20,971,520
 // bytes is 20.97… MB and shows as 20.9 MB; it never shows as 21.0 MB. Under a
 // kilobyte the exact count is shown, since there is nothing to round.
+//
+// Zero and negative counts are not release assets and validate refuses them
+// before this is reached; they are formatted rather than refused here so this
+// stays a pure formatter with no second opinion about what a size may be.
 func humanSize(n int64) string {
 	switch {
 	case n == 1:
@@ -208,4 +221,70 @@ func humanSize(n int64) string {
 	whole := n / unit
 	tenths := (n % unit) * 10 / unit
 	return fmt.Sprintf("%d.%d %s", whole, tenths, name)
+}
+
+// --- Which release ---------------------------------------------------------
+
+// forgeRelease is one entry of the forge's release list, in the shape
+// `gh release list --json tagName,isLatest,isDraft,isPrerelease,publishedAt`
+// produces it.
+type forgeRelease struct {
+	TagName      string `json:"tagName"`
+	IsLatest     bool   `json:"isLatest"`
+	IsDraft      bool   `json:"isDraft"`
+	IsPrerelease bool   `json:"isPrerelease"`
+	PublishedAt  string `json:"publishedAt"`
+}
+
+// electLatest picks the release the page names: the one the forge FLAGS as
+// latest, never the most recently created and never a draft or a pre-release.
+//
+// The election lives here rather than in the workflow so it can be tested
+// against a fixture — the case the page's record is about (a release created
+// after the flagged one) cannot be produced against the real forge without
+// hand-making a stale release, and a check that only reads the workflow's text
+// cannot fail for the reason the criterion names.
+//
+// The forge's own flag is followed rather than recomputed: it is the same
+// election the download button's `releases/latest` redirect and install.sh
+// follow, so the page and the button cannot disagree. What is added here is
+// refusal — of a list where nothing is flagged, of one where two things are, and
+// of a flagged entry that is a draft, a pre-release, or not a release tag at
+// all.
+func electLatest(list []forgeRelease) (forgeRelease, error) {
+	var flagged []forgeRelease
+	for _, r := range list {
+		if r.IsLatest {
+			flagged = append(flagged, r)
+		}
+	}
+	switch {
+	case len(flagged) == 0:
+		return forgeRelease{}, fmt.Errorf("no release in the list of %d is flagged latest", len(list))
+	case len(flagged) > 1:
+		return forgeRelease{}, fmt.Errorf("%d releases are flagged latest; exactly one is", len(flagged))
+	}
+	r := flagged[0]
+	switch {
+	case r.IsDraft:
+		return forgeRelease{}, fmt.Errorf("the release flagged latest (%s) is a draft", r.TagName)
+	case r.IsPrerelease:
+		return forgeRelease{}, fmt.Errorf("the release flagged latest (%s) is a pre-release", r.TagName)
+	case !versionRe.MatchString(r.TagName):
+		return forgeRelease{}, fmt.Errorf("the release flagged latest is tagged %q, which is not a release tag", r.TagName)
+	}
+	return r, nil
+}
+
+// electLatestFrom reads a release list and returns the elected tag.
+func electLatestFrom(path string) (string, error) {
+	var list []forgeRelease
+	if err := decodeStrict(path, &list); err != nil {
+		return "", fmt.Errorf("release list: %w", err)
+	}
+	r, err := electLatest(list)
+	if err != nil {
+		return "", fmt.Errorf("release list %s: %w", path, err)
+	}
+	return r.TagName, nil
 }
