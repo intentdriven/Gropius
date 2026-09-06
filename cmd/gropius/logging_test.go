@@ -3,10 +3,12 @@ package main
 import (
 	"bytes"
 	"errors"
+	golog "log"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -242,5 +244,89 @@ func TestLoggedResponseWriterStaysFlushable(t *testing.T) {
 	}
 	if assertable {
 		t.Error("the wrapper now satisfies http.Flusher; the comment on statusRecorder says it does not")
+	}
+}
+
+// syncBuffer collects a server's stderr from the connection goroutine while the
+// test reads it.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (s *syncBuffer) Write(b []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.buf.Write(b)
+}
+
+func (s *syncBuffer) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.buf.String()
+}
+
+// A handler panic is the one path that would otherwise put a client address
+// back on stderr: net/http's own recover logs "http: panic serving <addr>".
+// The wrapper reports the panic itself, without the address, and re-panics with
+// ErrAbortHandler so net/http drops the connection without logging it.
+func TestPanicIsLoggedWithoutTheClientAddress(t *testing.T) {
+	req := apiRequest(http.MethodPost, "/v1/chat/completions", "192.0.2.50:54321")
+
+	var buf bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&buf, nil))
+	handler := withLogging(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		panic("model pool exploded")
+	}), log)
+
+	var recovered any
+	func() {
+		defer func() { recovered = recover() }()
+		handler.ServeHTTP(httptest.NewRecorder(), req)
+	}()
+
+	if recovered != http.ErrAbortHandler {
+		t.Errorf("re-panic value = %v, want http.ErrAbortHandler so net/http aborts silently", recovered)
+	}
+	line := buf.String()
+	for _, want := range []string{"method=POST", "path=/v1/chat/completions", "model pool exploded"} {
+		if !strings.Contains(line, want) {
+			t.Errorf("panic log is missing %q:\n%s", want, line)
+		}
+	}
+	for _, leak := range []string{"192.0.2.50", "54321"} {
+		if strings.Contains(line, leak) {
+			t.Errorf("panic log leaks the client address %q:\n%s", leak, line)
+		}
+	}
+}
+
+// End to end over a real connection: net/http must not write its own
+// "http: panic serving <addr>" line to the server's error log.
+func TestNetHTTPDoesNotLogThePanicItself(t *testing.T) {
+	var stderr, appLog syncBuffer
+
+	srv := httptest.NewUnstartedServer(withLogging(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			panic("model pool exploded")
+		}),
+		slog.New(slog.NewTextHandler(&appLog, nil)),
+	))
+	srv.Config.ErrorLog = golog.New(&stderr, "", 0)
+	srv.Start()
+	defer srv.Close()
+
+	// The connection is aborted, so the client sees a transport error, not a
+	// response. Either outcome is fine here; the log is what is under test.
+	resp, err := srv.Client().Post(srv.URL+"/v1/chat/completions", "application/json", strings.NewReader("{}"))
+	if err == nil {
+		resp.Body.Close()
+	}
+
+	if got := stderr.String(); strings.Contains(got, "panic serving") {
+		t.Errorf("net/http logged the panic with the client address:\n%s", got)
+	}
+	if !strings.Contains(appLog.String(), "model pool exploded") {
+		t.Errorf("the panic was swallowed instead of reported:\n%s", appLog.String())
 	}
 }

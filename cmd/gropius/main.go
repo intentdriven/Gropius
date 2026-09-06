@@ -19,6 +19,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"syscall"
 	"time"
 
@@ -270,6 +271,27 @@ func openBrowser(url string) {
 // action instead.
 func withLogging(next http.Handler, log *slog.Logger) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// A handler panic is the other way a client address reaches stderr:
+		// net/http's own recover logs "http: panic serving <addr>" through the
+		// default error log. Report the panic here without the address, then
+		// re-panic with ErrAbortHandler, which tells net/http to drop the
+		// connection without logging anything itself. This runs before the
+		// isNoisy check so a panic on a polled path is reported too.
+		defer func() {
+			v := recover()
+			if v == nil {
+				return
+			}
+			if v != http.ErrAbortHandler {
+				var stack [4 << 10]byte
+				log.Error("panic serving request",
+					"method", r.Method, "path", r.URL.Path,
+					"panic", fmt.Sprint(v),
+					"stack", string(stack[:runtime.Stack(stack[:], false)]))
+			}
+			panic(http.ErrAbortHandler)
+		}()
+
 		if isNoisy(r.URL.Path) {
 			next.ServeHTTP(w, r)
 			return
