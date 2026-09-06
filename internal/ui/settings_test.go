@@ -42,26 +42,39 @@ func TestSettingsFormPostsThePerModelMapWhole(t *testing.T) {
 	}{
 		{
 			name: "a box that is ticked switches merging on",
-			expr: `perModelSettings({}, ["mlx-community/Qwen3-8B-4bit"])`,
+			expr: `perModelSettings({}, ["mlx-community/Qwen3-8B-4bit"], ["mlx-community/Qwen3-8B-4bit"])`,
 			want: map[string]any{
 				"mlx-community/Qwen3-8B-4bit": map[string]any{"merge_system_messages": true},
 			},
 		},
 		{
 			name: "a box that is clear leaves the model out",
-			expr: `perModelSettings({"mlx-community/Qwen3-8B-4bit":{"merge_system_messages":true}}, [])`,
+			expr: `perModelSettings({"mlx-community/Qwen3-8B-4bit":{"merge_system_messages":true}}, ["mlx-community/Qwen3-8B-4bit"], [])`,
 			want: map[string]any{},
 		},
 		{
 			name: "a model's other settings survive an unticked box",
-			expr: `perModelSettings({"org/a":{"merge_system_messages":true,"temperature":0.7}}, [])`,
+			expr: `perModelSettings({"org/a":{"merge_system_messages":true,"temperature":0.7}}, ["org/a"], [])`,
 			want: map[string]any{"org/a": map[string]any{"temperature": 0.7}},
 		},
 		{
 			name: "a model's other settings survive a ticked box",
-			expr: `perModelSettings({"org/a":{"temperature":0.7}}, ["org/a"])`,
+			expr: `perModelSettings({"org/a":{"temperature":0.7}}, ["org/a"], ["org/a"])`,
 			want: map[string]any{
 				"org/a": map[string]any{"temperature": 0.7, "merge_system_messages": true},
+			},
+		},
+		{
+			// The settings are keyed by model id, and a model can be given
+			// settings before it is downloaded — the app keeps a key for a
+			// model this machine does not have. The form draws a box only for
+			// the models it lists, so a model it does not list has no box to
+			// read, and its settings are carried through rather than deleted
+			// by an unrelated save.
+			name: "a model the form does not list keeps its settings",
+			expr: `perModelSettings({"org/not-downloaded":{"merge_system_messages":true}}, ["org/a"], [])`,
+			want: map[string]any{
+				"org/not-downloaded": map[string]any{"merge_system_messages": true},
 			},
 		},
 	}
@@ -81,7 +94,7 @@ func TestSettingsFormPostsThePerModelMapWhole(t *testing.T) {
 func TestSettingsFormIsWiredToThePerModelSwitches(t *testing.T) {
 	src := readPanelSource(t)
 	for _, fragment := range []string{
-		"per_model:         perModelSettings(state.config.per_model, checkedMergeModels()),",
+		"per_model:         perModelSettings(state.config.per_model, listedMergeModels(), checkedMergeModels()),",
 		"renderMergeSwitches();",
 	} {
 		if !strings.Contains(src, fragment) {

@@ -444,21 +444,39 @@ function renderMergeSwitches() {
   });
 }
 
+// mergeBoxes are the boxes drawn above, one per model the form lists.
+function mergeBoxes() {
+  return Array.from(document.querySelectorAll('#mergeList input[type=checkbox]'));
+}
+
+// listedMergeModels lists the models the form drew a box for.
+function listedMergeModels() {
+  return mergeBoxes().map((cb) => cb.dataset.model);
+}
+
 // checkedMergeModels lists the models whose box is ticked.
 function checkedMergeModels() {
-  return Array.from(document.querySelectorAll('#mergeList input[type=checkbox]'))
-    .filter((cb) => cb.checked)
-    .map((cb) => cb.dataset.model);
+  return mergeBoxes().filter((cb) => cb.checked).map((cb) => cb.dataset.model);
 }
 
 // perModelSettings returns the whole per-model map a save posts. The server
 // replaces what it holds with this, so a model whose box is clear is simply
 // left out and its merging goes off — a map cannot be switched off by omission
-// any other way. Settings this form does not own are carried through untouched,
-// so ticking a box never wipes a model's other settings.
-function perModelSettings(current, checked) {
+// any other way.
+//
+// Two things are therefore carried through rather than rebuilt. Settings this
+// form does not own stay on the model that has them, so ticking a box never
+// wipes a model's other settings. And a model the form does not list keeps
+// everything it has, because a model can be given settings before it is
+// downloaded and a form with no box for it has nothing to say about it.
+function perModelSettings(current, listed, checked) {
+  const shown = new Set(listed || []);
   const out = {};
   Object.keys(current || {}).forEach((id) => {
+    if (!shown.has(id)) {
+      out[id] = current[id];
+      return;
+    }
     const rest = Object.assign({}, current[id]);
     delete rest.merge_system_messages;
     if (Object.keys(rest).length) out[id] = rest;
@@ -580,7 +598,7 @@ $('settingsForm').addEventListener('submit', async (e) => {
     // handed a flag only for a parameter that has a value.
     sampling:           readSampling('input'),
     model_sampling:     overrides,
-    per_model:         perModelSettings(state.config.per_model, checkedMergeModels()),
+    per_model:         perModelSettings(state.config.per_model, listedMergeModels(), checkedMergeModels()),
   };
   try {
     const res = await api('/api/settings', {
