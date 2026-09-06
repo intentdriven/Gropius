@@ -1345,3 +1345,64 @@ func TestListModelsPublishesNoPortOrPath(t *testing.T) {
 		}
 	}
 }
+
+// The key is read once per request, by the middleware, and the handler decides
+// on that same reading.
+//
+// Reading it twice would let the owner's click on Save land between the two: a
+// LAN request admitted while no key was configured — and so admitted with no
+// credential at all — would be served residency because a key existed a moment
+// later. The window is tiny and the fields are small, but it is a request
+// reaching something withAuth never sanctioned, so the handler must decide on
+// the configuration the request was admitted under.
+func TestListModelsDecidesOnTheConfigItWasAdmittedUnder(t *testing.T) {
+	fake := mlxtest.Start(mlxtest.Options{ModelArg: "/m"})
+	defer fake.Close()
+
+	// The first read (withAuth's) sees no key, so the request is admitted
+	// unauthenticated; every later read sees one, as if Save landed in between.
+	var reads int
+	cfgFn := func() config.Config {
+		cfg := config.Default()
+		if reads > 0 {
+			cfg.APIKey = "bh_secret"
+		}
+		reads++
+		return cfg
+	}
+	models := &stubModels{models: []registry.Model{
+		{RepoID: "org/warm", State: registry.StateReady, AddedAt: time.Unix(1757145600, 0)},
+	}}
+	pool := &stubPool{srv: fake, resident: []runtime.Resident{{
+		RepoID:   "org/warm",
+		State:    runtime.ResidencyLoaded,
+		InFlight: 3,
+		LastUsed: time.Unix(1757145600, 0),
+	}}}
+	g := New(Options{ConfigFunc: cfgFn, Pool: pool, Models: models})
+
+	entries, body := listModelsEntries(t, g.Handler(), "")
+	for _, name := range []string{"state", "in_flight", "last_used"} {
+		if _, ok := entries[0][name]; ok {
+			t.Errorf("a request admitted with no key configured was served %q: %s", name, body)
+		}
+	}
+}
+
+// The projection allow-lists the state's *value*, not only the field names.
+// Pool is an interface, so the string in Resident.State is not this package's
+// to trust: a implementation that leaves it unset would otherwise publish
+// "state": "", a fourth value the reference page does not define and no client
+// can act on. An unrecognised state means the listing cannot say the model is
+// warm, which is exactly what not_loaded says.
+func TestListModelsRefusesAnUnknownResidencyState(t *testing.T) {
+	h := residencyGateway(t, "bh_secret", runtime.Resident{
+		RepoID: "org/warm",
+		State:  runtime.ResidencyState("wedged"),
+	})
+
+	entries, _ := listModelsEntries(t, h, "bh_secret")
+	if got := entryByID(t, entries, "org/warm")["state"]; got != "not_loaded" {
+		t.Errorf("state = %v for an unrecognised pool state, want %q", got, "not_loaded")
+	}
+}

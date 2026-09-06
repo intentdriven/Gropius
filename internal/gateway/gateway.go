@@ -124,7 +124,11 @@ func (g *Gateway) Handler() http.Handler {
 // included, so there is nothing here for either check to protect.
 func (g *Gateway) withAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		apiKey := g.cfg().APIKey
+		// One read of the live configuration per request. Everything below, and
+		// every handler beyond it, decides on this one value.
+		cfg := g.cfg()
+		apiKey := cfg.APIKey
+		r = withAdmittedConfig(r, cfg)
 		if apiKey == "" {
 			next.ServeHTTP(w, r)
 			return
@@ -194,9 +198,11 @@ func (g *Gateway) handleListModels(w http.ResponseWriter, r *http.Request) {
 	// and no projection, which an empty one would not.
 	//
 	// This is a read of the configured key, not a second authorization path:
-	// withAuth still decides who may call the listing at all.
+	// withAuth still decides who may call the listing at all, and this is the
+	// very value it decided on — read again, it could differ from the one the
+	// request was admitted under.
 	var residency map[string]runtime.Resident
-	if g.cfg().APIKey != "" {
+	if g.admittedConfig(r).APIKey != "" {
 		residency = make(map[string]runtime.Resident)
 		for _, res := range g.pool.Resident() {
 			residency[res.RepoID] = res
@@ -247,9 +253,16 @@ func (g *Gateway) handleListModels(w http.ResponseWriter, r *http.Request) {
 // model warm on the client's behalf: by the time the client reads them another
 // client's request may have evicted the model.
 func addResidency(entry map[string]any, res runtime.Resident, loaded bool) {
+	// The value is allow-listed too, not only the field names. Pool is an
+	// interface, so the string in Resident.State is not this package's to
+	// trust; anything but the two the pool defines means the listing cannot
+	// say the model is warm, which is what not_loaded says.
 	state := runtime.ResidencyNotLoaded
 	if loaded {
-		state = res.State
+		switch res.State {
+		case runtime.ResidencyLoaded, runtime.ResidencyLoading:
+			state = res.State
+		}
 	}
 	entry["state"] = string(state)
 	// Zero for a model that is not loaded, which is the true count.
