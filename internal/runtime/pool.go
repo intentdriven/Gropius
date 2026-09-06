@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"sort"
 	"sync"
@@ -108,6 +109,18 @@ type PoolOptions struct {
 	// ReadyTimeout bounds how long we wait for a model to load. Large models on
 	// a cold page cache genuinely take minutes.
 	ReadyTimeout time.Duration
+	// Pinned lists the repo ids that must stay in memory: a pinned model is
+	// never chosen as an eviction victim and is never reaped by IdleTimeout, so
+	// a request that would need its memory is refused instead. Ids are matched
+	// the way every other repo id is, folded through config.FoldRepoID, so a
+	// hand-edited settings file that spells one differently still protects the
+	// model it names. Replaced live with SetPinned.
+	Pinned []string
+	// Log records what the pool did that the requester is not told. The
+	// no-room refusal is deliberately generic on the wire — which models the
+	// operator protected is not a LAN client's business — so the names go here
+	// instead. Nil means slog.Default().
+	Log *slog.Logger
 
 	// Observer, when set, is told when a model server loads and when one
 	// leaves the pool. Nil (the default) means nobody is watching and every
@@ -132,6 +145,9 @@ type Pool struct {
 	mu      sync.Mutex
 	entries map[string]*entry
 	closed  bool
+	// pinned is the protected set, keyed by folded repo id. Guarded by mu, the
+	// same lock the eviction paths that read it already hold.
+	pinned map[string]bool
 
 	stopIdle chan struct{}
 	idleDone chan struct{}
@@ -187,15 +203,54 @@ func NewPool(opts PoolOptions) *Pool {
 	if opts.MaxQueueDepth <= 0 {
 		opts.MaxQueueDepth = 64
 	}
+	if opts.Log == nil {
+		opts.Log = slog.Default()
+	}
 
 	p := &Pool{
 		opts:     opts,
 		entries:  map[string]*entry{},
+		pinned:   pinnedSet(opts.Pinned),
 		stopIdle: make(chan struct{}),
 		idleDone: make(chan struct{}),
 	}
 	go p.reapIdle()
 	return p
+}
+
+// SetPinned replaces the set of models protected from eviction and from the
+// idle reaper. It is the seam a settings save uses, so a pin takes effect on
+// the models already loaded rather than at the next restart.
+//
+// It takes p.mu, the lock both eviction paths already hold while they read the
+// set, so a pin never lands half-applied between the victim search and the
+// stop that follows it.
+func (p *Pool) SetPinned(ids []string) {
+	set := pinnedSet(ids)
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.pinned = set
+}
+
+// MemoryBudget is the ceiling on the total charged size of resident models.
+//
+// It is read rather than a value the caller already has because the pool is
+// where the default (a share of physical RAM) is resolved, and the check that
+// a pinned set fits has to be against the figure eviction actually uses.
+func (p *Pool) MemoryBudget() int64 { return p.opts.MaxResidentBytes }
+
+// pinnedSet folds a list of repo ids into the lookup the pool keys by.
+func pinnedSet(ids []string) map[string]bool {
+	set := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		set[config.FoldRepoID(id)] = true
+	}
+	return set
+}
+
+// isPinnedLocked reports whether a model is protected. Callers must hold p.mu.
+func (p *Pool) isPinnedLocked(repoID string) bool {
+	return p.pinned[config.FoldRepoID(repoID)]
 }
 
 // ErrClosed is returned once the pool is shut down.
@@ -511,14 +566,27 @@ func (p *Pool) evictForLocked(need int64) error {
 			if e.inFlight > 0 || !isReady(e) {
 				continue
 			}
+			// A pinned model is removed from the candidate set before the
+			// least-recently-used comparison runs, so it survives even when it
+			// is the better victim by age. That is the whole of the promise:
+			// the load that needed the room fails instead.
+			if p.isPinnedLocked(e.repoID) {
+				continue
+			}
 			if victim == nil || e.lastUsed.Before(victim.lastUsed) {
 				victim = e
 			}
 		}
 		if victim == nil {
+			// Deliberately generic. handleCompletions writes a pool error
+			// verbatim into the 503 body, which every LAN client reads, and
+			// which models the operator chose to protect is not a client's
+			// business. The names go to this machine's own log instead.
+			p.opts.Log.Info("refused a model load: no model in memory could be freed",
+				"protected", p.pinnedResidentLocked(), "limit", humanBytes(p.opts.MaxResidentBytes))
 			return fmt.Errorf(
-				"not enough memory to load another model: every loaded model is currently serving a request (limit %s)",
-				humanBytes(p.opts.MaxResidentBytes))
+				"not enough memory to load another model: every model in memory is protected or serving a request (limit %s): %w",
+				humanBytes(p.opts.MaxResidentBytes), ErrBusy)
 		}
 		p.stopEntryLocked(victim, StopEvicted)
 	}
@@ -615,7 +683,12 @@ func (p *Pool) reapIdle() {
 				// Never reap a model that is still loading: its ready channel is
 				// open, so tearing it down would waste the load and error every
 				// caller waiting on it. isReady checks without blocking.
-				if e.inFlight == 0 && isReady(e) && now.Sub(e.lastUsed) >= p.opts.IdleTimeout {
+				// A pinned model ignores the timeout. Reaping is the second
+				// eviction path, with the same effect as the first, so
+				// protecting one and not the other would make the promise
+				// false after IdleTimeout of quiet.
+				if e.inFlight == 0 && isReady(e) && !p.isPinnedLocked(e.repoID) &&
+					now.Sub(e.lastUsed) >= p.opts.IdleTimeout {
 					p.stopEntryLocked(e, StopIdle)
 				}
 			}
@@ -659,6 +732,19 @@ func (p *Pool) Close() error {
 	}
 	wg.Wait()
 	return nil
+}
+
+// pinnedResidentLocked names the protected models currently in memory, for the
+// log line the refusal above writes. Callers must hold p.mu.
+func (p *Pool) pinnedResidentLocked() []string {
+	var out []string
+	for _, e := range p.entries {
+		if p.isPinnedLocked(e.repoID) {
+			out = append(out, e.repoID)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // isReady reports whether an entry has finished loading (its ready channel is

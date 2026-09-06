@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -965,4 +966,213 @@ func TestUnloadFindsTheModelWhateverTheSpelling(t *testing.T) {
 	if got := p.Resident(); len(got) != 0 {
 		t.Errorf("Resident() = %+v after Unload, want none", got)
 	}
+}
+
+// A pinned model is protected against every other client's request: the pool
+// refuses the load rather than taking the memory back. The refusal must name
+// no model — it is written verbatim into the 503 body an unauthenticated LAN
+// client reads, and which models the operator has chosen to protect is not
+// that client's business.
+func TestPinnedModelsAreNeverEvictedAndTheRefusalNamesNoModel(t *testing.T) {
+	l := newFakeLauncher()
+	src := &fakeSource{models: map[string]int64{"org/a": 100, "org/b": 100, "org/c": 100}}
+	// loadCost is 1.2x, so 100 bytes costs 120. A 250-byte budget holds two.
+	p := newTestPool(t, l, src, PoolOptions{
+		MaxResidentBytes: 250,
+		Pinned:           []string{"org/a", "org/b"},
+	})
+
+	for _, id := range []string{"org/a", "org/b"} {
+		_, release, err := p.Acquire(context.Background(), id)
+		if err != nil {
+			t.Fatalf("Acquire(%q): %v", id, err)
+		}
+		release() // idle, so only the pin protects it
+	}
+
+	_, _, err := p.Acquire(context.Background(), "org/c")
+	if err == nil {
+		t.Fatal("a third model loaded although both resident models are pinned")
+	}
+	if !errors.Is(err, ErrBusy) {
+		t.Errorf("error = %v, want it to wrap ErrBusy so callers can test for it", err)
+	}
+	for _, id := range []string{"org/a", "org/b"} {
+		if strings.Contains(err.Error(), id) {
+			t.Errorf("the refusal names %q; it reaches an unauthenticated LAN client: %v", id, err)
+		}
+	}
+	if got := len(p.Resident()); got != 2 {
+		t.Errorf("Resident() holds %d models after the refusal, want both pinned ones", got)
+	}
+}
+
+// The pin removes a model from the candidate set before the least-recently-used
+// comparison runs, so it survives even when it is the better victim by age.
+func TestEvictionSkipsThePinnedModelEvenWhenItIsTheLeastRecentlyUsed(t *testing.T) {
+	l := newFakeLauncher()
+	src := &fakeSource{models: map[string]int64{"org/pinned": 100, "org/spare": 100, "org/new": 100}}
+	clock := &testClock{now: time.Unix(1_700_000_000, 0)}
+	p := newTestPool(t, l, src, PoolOptions{
+		MaxResidentBytes: 250,
+		Pinned:           []string{"org/pinned"},
+		now:              clock.Now,
+	})
+
+	// The pinned model is used first and then left alone, so it is the older
+	// of the two and the one LRU would choose.
+	for _, id := range []string{"org/pinned", "org/spare"} {
+		_, release, err := p.Acquire(context.Background(), id)
+		if err != nil {
+			t.Fatalf("Acquire(%q): %v", id, err)
+		}
+		release()
+		clock.advance(time.Minute)
+	}
+
+	_, release, err := p.Acquire(context.Background(), "org/new")
+	if err != nil {
+		t.Fatalf("Acquire(org/new): %v", err)
+	}
+	defer release()
+
+	if ids := residentIDs(p); !slices.Equal(ids, []string{"org/new", "org/pinned"}) {
+		t.Errorf("resident = %v, want the pinned model kept and the spare one evicted", ids)
+	}
+}
+
+// The idle timeout is a second eviction path with the same effect, so a pin
+// that did not cover it would make the promise false after idle_timeout_sec
+// seconds of quiet.
+func TestPinnedModelIgnoresTheIdleTimeout(t *testing.T) {
+	l := newFakeLauncher()
+	src := &fakeSource{models: map[string]int64{"org/pinned": 100, "org/spare": 100}}
+	clock := &testClock{now: time.Unix(1_700_000_000, 0)}
+	p := newTestPool(t, l, src, PoolOptions{
+		MaxResidentBytes: 1 << 30,
+		IdleTimeout:      80 * time.Millisecond,
+		Pinned:           []string{"org/pinned"},
+		now:              clock.Now,
+	})
+
+	for _, id := range []string{"org/pinned", "org/spare"} {
+		_, release, err := p.Acquire(context.Background(), id)
+		if err != nil {
+			t.Fatalf("Acquire(%q): %v", id, err)
+		}
+		release()
+	}
+	// Both models are now well past the timeout as far as the pool is
+	// concerned; only the reaper's ticker still runs on real time.
+	clock.advance(time.Hour)
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if slices.Equal(residentIDs(p), []string{"org/pinned"}) {
+			// And it stays: a later tick must not take it either.
+			time.Sleep(100 * time.Millisecond)
+			if ids := residentIDs(p); !slices.Equal(ids, []string{"org/pinned"}) {
+				t.Fatalf("resident = %v, want the pinned model still held", ids)
+			}
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("resident = %v; the idle unpinned model was never reaped", residentIDs(p))
+}
+
+// SetPinned is the live seam: pinning in Settings protects a model that is
+// already loaded, without Gropius being restarted and without a new pool.
+func TestSetPinnedProtectsAModelWithoutANewPool(t *testing.T) {
+	l := newFakeLauncher()
+	src := &fakeSource{models: map[string]int64{"org/keep": 100, "org/spare": 100, "org/new": 100}}
+	clock := &testClock{now: time.Unix(1_700_000_000, 0)}
+	p := newTestPool(t, l, src, PoolOptions{MaxResidentBytes: 250, now: clock.Now})
+
+	for _, id := range []string{"org/keep", "org/spare"} {
+		_, release, err := p.Acquire(context.Background(), id)
+		if err != nil {
+			t.Fatalf("Acquire(%q): %v", id, err)
+		}
+		release()
+		clock.advance(time.Minute)
+	}
+
+	// Pinned under a spelling the pool never saw: Settings canonicalises, but
+	// a hand-edited settings file need not, and a pin that silently matched
+	// nothing would be the worst failure this feature has.
+	p.SetPinned([]string{"ORG/Keep"})
+
+	_, release, err := p.Acquire(context.Background(), "org/new")
+	if err != nil {
+		t.Fatalf("Acquire(org/new): %v", err)
+	}
+	defer release()
+
+	if ids := residentIDs(p); !slices.Equal(ids, []string{"org/keep", "org/new"}) {
+		t.Errorf("resident = %v, want the newly pinned model kept and the spare one evicted", ids)
+	}
+}
+
+// Pinning protects a model from other clients' requests, not from the
+// operator's own hand: every loopback caller is by design the administrator.
+func TestUnloadSucceedsOnAPinnedModel(t *testing.T) {
+	l := newFakeLauncher()
+	src := &fakeSource{models: map[string]int64{"org/m": 1 << 20}}
+	p := newTestPool(t, l, src, PoolOptions{MaxResidentBytes: 1 << 30, Pinned: []string{"org/m"}})
+
+	_, release, err := p.Acquire(context.Background(), "org/m")
+	if err != nil {
+		t.Fatal(err)
+	}
+	release()
+
+	if err := p.Unload("org/m"); err != nil {
+		t.Fatalf("Unload of a pinned model: %v", err)
+	}
+	if got := p.Resident(); len(got) != 0 {
+		t.Errorf("Resident() = %+v after unloading a pinned model, want none", got)
+	}
+}
+
+// The fit check the app runs before a settings save is against this figure, so
+// the pool has to be able to state it.
+func TestMemoryBudgetReportsTheCeilingEvictionUses(t *testing.T) {
+	l := newFakeLauncher()
+	src := &fakeSource{models: map[string]int64{}}
+	p := newTestPool(t, l, src, PoolOptions{MaxResidentBytes: 4242})
+
+	if got := p.MemoryBudget(); got != 4242 {
+		t.Errorf("MemoryBudget() = %d, want 4242", got)
+	}
+}
+
+// testClock is an injectable clock, so eviction order is set by the test
+// rather than by how long the test took to run.
+type testClock struct {
+	mu  sync.Mutex
+	now time.Time
+}
+
+func (c *testClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.now
+}
+
+func (c *testClock) advance(d time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.now = c.now.Add(d)
+}
+
+// residentIDs lists the repo ids the pool is holding, sorted, so a test can
+// compare the whole set rather than one entry.
+func residentIDs(p *Pool) []string {
+	var out []string
+	for _, r := range p.Resident() {
+		out = append(out, r.RepoID)
+	}
+	slices.Sort(out)
+	return out
 }

@@ -523,6 +523,9 @@ func TestStatisticsIsOffByDefaultAndSurvivesARoundTrip(t *testing.T) {
 	}
 	if !again.Statistics {
 		t.Error("the switch did not survive being saved and read back")
+	}
+}
+
 // The pinned list is what protects a model from eviction, so it has to survive
 // a round trip through the settings file exactly as it was saved.
 func TestSaveLoadRoundTripKeepsPinnedModels(t *testing.T) {
