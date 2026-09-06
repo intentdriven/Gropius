@@ -2,8 +2,12 @@ package gateway
 
 import (
 	"encoding/json"
+	"fmt"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -182,4 +186,73 @@ func TestTheStatisticsEndpointIsLoopbackOnly(t *testing.T) {
 	if w.Code != http.StatusForbidden {
 		t.Errorf("/api/stats from the LAN returned %d, want 403", w.Code)
 	}
+}
+
+// Recording lives in memory and writes nothing. Keeping records across a
+// restart is the next intent's (itd-2609061521102742), under its own decision
+// record, and until it exists a reader of this build should be able to see for
+// themselves that turning the switch on puts nothing on their disk.
+func TestRecordingWritesNoFile(t *testing.T) {
+	root := t.TempDir()
+	paths := config.NewPaths(root)
+	a, err := app.New(app.Options{Paths: paths, Config: config.Default()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { a.Close() })
+	ctrl := &Control{App: a}
+	mux := http.NewServeMux()
+	ctrl.Routes(mux)
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	// Everything the settings save itself writes is already on disk before the
+	// tree is read, so what is compared is only what recording adds.
+	resp := postJSON(t, srv, "/api/settings",
+		`{"host":"0.0.0.0","port":11535,"decode_concurrency":4,"statistics":true}`)
+	resp.Body.Close()
+	before := treeOf(t, root)
+
+	for i := range 50 {
+		a.Stats.Add(stats.Record{Model: "org/a", Class: stats.ClassOK, CompletionTokens: i})
+	}
+	a.Stats.LoadStarted("org/a")
+	a.Stats.LoadFinished("org/a", 0, nil)
+	a.Stats.Removed("org/a", stats.ReasonEvicted)
+	getJSON(t, srv, "/api/stats")
+
+	if after := treeOf(t, root); !slices.Equal(before, after) {
+		t.Errorf("recording wrote to the data root.\nbefore: %v\nafter:  %v", before, after)
+	}
+}
+
+// treeOf lists every path under root, relative to it, with each file's size,
+// so both a new file and a file that grew show up as a difference.
+func treeOf(t *testing.T, root string) []string {
+	t.Helper()
+	var out []string
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			out = append(out, rel+"/")
+			return nil
+		}
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		out = append(out, fmt.Sprintf("%s %d", rel, info.Size()))
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	slices.Sort(out)
+	return out
 }
