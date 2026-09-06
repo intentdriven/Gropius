@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
@@ -51,7 +52,23 @@ type Model struct {
 	// Progress is 0-100 while downloading.
 	Progress float64   `json:"progress"`
 	AddedAt  time.Time `json:"added_at"`
+	// ContextLength is the architectural context length the model's own
+	// configuration declares — the positional range it was trained or scaled
+	// for, not what this Mac can hold at once. Zero means the configuration
+	// declares none, or declares one that is not plausible; omitempty keeps
+	// an unknown figure absent from the JSON rather than published as 0,
+	// which a client that trims its history would read as "no context".
+	ContextLength int64 `json:"context_length,omitempty"`
 }
+
+// MaxContextLength bounds the context length Gropius will believe. A model
+// directory's config.json is, in shared-cache mode, a file another local
+// account can write, and the figure it declares is served to the LAN — so a
+// hostile or corrupt configuration must not be able to hand a client an
+// absurd number to size buffers from. 8,388,608 tokens is far above any
+// window in use (the lab verified prompts of about 122,000 tokens) and far
+// below anything that could be mistaken for a real one.
+const MaxContextLength = 1 << 23
 
 // Ready reports whether the model can be served.
 func (m Model) Ready() bool { return m.State == StateReady }
@@ -138,6 +155,13 @@ func Open(path string) (*Registry, error) {
 		// names dictate. Nothing is deleted here.
 		if existing, ok := r.models[key(m.RepoID)]; ok && (existing.Ready() || !m.Ready()) {
 			continue
+		}
+		// The context length is persisted, so a hand-edited or planted index
+		// can carry an absurd figure straight to the LAN with no rescan in
+		// between. Bound a figure read back exactly as one read from a model
+		// directory is bounded.
+		if !plausibleContextLength(m.ContextLength) {
+			m.ContextLength = 0
 		}
 		r.models[key(m.RepoID)] = m
 	}
@@ -485,7 +509,7 @@ func (r *Registry) Rescan(modelsDir string) error {
 				continue
 			}
 			dir := filepath.Join(modelsDir, org.Name(), repo.Name())
-			complete, size := inspectModelDir(dir)
+			complete, size, contextLength := inspectModelDir(dir)
 			if !complete {
 				continue
 			}
@@ -499,11 +523,12 @@ func (r *Registry) Rescan(modelsDir string) error {
 				continue
 			}
 			found[repoID] = Model{
-				RepoID:  repoID,
-				Path:    dir,
-				Bytes:   size,
-				State:   StateReady,
-				AddedAt: time.Now(),
+				RepoID:        repoID,
+				Path:          dir,
+				Bytes:         size,
+				ContextLength: contextLength,
+				State:         StateReady,
+				AddedAt:       time.Now(),
 			}
 		}
 	}
@@ -517,6 +542,10 @@ func (r *Registry) Rescan(modelsDir string) error {
 			}
 			existing.Path = m.Path
 			existing.Bytes = m.Bytes
+			// Assigned like every other field the scan re-derives, so a model
+			// recorded by a build that predates the figure gains it at the
+			// next startup rescan rather than only on a re-download.
+			existing.ContextLength = m.ContextLength
 			existing.State = StateReady
 			existing.Err = ""
 			r.models[key(repoID)] = existing
@@ -574,7 +603,7 @@ func (r *Registry) Rescan(modelsDir string) error {
 // a model config (mirroring the app layer's structural validation), and every
 // weight shard named by model.safetensors.index.json must be present as a
 // regular file.
-func inspectModelDir(dir string) (complete bool, size int64) {
+func inspectModelDir(dir string) (complete bool, size int64, contextLength int64) {
 	var hasConfig, hasWeights, partial, irregular bool
 	err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
@@ -610,11 +639,18 @@ func inspectModelDir(dir string) (complete bool, size int64) {
 		return nil
 	})
 	if err != nil {
-		return false, 0
+		return false, 0, 0
 	}
+	// One decode of config.json serves both questions the scan asks of it —
+	// whether the directory is a model at all, and what positional range it
+	// declares — so adding the figure adds no file access to the scan path.
+	cfg, cfgOK := readModelConfig(dir)
 	complete = hasConfig && hasWeights && !partial && !irregular &&
-		plausibleModelConfig(dir) && CheckShards(dir) == nil
-	return complete, size
+		cfgOK && plausibleConfig(cfg) && CheckShards(dir) == nil
+	if !complete {
+		return false, size, 0
+	}
+	return true, size, contextLengthFrom(cfg)
 }
 
 // maxManifestJSON caps how much of config.json or the shard index we read. A
@@ -635,16 +671,91 @@ func readManifest(dir, name string, v any) bool {
 	return err == nil && json.Unmarshal(b, v) == nil
 }
 
-// plausibleModelConfig reports whether dir's config.json can be a model
+// readModelConfig decodes dir's config.json. It reports false when the file
+// is missing, not a regular file, oversized, or not valid JSON. This is the
+// only decoder of a model's configuration in Gropius; every question asked of
+// that file is answered from the map it returns.
+func readModelConfig(dir string) (map[string]any, bool) {
+	var cfg map[string]any
+	if !readManifest(dir, "config.json", &cfg) {
+		return nil, false
+	}
+	return cfg, true
+}
+
+// plausibleConfig reports whether a decoded config.json can be a model
 // config. The criteria match the app layer's structural validation (mlx-lm
 // keys off model_type, or architectures for some models), so a download that
 // failed that validation cannot be re-adopted as ready by a rescan.
-func plausibleModelConfig(dir string) bool {
-	var cfg map[string]any
-	if !readManifest(dir, "config.json", &cfg) {
-		return false
-	}
+func plausibleConfig(cfg map[string]any) bool {
 	return cfg["model_type"] != nil || cfg["architectures"] != nil
+}
+
+// ContextLength reports the architectural context length declared by the
+// model configuration in dir, or 0 when it declares none or declares one that
+// is not plausible. It is exported so the app layer's download paths read the
+// figure through this one primitive, rather than a second copy of the key
+// rule that could drift from the rescan's — the same reason CheckShards is
+// exported.
+func ContextLength(dir string) int64 {
+	cfg, ok := readModelConfig(dir)
+	if !ok {
+		return 0
+	}
+	return contextLengthFrom(cfg)
+}
+
+// contextLengthFrom applies the key rule, sampled on 2026-09-06 against the
+// four models the lab benchmarked and seven further configurations on disk
+// (research note 2026-09-06-model-bench-findings):
+//
+//   - max_position_embeddings at the top level is authoritative. Every plain
+//     causal-LM configuration sampled declares it there.
+//   - Failing that, text_config.max_position_embeddings, which is where
+//     multimodal and composite configurations nest the text model's settings.
+//     A configuration that states both can disagree (the sampled qwen2_vl
+//     declares 32768 at the top level and 8192 under text_config), so the
+//     nested key is a fallback and never an override.
+//   - No scaling arithmetic is ever applied. Where rope_scaling carries
+//     original_max_position_embeddings, the top-level figure is already the
+//     scaled window; where it declares a factor and no pre-scaling figure,
+//     the declared range is published as it stands. Under-reporting is the
+//     safe direction for a client that trims its history to fit;
+//     over-reporting would hand it a number the model was never scaled to.
+//
+// A top-level key that is present but implausible yields nothing: falling
+// through to the nested key would publish a figure the configuration's own
+// authoritative key contradicts.
+func contextLengthFrom(cfg map[string]any) int64 {
+	if _, present := cfg["max_position_embeddings"]; present {
+		return positionalRange(cfg)
+	}
+	if text, ok := cfg["text_config"].(map[string]any); ok {
+		return positionalRange(text)
+	}
+	return 0
+}
+
+// positionalRange reads max_position_embeddings out of one configuration
+// level, accepting only a JSON number that is integral, positive and within
+// the ceiling. Anything else — a string, an object, a fraction, a negative,
+// an absurd magnitude — yields 0, which omits the figure.
+func positionalRange(level map[string]any) int64 {
+	// The bounds are checked on the float, before any conversion: a Go
+	// float-to-integer conversion whose value does not fit is undefined, and
+	// a configuration is free to declare 1e300.
+	n, ok := level["max_position_embeddings"].(float64)
+	if !ok || n != math.Trunc(n) || n <= 0 || n > MaxContextLength {
+		return 0
+	}
+	return int64(n)
+}
+
+// plausibleContextLength is the bound applied wherever a context length
+// enters the registry: on a scan, and again when one is read back from the
+// index file.
+func plausibleContextLength(n int64) bool {
+	return n > 0 && n <= MaxContextLength
 }
 
 // CheckShards reports an error unless every weight shard named by

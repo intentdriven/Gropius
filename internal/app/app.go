@@ -286,12 +286,17 @@ func (a *App) Download(repoID string) error {
 		case err == nil:
 			// Re-derive the size from disk rather than trusting the manifest.
 			if perr := a.Registry.Put(registry.Model{
-				RepoID:   repoID,
-				Path:     dest,
-				Bytes:    dirSize(dest),
-				State:    registry.StateReady,
-				Progress: 100,
-				AddedAt:  addedAt,
+				RepoID: repoID,
+				Path:   dest,
+				Bytes:  dirSize(dest),
+				// Read through the registry's own primitive, so the download
+				// path and the rescan apply one key rule; a model carries its
+				// context length from the moment it is ready, not only after
+				// the next startup rescan.
+				ContextLength: registry.ContextLength(dest),
+				State:         registry.StateReady,
+				Progress:      100,
+				AddedAt:       addedAt,
 			}); perr != nil {
 				// The files are on disk; only the index write failed. Surface it —
 				// a silently unrecorded model would look missing until a rescan.
@@ -333,12 +338,13 @@ func (a *App) restoreReady(repoID, dest string, wasReady bool, priorBytes int64,
 		return false
 	}
 	if perr := a.Registry.Put(registry.Model{
-		RepoID:   repoID,
-		Path:     dest,
-		Bytes:    priorBytes,
-		State:    registry.StateReady,
-		Progress: 100,
-		AddedAt:  priorAddedAt,
+		RepoID:        repoID,
+		Path:          dest,
+		Bytes:         priorBytes,
+		ContextLength: registry.ContextLength(dest),
+		State:         registry.StateReady,
+		Progress:      100,
+		AddedAt:       priorAddedAt,
 	}); perr != nil {
 		a.Log.Error("could not restore the ready model record", "model", repoID, "err", perr)
 		return false

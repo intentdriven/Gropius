@@ -938,3 +938,218 @@ func TestRemoveRefusesSymlinkedOrgDir(t *testing.T) {
 		t.Fatalf("Remove deleted through the planted org symlink: %v", err)
 	}
 }
+
+// writeModelDirWithConfig is writeModelDir with the model's config.json
+// content chosen by the caller, so a test can vary what the configuration
+// declares about the model's positional range.
+func writeModelDirWithConfig(t *testing.T, root, org, name, config string, weightBytes int) string {
+	t.Helper()
+	dir := filepath.Join(root, org, name)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(config), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "model.safetensors"), make([]byte, weightBytes), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+// The architectural context length is the positional range the model's own
+// configuration declares. Every plain causal-LM configuration sampled on
+// 2026-09-06 (research note 2026-09-06-model-bench-findings, "Context length
+// in the model configuration") carries it at the top level.
+func TestRescanReadsContextLengthFromTopLevelConfig(t *testing.T) {
+	r, dir := newTestRegistry(t)
+	models := filepath.Join(dir, "models")
+	writeModelDirWithConfig(t, models, "mlx-community", "Qwen3-Coder-Next-4bit",
+		`{"model_type":"qwen3_next","max_position_embeddings":262144,"rope_scaling":null}`, 32)
+
+	if err := r.Rescan(models); err != nil {
+		t.Fatalf("Rescan: %v", err)
+	}
+	m, err := r.Get("mlx-community/Qwen3-Coder-Next-4bit")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if m.ContextLength != 262144 {
+		t.Errorf("ContextLength = %d, want 262144", m.ContextLength)
+	}
+}
+
+// Multimodal and composite configurations declare no top-level positional
+// range and nest the text model's settings under text_config; the dense 27B
+// the lab benchmarked is one of them.
+func TestRescanReadsContextLengthFromTextConfig(t *testing.T) {
+	r, dir := newTestRegistry(t)
+	models := filepath.Join(dir, "models")
+	writeModelDirWithConfig(t, models, "mlx-community", "Qwen3.8-27B-8bit",
+		`{"model_type":"qwen3_5","text_config":{"model_type":"qwen3_5_text","max_position_embeddings":262144}}`, 32)
+
+	if err := r.Rescan(models); err != nil {
+		t.Fatalf("Rescan: %v", err)
+	}
+	m, _ := r.Get("mlx-community/Qwen3.8-27B-8bit")
+	if m.ContextLength != 262144 {
+		t.Errorf("ContextLength = %d, want 262144", m.ContextLength)
+	}
+}
+
+// Some configurations state both, and the two disagree (the sampled
+// qwen2_vl declares 32768 at the top level and 8192 under text_config). The
+// top level is the authoritative one; text_config is only a fallback.
+func TestRescanPrefersTheTopLevelPositionalRange(t *testing.T) {
+	r, dir := newTestRegistry(t)
+	models := filepath.Join(dir, "models")
+	writeModelDirWithConfig(t, models, "org", "both",
+		`{"model_type":"qwen2_vl","max_position_embeddings":32768,"text_config":{"max_position_embeddings":8192}}`, 32)
+
+	if err := r.Rescan(models); err != nil {
+		t.Fatalf("Rescan: %v", err)
+	}
+	m, _ := r.Get("org/both")
+	if m.ContextLength != 32768 {
+		t.Errorf("ContextLength = %d, want 32768 (the top-level figure)", m.ContextLength)
+	}
+}
+
+// A configuration that declares no positional range gets no figure — and is
+// still adopted as ready, exactly as it is without one.
+func TestRescanOmitsContextLengthWhenConfigDeclaresNone(t *testing.T) {
+	r, dir := newTestRegistry(t)
+	models := filepath.Join(dir, "models")
+	writeModelDirWithConfig(t, models, "org", "silent", `{"model_type":"test"}`, 32)
+
+	if err := r.Rescan(models); err != nil {
+		t.Fatalf("Rescan: %v", err)
+	}
+	m, err := r.Get("org/silent")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if m.ContextLength != 0 {
+		t.Errorf("ContextLength = %d, want 0", m.ContextLength)
+	}
+	if !m.Ready() {
+		t.Errorf("state = %q, want ready", m.State)
+	}
+}
+
+// config.json sits in a model directory another local account can write in
+// shared-cache mode, and the figure is served to the LAN. Anything that is
+// not a plausible positive integer is dropped, and dropping it must never
+// affect whether the model is served.
+func TestRescanRejectsImplausibleContextLengths(t *testing.T) {
+	cases := []struct {
+		name   string
+		config string
+	}{
+		{"negative", `{"model_type":"t","max_position_embeddings":-1}`},
+		{"zero", `{"model_type":"t","max_position_embeddings":0}`},
+		{"fractional", `{"model_type":"t","max_position_embeddings":1.5}`},
+		{"string", `{"model_type":"t","max_position_embeddings":"32768"}`},
+		{"null", `{"model_type":"t","max_position_embeddings":null}`},
+		{"object", `{"model_type":"t","max_position_embeddings":{"n":8}}`},
+		{"above the ceiling", `{"model_type":"t","max_position_embeddings":8388609}`},
+		{"absurd", `{"model_type":"t","max_position_embeddings":1e300}`},
+		{"top level bad, text_config good", `{"model_type":"t","max_position_embeddings":-1,"text_config":{"max_position_embeddings":4096}}`},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			r, dir := newTestRegistry(t)
+			models := filepath.Join(dir, "models")
+			writeModelDirWithConfig(t, models, "org", "m", c.config, 32)
+
+			if err := r.Rescan(models); err != nil {
+				t.Fatalf("Rescan: %v", err)
+			}
+			m, err := r.Get("org/m")
+			if err != nil {
+				t.Fatalf("the rescan dropped the model: %v", err)
+			}
+			if m.ContextLength != 0 {
+				t.Errorf("ContextLength = %d, want 0", m.ContextLength)
+			}
+			if m.State != StateReady {
+				t.Errorf("state = %q, want ready — an implausible figure must not affect the model", m.State)
+			}
+		})
+	}
+}
+
+// The ceiling is exactly inclusive, so a model right on it keeps its figure.
+func TestRescanAcceptsTheCeilingItself(t *testing.T) {
+	r, dir := newTestRegistry(t)
+	models := filepath.Join(dir, "models")
+	writeModelDirWithConfig(t, models, "org", "huge",
+		`{"model_type":"t","max_position_embeddings":8388608}`, 32)
+
+	if err := r.Rescan(models); err != nil {
+		t.Fatalf("Rescan: %v", err)
+	}
+	if m, _ := r.Get("org/huge"); m.ContextLength != MaxContextLength {
+		t.Errorf("ContextLength = %d, want %d", m.ContextLength, MaxContextLength)
+	}
+}
+
+// A model recorded by a build that predates the figure must gain it at the
+// next startup rescan, without a re-download. Rescan updates an existing
+// entry field by field, so this is the case that a new field silently misses.
+func TestRescanAddsContextLengthToAnEntryFromAnOlderBuild(t *testing.T) {
+	r, dir := newTestRegistry(t)
+	models := filepath.Join(dir, "models")
+	md := writeModelDirWithConfig(t, models, "org", "old",
+		`{"model_type":"t","max_position_embeddings":40960}`, 32)
+	// The entry an older build would have written: ready, no figure.
+	if err := r.Put(Model{RepoID: "org/old", Path: md, State: StateReady}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := r.Rescan(models); err != nil {
+		t.Fatalf("Rescan: %v", err)
+	}
+	m, _ := r.Get("org/old")
+	if m.ContextLength != 40960 {
+		t.Errorf("ContextLength = %d, want 40960 — an entry from an older build never gained the figure", m.ContextLength)
+	}
+}
+
+// The figure is persisted, so a hand-edited or planted registry.json can
+// carry an absurd one straight to the LAN without a rescan in between. The
+// same bounds apply when an entry is read back.
+func TestOpenDropsAnImplausibleStoredContextLength(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "registry.json")
+	body := `[{"repo_id":"org/planted","path":"/nowhere","state":"ready","context_length":999999999999},
+	          {"repo_id":"org/sane","path":"/nowhere","state":"ready","context_length":8192}]`
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	r, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if m, _ := r.Get("org/planted"); m.ContextLength != 0 {
+		t.Errorf("ContextLength = %d, want 0 — a stored figure is bounded like a scanned one", m.ContextLength)
+	}
+	if m, _ := r.Get("org/sane"); m.ContextLength != 8192 {
+		t.Errorf("ContextLength = %d, want 8192", m.ContextLength)
+	}
+}
+
+// The registry owns the only decoder of a model's config.json, so the app
+// layer's download paths read the figure through this one primitive rather
+// than a second copy of the key rule.
+func TestContextLengthReadsAModelDirectory(t *testing.T) {
+	dir := t.TempDir()
+	md := writeModelDirWithConfig(t, dir, "org", "m",
+		`{"model_type":"t","max_position_embeddings":131072}`, 8)
+	if got := ContextLength(md); got != 131072 {
+		t.Errorf("ContextLength = %d, want 131072", got)
+	}
+	if got := ContextLength(filepath.Join(dir, "org", "absent")); got != 0 {
+		t.Errorf("ContextLength of a missing directory = %d, want 0", got)
+	}
+}
