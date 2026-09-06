@@ -13,10 +13,12 @@ import (
 // build/Info.plist's LSMinimumSystemVersion is this product's ONE declaration
 // of the macOS floor it supports. Every other surface that names a minimum --
 // the chat client's bundle, the deployment targets its build script compiles
-// against, the installer's refusal, and the prose in the three READMEs and the
-// guide -- is checked against that one value here, and none of them carries a
-// second copy of the number for this test to compare it with. Two literals of
-// the same floor are a place for the floor to drift, which is the failure this
+// against, the installer's refusal, and the requirement sentence in the three
+// READMEs and the guide -- is checked against that one value here, so a second
+// copy of the number (install.sh's MIN_MACOS_MAJOR, say) cannot drift from it
+// unnoticed. Prose that names the version some other way -- the README's
+// tested-on line, the client README's SDK requirement -- is not read here and
+// still needs a human edit when the floor moves. Drift is the failure this
 // guard exists to prevent:
 //
 //   - a bundle minimum below the floor lets an unsupported Mac install the app
