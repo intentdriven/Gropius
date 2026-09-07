@@ -577,7 +577,10 @@ function budgetBytes(text) {
 function budgetFieldValue(machine) {
   const m = machine || {};
   if (!m.budget || m.budget_is_default) return '';
-  return String(Math.round((m.budget / (1024 * 1024 * 1024)) * 100) / 100);
+  // Enough decimals that posting back what is shown returns the same figure:
+  // a budget set through the API is not always a round number of gigabytes,
+  // and rounding it here would rewrite it on the next unrelated save.
+  return String(Math.round((m.budget / (1024 * 1024 * 1024)) * 1e6) / 1e6);
 }
 
 // budgetHint is the line beside the field: what the budget is, what share of
@@ -605,22 +608,30 @@ function budgetHint(machine) {
   return parts.join(' ');
 }
 
+// budgetShown is the machine as the figure being typed would leave it: what
+// saving now would give. A cleared field is the default, so it shows the
+// default rather than the figure it would replace — the panel documents
+// clearing the field as the way back, and showing the old number there would
+// make that instruction read as a lie.
+function budgetShown(machine, typed) {
+  const m = machine || {};
+  const budget = typed || m.default_budget || m.budget || 0;
+  return Object.assign({}, m, {
+    budget,
+    budget_is_default: !typed,
+    over_budget: budget > 0 && (m.resident_bytes || 0) > budget,
+  });
+}
+
 // updateBudgetHint writes that line, against the figure being typed rather
 // than the one last saved, so the warning arrives while the number is being
 // chosen instead of after it is stored.
 function updateBudgetHint() {
   const line = $('budgetHint');
   if (!line) return;
-  const m = state.machine || {};
-  const typed = budgetBytes($('setBudget').value);
-  const budget = typed || m.budget || 0;
-  const shown = Object.assign({}, m, {
-    budget,
-    budget_is_default: !typed && !!m.budget_is_default,
-    over_budget: budget > 0 && (m.resident_bytes || 0) > budget,
-  });
+  const shown = budgetShown(state.machine, budgetBytes($('setBudget').value));
   line.textContent = budgetHint(shown);
-  line.className = shown.over_budget || (shown.warn_above && budget > shown.warn_above) ? 'msg err' : 'hint';
+  line.className = shown.over_budget || (shown.warn_above && shown.budget > shown.warn_above) ? 'msg err' : 'hint';
 }
 
 // updatePinBudget writes the line beside the boxes: what the ticked models

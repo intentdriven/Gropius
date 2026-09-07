@@ -243,7 +243,13 @@ func TestAHighBudgetIsSavedWithAWarning(t *testing.T) {
 // The search tab hides what the pool would refuse, so it has to read the
 // budget the operator set rather than a share of the machine of its own.
 func TestSearchFollowsTheConfiguredBudget(t *testing.T) {
-	const modelSize = 8 * gb
+	// Small enough that the disk half of the "fits" check cannot decide the
+	// outcome: capability.Assess measures the real volume, and a fixture sized
+	// in tens of gigabytes would make this test a test of the host's free space.
+	const modelSize = 64 << 20
+	if free := capability.Assess(t.TempDir(), gb).FreeDisk; free > 0 && free < 4*gb {
+		t.Skipf("this volume has %d bytes free; the search filter's disk check would decide the outcome", free)
+	}
 	hub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case strings.HasPrefix(r.URL.Path, "/api/models/org/big/tree/"):
@@ -257,7 +263,7 @@ func TestSearchFollowsTheConfiguredBudget(t *testing.T) {
 	defer hub.Close()
 
 	cfg := config.Default()
-	cfg.MaxResidentBytes = 4 * gb // too small for an 8 GB model charged 1.2x
+	cfg.MaxResidentBytes = 32 << 20 // too small for a 64 MB model charged 1.2x
 	a, srv := newBudgetControl(t, cfg, 128*gb, nil)
 	a.Hub.BaseURL = hub.URL
 
@@ -287,9 +293,13 @@ func TestSearchFollowsTheConfiguredBudget(t *testing.T) {
 		t.Errorf("search showed %d results and hid %d under a budget too small for the model, want 0 and 1",
 			results, hidden)
 	}
+	// Named, so a failure above cannot be read as the disk check firing.
+	if reason := capability.Assess(t.TempDir(), a.Pool.MemoryBudget()).Reason(modelSize); !strings.Contains(reason, "memory") {
+		t.Errorf("the model is hidden for %q, want the memory budget", reason)
+	}
 
 	body := `{"host":"0.0.0.0","port":11535,"api_key":"","decode_concurrency":4,` +
-		`"idle_timeout_sec":0,"max_resident_bytes":17179869184}` // 16 GB
+		`"idle_timeout_sec":0,"max_resident_bytes":1073741824}` // 1 GB
 	resp := postJSON(t, srv, "/api/settings", body)
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
@@ -299,5 +309,22 @@ func TestSearchFollowsTheConfiguredBudget(t *testing.T) {
 	if results, hidden := search(); results != 1 || hidden != 0 {
 		t.Errorf("search showed %d results and hid %d under a raised budget, want 1 and 0 — with no restart",
 			results, hidden)
+	}
+}
+
+// The panel has to be able to say what clearing the field would give, which is
+// a figure only this Mac knows: the default share of its memory.
+func TestStateCarriesTheDefaultBudgetTheMachineWouldUse(t *testing.T) {
+	_, srv := newBudgetControl(t, config.Config{
+		Host: "127.0.0.1", Port: 11535, DecodeConcurrency: 4,
+		MaxResidentBytes: 96 * gb,
+	}, 128*gb, nil)
+
+	m := stateOf(t, srv).Machine
+	if want := capability.DefaultBudget(128 * gb); m.DefaultBudget != want {
+		t.Errorf("machine.default_budget = %d, want %d", m.DefaultBudget, want)
+	}
+	if m.Budget != 96*gb || m.BudgetIsDefault {
+		t.Errorf("machine.budget = %d (default %v), want the saved figure", m.Budget, m.BudgetIsDefault)
 	}
 }

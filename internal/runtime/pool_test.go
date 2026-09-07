@@ -1351,3 +1351,36 @@ func TestSettingAZeroMemoryBudgetRestoresTheDefault(t *testing.T) {
 		t.Errorf("MemoryBudget() = %d after a zero budget, want the default %d", got, want)
 	}
 }
+
+// The budget is written by a settings save and read by the control panel, the
+// search tab and every load, all at once. The lock is what makes that safe and
+// nothing else would notice if it went.
+func TestTheMemoryBudgetIsSafeToChangeWhileItIsBeingRead(t *testing.T) {
+	l := newFakeLauncher()
+	src := &fakeSource{models: map[string]int64{"org/a": 200, "org/b": 200}}
+	p := newTestPool(t, l, src, PoolOptions{MaxResidentBytes: 600})
+
+	var wg sync.WaitGroup
+	for i := range 8 {
+		wg.Add(3)
+		go func(i int) {
+			defer wg.Done()
+			p.SetMemoryBudget(int64(400 + 100*i))
+		}(i)
+		go func() {
+			defer wg.Done()
+			_ = p.MemoryBudget()
+		}()
+		go func(i int) {
+			defer wg.Done()
+			id := []string{"org/a", "org/b"}[i%2]
+			if _, release, err := p.Acquire(context.Background(), id); err == nil {
+				release()
+			}
+		}(i)
+	}
+	wg.Wait()
+	if got := p.MemoryBudget(); got < 400 {
+		t.Errorf("MemoryBudget() = %d, want one of the figures that were set", got)
+	}
+}

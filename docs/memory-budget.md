@@ -62,17 +62,21 @@ concurrently.
 
 ## What Gropius refuses
 
-- A budget larger than this Mac's memory. The save is refused, naming what the
-  Mac has, and nothing is written.
-- A budget below what the [pinned models](pinning-models.md) cost together. A
-  pinned model is never unloaded, so a budget under their sum leaves no room for
-  anything else and every other request is refused. The save is refused, naming
-  the sum.
+- A save raising the budget above this Mac's memory. It is refused, naming what
+  the Mac has, and nothing is written.
+- A save lowering the budget below what the [pinned models](pinning-models.md)
+  cost together. A pinned model is never unloaded, so a budget under their sum
+  leaves no room for anything else and every other request is refused. The save
+  is refused, naming the sum.
 
 A pinned set that arrives already over budget — a settings file carried from a
 Mac with more memory — is reported rather than refused, so it never stands
-between you and saving an unrelated setting. Raising the budget is always
-allowed; lowering it under such a set is not.
+between you and saving an unrelated setting. The same holds for a budget larger
+than this Mac, which a settings file carried from a bigger one can carry: it is
+reported in the log at start-up and on the panel, and it stands until you change
+it. What is refused is a save that makes either worse — one that raises the
+budget past this Mac's memory, and one that lowers it under a pinned set the
+budget in force can hold.
 
 ## Choose a figure
 

@@ -109,3 +109,58 @@ func TestThePanelReadsTheBudgetTheMachineObjectCarries(t *testing.T) {
 		t.Error("the panel reads the stored budget; what is enforced is what the machine object carries")
 	}
 }
+
+// The line is written from the figure being typed, and a cleared field means
+// the default — so it has to show the default, not the figure it replaces.
+func TestSettingsFormShowsTheDefaultWhenTheFieldIsCleared(t *testing.T) {
+	machine := `{"total_ram":137438953472,"budget":103079215104,"default_budget":82463372083,` +
+		`"budget_is_default":false,"warn_above":116824368742,"resident_bytes":0,"over_budget":false}`
+
+	cleared := evalPanelValue(t, `budgetShown(`+machine+`, 0)`, "budgetShown")
+	if got := cleared["budget"]; got != float64(82463372083) {
+		t.Errorf("budgetShown with a cleared field = %v, want the default budget", got)
+	}
+	if cleared["budget_is_default"] != true {
+		t.Error("budgetShown with a cleared field does not say the figure is the default")
+	}
+
+	typed := evalPanelValue(t, `budgetShown(`+machine+`, 68719476736)`, "budgetShown")
+	if got := typed["budget"]; got != float64(68719476736) {
+		t.Errorf("budgetShown = %v, want the figure being typed", got)
+	}
+	if typed["budget_is_default"] != false {
+		t.Error("a typed figure is reported as the default")
+	}
+}
+
+// Typing a figure under what is already loaded says so before the save, not
+// after it.
+func TestSettingsFormSaysAFigureBeingTypedIsUnderWhatIsLoaded(t *testing.T) {
+	machine := `{"total_ram":137438953472,"budget":103079215104,"default_budget":82463372083,` +
+		`"budget_is_default":false,"warn_above":116824368742,"resident_bytes":10307921510,"over_budget":false}`
+	shown := evalPanelValue(t, `budgetShown(`+machine+`, 4294967296)`, "budgetShown")
+	if shown["over_budget"] != true {
+		t.Error("a figure typed under what is already in memory is not reported as over budget")
+	}
+}
+
+// The field and the line it writes have to exist in the page, or the panel
+// throws on load and every tab goes with it.
+func TestSettingsFormHasTheBudgetControl(t *testing.T) {
+	page, err := assets.ReadFile("static/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"setBudget", "budgetHint"} {
+		if !strings.Contains(string(page), `id="`+id+`"`) {
+			t.Errorf("the settings form has no element with id %q, which app.js addresses on load", id)
+		}
+	}
+	script, err := assets.ReadFile("static/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(script), "max_resident_bytes") {
+		t.Error("app.js never posts max_resident_bytes, so the budget cannot be saved")
+	}
+}

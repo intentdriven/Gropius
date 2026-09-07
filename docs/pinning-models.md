@@ -68,7 +68,7 @@ occasionally.
 
 The check runs when Settings is saved, and it refuses a save that makes the set
 worse — one that pins another model, or one that lowers the memory budget under
-the models already pinned. A set that arrives already too large is
+a pinned set the budget in force can hold. A set that arrives already too large is
 applied and reported rather than refused, so that a `config.json` carried from
 a Mac with more memory never stands between you and saving an API key.
 

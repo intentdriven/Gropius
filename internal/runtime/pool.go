@@ -197,7 +197,7 @@ func NewPool(opts PoolOptions) *Pool {
 	if opts.now == nil {
 		opts.now = time.Now
 	}
-	if opts.MaxResidentBytes == 0 {
+	if opts.MaxResidentBytes <= 0 {
 		opts.MaxResidentBytes = defaultResidentBudget()
 	}
 	if opts.ReadyTimeout == 0 {

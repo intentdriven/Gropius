@@ -208,6 +208,14 @@ func New(opts Options) (*App, error) {
 	budget := a.Pool.MemoryBudget()
 	_ = a.checkPinnedFit(a.cfg.Pinned, a.cfg.Pinned, budget, budget)
 
+	// The ceiling cannot refuse a file either, and the pool is enforcing this
+	// figure from the first request, so the operator is told here — the one
+	// place a headless install says anything at all. Passing the budget as its
+	// own current value is what says "nothing was raised here".
+	if err := a.checkBudgetFitsTheMachine(budget, 0); err != nil {
+		a.Log.Warn("the memory budget is larger than this Mac", "err", err)
+	}
+
 	if len(opts.Config.Preload) > 0 {
 		go a.preload(opts.Config.Preload)
 	}
@@ -266,10 +274,10 @@ func (a *App) SetConfig(c config.Config) error {
 	}
 	c.PerModel = perModel
 	c.Pinned = a.canonicalPinned(c.Pinned)
-	if err := a.checkBudgetFitsTheMachine(c.MaxResidentBytes); err != nil {
+	budget := a.effectiveBudget(c.MaxResidentBytes)
+	if err := a.checkBudgetFitsTheMachine(budget, a.Pool.MemoryBudget()); err != nil {
 		return err
 	}
-	budget := a.effectiveBudget(c.MaxResidentBytes)
 	if err := a.checkPinnedFit(c.Pinned, a.Config().Pinned, budget, a.Pool.MemoryBudget()); err != nil {
 		return err
 	}
@@ -306,8 +314,14 @@ func (a *App) MachineRAM() int64 { return a.machineRAM }
 
 // effectiveBudget resolves a stored budget to the figure the pool enforces:
 // zero — what a fresh install stores — means the default share of this Mac's
-// memory. The rule lives here so that the pool, the search filter and Settings
-// cannot each resolve it differently.
+// memory.
+//
+// Every figure the operator is shown or measured against goes through here, so
+// they all come from the one reading of this machine that App holds. The pool
+// and capability.Assess apply the same zero rule for a caller that reaches them
+// directly (a test, mostly), and resolve it from a fresh reading of the machine
+// rather than from that one; App never takes those branches, because it always
+// passes a positive figure.
 func (a *App) effectiveBudget(stored int64) int64 {
 	if stored > 0 {
 		return stored
@@ -315,7 +329,8 @@ func (a *App) effectiveBudget(stored int64) int64 {
 	return capability.DefaultBudget(a.machineRAM)
 }
 
-// checkBudgetFitsTheMachine refuses a budget larger than this Mac's memory.
+// checkBudgetFitsTheMachine refuses a save that raises the budget above this
+// Mac's memory.
 //
 // It is checked here, at a save, and deliberately not in config.Validate:
 // Validate runs at every read, and a config that fails it takes the whole
@@ -323,8 +338,16 @@ func (a *App) effectiveBudget(stored int64) int64 {
 // carried from a 128 GB Mac to a 64 GB one would silently reset the bind
 // address and the API key along with the budget. A machine whose memory cannot
 // be read has no ceiling to check against, so the figure is taken at its word.
-func (a *App) checkBudgetFitsTheMachine(budget int64) error {
-	if a.machineRAM <= 0 || budget <= a.machineRAM {
+//
+// What is refused is a save that makes it worse, for the reason checkPinnedFit
+// gives: a figure already in force can have arrived from a larger Mac, or from
+// a start where sysctl could not read this one, and a settings page that will
+// not save an API key until an unrelated memory figure is fixed is the wedge
+// this repository has now met twice. Such a budget is warned about at start-up
+// and on the panel, and the pool is enforcing it either way — refusing the save
+// protects nothing and blocks the operator from closing an open endpoint.
+func (a *App) checkBudgetFitsTheMachine(budget, current int64) error {
+	if a.machineRAM <= 0 || budget <= a.machineRAM || budget <= current {
 		return nil
 	}
 	return fmt.Errorf(
@@ -453,11 +476,22 @@ func (a *App) checkPinnedFit(incoming, current []string, budget, currentBudget i
 	if problem == nil {
 		return nil
 	}
-	if addsAPin(incoming, current) || budget < currentBudget {
+	if addsAPin(incoming, current) || a.lowersUnderAFittingSet(incoming, budget, currentBudget) {
 		return problem
 	}
 	a.Log.Warn("the pinned models cannot all be kept in memory as configured", "err", problem)
 	return nil
+}
+
+// lowersUnderAFittingSet reports whether this save is what stops the pinned set
+// fitting — a budget lowered under a set that the budget in force could hold.
+//
+// A set that fits neither figure is inherited, not caused here, and the panel
+// posting a figure a few bytes under the one in force (it renders gigabytes) is
+// not the operator asking for less. Judging on the bare comparison turned both
+// into refusals of every settings change there is, which is the wedge again.
+func (a *App) lowersUnderAFittingSet(incoming []string, budget, currentBudget int64) bool {
+	return budget < currentBudget && a.pinnedFitProblem(incoming, currentBudget) == nil
 }
 
 // pinnedFitProblem says why a pinned set cannot be held, or nil when it can.

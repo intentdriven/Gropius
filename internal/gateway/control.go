@@ -183,6 +183,10 @@ type Machine struct {
 	// Budget is the ceiling on the total charged size of resident models, as
 	// the pool is enforcing it.
 	Budget int64 `json:"budget"`
+	// DefaultBudget is the share of this Mac's memory a budget of none would
+	// give. The panel needs it to say what clearing the field would do, which
+	// is a question only this Mac can answer.
+	DefaultBudget int64 `json:"default_budget"`
 	// BudgetIsDefault says the budget is the share of this Mac's memory
 	// Gropius chose, not a figure the operator set, so the panel can show it as
 	// the default rather than as their own number.
@@ -221,6 +225,7 @@ func (c *Control) snapshot() State {
 	st.Machine = Machine{
 		TotalRAM:        c.App.MachineRAM(),
 		Budget:          budget,
+		DefaultBudget:   capability.DefaultBudget(c.App.MachineRAM()),
 		BudgetIsDefault: cfg.MaxResidentBytes == 0,
 		WarnAbove:       c.App.BudgetWarnAbove(),
 		ResidentBytes:   resident,
@@ -653,8 +658,8 @@ func (c *Control) handleSetSettings(w http.ResponseWriter, r *http.Request) {
 	// A budget that claims most of the Mac is saved and answered with advice.
 	// What a Mac can actually carry is not a figure Gropius knows, so this is
 	// the one thing a save says without refusing anything.
-	if w := c.App.MemoryBudgetWarning(); w != "" {
-		out["warning"] = w
+	if warn := c.App.MemoryBudgetWarning(); warn != "" {
+		out["warning"] = warn
 	}
 	writeJSON(w, http.StatusOK, out)
 }

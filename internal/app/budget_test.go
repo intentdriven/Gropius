@@ -2,6 +2,7 @@ package app
 
 import (
 	"bytes"
+	"log/slog"
 	"os"
 	"strings"
 	"testing"
@@ -243,5 +244,112 @@ func TestAHighBudgetIsWarnedAboutRatherThanRefused(t *testing.T) {
 	}
 	if w := a.MemoryBudgetWarning(); w != "" {
 		t.Errorf("MemoryBudgetWarning() = %q, want none for a modest budget", w)
+	}
+}
+
+// A budget that arrives from a Mac with more memory — a settings file carried
+// or restored, or a start where the machine could not be measured — is not a
+// figure the operator chose on this machine, and refusing every save over it
+// would put a memory setting between them and their API key. It is applied,
+// warned about, and left alone until they change it.
+func TestAnInheritedOverMachineBudgetDoesNotBlockAnUnrelatedSave(t *testing.T) {
+	a := newBudgetApp(t, 16*gb, config.Config{
+		Host: "0.0.0.0", Port: 11535, DecodeConcurrency: 4,
+		MaxResidentBytes: 128 * gb,
+	})
+
+	c := a.Config()
+	c.APIKey = "bh_lock_it_down"
+	if err := a.SetConfig(c); err != nil {
+		t.Fatalf("an unrelated save was refused over an inherited budget: %v", err)
+	}
+	if got := a.Config().APIKey; got != "bh_lock_it_down" {
+		t.Errorf("APIKey = %q, want the key the save carried", got)
+	}
+	// Lowering it, even to a figure still over the machine, makes it better.
+	lower := a.Config()
+	lower.MaxResidentBytes = 64 * gb
+	if err := a.SetConfig(lower); err != nil {
+		t.Errorf("a save lowering an inherited budget was refused: %v", err)
+	}
+	// Raising it further is the operator's own choice, and still refused.
+	raise := a.Config()
+	raise.MaxResidentBytes = 256 * gb
+	if err := a.SetConfig(raise); err == nil {
+		t.Error("SetConfig accepted a save raising the budget further above this Mac")
+	}
+}
+
+// The operator is told on the way in, since nothing else will tell them: the
+// pool is enforcing that figure from the first request.
+func TestStartupWarnsWhenTheBudgetIsLargerThanTheMachine(t *testing.T) {
+	var logged bytes.Buffer
+	a, err := New(Options{
+		Paths: config.NewPaths(t.TempDir()),
+		Config: config.Config{
+			Host: "127.0.0.1", Port: 11535, DecodeConcurrency: 4,
+			MaxResidentBytes: 128 * gb,
+		},
+		PhysicalMemory: func() int64 { return 16 * gb },
+		Log:            slog.New(slog.NewTextHandler(&logged, nil)),
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	t.Cleanup(func() { a.Close() })
+
+	if !strings.Contains(logged.String(), "memory budget") {
+		t.Errorf("startup logged %q, want a warning that the budget is larger than this Mac", logged.String())
+	}
+	// Warned, not clamped: the figure is the operator's, and clamping it would
+	// silently rewrite a setting they can still see and change.
+	if got := a.Pool.MemoryBudget(); got != 128*gb {
+		t.Errorf("the pool holds %d, want the stored budget applied anyway", got)
+	}
+}
+
+// The panel renders the budget in gigabytes and posts it back, so a save can
+// carry a figure a few bytes under the one in force without meaning to lower
+// anything. A pinned set that fits neither figure must not flip from warned to
+// refused over that.
+func TestARoundedBudgetDoesNotTurnAWarningIntoARefusal(t *testing.T) {
+	a := newBudgetApp(t, 128*gb, config.Config{
+		Host: "127.0.0.1", Port: 11535, DecodeConcurrency: 4,
+		MaxResidentBytes: 8 * gb,
+		Pinned:           []string{"org/writer"},
+	})
+	putReady(t, a, "org/writer", 20*gb) // charged 24 GB: fits neither budget
+
+	c := a.Config()
+	c.MaxResidentBytes = 8*gb - 4_000_000 // what a round trip through the panel costs
+	c.APIKey = "bh_unrelated"
+	if err := a.SetConfig(c); err != nil {
+		t.Fatalf("a save was refused over a pinned set that fitted neither budget: %v", err)
+	}
+}
+
+// A pin whose model this Mac cannot measure is refused as it is added, because
+// a fit check that skips a model is a promise it cannot keep. It must not also
+// block every later budget change: there would be no way out but unpinning.
+func TestAnUnmeasurablePinDoesNotBlockALowerBudget(t *testing.T) {
+	a := newBudgetApp(t, 128*gb, config.Default())
+	putReady(t, a, "org/unmeasured", 0)
+
+	c := a.Config()
+	c.Pinned = []string{"org/unmeasured"}
+	if err := a.SetConfig(c); err == nil {
+		t.Fatal("SetConfig accepted a pin on a model of unknown size")
+	}
+
+	// Same set, arriving from the file rather than added here.
+	b := newBudgetApp(t, 128*gb, config.Config{
+		Host: "127.0.0.1", Port: 11535, DecodeConcurrency: 4,
+		Pinned: []string{"org/unmeasured"},
+	})
+	putReady(t, b, "org/unmeasured", 0)
+	lower := b.Config()
+	lower.MaxResidentBytes = 32 * gb
+	if err := b.SetConfig(lower); err != nil {
+		t.Errorf("a budget change was refused over a pin this Mac cannot measure: %v", err)
 	}
 }
