@@ -1340,16 +1340,45 @@ func TestLoweringTheMemoryBudgetUnloadsNothing(t *testing.T) {
 }
 
 // Zero is what a fresh install stores, and it means the default share of this
-// Mac's memory rather than a budget of nothing.
+// Mac's memory rather than a budget of nothing. So does anything below it: a
+// negative budget would refuse every model there is.
 func TestSettingAZeroMemoryBudgetRestoresTheDefault(t *testing.T) {
 	l := newFakeLauncher()
 	src := &fakeSource{models: map[string]int64{"org/a": 200}}
 	p := newTestPool(t, l, src, PoolOptions{MaxResidentBytes: 300})
 
-	p.SetMemoryBudget(0)
-	if got, want := p.MemoryBudget(), defaultResidentBudget(); got != want {
-		t.Errorf("MemoryBudget() = %d after a zero budget, want the default %d", got, want)
+	for _, n := range []int64{0, -1} {
+		p.SetMemoryBudget(n)
+		if got, want := p.MemoryBudget(), defaultResidentBudget(); got != want {
+			t.Errorf("MemoryBudget() = %d after a budget of %d, want the default %d", got, n, want)
+		}
 	}
+	q := newTestPool(t, l, src, PoolOptions{MaxResidentBytes: -1})
+	if got, want := q.MemoryBudget(), defaultResidentBudget(); got != want {
+		t.Errorf("a pool built with a negative budget holds %d, want the default %d", got, want)
+	}
+}
+
+// A model larger than the whole budget is refused before any eviction is
+// considered, and that comparison has to read the budget in force too — or
+// raising it answers the operator by telling them to raise it.
+func TestTheAdmissionCeilingReadsTheBudgetInForce(t *testing.T) {
+	l := newFakeLauncher()
+	// Charged 480: over a budget of 300, under one of 600, so this model can
+	// only be admitted by the comparison in startLocked reading the new figure.
+	src := &fakeSource{models: map[string]int64{"org/large": 400}}
+	p := newTestPool(t, l, src, PoolOptions{MaxResidentBytes: 300})
+
+	if _, _, err := p.Acquire(context.Background(), "org/large"); err == nil {
+		t.Fatal("a model charged more than the whole budget was admitted")
+	}
+
+	p.SetMemoryBudget(600)
+	_, release, err := p.Acquire(context.Background(), "org/large")
+	if err != nil {
+		t.Fatalf("a model that fits the raised budget was refused: %v", err)
+	}
+	release()
 }
 
 // The budget is written by a settings save and read by the control panel, the

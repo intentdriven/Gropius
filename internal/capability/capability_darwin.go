@@ -31,21 +31,25 @@ func DefaultBudget(totalRAM int64) int64 {
 	return totalRAM * ramBudgetPercent / 100
 }
 
-// Assess measures this machine's memory and the free space on the volume that
-// holds modelsDir, and reports them against the given budget.
+// Assess reports a machine of the given size and budget, measuring the free
+// space on the volume that holds modelsDir.
 //
-// The budget is a parameter rather than a figure this package resolves,
-// because it is the operator's setting: the filter has to hide exactly what
-// the process pool would refuse, and the pool is measuring against whatever is
-// configured. Zero — what a fresh install stores — means the default share
-// above.
-func Assess(modelsDir string, budget int64) Machine {
-	ram := PhysicalMemory()
+// Both figures are parameters rather than ones this package resolves. The
+// budget is the operator's setting, and the filter has to hide exactly what the
+// process pool would refuse; the machine's size is read once where the app
+// holds it, so that every surface of one control panel answers from one
+// reading rather than from whatever sysctl says at the moment each is drawn.
+// Zero for either — an unmeasurable Mac, a fresh install's stored budget —
+// means what it means everywhere else: unknown, and the default share.
+func Assess(modelsDir string, totalRAM, budget int64) Machine {
+	if totalRAM < 0 {
+		totalRAM = 0
+	}
 	if budget <= 0 {
-		budget = DefaultBudget(ram)
+		budget = DefaultBudget(totalRAM)
 	}
 	return Machine{
-		TotalRAM:  ram,
+		TotalRAM:  totalRAM,
 		RAMBudget: budget,
 		FreeDisk:  freeDisk(modelsDir),
 	}

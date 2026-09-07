@@ -86,8 +86,13 @@ type Resident struct {
 type PoolOptions struct {
 	Launcher Launcher
 	Models   ModelSource
-	// MaxResidentBytes caps the total on-disk size of simultaneously loaded
-	// models. Zero means "60% of physical RAM".
+	// MaxResidentBytes is the pool's memory budget as it starts: the ceiling on
+	// the total charged size (LoadCost, 1.2x the size on disk) of the models
+	// held at once. Zero or less means the default share of this Mac's memory.
+	//
+	// The starting value only. SetMemoryBudget replaces it, and the figure the
+	// pool enforces after that is the one it holds under p.mu — this field is
+	// not updated and must not be read as the budget in force.
 	MaxResidentBytes int64
 	// IdleTimeout unloads a model after this long without a request. Zero keeps
 	// models resident indefinitely.

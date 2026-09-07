@@ -247,7 +247,7 @@ func TestSearchFollowsTheConfiguredBudget(t *testing.T) {
 	// outcome: capability.Assess measures the real volume, and a fixture sized
 	// in tens of gigabytes would make this test a test of the host's free space.
 	const modelSize = 64 << 20
-	if free := capability.Assess(t.TempDir(), gb).FreeDisk; free > 0 && free < 4*gb {
+	if free := capability.Assess(t.TempDir(), 128*gb, gb).FreeDisk; free > 0 && free < 4*gb {
 		t.Skipf("this volume has %d bytes free; the search filter's disk check would decide the outcome", free)
 	}
 	hub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -294,7 +294,7 @@ func TestSearchFollowsTheConfiguredBudget(t *testing.T) {
 			results, hidden)
 	}
 	// Named, so a failure above cannot be read as the disk check firing.
-	if reason := capability.Assess(t.TempDir(), a.Pool.MemoryBudget()).Reason(modelSize); !strings.Contains(reason, "memory") {
+	if reason := capability.Assess(t.TempDir(), 128*gb, a.Pool.MemoryBudget()).Reason(modelSize); !strings.Contains(reason, "memory") {
 		t.Errorf("the model is hidden for %q, want the memory budget", reason)
 	}
 
@@ -326,5 +326,74 @@ func TestStateCarriesTheDefaultBudgetTheMachineWouldUse(t *testing.T) {
 	}
 	if m.Budget != 96*gb || m.BudgetIsDefault {
 		t.Errorf("machine.budget = %d (default %v), want the saved figure", m.Budget, m.BudgetIsDefault)
+	}
+}
+
+// The control plane answers from one reading of this Mac. Two — one cached at
+// start-up for Settings, one taken per search — is how the Search tab comes to
+// print a machine size the Settings tab says cannot be read.
+func TestSearchAndStateAgreeAboutTheMachine(t *testing.T) {
+	hub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `[]`)
+	}))
+	defer hub.Close()
+
+	// A Mac whose memory could not be read at start-up: the reading the app
+	// holds is 0, whatever a later sysctl would say.
+	a, srv := newBudgetControl(t, config.Default(), 0, nil)
+	a.Hub.BaseURL = hub.URL
+
+	resp, err := srv.Client().Get(srv.URL + "/api/search?q=anything")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var out struct {
+		Machine capability.Machine `json:"machine"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	if out.Machine.TotalRAM != 0 {
+		t.Errorf("search reports %d bytes of memory, want the 0 the rest of the panel reports",
+			out.Machine.TotalRAM)
+	}
+	if got := stateOf(t, srv).Machine.TotalRAM; got != out.Machine.TotalRAM {
+		t.Errorf("search says %d and state says %d about the same Mac", out.Machine.TotalRAM, got)
+	}
+}
+
+// One name for one number. The search payload and the state snapshot both
+// carry a "machine" object, and a budget spelled two ways across them is the
+// drift this record removed from the snapshot in the first place.
+func TestTheMachineObjectsSpellTheBudgetOneWay(t *testing.T) {
+	hub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `[]`)
+	}))
+	defer hub.Close()
+
+	a, srv := newBudgetControl(t, config.Default(), 128*gb, nil)
+	a.Hub.BaseURL = hub.URL
+
+	resp, err := srv.Client().Get(srv.URL + "/api/search?q=anything")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var out struct {
+		Machine map[string]any `json:"machine"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := out.Machine["ram_budget"]; ok {
+		t.Errorf("the search machine spells the budget ram_budget; the state machine spells it budget: %v", out.Machine)
+	}
+	budget, ok := out.Machine["budget"].(float64)
+	if !ok {
+		t.Fatalf("the search machine carries no budget: %v", out.Machine)
+	}
+	if int64(budget) != a.Pool.MemoryBudget() {
+		t.Errorf("search measured against %v, want the budget in force %d", budget, a.Pool.MemoryBudget())
 	}
 }
