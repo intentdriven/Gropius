@@ -14,6 +14,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -400,6 +401,13 @@ func (g *Gateway) handleCompletions(w http.ResponseWriter, r *http.Request) {
 
 	up, release, err := g.pool.Acquire(r.Context(), model)
 	if err != nil {
+		// A refusal that came after a wait is the one a client most needs the
+		// figure for: it held the connection open for that long. Set before
+		// writeError, which writes the status line immediately.
+		var noRoom *runtime.NoRoomError
+		if errors.As(err, &noRoom) {
+			setWaitHeaders(w.Header(), noRoom.Waited)
+		}
 		if errors.Is(err, context.Canceled) {
 			obs.failed(stats.ClassCancelled)
 			return // the client hung up while the model was loading
@@ -420,6 +428,10 @@ func (g *Gateway) handleCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	defer release()
 	obs.waited(up.Waits)
+	// Set here rather than beside WriteHeader below, so that the streamed and
+	// the non-streamed path take the same line and so that a later failure on
+	// this request still reports the wait it had already paid.
+	setWaitHeaders(w.Header(), up.Waits.LoadWait+up.Waits.QueueWait)
 
 	// The load-bearing rewrite. mlx-lm reads "model" as an instruction to *load*
 	// that model: anything other than the exact --model value it was started with
@@ -507,6 +519,29 @@ func (g *Gateway) handleCompletions(w http.ResponseWriter, r *http.Request) {
 	copyResponseHeaders(w.Header(), resp.Header)
 	w.WriteHeader(resp.StatusCode)
 	obs.relayed(relayRewritingModel(w, resp, up.ModelArg, requested, relay))
+}
+
+// setWaitHeaders tells the client what this request spent before its model
+// server was asked anything.
+//
+// Two values and one number. X-Gropius-State is warm or waited;
+// X-Gropius-Queue-Time is whole milliseconds, counting the wait for room under
+// an eviction grace, the wait for a cold model to load, and the wait for a
+// slot on a model already busy. "waited" is exactly "the queue time is not
+// zero", so a client never has to reconcile the two, and sub-millisecond
+// contention on the pool's own lock — which no client meant by a wait — reads
+// as warm.
+//
+// They say that this machine was busy and for how long, and name no model and
+// no count: the same fact a client with a stopwatch already had.
+func setWaitHeaders(h http.Header, waited time.Duration) {
+	ms := waited.Milliseconds()
+	state := "warm"
+	if ms > 0 {
+		state = "waited"
+	}
+	h.Set("X-Gropius-State", state)
+	h.Set("X-Gropius-Queue-Time", strconv.FormatInt(ms, 10))
 }
 
 // relayRewritingModel forwards the upstream response body, mapping the

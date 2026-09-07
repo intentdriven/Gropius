@@ -57,6 +57,9 @@ type stubPool struct {
 	// baseURL, if set, replaces the fake server's own address, so a test can
 	// hand the gateway an upstream it cannot even build a request for.
 	baseURL string
+	// waits is what Acquire reports this acquisition spent getting here, which
+	// is what the two wait headers are written from.
+	waits runtime.AcquireStats
 	// releaseDelay holds the handler up inside release(), which runs before
 	// the deferred bookkeeping. It gives a test a window in which a client's
 	// disconnect is delivered while the handler is still finishing.
@@ -101,6 +104,7 @@ func (p *stubPool) Acquire(ctx context.Context, repoID string) (*runtime.Upstrea
 		RepoID:   repoID,
 		BaseURL:  base,
 		ModelArg: p.srv.ModelArg,
+		Waits:    p.waits,
 	}, release, nil
 }
 
