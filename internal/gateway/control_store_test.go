@@ -40,25 +40,31 @@ func recordingServer(t *testing.T) (*app.App, *httptest.Server, config.Paths) {
 // whether it holds a week or a year.
 func TestTheStatisticsEndpointSaysHowFarBackTheStoreReaches(t *testing.T) {
 	a, srv, paths := recordingServer(t)
-	// Starting up wrote a record of the settings in force, which is a record
-	// like any other; clear it, so what is asserted is the date of a record
-	// this test put there.
-	if err := a.ClearStats(); err != nil {
-		t.Fatal(err)
-	}
 	a.Stats.Add(stats.Record{Model: "org/a", At: 1788696030, Class: stats.ClassOK})
 	a.Stats.Add(stats.Record{Model: "org/a", At: 1788700000, Class: stats.ClassOK})
 	if err := a.StatsStore.Flush(); err != nil {
 		t.Fatal(err)
 	}
 
+	// The oldest record the store actually holds, read back out of it: the
+	// figure the panel shows has to be that one, not zero and not the date of
+	// something that was pruned.
+	var held []stats.Line
+	if err := a.StatsStore.Latest(0, func(l stats.Line) bool { held = append(held, l); return true }); err != nil {
+		t.Fatal(err)
+	}
+	if len(held) == 0 {
+		t.Fatal("the store holds nothing, so this test proves nothing")
+	}
+	oldest := held[len(held)-1].At
+
 	view, raw := getJSON(t, srv, "/api/stats")
 	store, ok := view["store"].(map[string]any)
 	if !ok {
 		t.Fatalf("the statistics endpoint says nothing about the store:\n%s", raw)
 	}
-	if got := store["oldest"]; got != float64(1788696030) {
-		t.Errorf("the store's oldest record is reported as %v, want the first record written", got)
+	if got := store["oldest"]; got != float64(oldest) {
+		t.Errorf("the store's oldest record is reported as %v, want %d — the oldest it holds", got, oldest)
 	}
 	if got, _ := store["bytes"].(float64); got <= 0 {
 		t.Errorf("the store is reported as using %v bytes", got)

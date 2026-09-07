@@ -144,6 +144,24 @@ func TestClearEmptiesTheStoreAndTheView(t *testing.T) {
 	if v := a.Stats.View(); len(v.Requests) != 0 || !v.Enabled {
 		t.Errorf("after Clear the live view holds %d requests and enabled=%v", len(v.Requests), v.Enabled)
 	}
+
+	// Recording carries on, and the first thing written is the settings in
+	// force again: a record made after a Clear must still be readable against
+	// the settings that produced it.
+	a.Stats.Add(stats.Record{Model: "org/a", At: 99, Class: stats.ClassOK})
+	if err := a.StatsStore.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	var kinds []string
+	if err := a.StatsStore.Latest(0, func(l stats.Line) bool {
+		kinds = append(kinds, l.Kind)
+		return true
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(kinds) != 2 || kinds[0] != stats.KindRequest || kinds[1] != stats.KindSettings {
+		t.Errorf("after Clear the store holds %v, want the settings in force and then the request", kinds)
+	}
 }
 
 // A store that cannot be created is not a reason to refuse to serve. The

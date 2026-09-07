@@ -691,3 +691,44 @@ func TestStoreFieldsNamesEveryFieldWritten(t *testing.T) {
 		}
 	}
 }
+
+// An emptied store states the settings in force again before the first record
+// that follows it — but not before, because Clear leaves the directory empty
+// and a file that appeared as the button was pressed would be a file the
+// operator did not ask for.
+func TestAnEmptiedStoreStatesTheSettingsAgainBeforeTheNextRecord(t *testing.T) {
+	s, dir := newTestStore(t, StoreOptions{})
+	on(t, s)
+	if err := s.AppendSettings(Settings{At: 10, DecodeConcurrency: 4, Months: 6}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.AppendRequest(Record{Model: "org/a", At: 11, Class: ClassOK}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Clear(); err != nil {
+		t.Fatal(err)
+	}
+	if got := names(t, dir); len(got) != 0 {
+		t.Fatalf("Clear left %v behind", got)
+	}
+
+	if err := s.AppendRequest(Record{Model: "org/a", At: 12, Class: ClassOK}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	got := read(t, s, 0)
+	if len(got) != 2 {
+		t.Fatalf("the store holds %d records, want the request and the settings before it", len(got))
+	}
+	if got[0].Kind != KindRequest || got[1].Kind != KindSettings {
+		t.Fatalf("the store holds %s then %s, want the settings first", got[1].Kind, got[0].Kind)
+	}
+	if got[1].Settings.DecodeConcurrency != 4 || got[1].Settings.Months != 6 {
+		t.Errorf("the restated settings are %+v, not the ones in force", got[1].Settings)
+	}
+	if got[1].Settings.At == 10 {
+		t.Error("the restated settings carry the old record's time, not the time they were written again")
+	}
+}

@@ -210,9 +210,12 @@ type FileStore struct {
 	done    chan struct{}
 	// lastSettings is the settings record last written, so that restarts and
 	// saves that change nothing do not fill the store with a record of
-	// nothing.
-	lastSettings Settings
-	haveSettings bool
+	// nothing. pending says it has to be written again before the next record,
+	// which is how an emptied store gets its baseline back without a file
+	// appearing in a directory Clear has just emptied.
+	lastSettings    Settings
+	haveSettings    bool
+	pendingSettings bool
 
 	// statusMu guards the figures the panel reads and the two retention bounds
 	// the writer applies. It is its own lock because the writer touches both
@@ -336,7 +339,7 @@ func (s *FileStore) stop() {
 	s.enabled = false
 	ch, done := s.ch, s.done
 	s.ch, s.done = nil, nil
-	s.haveSettings = false
+	s.haveSettings, s.pendingSettings = false, false
 	close(ch)
 	s.mu.Unlock()
 	<-done
@@ -399,11 +402,11 @@ func (s *FileStore) AppendSettings(set Settings) error {
 		s.mu.Unlock()
 		return nil
 	}
-	if s.haveSettings && s.lastSettings.sameAs(set) {
+	if s.haveSettings && !s.pendingSettings && s.lastSettings.sameAs(set) {
 		s.mu.Unlock()
 		return nil
 	}
-	s.lastSettings, s.haveSettings = set, true
+	s.lastSettings, s.haveSettings, s.pendingSettings = set, true, false
 	s.sendLocked(b)
 	s.mu.Unlock()
 	return nil
@@ -415,6 +418,20 @@ func (s *FileStore) offer(b []byte) {
 	defer s.mu.Unlock()
 	if !s.enabled {
 		return
+	}
+	// A store that was emptied writes the settings in force again before the
+	// first record that follows, so that a record is never left on disk with
+	// nothing to read it against. Not at the moment of clearing: Clear leaves
+	// the directory empty, and a file that appeared as it was pressed would be
+	// a file the operator did not ask for.
+	if s.pendingSettings && s.haveSettings {
+		s.pendingSettings = false
+		set := s.lastSettings
+		set.At = s.now().UTC().Unix()
+		if sb, err := json.Marshal(settingsLine{V: SchemaVersion, Kind: KindSettings, Settings: set}); err == nil {
+			s.lastSettings = set
+			s.sendLocked(sb)
+		}
 	}
 	s.sendLocked(b)
 }
@@ -467,8 +484,19 @@ func (s *FileStore) Clear() error {
 	if s == nil {
 		return nil
 	}
-	was := s.Enabled()
+	// The settings in force are carried across the stop, so that the emptied
+	// store can state them again before the first record that follows. Without
+	// that, every record made between a Clear and the next restart would sit
+	// in a file with nothing to read it against.
+	s.mu.Lock()
+	was, last, have := s.enabled, s.lastSettings, s.haveSettings
+	s.mu.Unlock()
 	s.stop()
+	if was {
+		s.mu.Lock()
+		s.lastSettings, s.haveSettings, s.pendingSettings = last, have, have
+		s.mu.Unlock()
+	}
 
 	root, err := os.OpenRoot(s.dir)
 	if err != nil {
