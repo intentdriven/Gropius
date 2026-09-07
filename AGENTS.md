@@ -128,6 +128,8 @@ CI (`.github/workflows/ci.yml`) gates on: `gofmt -l .` (must be empty),
   comments, strings, and commit messages in US English. No stray markdown at
   the repo root beyond README, AGENTS, CLAUDE, GEMINI, CHANGELOG, CONTRIBUTING,
   SECURITY, LICENSE, ACKNOWLEDGEMENTS.
+- **Names.** The committed name guard rejects superseded product names in
+  user-facing content. Use the current name, or a generic term.
 - **Privacy:** no absolute local paths, real hostnames, usernames, emails,
   tokens, IPs, or private repository names in anything committed —
   repo-relative paths only. (`/Users/Shared/…` is a macOS system path, not a

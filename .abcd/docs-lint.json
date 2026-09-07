@@ -1,6 +1,20 @@
 {
-  "roots": ["docs", "README.md"],
-  "banned_tokens": [],
+  "roots": [
+    "docs",
+    "README.md"
+  ],
+  "banned_tokens": [
+    {
+      "id": "names/predecessor-product",
+      "pattern": "(?i)Bauhaus",
+      "severity": "blocker",
+      "successor": "a generic term",
+      "allow_context": [
+        "(?i)<!--\\s*docs-lint:\\s*allow\\b"
+      ],
+      "message": "names a banned token in user-facing content (names/predecessor-product); this repo's published surface does not name it. Use a generic term, or add <!-- docs-lint: allow --> if naming it is genuinely necessary."
+    }
+  ],
   "rules": {},
   "exempt_paths": [],
   "exempt_if_status": []
