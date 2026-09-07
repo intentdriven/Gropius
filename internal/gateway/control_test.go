@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -575,6 +576,52 @@ func TestStateWarnsWhenThePinnedSetNoLongerFits(t *testing.T) {
 // warned reports whether /api/state carries a warning about the pinned models.
 func warned(t *testing.T, srv *httptest.Server) bool {
 	t.Helper()
+	for _, w := range fetchState(t, srv).Warnings {
+		if strings.Contains(w, "pinned") {
+			return true
+		}
+	}
+	return false
+}
+
+// The panel's whole view of pinning — which boxes are ticked, which cards carry
+// the pill, and what the pinned set leaves of the budget — is drawn from these
+// two fields. Without them the operator sees no pin anywhere and an empty
+// budget line, which is silently the opposite of the promise, so the snapshot
+// has to be held to carrying them.
+func TestStateCarriesThePinnedSetAndTheMemoryBudget(t *testing.T) {
+	srv, a := newTestControlApp(t, config.Default())
+	if err := a.Registry.Put(registry.Model{
+		RepoID: "org/keeper", Path: a.Paths.ModelDir("org/keeper"),
+		Bytes: 1 << 20, State: registry.StateReady, Progress: 100,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := a.Config()
+	cfg.Pinned = []string{"org/keeper"}
+	if err := a.SetConfig(cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	st := fetchState(t, srv)
+	if !reflect.DeepEqual(st.Pinned, []string{"org/keeper"}) {
+		t.Errorf("state.pinned = %v, want the pinned model — the panel draws every pin from this", st.Pinned)
+	}
+	if st.MemoryBudget <= 0 {
+		t.Errorf("state.memory_budget = %d, want the pool's budget — the panel cannot say what a pin leaves without it",
+			st.MemoryBudget)
+	}
+	// Read from the pool, not the stored settings: the two agree except in the
+	// moment a pin is reconciled with a model that has just arrived, and this
+	// is the surface an operator acts on.
+	if got := a.Pool.Pinned(); !reflect.DeepEqual(st.Pinned, got) {
+		t.Errorf("state.pinned = %v but the pool is enforcing %v", st.Pinned, got)
+	}
+}
+
+// fetchState decodes the control plane's whole snapshot.
+func fetchState(t *testing.T, srv *httptest.Server) State {
+	t.Helper()
 	resp, err := srv.Client().Get(srv.URL + "/api/state")
 	if err != nil {
 		t.Fatal(err)
@@ -584,10 +631,5 @@ func warned(t *testing.T, srv *httptest.Server) bool {
 	if err := json.NewDecoder(resp.Body).Decode(&st); err != nil {
 		t.Fatal(err)
 	}
-	for _, w := range st.Warnings {
-		if strings.Contains(w, "pinned") {
-			return true
-		}
-	}
-	return false
+	return st
 }

@@ -201,3 +201,22 @@ func TestSettingsFormChargesADownloadItsDeclaredSize(t *testing.T) {
 		t.Errorf("pinnedCharge = %v, want %v", got, want)
 	}
 }
+
+// The panel's pinned set comes from the pool, through the state snapshot, and
+// not from the stored settings: the two agree except in the moment a pin is
+// reconciled with a model that has just arrived, and the panel is the surface
+// an operator acts on. Asserted against the source because the alternative is
+// a whole DOM: the reverting edit is a one-word change, and this is what makes
+// it fail.
+func TestThePanelReadsThePinnedSetThePoolIsEnforcing(t *testing.T) {
+	src := readPanelSource(t)
+	if !strings.Contains(src, "state.pinned") {
+		t.Error("the panel never reads state.pinned, so it cannot show what the pool is protecting")
+	}
+	if strings.Contains(src, "state.config.pinned") {
+		t.Error("the panel reads state.config.pinned; the stored settings are not what is being enforced")
+	}
+	if !strings.Contains(src, "state.memory_budget") {
+		t.Error("the panel never reads state.memory_budget, so it cannot say what a pinned set leaves")
+	}
+}
