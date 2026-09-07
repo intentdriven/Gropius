@@ -56,6 +56,8 @@ Evidence: research note 2026-09-06-model-bench-evidence (context probe: three Mo
 
 Held on 2026-09-06 by the maintainer's decision in the planning interview: not planned until iss-2609061541313832 (the gateway's ten-minute upstream timeout, which confounds long-prompt measurement), the budget rule ADR that the configurable-budget intent's spec and iss-3 produce, and iss-2609061431537735 (effective-window measurement) have landed. The context-window reporting intent ships alone first.
 
+Depends on, updated 2026-09-06 after the context-window campaign (research note 2026-09-06-context-windows): iss-2609061431537735 is satisfied as far as the timeout allows. Nominal, verified and usable windows are measured for all four local models (Nemotron 253,106 verified at its cap; Qwen3-Coder-Next 221,743; GLM-4.7-Flash 81,100; Qwen3.8-27B 91,673; 34 needle runs recalled out of 34 at sizes up to those), and the per-architecture memory cost iss-3 needs is measured (12, 115, 201 and 353 KB per token with a 1 to 3.4 GB intercept, plus cache retention across requests). Still outstanding: iss-2609061541313832, which bounds three of the four windows and must land before the windows above 222K, 81K and 92K can be verified; and the budget rule ADR. The issue records stay open for the fixing changes.
+
 ## Open Questions
 
 - How does the gateway know a prompt's token count without a tokenizer? Count
