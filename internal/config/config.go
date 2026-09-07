@@ -31,6 +31,9 @@ type Paths struct {
 	Logs    string
 	Config  string // config.json
 	State   string // registry.json
+	// Stats is where the request statistics store keeps its files. It is the
+	// one entry that is not always under Root: see StatsDir.
+	Stats string
 }
 
 // SharedRoot is the machine-wide location, used when it exists.
@@ -122,7 +125,36 @@ func NewPaths(root string) Paths {
 		Logs:    filepath.Join(root, "logs"),
 		Config:  filepath.Join(root, "config.json"),
 		State:   filepath.Join(root, "registry.json"),
+		Stats:   StatsDir(root),
 	}
+}
+
+// StatsDir is where the request statistics store keeps its files for a data
+// root.
+//
+// Everywhere but the shared root that is a "stats" directory under the root
+// itself, so an installation is still one folder to delete. The shared root is
+// the exception, and the store goes under this account's own Application
+// Support directory instead: the shared root is group-writable and sticky by
+// design (see the Makefile's install-shared), and a file holding one account's
+// own record of what it served has no business in a directory every other
+// account on the Mac can write to and this one cannot re-mode. Under an
+// explicit GROPIUS_ROOT the store lives under that root, so the rule is total
+// and the store never appears somewhere the operator did not point Gropius at.
+//
+// A home directory that cannot be resolved falls back to the root, where the
+// store's own refusal to create itself in a group- or other-writable directory
+// is what stops the records being written: this function decides where to
+// look, never whether the place is safe.
+func StatsDir(root string) string {
+	if root != SharedRoot {
+		return filepath.Join(root, "stats")
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return filepath.Join(root, "stats")
+	}
+	return filepath.Join(home, "Library", "Application Support", "Gropius", "stats")
 }
 
 // UV is the path to the uv binary Gropius manages.
@@ -349,6 +381,14 @@ type Config struct {
 	// completion, key or client address is ever part of it.
 	Statistics bool `json:"statistics,omitempty"`
 
+	// StatsMonths and StatsMaxBytes bound how much of that record is kept on
+	// disk: a horizon in whole months, and a hard ceiling in bytes. The
+	// ceiling always wins — the months figure prunes within it — so the store
+	// is bounded however busy the Mac is, and how far back it actually reaches
+	// is shown in Settings rather than promised (adr-2609061610107154).
+	StatsMonths   int   `json:"stats_months,omitempty"`
+	StatsMaxBytes int64 `json:"stats_max_bytes,omitempty"`
+
 	// PerModel holds the per-model settings that are not sampling parameters,
 	// keyed by the registry's canonical repo id. A model with no entry runs on
 	// the machine-wide settings above, which is what every model does until the
@@ -566,6 +606,23 @@ func (c Config) Clone() Config {
 	return out
 }
 
+// Retention bounds for the statistics store.
+//
+// The defaults are the ADR's starting values: at about 150 bytes a record,
+// 200 MB is over four months of ten thousand requests a day, so the ceiling
+// and the horizon are of the same order and neither is decorative. The floor
+// on the ceiling is two rotated files, below which the store would drop a file
+// it had only just opened; the ceiling on the ceiling and the horizon are
+// there so a mistyped figure is refused rather than filling a disk or being
+// read as "forever".
+const (
+	DefaultStatsMonths   = 6
+	DefaultStatsMaxBytes = 200 << 20
+	MinStatsMaxBytes     = 10 << 20
+	MaxStatsMaxBytes     = 1 << 40
+	MaxStatsMonths       = 120
+)
+
 // Default returns the shipping defaults: LAN-exposed, unauthenticated.
 func Default() Config {
 	return Config{
@@ -575,7 +632,31 @@ func Default() Config {
 		Advertise:         true,
 		IdleTimeoutSec:    0,
 		DecodeConcurrency: 4,
+		StatsMonths:       DefaultStatsMonths,
+		StatsMaxBytes:     DefaultStatsMaxBytes,
 	}
+}
+
+// sanitizeStats repairs a retention figure this build cannot use and returns
+// what it repaired, so a hand-edited file, a backup or another build's
+// settings still load.
+//
+// Repaired rather than refused, for the reason Load's own comment gives: a
+// refused config.json sends the next start into its fail-closed loopback-only
+// branch, and a machine-wide outage is far too much to pay for a number that
+// decides how long a statistics file is kept. Save still refuses the same
+// values outright, which is the moment the operator is there to read why.
+func (c *Config) sanitizeStats() []string {
+	var repaired []string
+	if c.StatsMonths < 1 || c.StatsMonths > MaxStatsMonths {
+		repaired = append(repaired, "stats_months="+strconv.Itoa(c.StatsMonths))
+		c.StatsMonths = DefaultStatsMonths
+	}
+	if c.StatsMaxBytes < MinStatsMaxBytes || c.StatsMaxBytes > MaxStatsMaxBytes {
+		repaired = append(repaired, "stats_max_bytes="+strconv.FormatInt(c.StatsMaxBytes, 10))
+		c.StatsMaxBytes = DefaultStatsMaxBytes
+	}
+	return repaired
 }
 
 // Validate reports whether the config is usable.
@@ -591,6 +672,13 @@ func (c Config) Validate() error {
 	}
 	if err := c.validatePinned(); err != nil {
 		return err
+	}
+	if c.StatsMonths < 1 || c.StatsMonths > MaxStatsMonths {
+		return fmt.Errorf("keep statistics for between 1 and %d months, got %d", MaxStatsMonths, c.StatsMonths)
+	}
+	if c.StatsMaxBytes < MinStatsMaxBytes || c.StatsMaxBytes > MaxStatsMaxBytes {
+		return fmt.Errorf("the statistics store's limit must be between %d and %d bytes, got %d",
+			MinStatsMaxBytes, MaxStatsMaxBytes, c.StatsMaxBytes)
 	}
 	// A sampling default becomes a launch flag on every model server, and the
 	// model server validates the effective value of every request against it:
@@ -652,6 +740,7 @@ func Load(path string) (Config, []string, error) {
 	}
 	dropped := append(cfg.sanitizeSampling(), cfg.sanitizePerModel()...)
 	dropped = append(dropped, cfg.sanitizePinned()...)
+	dropped = append(dropped, cfg.sanitizeStats()...)
 	if err := cfg.Validate(); err != nil {
 		return Default(), nil, fmt.Errorf("invalid config %s: %w", path, err)
 	}
