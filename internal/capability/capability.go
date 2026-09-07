@@ -4,9 +4,13 @@ package capability
 
 // Machine describes the resources available to local models.
 type Machine struct {
-	TotalRAM  int64 `json:"total_ram"`  // installed physical RAM, bytes
-	RAMBudget int64 `json:"ram_budget"` // RAM Gropius will let a loaded model use, bytes
-	FreeDisk  int64 `json:"free_disk"`  // free space on the models volume, bytes
+	TotalRAM int64 `json:"total_ram"` // installed physical RAM, bytes
+	// RAMBudget is the memory Gropius will let loaded models use. It is spelled
+	// the way the control plane's own machine object spells it: both reach the
+	// same panel, and one number under two names is what this figure was
+	// centralized to prevent.
+	RAMBudget int64 `json:"budget"`
+	FreeDisk  int64 `json:"free_disk"` // free space on the models volume, bytes
 }
 
 // diskHeadroom is left free so a download never fills the disk to the brim.

@@ -205,3 +205,142 @@ of truth: the filter and the pool read one number.
 - Whether `capability.Assess` takes a budget parameter or an `App`-supplied
   `Machine`. Both satisfy criterion 7; the budget parameter is recommended, as it
   keeps the zero-means-default rule in one place.
+
+## As built (2026-09-07)
+
+Eight points where the shipped change differs from the Approach above, or
+settles something it left open. The record is annotated rather than rewritten.
+
+1. **The pool setter is `SetMemoryBudget`, not `SetMaxResidentBytes`.** The
+   pinned-models change had already added the reader as `Pool.MemoryBudget()`;
+   a setter under a second name for one figure is how two names for it start.
+   The budget also lives in a `maxResident` field guarded by `p.mu` rather than
+   in `p.opts`, so the value every eviction path reads is the one the setter
+   writes under the lock they already hold, and `MemoryBudget()` takes that lock
+   rather than reading a field being written.
+2. **`State` does not gain a `machine` object beside `memory_budget`; the
+   object replaces it.** `memory_budget` shipped with the pinned models a day
+   earlier and carries exactly `machine.budget`. Two spellings of one number on
+   one loopback snapshot is the drift this record exists to avoid, and the only
+   consumer is the panel in the same binary.
+3. **The 60% share moves to `capability.DefaultBudget`,** not only the machine
+   reading. The share existed twice, with a comment in each saying it must match
+   the other; `PhysicalMemory` alone would have left that duplication in place.
+   `internal/runtime` now imports `internal/capability` — so the collapse
+   `iss-2609062318532053` asks for must move `LoadCost` into `capability`
+   rather than the other way round.
+4. **The machine size is injected as `Options.PhysicalMemory func() int64`,**
+   not as a size field: zero is a *meaning* here — the Mac that cannot be
+   measured, which acceptance criterion 6 is about — so it cannot double as
+   "not injected".
+5. **The pinned floor is judged the way the pinned record leaves it.** A save is
+   refused when it makes the set worse: one that adds a pin, and now one that
+   lowers the budget under the pinned sum. A set that arrives already over
+   budget, under a budget the save does not lower, is applied and warned about
+   (`App.PinnedFitWarning`), per the 2026-09-07 ledger line. The Approach's "the
+   sum must fit the incoming budget" at every save would refuse every settings
+   change there is over a set the operator never chose on this Mac.
+6. **The warning threshold is 85% of physical memory,** exposed as
+   `machine.warn_above`. It is served in two places: on the state snapshot,
+   beside the open-endpoint warning, so it stands for as long as the budget
+   does; and in the save response, so the answer to the save that set it says
+   so. The panel writes it from the figure being typed, so the advice arrives
+   while the number is being chosen.
+7. **The field accepts fractional gigabytes** (`step="0.1"`), the open point the
+   Approach left to the implementer. Storage is bytes either way, and a Mac's
+   memory is not always a whole number of the units anyone wants to type.
+8. **`Validate` refuses a negative budget and `Load` drops one.** The Approach
+   named only the Validate rule; a hand-edited negative figure would then have
+   failed validation at *load*, which is the fail-closed branch this record went
+   out of its way to avoid. `sanitizeBudget` drops it to the default and names
+   it in the dropped list, as `sanitizePinned` does.
+
+## Corrections from the branch reviews (2026-09-07)
+
+Two independent reviews of the branch — adversarial security and senior code —
+returned the same blocking finding, and the points above are corrected here
+rather than rewritten.
+
+- **Point 5 extends to the ceiling.** Check 1 of the Approach ("if the incoming
+  budget exceeds the machine, refuse") was implemented literally and wedged
+  every settings save on a Mac holding an inherited over-machine budget: a
+  `config.json` carried from a larger Mac, or one written during a start where
+  `sysctl` could not read this one. Both reviews demonstrated it end to end,
+  the security review through the save that sets an API key on an open LAN
+  endpoint. A save is refused only when it **raises** the budget above this
+  Mac; an inherited figure is warned about at start-up and on the panel, and
+  the pool enforces it either way — so the refusal protected nothing while
+  blocking everything. This is the same anti-wedge principle that beat
+  criterion 5 of itd-2609061441241254 on 2026-09-07, and acceptance criterion 3
+  of this record is **diverged** in the same way and for the same reason.
+- **The pinned floor is judged on what the save changes, not on a bare
+  comparison.** Lowering the budget counts as making the set worse only when the
+  budget in force could hold that set. The panel renders gigabytes, so a save
+  that posts back what it shows can carry a figure a few bytes under the one in
+  force; on the bare comparison that flipped an inherited over-budget set from
+  warned to refused, and it let a pin whose model this Mac cannot measure block
+  every budget change with no way out but unpinning.
+- **`machine` carries `default_budget`.** Clearing the field is the documented
+  way back to the default, and the panel could not say what that would give.
+- Smaller: the panel's gigabyte rendering keeps enough precision to survive a
+  round trip; `Pool.MemoryBudget`'s lock is held by a `-race` test that fails
+  without it; the search test no longer depends on the host's free disk;
+  `sysctl` is executed by absolute path; `NewPool` treats a negative budget as
+  `SetMemoryBudget` does. `iss-2609062318532053` is amended, since this change
+  fixes the direction its remedy must take, and `iss-2609070042568257` is filed
+  for the low side of the range, which this record settles no floor for.
+
+## As built, addendum (2026-09-07, second review round)
+
+The sections above were written before the design and record reviews of the
+branch. They stand as written; this addendum is appended rather than folded into
+them, and governs where they differ.
+
+- **Point 7 above is superseded.** The field ships `step="any"`, not
+  `step="0.1"`. A stepped number field refuses the whole settings form for any
+  value that does not land on the step, and the panel writes the stored budget
+  into that field in gigabytes — so a figure written by anything but the panel
+  (another client, a hand edit, a file from a larger Mac, every case this record
+  goes out of its way to tolerate) made the browser refuse every save there is,
+  the API key included, before the submit listener ran. The rendering is
+  unrounded for the same reason: what the field shows posts back as the figure
+  it came from, to the byte. Held by
+  `ui.TestTheBudgetFieldAcceptsAnyFigureThePanelWritesIntoIt` and
+  `ui.TestTheBudgetFieldRoundTripsAnyStoredFigure`.
+- **What the pool is given is bounded by physical memory.** The Approach and the
+  trust-boundary notes above describe the stored figure reaching the pool with
+  the save-time ceiling as its only guard. As built, `App.enforcedBudget` hands
+  the pool `min(effectiveBudget, machineRAM)` when the machine's size is known.
+  The stored value and the save-path checks are untouched — an inherited figure
+  is still applied and warned about rather than rewritten — but a figure planted
+  in a settings file another local account can write under the shared install no
+  longer has the pool admitting models on the strength of memory that does not
+  exist. A Mac whose memory cannot be read has nothing to bound the figure to;
+  that residual is recorded. Held by
+  `app.TestAPlantedBudgetIsEnforcedNoHigherThanTheMachine`.
+- **The budget answers both ends of its range.** `App.MemoryBudgetWarning` also
+  reports a budget below the smallest model on this Mac, naming what that model
+  needs — a new control-plane warning and a new `warning` field on the settings
+  response. A warning, not a floor: refusing the save is the wedge, and the floor
+  question stays open as `iss-2609070042568257`. Held by
+  `app.TestABudgetTooSmallForAnyModelIsWarnedAbout`.
+- **`capability.Assess` takes the machine as well as the budget** —
+  `Assess(modelsDir string, totalRAM, budget int64)` — and `handleSearch` passes
+  `App.MachineRAM()`. The Approach named `Assess(modelsDir, budget)`, which left
+  the filter taking its own `sysctl` reading per search: on the Mac the
+  unmeasured branch exists for, the Search tab printed a machine size the
+  Settings tab said could not be read. Held by
+  `gateway.TestSearchAndStateAgreeAboutTheMachine`.
+- **`capability.Machine`'s budget is served as `budget`, not `ram_budget`.** Two
+  objects called `machine` reach one panel, and point 2 above removed
+  `State.MemoryBudget` for exactly this reason. Held by
+  `gateway.TestTheMachineObjectsSpellTheBudgetOneWay`.
+- **The trust-boundary list gains `internal/capability`.** The Trust-boundary
+  review notes above name `internal/config`, `internal/runtime` and
+  `internal/gateway`; `internal/capability` now executes `/usr/sbin/sysctl` on
+  behalf of the pool and the app and owns the default share, so AGENTS.md names
+  it too.
+- **Acceptance criterion 4 shipped narrower**, alongside the criterion-3
+  divergence already recorded: a save that lowers the budget under the pinned
+  sum is refused only when the budget in force could hold that set
+  (`lowersUnderAFittingSet`). See the intent's Audit Notes.

@@ -146,11 +146,10 @@ type State struct {
 	// actually refuses an eviction, and a pin reconciled with its model after a
 	// download reaches the pool before it reaches the stored settings.
 	Pinned []string `json:"pinned"`
-	// MemoryBudget is the ceiling on the total charged size of resident
-	// models, so the panel can say what a pinned set leaves for everything
-	// else. The pool resolves it, since the default is a share of this Mac's
-	// physical RAM rather than a stored setting.
-	MemoryBudget int64 `json:"memory_budget"`
+	// Machine is this Mac's memory, the budget loaded models are held to, and
+	// what they are using of it — everything Settings says about the budget,
+	// as figures rather than as UI text that nothing can check.
+	Machine Machine `json:"machine"`
 	// Endpoints are the URLs other machines should use.
 	Endpoints []string `json:"endpoints"`
 	Hostname  string   `json:"hostname"`
@@ -170,6 +169,40 @@ type State struct {
 	StatsStore *stats.StoreStatus `json:"stats_store,omitempty"`
 }
 
+// Machine is what the control panel needs to talk about the memory budget: the
+// size of the Mac, the ceiling models are held to, and what is in memory now.
+//
+// It is a snapshot of figures, not of copy. Every claim the Settings page makes
+// — the budget in gigabytes, its share of the machine, whether it is still the
+// default, whether the machine is over its budget — is a claim about one of
+// these, so each is asserted in Go rather than read out of the panel's text.
+type Machine struct {
+	// TotalRAM is this Mac's installed memory, or 0 when it cannot be read, in
+	// which case the panel shows no percentage and no ceiling is enforced.
+	TotalRAM int64 `json:"total_ram"`
+	// Budget is the ceiling on the total charged size of resident models, as
+	// the pool is enforcing it.
+	Budget int64 `json:"budget"`
+	// DefaultBudget is the share of this Mac's memory a budget of none would
+	// give. The panel needs it to say what clearing the field would do, which
+	// is a question only this Mac can answer.
+	DefaultBudget int64 `json:"default_budget"`
+	// BudgetIsDefault says the budget is the share of this Mac's memory
+	// Gropius chose, not a figure the operator set, so the panel can show it as
+	// the default rather than as their own number.
+	BudgetIsDefault bool `json:"budget_is_default"`
+	// WarnAbove is the budget beyond which the panel warns, or 0 when this Mac
+	// cannot be measured. Advice, not a limit.
+	WarnAbove int64 `json:"warn_above"`
+	// ResidentBytes is what the models in memory are charged against the
+	// budget, the same 1.2x figure eviction uses.
+	ResidentBytes int64 `json:"resident_bytes"`
+	// OverBudget says the models in memory cost more than the budget allows.
+	// Lowering the budget unloads nothing, so this stands until they unload by
+	// the usual rules.
+	OverBudget bool `json:"over_budget"`
+}
+
 // snapshot builds the state the UI renders.
 //
 // Both /api/state and the /api/events stream go through here. They used to build
@@ -179,20 +212,33 @@ type State struct {
 func (c *Control) snapshot() State {
 	cfg := c.App.Config()
 	st := State{
-		Models:       c.App.Registry.List(),
-		Resident:     c.App.Pool.Resident(),
-		Setup:        c.App.Provisioner.Status(),
-		Config:       redactConfig(cfg),
-		Pinned:       c.App.Pool.Pinned(),
-		MemoryBudget: c.App.Pool.MemoryBudget(),
-		Endpoints:    Endpoints(cfg),
-		Hostname:     hostname(),
+		Models:    c.App.Registry.List(),
+		Resident:  c.App.Pool.Resident(),
+		Setup:     c.App.Provisioner.Status(),
+		Config:    redactConfig(cfg),
+		Pinned:    c.App.Pool.Pinned(),
+		Endpoints: Endpoints(cfg),
+		Hostname:  hostname(),
+	}
+	budget := c.App.Pool.MemoryBudget()
+	resident := residentCharge(st.Resident)
+	st.Machine = Machine{
+		TotalRAM:        c.App.MachineRAM(),
+		Budget:          budget,
+		DefaultBudget:   capability.DefaultBudget(c.App.MachineRAM()),
+		BudgetIsDefault: cfg.MaxResidentBytes == 0,
+		WarnAbove:       c.App.BudgetWarnAbove(),
+		ResidentBytes:   resident,
+		OverBudget:      resident > budget,
 	}
 	if cfg.ExposedToLAN() && cfg.APIKey == "" {
 		st.Warnings = append(st.Warnings,
 			"This server is reachable by anyone on your network and requires no API key. Set one in Settings to restrict access.")
 	}
 	if w := c.App.PinnedFitWarning(); w != "" {
+		st.Warnings = append(st.Warnings, w)
+	}
+	if w := c.App.MemoryBudgetWarning(); w != "" {
 		st.Warnings = append(st.Warnings, w)
 	}
 	if !c.App.Provisioner.Installed() {
@@ -205,6 +251,17 @@ func (c *Control) snapshot() State {
 		st.StatsStore = &status
 	}
 	return st
+}
+
+// residentCharge is what the models in memory cost the budget: each one's size
+// on disk plus a fifth, which is the figure the pool charges (runtime.LoadCost)
+// and therefore the only one that can be compared with the budget.
+func residentCharge(resident []runtime.Resident) int64 {
+	var sum int64
+	for _, r := range resident {
+		sum += runtime.LoadCost(r.Bytes)
+	}
+	return sum
 }
 
 // handleStats serves the live view of what this Mac has served: the recent
@@ -369,8 +426,12 @@ func (c *Control) handleSearch(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Measure this machine so we can show each model's size and hide the ones
-	// that will not fit — too big to store, or too big to run in the RAM budget.
-	machine := capability.Assess(c.App.Paths.Models)
+	// that will not fit — too big to store, or too big to run in the memory
+	// budget. The budget is the one the pool is enforcing, read on every
+	// search, so a figure the operator changes in Settings changes what this
+	// tab shows without a restart and without a second answer to the question
+	// of what fits.
+	machine := capability.Assess(c.App.Paths.Models, c.App.MachineRAM(), c.App.Pool.MemoryBudget())
 
 	// The search payload carries no file sizes, so fetch each repo's download
 	// size concurrently (one tree request each, bounded).
@@ -589,11 +650,18 @@ func (c *Control) handleSetSettings(w http.ResponseWriter, r *http.Request) {
 		incoming.Host != current.Host ||
 		incoming.DecodeConcurrency != current.DecodeConcurrency ||
 		incoming.IdleTimeoutSec != current.IdleTimeoutSec
-	writeJSON(w, http.StatusOK, map[string]any{
+	out := map[string]any{
 		"status":        "saved",
 		"restart":       restart,
 		"reload_models": samplingReloads(current, incoming, c.App.Pool.Resident()),
-	})
+	}
+	// A budget that claims most of the Mac is saved and answered with advice.
+	// What a Mac can actually carry is not a figure Gropius knows, so this is
+	// the one thing a save says without refusing anything.
+	if warn := c.App.MemoryBudgetWarning(); warn != "" {
+		out["warning"] = warn
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 // namesModelSampling reports whether the posted body carries a model_sampling

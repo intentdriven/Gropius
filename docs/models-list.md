@@ -181,13 +181,25 @@ Residency is worth reading because it changes, and it changes under these
 rules.
 
 - Gropius runs one model server per model and keeps as many resident as its
-  memory budget allows. The budget is 60% of this Mac's physical RAM, which
-  leaves the rest for everything else on a machine whose GPU and CPU share one
-  pool of memory. There is no setting for it.
+  memory budget allows. The budget defaults to 60% of this Mac's physical RAM,
+  which leaves the rest for everything else on a machine whose GPU and CPU share
+  one pool of memory, and **Settings → Memory for loaded models** sets it to any
+  figure up to the whole machine. A change applies to the next load, with no
+  restart: nothing is unloaded to fit a lowered budget, so the machine can sit
+  above it until the models resident at the time go, and a figure larger than
+  this Mac's memory is held down to it. See
+  [Set how much memory models may use](memory-budget.md) and
+  [Why there is a memory budget](memory-budget-explained.md).
 - Each loaded model is charged 1.2 times its size on disk, the weights plus
-  headroom for the cache and activations a running model needs.
+  headroom for the cache and activations a running model needs. The cache a
+  request builds as it works through a long prompt is not counted, so a machine
+  loaded to its budget can still run out of memory under long prompts served
+  concurrently.
 - A request for a model that does not fit in what is left unloads the
-  least-recently-used idle model, at once, to make room. A model with a request
+  least-recently-used idle model, at once, to make room. The memory of the model
+  being unloaded is credited back as the replacement starts, so the two overlap
+  for the seconds it takes the first to exit and the budget is not a hard
+  ceiling in that moment. A model with a request
   in flight is never the one chosen, a model still loading is not either, and a
   pinned model is not either. If nothing can be freed, the request is refused
   with an error naming the memory pressure rather than waiting. That refusal
