@@ -129,7 +129,7 @@ type DayTokens struct {
 }
 
 // Tokens is the day's whole traffic for that model, in and out.
-func (d DayTokens) Tokens() int64 { return d.PromptTokens + d.CompletionTokens }
+func (d DayTokens) Tokens() int64 { return addTokens64(d.PromptTokens, d.CompletionTokens) }
 
 // ModelShare is one model's part of the whole range: what it served, and what
 // fraction of the range's tokens that came to.
@@ -233,11 +233,10 @@ type History struct {
 	// a crash, a great many mean the figures rest on a fraction of what was
 	// recorded.
 	//
-	// It is the store's own count from the last read through it rather than
-	// this pass's, because the store is what does the skipping. Two readings at
-	// once can therefore report each other's figure. That is worth less than
-	// the figure is: what a reader does with it is notice that a number of
-	// lines are unreadable at all, which is true of the store either way.
+	// It is this pass's own count, not the store's running one: two readings at
+	// once would otherwise each report the other's figure, and a reader shown
+	// "so many lines could not be read" deserves the number from the reading in
+	// front of them.
 	Skipped int64 `json:"skipped"`
 	// Truncated reports a pass that a bound stopped: the record bound or the
 	// row bound. On its own it does not mean the figures are short of the
@@ -257,15 +256,24 @@ type History struct {
 	MaxDays    int `json:"max_days"`
 }
 
-// RecordSource is the store as the dashboard reads it: newest record first and
-// bounded, which is the read the durable store was built to serve.
+// MaxHistoryBytes is the most file content one pass reads.
+//
+// The line bound below already bounds the decoding, which is what the time goes
+// on. This bounds the reading itself, for the store that is mostly one enormous
+// line: a file is read whole before any line of it is looked at, so without a
+// budget across files a pass over a store whose size cap has been raised is a
+// pass over all of it. Half a gigabyte is twice the default cap and comfortably
+// past anything a pass of a million lines can want.
+const MaxHistoryBytes = 512 << 20
+
+// RecordSource is the store as the dashboard reads it: newest record first,
+// bounded in what it costs rather than only in what it yields, and stoppable.
 //
 // It is an interface so that the aggregation depends on the reading rather
 // than on the FileStore, and so a caller with no store at all — a Mac where
 // recording has never been on — passes nil and gets an empty view.
 type RecordSource interface {
-	Latest(limit int, fn func(Line) bool) error
-	Status() StoreStatus
+	Read(ctx context.Context, opts ReadOptions, fn func(Line) bool) (ReadStats, error)
 }
 
 // Aggregate walks the store once and returns everything the dashboard draws.
@@ -315,12 +323,21 @@ func Aggregate(ctx context.Context, src RecordSource, from, to time.Time, loc *t
 
 	a := newHistoryAgg(ctx, h.From, h.To, loc)
 	a.partialDay = clippedDay(from, loc)
-	err := src.Latest(0, a.take)
+	// Bounded in lines rather than in records, because those are different
+	// numbers the moment a line does not parse — a store a newer Gropius wrote,
+	// or one a crash tore, yields nothing while costing every byte of itself —
+	// and the context goes to the reader for the same reason: the check in take
+	// never runs on a store this build cannot read a line of.
+	read, err := src.Read(ctx, ReadOptions{
+		MaxLines: historyRecordBound,
+		MaxBytes: MaxHistoryBytes,
+	}, a.take)
 	if a.err != nil {
 		return h, a.err
 	}
-	h.Records, h.Truncated, h.ReachedStart = a.read, a.truncated, a.reachedStart
-	h.Skipped = src.Status().Skipped
+	h.Records, h.ReachedStart = a.read, a.reachedStart
+	h.Truncated = a.truncated || read.Bounded
+	h.Skipped = read.Skipped
 	if err != nil {
 		return h, err
 	}
@@ -466,8 +483,8 @@ func (a *historyAgg) addTokens(day, model string, requests int, in, out int64, f
 		a.dayOrder = append(a.dayOrder, key)
 	}
 	d.Requests += requests
-	d.PromptTokens += in
-	d.CompletionTokens += out
+	d.PromptTokens = addTokens64(d.PromptTokens, in)
+	d.CompletionTokens = addTokens64(d.CompletionTokens, out)
 	d.FromSummary = d.FromSummary || fromSummary
 
 	m, ok := a.models[model]
@@ -476,9 +493,30 @@ func (a *historyAgg) addTokens(day, model string, requests int, in, out int64, f
 		a.models[model] = m
 	}
 	m.Requests += requests
-	m.PromptTokens += in
-	m.CompletionTokens += out
-	a.total += in + out
+	m.PromptTokens = addTokens64(m.PromptTokens, in)
+	m.CompletionTokens = addTokens64(m.CompletionTokens, out)
+	a.total = addTokens64(a.total, addTokens64(in, out))
+}
+
+// addTokens64 adds two token counts without letting them wrap.
+//
+// The counts come off a file, and only the account that owns the store can
+// write that file — so this is not a defence against anyone. It is a defence
+// against a table of negative tokens and a share of zero, which is what a hand
+// edit or a corrupt line otherwise produces, and which reads as a bug in the
+// arithmetic rather than as a bad line in the store. A negative count is
+// nothing, and a sum that would overflow stops at the largest number there is.
+func addTokens64(a, b int64) int64 {
+	if a < 0 {
+		a = 0
+	}
+	if b < 0 {
+		b = 0
+	}
+	if a > math.MaxInt64-b {
+		return math.MaxInt64
+	}
+	return a + b
 }
 
 // request folds one request record into the day, model and latency figures.
@@ -529,7 +567,7 @@ func (a *historyAgg) fill(h *History) {
 	h.Models = make([]ModelShare, 0, len(a.models))
 	for _, m := range a.models {
 		c := *m
-		c.Tokens = c.PromptTokens + c.CompletionTokens
+		c.Tokens = addTokens64(c.PromptTokens, c.CompletionTokens)
 		if a.total > 0 {
 			c.Share = float64(c.Tokens) / float64(a.total)
 		}

@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -371,6 +372,16 @@ func (c *Control) handleStatsHistory(w http.ResponseWriter, r *http.Request) {
 	// The request's own context, so a reader who closes the panel part-way
 	// through a pass over months of records stops being paid for.
 	history, err := stats.Aggregate(r.Context(), historySource(c.App), from, to, time.Local)
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		// The reader went away, which is the pass working as it should rather
+		// than the store failing. There is no socket left to answer and there
+		// is nothing to say: logging it at Warn would let anyone who can open
+		// this endpoint write an unbounded run of store-failure lines into the
+		// operator's log by opening and abandoning it, which is the very thing
+		// the writer logs once per spell to avoid.
+		c.App.Log.Debug("a reading of the request statistics was abandoned", "err", err)
+		return
+	}
 	if err != nil {
 		// The reason is logged, not returned: these errors name the store's
 		// directory, and the control plane answers every account on this Mac.

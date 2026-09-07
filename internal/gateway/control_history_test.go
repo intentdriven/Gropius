@@ -1,7 +1,11 @@
 package gateway
 
 import (
+	"bytes"
+	"context"
+	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -303,7 +307,7 @@ type blockingSource struct {
 	release chan struct{}
 }
 
-func (b *blockingSource) Latest(_ int, _ func(stats.Line) bool) error {
+func (b *blockingSource) Read(_ context.Context, _ stats.ReadOptions, _ func(stats.Line) bool) (stats.ReadStats, error) {
 	// Signalled without waiting to be heard, and held for a bounded time: a cap
 	// that let a third reading through must make the assertion below fail,
 	// never hang the suite on a reading nobody is going to release.
@@ -315,10 +319,8 @@ func (b *blockingSource) Latest(_ int, _ func(stats.Line) bool) error {
 	case <-b.release:
 	case <-time.After(5 * time.Second):
 	}
-	return nil
+	return stats.ReadStats{}, nil
 }
-
-func (b *blockingSource) Status() stats.StoreStatus { return stats.StoreStatus{} }
 
 // One pass over a store at its size cap is a second of work and several hundred
 // megabytes, and this endpoint answers every account on this Mac and a blind
@@ -382,5 +384,95 @@ func TestAFinishedReadingGivesUpItsPlace(t *testing.T) {
 		if resp.StatusCode != http.StatusOK {
 			t.Fatalf("reading %d one after another returned %d, want 200", i+1, resp.StatusCode)
 		}
+	}
+}
+
+// cancellingSource stands in for a store the reader gives up on part-way
+// through, which is what a closed tab looks like from inside the aggregation.
+type cancellingSource struct{}
+
+func (cancellingSource) Read(ctx context.Context, _ stats.ReadOptions, _ func(stats.Line) bool) (stats.ReadStats, error) {
+	return stats.ReadStats{}, context.Canceled
+}
+
+// A reader who goes away is the pass working, not the store failing. Logging it
+// as a fault would let anyone who can open this endpoint — every account on
+// this Mac, and a page in the operator's own browser — write an unbounded run
+// of store-failure lines into the log by opening and abandoning it, which is
+// the very thing the store's writer logs once per spell to avoid.
+func TestAnAbandonedReadingIsNotLoggedAsAStoreFailure(t *testing.T) {
+	var logged bytes.Buffer
+	paths := config.NewPaths(t.TempDir())
+	cfg := config.Default()
+	cfg.Statistics = true
+	a, err := app.New(app.Options{
+		Paths: paths, Config: cfg,
+		Log: slog.New(slog.NewTextHandler(&logged, &slog.HandlerOptions{Level: slog.LevelInfo})),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { a.Close() })
+
+	was := historySource
+	historySource = func(*app.App) stats.RecordSource { return cancellingSource{} }
+	t.Cleanup(func() { historySource = was })
+
+	mux := http.NewServeMux()
+	(&Control{App: a}).Routes(mux)
+	now := time.Now()
+	req := httptest.NewRequest(http.MethodGet, historyPath(now.AddDate(0, 0, -7), now), nil)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if said := logged.String(); strings.Contains(said, "could not be aggregated") {
+		t.Errorf("an abandoned reading is logged as a store failure:\n%s", said)
+	}
+	// And nothing is written back, because there is nothing left to write to.
+	if w.Body.Len() != 0 {
+		t.Errorf("an abandoned reading answered %q", w.Body.String())
+	}
+}
+
+// A reading that genuinely failed still says so, in the log and to the caller,
+// and still says nothing about where the records are.
+type failingSource struct{}
+
+func (failingSource) Read(context.Context, stats.ReadOptions, func(stats.Line) bool) (stats.ReadStats, error) {
+	return stats.ReadStats{}, errors.New("open /some/place/stats: permission denied")
+}
+
+func TestAFailedReadingIsStillReported(t *testing.T) {
+	var logged bytes.Buffer
+	cfg := config.Default()
+	cfg.Statistics = true
+	a, err := app.New(app.Options{
+		Paths: config.NewPaths(t.TempDir()), Config: cfg,
+		Log: slog.New(slog.NewTextHandler(&logged, &slog.HandlerOptions{Level: slog.LevelInfo})),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { a.Close() })
+
+	was := historySource
+	historySource = func(*app.App) stats.RecordSource { return failingSource{} }
+	t.Cleanup(func() { historySource = was })
+
+	mux := http.NewServeMux()
+	(&Control{App: a}).Routes(mux)
+	now := time.Now()
+	req := httptest.NewRequest(http.MethodGet, historyPath(now.AddDate(0, 0, -7), now), nil)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Errorf("a failed reading answered %d, want 500", w.Code)
+	}
+	if !strings.Contains(logged.String(), "could not be aggregated") {
+		t.Errorf("a failed reading is not logged:\n%s", logged.String())
+	}
+	if strings.Contains(w.Body.String(), "/some/place") {
+		t.Errorf("the failure's reason reaches the caller: %s", w.Body.String())
 	}
 }

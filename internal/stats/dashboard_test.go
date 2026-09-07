@@ -3,6 +3,10 @@ package stats
 import (
 	"context"
 	"errors"
+	"fmt"
+	"math"
+	"os"
+	"path/filepath"
 	"reflect"
 	"testing"
 	"time"
@@ -621,5 +625,153 @@ func TestTheSummaryFoldAddsToTheDayAndMarksIt(t *testing.T) {
 	}
 	if h.Models[0].Share != 1 {
 		t.Errorf("the only model's share is %v, want 1", h.Models[0].Share)
+	}
+}
+
+// unreadableStore fills a directory with lines this build cannot read: a
+// schema version newer than its own, which is exactly what a store written by
+// a later Gropius looks like. Nothing in it ever reaches the aggregation, so
+// every bound that lives there bounds nothing.
+func unreadableStore(t *testing.T, dir string, files int) {
+	t.Helper()
+	line := []byte(`{"v":99,"kind":"request","model":"mlx-community/Qwen3-8B-4bit",` +
+		`"at":1788696030,"class":"ok","streamed":true,"prompt_tokens":1234,` +
+		`"completion_tokens":567,"first_token_ms":210,"duration_ms":4200,` +
+		`"queue_wait_ms":12,"load_wait_ms":0}` + "\n")
+	var buf []byte
+	for int64(len(buf)) < defaultRotateBytes {
+		buf = append(buf, line...)
+	}
+	for i := 1; i <= files; i++ {
+		name := fmt.Sprintf("stats-20260901-%03d.jsonl", i)
+		if err := os.WriteFile(filepath.Join(dir, name), buf, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// A store whose lines this build cannot read is still bounded and still
+// stoppable. Both used to live in the aggregation's own callback, which the
+// store never calls for a line that does not parse — so a store a newer
+// Gropius wrote was read from end to end, on every request, and a reader who
+// had gone away was paid for to the last byte of it.
+func TestAStoreOfUnreadableLinesIsStillBoundedAndStillStoppable(t *testing.T) {
+	dir := t.TempDir()
+	unreadableStore(t, dir, 8) // 40 MB, about 300,000 lines
+	s := NewStore(dir, StoreOptions{Months: 1200, MaxBytes: defaultMaxBytes})
+	t.Cleanup(func() { s.Close() })
+
+	was := historyRecordBound
+	historyRecordBound = 1
+	t.Cleanup(func() { historyRecordBound = was })
+
+	t.Run("the bound holds", func(t *testing.T) {
+		started := time.Now()
+		h, err := Aggregate(t.Context(), s, time.Unix(0, 0), time.Now(), time.UTC)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if h.Skipped > 1 {
+			t.Errorf("the pass read %d unreadable lines under a bound of 1", h.Skipped)
+		}
+		if !h.Truncated {
+			t.Error("a pass a bound stopped does not say so")
+		}
+		if took := time.Since(started); took > 5*time.Second {
+			t.Errorf("a bounded pass over an unreadable store took %v", took)
+		}
+	})
+
+	t.Run("the reader who went away is let go of", func(t *testing.T) {
+		historyRecordBound = was // the bound must not be what stops this one
+		ctx, cancel := context.WithCancel(t.Context())
+		cancel()
+		started := time.Now()
+		_, err := Aggregate(ctx, s, time.Unix(0, 0), time.Now(), time.UTC)
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("a cancelled pass over an unreadable store returned %v, want context.Canceled", err)
+		}
+		if took := time.Since(started); took > 5*time.Second {
+			t.Errorf("a cancelled pass over an unreadable store took %v to come back", took)
+		}
+	})
+}
+
+// The byte budget is the other half: a store of enormous lines yields few of
+// them and costs every byte, so what bounds the reading is not the count.
+func TestTheReadIsBoundedInBytesAsWellAsInLines(t *testing.T) {
+	dir := t.TempDir()
+	unreadableStore(t, dir, 4)
+	s := NewStore(dir, StoreOptions{Months: 1200, MaxBytes: defaultMaxBytes})
+	t.Cleanup(func() { s.Close() })
+
+	got, err := s.Read(t.Context(), ReadOptions{MaxBytes: 1}, func(Line) bool { return true })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.Bounded {
+		t.Error("a read the byte budget stopped does not say so")
+	}
+	// One file's worth, and not the four: the budget is checked between files,
+	// because a file is read whole before any line of it is looked at, so the
+	// first one is always paid for and none after it is.
+	if got.Bytes > 2*defaultRotateBytes {
+		t.Errorf("a read under a one-byte budget read %d bytes, want one file's worth", got.Bytes)
+	}
+}
+
+// Two readings at once each report their own skipped count. The store keeps a
+// running one for the panel's store line; an aggregate that took that figure
+// would show the other reading's.
+func TestEachReadReportsItsOwnSkippedCount(t *testing.T) {
+	dir := t.TempDir()
+	unreadableStore(t, dir, 1)
+	s := NewStore(dir, StoreOptions{Months: 1200, MaxBytes: defaultMaxBytes})
+	t.Cleanup(func() { s.Close() })
+
+	small, err := s.Read(t.Context(), ReadOptions{MaxLines: 10}, func(Line) bool { return true })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if small.Skipped != 10 {
+		t.Errorf("a read of ten lines reports %d skipped, want 10", small.Skipped)
+	}
+	big, err := s.Read(t.Context(), ReadOptions{MaxLines: 100}, func(Line) bool { return true })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if big.Skipped != 100 {
+		t.Errorf("a read of a hundred lines reports %d skipped, want 100", big.Skipped)
+	}
+}
+
+// A count off a file is a count nobody promised is sane. A hand edit or a
+// corrupt line must not turn into a table of negative tokens and a share of
+// nothing, which reads as a fault in the arithmetic rather than as a bad line.
+func TestHostileTokenCountsDoNotWrapTheTotals(t *testing.T) {
+	s := fixtureStore(t)
+	day := at(east, 2026, 9, 1, 12, 0)
+	for _, r := range []Record{
+		{Model: "org/alpha", At: day, Class: ClassOK, PromptTokens: math.MaxInt64, CompletionTokens: math.MaxInt64},
+		{Model: "org/alpha", At: day + 1, Class: ClassOK, PromptTokens: -5, CompletionTokens: -5},
+		{Model: "org/beta", At: day + 2, Class: ClassOK, PromptTokens: 10, CompletionTokens: 10},
+	} {
+		if err := s.AppendRequest(r); err != nil {
+			t.Fatal(err)
+		}
+	}
+	h, err := Aggregate(t.Context(), s, time.Unix(day-3600, 0), time.Unix(day+3600, 0), east)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, d := range h.Days {
+		if d.PromptTokens < 0 || d.CompletionTokens < 0 || d.Tokens() < 0 {
+			t.Errorf("a day's tokens went negative: %#v", d)
+		}
+	}
+	for _, m := range h.Models {
+		if m.Tokens < 0 || m.Share < 0 || m.Share > 1 {
+			t.Errorf("a model's totals went out of range: %#v", m)
+		}
 	}
 }
