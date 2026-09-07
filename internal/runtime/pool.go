@@ -647,14 +647,12 @@ var ErrNotLoaded = errors.New("model is not loaded")
 // matching on message text.
 var ErrBusy = errors.New("model is busy")
 
-// MemoryBudget, DecodeConcurrency and IdleTimeout are what the pool is
-// actually running with, which is not always what is saved: all three are
-// taken from the settings once, when the pool is built, and a change to any of
-// them takes a restart. The statistics store records the effective values
-// rather than the saved ones, so that a reader comparing figures either side
-// of a change sees the line in the right place.
-func (p *Pool) MemoryBudget() int64 { return p.opts.MaxResidentBytes }
-
+// DecodeConcurrency and IdleTimeout are what the pool is actually running
+// with, which is not always what is saved: both are taken from the settings
+// once, when the pool is built, and a change to either takes a restart. The
+// statistics store records the effective values rather than the saved ones,
+// so that a reader comparing figures either side of a change sees the line in
+// the right place. MemoryBudget, declared above, is the third figure it records.
 func (p *Pool) DecodeConcurrency() int { return p.opts.DecodeConcurrency }
 
 func (p *Pool) IdleTimeout() time.Duration { return p.opts.IdleTimeout }
