@@ -92,10 +92,9 @@ func TestValidateRefusesAnIntervalOutOfRange(t *testing.T) {
 		name string
 		set  func(*Config)
 	}{
-		{"a grace of zero", func(c *Config) { c.EvictionGraceSec = 0 }},
 		{"a negative grace", func(c *Config) { c.EvictionGraceSec = -1 }},
 		{"a grace past the ceiling", func(c *Config) { c.EvictionGraceSec = MaxEvictionWaitSec + 1 }},
-		{"a maximum wait of zero", func(c *Config) { c.EvictionMaxWaitSec = 0 }},
+		{"a negative maximum wait", func(c *Config) { c.EvictionMaxWaitSec = -1 }},
 		{"a maximum wait past the ceiling", func(c *Config) { c.EvictionMaxWaitSec = MaxEvictionWaitSec + 1 }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -116,7 +115,7 @@ func TestLoadRepairsAnUnusableEvictionGrace(t *testing.T) {
 	path := filepath.Join(dir, "config.json")
 	raw := `{"host":"0.0.0.0","port":11535,"api_key":"secret","decode_concurrency":4,
 		"idle_timeout_sec":60,"eviction_grace":true,"eviction_grace_sec":900,
-		"eviction_max_wait_sec":0,"stats_months":6,"stats_max_bytes":209715200}`
+		"eviction_max_wait_sec":-5,"stats_months":6,"stats_max_bytes":209715200}`
 	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -146,5 +145,33 @@ func TestLoadRepairsAnUnusableEvictionGrace(t *testing.T) {
 	// the rest of the process runs on.
 	if err := got.Validate(); err != nil {
 		t.Errorf("the repaired config does not validate: %v", err)
+	}
+}
+
+// A field the operator clears, a file from a build that had no such field, and
+// a fresh install all mean the same thing: the default. A zero that refused
+// the save would be the wedge this repository has now built twice — a setting
+// nobody chose standing between the operator and the API key they came to set.
+func TestAClearedIntervalMeansTheDefaultRatherThanARefusal(t *testing.T) {
+	c := Default()
+	c.EvictionGrace = true
+	c.EvictionGraceSec = 0
+	c.EvictionMaxWaitSec = 0
+
+	if err := c.Validate(); err != nil {
+		t.Fatalf("Validate refused a cleared interval: %v", err)
+	}
+	if got := c.GraceSeconds(); got != DefaultEvictionGraceSec {
+		t.Errorf("GraceSeconds() = %d, want the default %d", got, DefaultEvictionGraceSec)
+	}
+	if got := c.MaxWaitSeconds(); got != DefaultEvictionMaxWaitSec {
+		t.Errorf("MaxWaitSeconds() = %d, want the default %d", got, DefaultEvictionMaxWaitSec)
+	}
+	// And the resolved figure is what the idle-timeout rule is judged on, so a
+	// cleared grace is refused against a short idle timeout exactly as the
+	// figure it stands for would be.
+	c.IdleTimeoutSec = 30
+	if err := c.Validate(); err == nil {
+		t.Error("Validate accepted a cleared grace that resolves to more than the idle timeout")
 	}
 }

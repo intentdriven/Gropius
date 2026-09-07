@@ -411,10 +411,18 @@ type Config struct {
 
 	// EvictionGraceSec is how long a model is protected after it finishes a
 	// request, and EvictionMaxWaitSec is the longest a request will wait for
-	// room before it is refused. Both are whole seconds, both apply only while
-	// EvictionGrace is on, and the grace may not exceed a non-zero
-	// IdleTimeoutSec: the idle reaper would otherwise unload the very model a
-	// wait is protecting, which would make the promise false.
+	// room before it is refused. Both are whole seconds and both apply only
+	// while EvictionGrace is on.
+	//
+	// Zero means the default, the way it does for MaxResidentBytes: a field
+	// cleared in Settings, a file written by a build that had no such field,
+	// and a fresh install all mean the same thing, and none of them may stand
+	// between the operator and saving an unrelated setting. Read them through
+	// GraceSeconds and MaxWaitSeconds, which resolve that.
+	//
+	// The grace may not exceed a non-zero IdleTimeoutSec: the idle reaper
+	// would otherwise unload the very model a wait is protecting, which would
+	// make the promise false.
 	EvictionGraceSec   int `json:"eviction_grace_sec,omitempty"`
 	EvictionMaxWaitSec int `json:"eviction_max_wait_sec,omitempty"`
 
@@ -705,9 +713,9 @@ const (
 // seconds is longer than most clients will wait but short enough that a
 // request that will never be served fails rather than hangs. The ceiling is an
 // hour: past that the wait is longer than any interactive client's own
-// timeout, so a figure above it is a typing mistake rather than a policy. The
-// floor is one second, since a grace of zero is what switching the feature off
-// already means.
+// timeout, so a figure above it is a typing mistake rather than a policy. Zero
+// is not a figure but the absence of one, and resolves to the default: see
+// Config.GraceSeconds.
 const (
 	DefaultEvictionGraceSec   = 120
 	DefaultEvictionMaxWaitSec = 300
@@ -722,21 +730,38 @@ const (
 // setting the operator is not using between them and the API key they came to
 // set.
 func (c Config) validateGrace() error {
-	if c.EvictionGraceSec < 1 || c.EvictionGraceSec > MaxEvictionWaitSec {
-		return fmt.Errorf("the eviction grace must be between 1 and %d seconds, got %d",
+	if c.EvictionGraceSec < 0 || c.EvictionGraceSec > MaxEvictionWaitSec {
+		return fmt.Errorf("the eviction grace must be between 0 and %d seconds, got %d",
 			MaxEvictionWaitSec, c.EvictionGraceSec)
 	}
-	if c.EvictionMaxWaitSec < 1 || c.EvictionMaxWaitSec > MaxEvictionWaitSec {
-		return fmt.Errorf("the maximum wait must be between 1 and %d seconds, got %d",
+	if c.EvictionMaxWaitSec < 0 || c.EvictionMaxWaitSec > MaxEvictionWaitSec {
+		return fmt.Errorf("the maximum wait must be between 0 and %d seconds, got %d",
 			MaxEvictionWaitSec, c.EvictionMaxWaitSec)
 	}
-	if c.EvictionGrace && c.IdleTimeoutSec > 0 && c.EvictionGraceSec > c.IdleTimeoutSec {
+	if c.EvictionGrace && c.IdleTimeoutSec > 0 && c.GraceSeconds() > c.IdleTimeoutSec {
 		return fmt.Errorf(
 			"the eviction grace (%d s) must not be longer than the idle timeout (%d s), "+
 				"or the idle timeout unloads the model the wait is protecting",
-			c.EvictionGraceSec, c.IdleTimeoutSec)
+			c.GraceSeconds(), c.IdleTimeoutSec)
 	}
 	return nil
+}
+
+// GraceSeconds and MaxWaitSeconds are the two intervals in force, with zero
+// resolved to its default. Everything that acts on them reads them here, so
+// "unset" has one meaning and not one per caller.
+func (c Config) GraceSeconds() int {
+	if c.EvictionGraceSec <= 0 {
+		return DefaultEvictionGraceSec
+	}
+	return c.EvictionGraceSec
+}
+
+func (c Config) MaxWaitSeconds() int {
+	if c.EvictionMaxWaitSec <= 0 {
+		return DefaultEvictionMaxWaitSec
+	}
+	return c.EvictionMaxWaitSec
 }
 
 // sanitizeGrace repairs eviction-grace figures this build cannot use and
@@ -751,16 +776,16 @@ func (c Config) validateGrace() error {
 // the timeout itself.
 func (c *Config) sanitizeGrace() []string {
 	var repaired []string
-	if c.EvictionGraceSec < 1 || c.EvictionGraceSec > MaxEvictionWaitSec {
+	if c.EvictionGraceSec < 0 || c.EvictionGraceSec > MaxEvictionWaitSec {
 		repaired = append(repaired, "eviction_grace_sec="+strconv.Itoa(c.EvictionGraceSec))
 		c.EvictionGraceSec = DefaultEvictionGraceSec
 	}
-	if c.EvictionMaxWaitSec < 1 || c.EvictionMaxWaitSec > MaxEvictionWaitSec {
+	if c.EvictionMaxWaitSec < 0 || c.EvictionMaxWaitSec > MaxEvictionWaitSec {
 		repaired = append(repaired, "eviction_max_wait_sec="+strconv.Itoa(c.EvictionMaxWaitSec))
 		c.EvictionMaxWaitSec = DefaultEvictionMaxWaitSec
 	}
-	if c.EvictionGrace && c.IdleTimeoutSec > 0 && c.EvictionGraceSec > c.IdleTimeoutSec {
-		repaired = append(repaired, "eviction_grace_sec="+strconv.Itoa(c.EvictionGraceSec))
+	if c.EvictionGrace && c.IdleTimeoutSec > 0 && c.GraceSeconds() > c.IdleTimeoutSec {
+		repaired = append(repaired, "eviction_grace_sec="+strconv.Itoa(c.GraceSeconds()))
 		c.EvictionGraceSec = c.IdleTimeoutSec
 	}
 	return repaired
