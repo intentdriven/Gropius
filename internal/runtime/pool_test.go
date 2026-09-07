@@ -1271,3 +1271,83 @@ func (h *blockingHandler) Handle(context.Context, slog.Record) error {
 func (h *blockingHandler) release()                           { h.releasing.Do(func() { close(h.leave) }) }
 func (h *blockingHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
 func (h *blockingHandler) WithGroup(string) slog.Handler      { return h }
+
+// The budget is a setting, so it has to reach a running pool. Raising it is
+// what lets a writer and a reviewer sit in memory together on a Mac with the
+// room for both.
+func TestRaisingTheMemoryBudgetLetsTwoModelsCoResideWithoutANewPool(t *testing.T) {
+	l := newFakeLauncher()
+	// Charged 240 each, so a budget of 300 holds one and 600 holds both.
+	src := &fakeSource{models: map[string]int64{"org/writer": 200, "org/reviewer": 200}}
+	p := newTestPool(t, l, src, PoolOptions{MaxResidentBytes: 300})
+
+	acquire := func(id string) {
+		t.Helper()
+		_, release, err := p.Acquire(context.Background(), id)
+		if err != nil {
+			t.Fatalf("Acquire(%s): %v", id, err)
+		}
+		release()
+	}
+	acquire("org/writer")
+	acquire("org/reviewer")
+	if got := residentIDs(p); len(got) != 1 {
+		t.Fatalf("resident = %v, want one model under a budget that holds one", got)
+	}
+
+	p.SetMemoryBudget(600)
+	if got := p.MemoryBudget(); got != 600 {
+		t.Errorf("MemoryBudget() = %d, want the figure just set", got)
+	}
+	acquire("org/writer")
+	acquire("org/reviewer")
+	if got := residentIDs(p); !slices.Equal(got, []string{"org/reviewer", "org/writer"}) {
+		t.Errorf("resident = %v, want both models in memory under the raised budget", got)
+	}
+}
+
+// Lowering the budget applies to future loads only: nothing is pulled out from
+// under the model the operator is using. The machine sits over the new figure
+// until those models unload by the usual rules.
+func TestLoweringTheMemoryBudgetUnloadsNothing(t *testing.T) {
+	l := newFakeLauncher()
+	src := &fakeSource{models: map[string]int64{"org/a": 200, "org/b": 200, "org/c": 200}}
+	p := newTestPool(t, l, src, PoolOptions{MaxResidentBytes: 600})
+
+	for _, id := range []string{"org/a", "org/b"} {
+		_, release, err := p.Acquire(context.Background(), id)
+		if err != nil {
+			t.Fatalf("Acquire(%s): %v", id, err)
+		}
+		release()
+	}
+
+	p.SetMemoryBudget(250)
+
+	if got := residentIDs(p); !slices.Equal(got, []string{"org/a", "org/b"}) {
+		t.Errorf("resident = %v, want both models still in memory — lowering the budget unloads nothing", got)
+	}
+	// The new figure governs the next load, which is the whole of what
+	// lowering it does: room is made for org/c by eviction, not by the save.
+	if _, release, err := p.Acquire(context.Background(), "org/c"); err != nil {
+		t.Fatalf("Acquire(org/c): %v", err)
+	} else {
+		release()
+	}
+	if got := residentIDs(p); !slices.Equal(got, []string{"org/c"}) {
+		t.Errorf("resident = %v, want the next load measured against the lowered budget", got)
+	}
+}
+
+// Zero is what a fresh install stores, and it means the default share of this
+// Mac's memory rather than a budget of nothing.
+func TestSettingAZeroMemoryBudgetRestoresTheDefault(t *testing.T) {
+	l := newFakeLauncher()
+	src := &fakeSource{models: map[string]int64{"org/a": 200}}
+	p := newTestPool(t, l, src, PoolOptions{MaxResidentBytes: 300})
+
+	p.SetMemoryBudget(0)
+	if got, want := p.MemoryBudget(), defaultResidentBudget(); got != want {
+		t.Errorf("MemoryBudget() = %d after a zero budget, want the default %d", got, want)
+	}
+}

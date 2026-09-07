@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/intentdriven/Gropius/internal/capability"
 	"github.com/intentdriven/Gropius/internal/config"
 	"github.com/intentdriven/Gropius/internal/hub"
 	"github.com/intentdriven/Gropius/internal/registry"
@@ -36,6 +37,13 @@ type App struct {
 	// not a file, not its own directory — until that switch is on.
 	StatsStore *stats.FileStore
 	Log        *slog.Logger
+
+	// machineRAM is how much memory this Mac has, or 0 when that cannot be
+	// read. Read once, at construction: a machine does not grow while the
+	// process runs, and every figure derived from it — the default budget, the
+	// share Settings shows, the ceiling a save is checked against — has to be
+	// the same figure or they contradict each other on screen.
+	machineRAM int64
 
 	// saveMu serialises whole settings saves. cfgMu guards the value; this
 	// guards the sequence — write the file, swap the value, tell the pool —
@@ -78,6 +86,12 @@ type Options struct {
 	Paths  config.Paths
 	Config config.Config
 	Log    *slog.Logger
+	// PhysicalMemory reads how much memory this Mac has. Nil — the shipping
+	// case — means capability.PhysicalMemory, which asks the system. It is a
+	// seam because every claim Settings makes about the memory budget is a
+	// claim about a figure this process cannot otherwise choose, including the
+	// claim it makes when the figure cannot be read at all.
+	PhysicalMemory func() int64
 	// Launcher starts model server processes. Nil — the shipping case — means
 	// the real one, which runs mlx_lm.server out of the managed virtualenv.
 	// It is a seam because the wiring between a saved configuration and a
@@ -120,7 +134,13 @@ func New(opts Options) (*App, error) {
 		MaxBytes: opts.Config.StatsMaxBytes,
 		Log:      opts.Log,
 	})
+	readMemory := opts.PhysicalMemory
+	if readMemory == nil {
+		readMemory = capability.PhysicalMemory
+	}
+
 	a := &App{
+		machineRAM:  readMemory(),
 		Paths:       opts.Paths,
 		Hub:         hc,
 		Registry:    reg,
@@ -153,9 +173,13 @@ func New(opts Options) (*App, error) {
 	a.cfg.Pinned = a.adoptPinned(a.cfg.Pinned)
 
 	a.Pool = runtime.NewPool(runtime.PoolOptions{
-		Launcher:          launcher,
-		Models:            modelSource{reg},
-		IdleTimeout:       time.Duration(opts.Config.IdleTimeoutSec) * time.Second,
+		Launcher:    launcher,
+		Models:      modelSource{reg},
+		IdleTimeout: time.Duration(opts.Config.IdleTimeoutSec) * time.Second,
+		// Resolved here rather than left to the pool, so that the budget the
+		// pool enforces, the ceiling a save is checked against and the share
+		// Settings shows are all worked out from one reading of this machine.
+		MaxResidentBytes:  a.effectiveBudget(opts.Config.MaxResidentBytes),
 		DecodeConcurrency: opts.Config.DecodeConcurrency,
 		// Read live, at the moment a model server starts, so a default saved in
 		// Settings applies the next time each model loads.
@@ -181,7 +205,8 @@ func New(opts Options) (*App, error) {
 	// so an over-budget set reaches the pool whatever this says. Passing the
 	// same list as both the incoming and the current set is what says "nothing
 	// was added here": every problem it finds is warned about, none refused.
-	_ = a.checkPinnedFit(a.cfg.Pinned, a.cfg.Pinned)
+	budget := a.Pool.MemoryBudget()
+	_ = a.checkPinnedFit(a.cfg.Pinned, a.cfg.Pinned, budget, budget)
 
 	if len(opts.Config.Preload) > 0 {
 		go a.preload(opts.Config.Preload)
@@ -241,7 +266,11 @@ func (a *App) SetConfig(c config.Config) error {
 	}
 	c.PerModel = perModel
 	c.Pinned = a.canonicalPinned(c.Pinned)
-	if err := a.checkPinnedFit(c.Pinned, a.Config().Pinned); err != nil {
+	if err := a.checkBudgetFitsTheMachine(c.MaxResidentBytes); err != nil {
+		return err
+	}
+	budget := a.effectiveBudget(c.MaxResidentBytes)
+	if err := a.checkPinnedFit(c.Pinned, a.Config().Pinned, budget, a.Pool.MemoryBudget()); err != nil {
 		return err
 	}
 	if err := config.Save(a.Paths.Config, c); err != nil {
@@ -263,7 +292,80 @@ func (a *App) SetConfig(c config.Config) error {
 	// eviction rather than from the one after a restart. The pool takes its own
 	// lock, the one both eviction paths hold while they read the set.
 	a.Pool.SetPinned(c.Pinned)
+	// Applied live for the same reason, and it unloads nothing: a lowered
+	// budget governs the next load, so no model is pulled out from under the
+	// operator at the moment they pressed Save.
+	a.Pool.SetMemoryBudget(budget)
 	return nil
+}
+
+// MachineRAM is how much memory this Mac has, or 0 when that cannot be read.
+// Settings shows the budget as a share of it, and a save is checked against
+// it; both say nothing rather than guess when it is 0.
+func (a *App) MachineRAM() int64 { return a.machineRAM }
+
+// effectiveBudget resolves a stored budget to the figure the pool enforces:
+// zero — what a fresh install stores — means the default share of this Mac's
+// memory. The rule lives here so that the pool, the search filter and Settings
+// cannot each resolve it differently.
+func (a *App) effectiveBudget(stored int64) int64 {
+	if stored > 0 {
+		return stored
+	}
+	return capability.DefaultBudget(a.machineRAM)
+}
+
+// checkBudgetFitsTheMachine refuses a budget larger than this Mac's memory.
+//
+// It is checked here, at a save, and deliberately not in config.Validate:
+// Validate runs at every read, and a config that fails it takes the whole
+// install down to loopback with the shipping defaults — so a config.json
+// carried from a 128 GB Mac to a 64 GB one would silently reset the bind
+// address and the API key along with the budget. A machine whose memory cannot
+// be read has no ceiling to check against, so the figure is taken at its word.
+func (a *App) checkBudgetFitsTheMachine(budget int64) error {
+	if a.machineRAM <= 0 || budget <= a.machineRAM {
+		return nil
+	}
+	return fmt.Errorf(
+		"a memory budget of %s is more than this Mac has (%s) — models can only be held in the memory that exists",
+		runtime.HumanBytes(budget), runtime.HumanBytes(a.machineRAM))
+}
+
+// warnAbovePercent is the share of this Mac's memory beyond which a budget is
+// advice rather than arithmetic. It is a threshold on a warning, not a limit:
+// the operator is the one who knows what else this Mac runs.
+const warnAbovePercent = 85
+
+// BudgetWarnAbove is the budget above which the panel warns, or 0 when this
+// Mac's memory cannot be read and there is nothing to take a share of.
+func (a *App) BudgetWarnAbove() int64 {
+	if a.machineRAM <= 0 {
+		return 0
+	}
+	return a.machineRAM * warnAbovePercent / 100
+}
+
+// MemoryBudgetWarning is what the control panel says when the budget claims
+// most of this Mac, and "" when it does not.
+//
+// A warning rather than a refusal, because what a Mac can carry is not a
+// figure Gropius knows: a loaded model is charged its weights and a fifth, and
+// not the cache a long conversation adds (iss-3), so a machine that is fully
+// committed on paper can still run out under load — and equally, a Mac that
+// runs nothing else can carry more than the default share.
+func (a *App) MemoryBudgetWarning() string {
+	above := a.BudgetWarnAbove()
+	if above <= 0 {
+		return ""
+	}
+	budget := a.Pool.MemoryBudget()
+	if budget <= above {
+		return ""
+	}
+	return fmt.Sprintf(
+		"The memory budget (%s) is most of this Mac's memory (%s). macOS and everything else running share it, and a model is charged what it loads rather than what a long conversation adds to it, so requests can still run the machine out of memory.",
+		runtime.HumanBytes(budget), runtime.HumanBytes(a.machineRAM))
 }
 
 // canonicalPinned rewrites each pinned id to the registry's spelling of the
@@ -334,23 +436,24 @@ func (a *App) adoptPinned(in []string) []string {
 // fail at save time by itself — it fails later, as a refusal of every request
 // for a model that is not pinned, with no hint of why.
 //
-// What is refused is a save that makes the set worse: one that adds a pin. A
-// set the operator did not touch is accepted and warned about, however badly it
-// fits, because the fit is a fact about this Mac and the set may have arrived
-// from another one — and a settings page that will not save an API key until an
-// unrelated setting is fixed is the wedge adoptPinned exists to prevent. When
-// the memory budget itself becomes settable, a save that lowers it is the other
-// way to make the set worse and belongs in the same test here.
+// What is refused is a save that makes the set worse: one that adds a pin, and
+// one that lowers the memory budget under it. A set the operator did not touch,
+// under a budget they did not lower, is accepted and warned about however badly
+// it fits, because the fit is a fact about this Mac and the set may have
+// arrived from another one — and a settings page that will not save an API key
+// until an unrelated setting is fixed is the wedge adoptPinned exists to
+// prevent. The budget is judged at its incoming value, so one save that changes
+// both the pins and the budget is measured on what it is asking for.
 //
 // A pin that names a model this Mac cannot measure is refused as it is added,
 // for the same reason: a fit check that silently skips a model is a promise it
 // cannot keep. One already in the set is warned about, not refused.
-func (a *App) checkPinnedFit(incoming, current []string) error {
-	problem := a.pinnedFitProblem(incoming)
+func (a *App) checkPinnedFit(incoming, current []string, budget, currentBudget int64) error {
+	problem := a.pinnedFitProblem(incoming, budget)
 	if problem == nil {
 		return nil
 	}
-	if addsAPin(incoming, current) {
+	if addsAPin(incoming, current) || budget < currentBudget {
 		return problem
 	}
 	a.Log.Warn("the pinned models cannot all be kept in memory as configured", "err", problem)
@@ -361,14 +464,14 @@ func (a *App) checkPinnedFit(incoming, current []string) error {
 //
 // A model it cannot measure is reported before the sum, because a sum with a
 // model missing from it is not a figure to act on.
-func (a *App) pinnedFitProblem(pinned []string) error {
+func (a *App) pinnedFitProblem(pinned []string, budget int64) error {
 	sum, unsized := a.pinnedCharge(pinned)
 	if len(unsized) > 0 {
 		return fmt.Errorf(
 			"cannot measure %s against the memory budget — this Mac does not record how large it is",
 			strings.Join(unsized, ", "))
 	}
-	if budget := a.Pool.MemoryBudget(); sum > budget {
+	if sum > budget {
 		return fmt.Errorf(
 			"the pinned models need about %s of memory but the budget is %s — pin fewer models, or choose smaller quantizations",
 			runtime.HumanBytes(sum), runtime.HumanBytes(budget))
@@ -480,7 +583,7 @@ var stopReasons = map[runtime.StopReason]string{
 // re-downloaded at a larger quantization grows. Nothing refuses either, so the
 // panel says so instead, beside the warning about an open LAN endpoint.
 func (a *App) PinnedFitWarning() string {
-	problem := a.pinnedFitProblem(a.Config().Pinned)
+	problem := a.pinnedFitProblem(a.Config().Pinned, a.Pool.MemoryBudget())
 	if problem == nil {
 		return ""
 	}

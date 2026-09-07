@@ -1,0 +1,247 @@
+package app
+
+import (
+	"bytes"
+	"os"
+	"strings"
+	"testing"
+
+	"github.com/intentdriven/Gropius/internal/capability"
+	"github.com/intentdriven/Gropius/internal/config"
+	"github.com/intentdriven/Gropius/internal/runtime"
+)
+
+const gb = int64(1) << 30
+
+// newBudgetApp builds an App on a machine of a size the test chooses, so that
+// every figure below is the same on whatever Mac the suite runs on — and so
+// that the machine nobody can measure is testable at all.
+func newBudgetApp(t *testing.T, ram int64, cfg config.Config) *App {
+	t.Helper()
+	a, err := New(Options{
+		Paths:          config.NewPaths(t.TempDir()),
+		Config:         cfg,
+		PhysicalMemory: func() int64 { return ram },
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	t.Cleanup(func() { a.Close() })
+	return a
+}
+
+// A fresh install stores no budget and runs on the default share of this Mac's
+// memory, which is the figure Settings shows back.
+func TestAFreshInstallRunsOnTheDefaultShareOfTheMachine(t *testing.T) {
+	a := newBudgetApp(t, 128*gb, config.Default())
+
+	if got, want := a.MachineRAM(), 128*gb; got != want {
+		t.Errorf("MachineRAM() = %d, want %d", got, want)
+	}
+	if got, want := a.Pool.MemoryBudget(), capability.DefaultBudget(128*gb); got != want {
+		t.Errorf("MemoryBudget() = %d, want the default share %d", got, want)
+	}
+	if got := a.Config().MaxResidentBytes; got != 0 {
+		t.Errorf("MaxResidentBytes = %d, want 0 — the default is resolved, not stored", got)
+	}
+}
+
+// A budget saved in Settings governs the next load, not the next start-up.
+func TestSetConfigAppliesTheBudgetToThePoolWithoutARestart(t *testing.T) {
+	a := newBudgetApp(t, 128*gb, config.Default())
+
+	c := a.Config()
+	c.MaxResidentBytes = 96 * gb
+	if err := a.SetConfig(c); err != nil {
+		t.Fatalf("SetConfig: %v", err)
+	}
+	if got := a.Pool.MemoryBudget(); got != 96*gb {
+		t.Errorf("the pool holds a budget of %d, want the one just saved (%d)", got, 96*gb)
+	}
+	// Clearing it goes back to the default rather than to a budget of nothing.
+	c.MaxResidentBytes = 0
+	if err := a.SetConfig(c); err != nil {
+		t.Fatalf("SetConfig: %v", err)
+	}
+	if got, want := a.Pool.MemoryBudget(), capability.DefaultBudget(128*gb); got != want {
+		t.Errorf("the pool holds %d after the budget was cleared, want the default %d", got, want)
+	}
+}
+
+// A budget larger than the machine is refused, naming what the machine has,
+// and nothing is written: the check is at a save, where a human is waiting for
+// an answer, rather than at a read, where refusing would take the install down
+// to loopback over one figure.
+func TestSetConfigRefusesABudgetLargerThanTheMachine(t *testing.T) {
+	a := newBudgetApp(t, 16*gb, config.Default())
+
+	base := a.Config()
+	base.APIKey = "bh_before"
+	if err := a.SetConfig(base); err != nil {
+		t.Fatalf("SetConfig: %v", err)
+	}
+	before, err := os.ReadFile(a.Paths.Config)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	over := base.Clone()
+	over.MaxResidentBytes = 32 * gb
+	err = a.SetConfig(over)
+	if err == nil {
+		t.Fatal("SetConfig accepted a budget larger than the whole machine")
+	}
+	if !strings.Contains(err.Error(), runtime.HumanBytes(16*gb)) {
+		t.Errorf("error = %q, want it to name this Mac's memory (%s)", err, runtime.HumanBytes(16*gb))
+	}
+	after, err := os.ReadFile(a.Paths.Config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Error("a refused save rewrote config.json")
+	}
+	if got := a.Config().MaxResidentBytes; got != 0 {
+		t.Errorf("the refused budget reached the live configuration: %d", got)
+	}
+	if got, want := a.Pool.MemoryBudget(), capability.DefaultBudget(16*gb); got != want {
+		t.Errorf("the refused budget reached the pool: %d, want %d", got, want)
+	}
+}
+
+// When the machine's memory cannot be read there is no ceiling to check
+// against, so an explicit figure is taken at its word rather than refused.
+func TestAMachineOfUnknownSizeAcceptsAnyBudget(t *testing.T) {
+	a := newBudgetApp(t, 0, config.Default())
+
+	if got := a.MachineRAM(); got != 0 {
+		t.Fatalf("MachineRAM() = %d, want 0 for a machine that cannot be measured", got)
+	}
+	c := a.Config()
+	c.MaxResidentBytes = 512 * gb
+	if err := a.SetConfig(c); err != nil {
+		t.Fatalf("SetConfig refused a budget on an unmeasurable machine: %v", err)
+	}
+	if got := a.Pool.MemoryBudget(); got != 512*gb {
+		t.Errorf("the pool holds %d, want the budget just saved", got)
+	}
+	// And there is no share of the machine to warn about either.
+	if got := a.BudgetWarnAbove(); got != 0 {
+		t.Errorf("BudgetWarnAbove() = %d, want 0 when the machine cannot be measured", got)
+	}
+	if w := a.MemoryBudgetWarning(); w != "" {
+		t.Errorf("MemoryBudgetWarning() = %q, want none when the machine cannot be measured", w)
+	}
+}
+
+// Lowering the budget under the pinned models is the other way to make a
+// pinned set worse, and it is refused the same way adding a pin is: naming the
+// sum, changing nothing.
+func TestSetConfigRefusesABudgetBelowThePinnedSum(t *testing.T) {
+	a := newBudgetApp(t, 128*gb, config.Default())
+	putReady(t, a, "org/writer", 20*gb)
+	putReady(t, a, "org/reviewer", 20*gb)
+
+	base := a.Config()
+	base.Pinned = []string{"org/writer", "org/reviewer"}
+	base.APIKey = "bh_before"
+	if err := a.SetConfig(base); err != nil {
+		t.Fatalf("SetConfig: %v", err)
+	}
+	before, err := os.ReadFile(a.Paths.Config)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	sum := 2 * runtime.LoadCost(20*gb)
+	lower := base.Clone()
+	lower.MaxResidentBytes = sum - 1
+	err = a.SetConfig(lower)
+	if err == nil {
+		t.Fatal("SetConfig accepted a budget below the sum of the pinned models")
+	}
+	if !strings.Contains(err.Error(), runtime.HumanBytes(sum)) {
+		t.Errorf("error = %q, want it to name the pinned sum (%s)", err, runtime.HumanBytes(sum))
+	}
+	after, err := os.ReadFile(a.Paths.Config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Error("a refused save rewrote config.json")
+	}
+
+	// A budget that still holds the set is saved, and so is one that makes the
+	// fit better.
+	ok := base.Clone()
+	ok.MaxResidentBytes = sum
+	if err := a.SetConfig(ok); err != nil {
+		t.Errorf("SetConfig refused a budget that holds the pinned set exactly: %v", err)
+	}
+}
+
+// A pinned set that arrives already over budget — a config.json carried from a
+// Mac with more memory — is applied and warned about, not refused: a settings
+// page that will not save an API key over a set the operator did not touch on
+// this machine is the wedge. Raising the budget makes it better, so it is
+// accepted even while the set still does not fit.
+func TestAnInheritedOverBudgetSetDoesNotBlockABudgetSave(t *testing.T) {
+	a := newBudgetApp(t, 128*gb, config.Config{
+		Host: "127.0.0.1", Port: 11535, DecodeConcurrency: 4,
+		MaxResidentBytes: 2 * gb,
+		Pinned:           []string{"org/writer"},
+	})
+	putReady(t, a, "org/writer", 20*gb)
+
+	c := a.Config()
+	c.APIKey = "bh_unrelated"
+	if err := a.SetConfig(c); err != nil {
+		t.Fatalf("an unrelated save was refused over an inherited pinned set: %v", err)
+	}
+	raise := a.Config()
+	raise.MaxResidentBytes = 4 * gb
+	if err := a.SetConfig(raise); err != nil {
+		t.Fatalf("a save raising the budget was refused although it makes the fit better: %v", err)
+	}
+	if got := a.Pool.MemoryBudget(); got != 4*gb {
+		t.Errorf("the pool holds %d, want the raised budget", got)
+	}
+	// It is still reported, since nothing about the save made it fit.
+	if w := a.PinnedFitWarning(); w == "" {
+		t.Error("a pinned set that still does not fit is not reported to the operator")
+	}
+}
+
+// A budget that takes most of the machine is advice, not an error: the charge
+// counts the weights a model loads and not the cache a long conversation adds,
+// so a Mac that is fully committed on paper can still run out under load.
+func TestAHighBudgetIsWarnedAboutRatherThanRefused(t *testing.T) {
+	a := newBudgetApp(t, 100*gb, config.Default())
+
+	if got, want := a.BudgetWarnAbove(), 85*gb; got != want {
+		t.Errorf("BudgetWarnAbove() = %d, want %d", got, want)
+	}
+	c := a.Config()
+	c.MaxResidentBytes = 95 * gb
+	if err := a.SetConfig(c); err != nil {
+		t.Fatalf("a high budget was refused rather than warned about: %v", err)
+	}
+	if got := a.Config().MaxResidentBytes; got != 95*gb {
+		t.Errorf("the high budget was not stored: %d", got)
+	}
+	w := a.MemoryBudgetWarning()
+	if w == "" {
+		t.Fatal("a budget above the warning threshold draws no warning")
+	}
+	if !strings.Contains(w, runtime.HumanBytes(100*gb)) {
+		t.Errorf("warning = %q, want it to name this Mac's memory", w)
+	}
+
+	c.MaxResidentBytes = 50 * gb
+	if err := a.SetConfig(c); err != nil {
+		t.Fatal(err)
+	}
+	if w := a.MemoryBudgetWarning(); w != "" {
+		t.Errorf("MemoryBudgetWarning() = %q, want none for a modest budget", w)
+	}
+}
