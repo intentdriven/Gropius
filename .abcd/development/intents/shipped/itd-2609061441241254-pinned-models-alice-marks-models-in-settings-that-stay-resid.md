@@ -115,6 +115,31 @@ room that the machine refuses more work than eviction used to cost it.
 <!-- abcd-review: OWED receipt=rcp-4d0d60cfdaf8 -->
 Fidelity review OWED (receipt rcp-4d0d60cfdaf8).
 
+2026-09-07 — Acceptance criterion 5 shipped narrower than it is written here,
+and the criterion is left as written because a shipped record is not rewritten.
+As built: a save that adds a pin the memory budget cannot hold is refused with
+the sum and the budget, and the stored settings are unchanged; a stored set that
+no longer fits — a `config.json` carried to a Mac with less memory, or a
+start-up where the RAM detection fell back to its default — is applied with a
+warning on the control panel and in the log, so that Alice can still save her
+API key. The literal criterion refuses every settings change there is over a
+pinned set she did not choose on this machine, which is the wedge this intent's
+own `adoptPinned` work exists to prevent. Scope condition cond-2609061822378129
+("a settings save that breaks that is refused") and the resolved Open Question
+that states the invariant are narrowed the same way. **The fidelity audit should
+record criterion 5 as diverged, for the maintainer to adopt or reject**, and
+itd-2609061441261073's dependency on "floor at least the pinned sum" must read
+that sum as advisory for an inherited set: it refuses a budget the operator
+lowers below it, and warns for a set carried in.
+
+2026-09-07 — Acceptance criterion 2 as written is weaker than what shipped: a
+pinned model that "was used more recently" is spared by least-recently-used
+eviction whether or not pinning exists, so the criterion would pass on a build
+where a pin does nothing. What is built and held is the stronger case — the
+pinned model is the *least* recently used and is still not evicted — by
+`runtime.TestEvictionSkipsThePinnedModelEvenWhenItIsTheLeastRecentlyUsed`. The
+criterion is left as written; this note and that test say what holds.
+
 ## Grounds
 
 - pursued: we expect a shared Mac to serve several agents without their models evicting each other once the operator can pin, budget and grace, and once keyed clients can see what is warm; we are wrong if model swaps stay as frequent with those controls set as they were without them, measured by the statistics store

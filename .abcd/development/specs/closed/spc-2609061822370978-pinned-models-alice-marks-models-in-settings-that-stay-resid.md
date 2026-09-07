@@ -202,3 +202,75 @@ is visible at pin time rather than at the first refused request.
   holds; the remaining-budget figure beside the field is required.
 - Whether a non-resident pinned model reads "pinned, not loaded" on its card.
   Recommended, because an operator reading "pinned" assumes it is running.
+
+## As built (2026-09-07)
+
+Six things shipped differently from the plan above. Recorded here because a
+closed spec is the durable claim about what shipped, and the rest of this
+document says otherwise. The reasoning is in `.abcd/work/DECISIONS.md`
+(2026-09-06, the three pinned lines, and 2026-09-07); this section is the
+inventory.
+
+**`runtime.Resident` did not gain `Pinned`.** The Approach says it does, and
+that spc-2609061822377049 projects it onto the keyed models listing. A
+`Resident` record exists only for a model the pool is holding, so a
+`Resident`-sourced field reports `pinned: false` for a pinned model nothing has
+loaded — which is the entry a client most needs to tell apart from an ordinary
+cold one, and which this spec's own Open Design Point asks the panel to show as
+"pinned, not loaded". `Pool.Pinned() []string` answers instead, independent of
+what is loaded, and the models list joins it on the folded id beside the
+residency join.
+
+**The fit check refuses only a save that adds a pin.** The Approach says "at
+every `App.SetConfig`, the sum ... must be no greater than the effective memory
+budget". As built, a save is refused when the resulting set does not fit **and**
+the save adds a pin; a set that arrives already too large — a `config.json`
+carried from a Mac with more memory, or a start-up where the RAM sysctl fell
+back to its default — is applied and warned about, on the panel and in the log.
+The literal rule refuses every settings change there is, the API key and the
+bind address with it, over a set the operator did not choose on this machine;
+that is the wedge `App.adoptPinned` exists to prevent, reached by a second door.
+Acceptance criterion 5, scope condition `cond-2609061822378129` and the Open
+Question that resolves the fit check are all stated in the literal form and are
+therefore narrower as built — see the intent's Audit Notes for 2026-09-07.
+**itd-2609061441261073 must read this invariant as advisory for an inherited
+set**: its dependency on "floor at least the pinned sum" holds for a budget the
+operator lowers, and warns rather than refuses for a set carried in.
+
+**The 503 wording.** The Approach gives it as "not enough memory to load another
+model right now — the resident models are protected or busy". As built it is
+`runtime.NoRoomError.Error()`: "not enough memory to load another model, and no
+model in memory can be freed (limit %s)". The word "protected" is deliberately
+gone — it tells an unauthenticated LAN client that pinning is in use on this
+install, which is the disclosure class this record gates its other fields on.
+
+**Names the Scope does not list.** Shipped beyond the five in-scope items:
+`App.adoptPinned` (folds a pinned list read from disk onto the registry's
+spellings), `App.adoptPinnedSpelling` (the same when a model arrives),
+`App.PinnedFitWarning` (a set can stop fitting with no save to refuse it),
+`App.saveMu` (a settings save is one sequence, not three steps),
+`runtime.NoRoomError`, `runtime.PoolOptions.Log`, and `State.Pinned` /
+`State.MemoryBudget` on the control plane.
+
+**The charge basis.** The Approach charges "`loadCost(size)` over the pinned ids
+that are downloaded". As built, `chargeable` counts a model that is ready **or
+still downloading** — a download charged nothing is how a pinned pair that can
+never fit is accepted while the bytes are arriving — and a failed download is
+charged nothing, because the pool refuses to load it at all. `chargedSize` is
+`Bytes` when non-zero, else `SizeBytes`: the disk figure is what the pool
+charges, and the declared figure stands in for it until the bytes land. A model
+with neither is refused as it is pinned rather than skipped silently.
+
+**iss-2 is closed on this path, not merely "not worsened".** The trust-boundary
+notes say iss-2 (unsynchronised `App.SetConfig`) is unchanged. `saveMu` covers
+the whole of `SetConfig`, including the `a.Hub.Token` write that issue names, so
+that race is gone; iss-2609062318466201, raised on this branch for the pool's
+own divergence, is resolved by the same lock.
+
+**Criterion 2 as written is weaker than what shipped.** It says the pinned model
+survives "even though the pinned one was used more recently" — which plain
+least-recently-used eviction satisfies without any pin at all. The holding test,
+`runtime.TestEvictionSkipsThePinnedModelEvenWhenItIsTheLeastRecentlyUsed`, makes
+the pinned model the *older* of the two, so it fails without the skip clause.
+The criterion is not rewritten (a shipped record is not rewritten); the test is
+the statement of what holds.
