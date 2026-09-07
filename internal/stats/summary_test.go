@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -741,25 +742,37 @@ func TestAHalfWrittenSummaryIsSweptAtTheNextStart(t *testing.T) {
 // every record from then on, silently, for the life of the process.
 func TestAFoldThatCannotBeDoneStopsRetentionAndNothingElse(t *testing.T) {
 	const wrote = 300
-	live := func(t *testing.T, s *FileStore) {
+	// What M1 is about: the write path loses nothing and recording carries on.
+	// How much of the past survives is retention's business, and once the store
+	// is over its cap with no way to summarize what it drops, the cap wins and
+	// the loss is counted where it can be seen — which is the decision recorded
+	// against adr-2609061610107154.
+	live := func(t *testing.T, s *FileStore, newest int64) {
 		t.Helper()
 		if got := s.Status().Dropped; got != 0 {
-			t.Errorf("%d records were lost because retention could not summarize what it wanted to drop", got)
+			t.Errorf("%d records were lost from the write path because retention could not summarize what it wanted to drop", got)
 		}
-		if !s.Status().RetentionWedged {
-			t.Error("the store does not say retention is stuck, so the panel would show a store quietly over its limit")
-		}
-		seen := 0
+		seen, latest := 0, int64(0)
 		if err := s.Latest(0, func(l Line) bool {
 			if l.Kind == KindRequest {
 				seen++
+				if l.At > latest {
+					latest = l.At
+				}
 			}
 			return true
 		}); err != nil {
 			t.Fatal(err)
 		}
-		if seen != wrote {
-			t.Errorf("%d of %d records are readable", seen, wrote)
+		if seen == 0 {
+			t.Fatal("the store recorded nothing at all")
+		}
+		if latest != newest {
+			t.Errorf("the newest record held is from %d, want the last one written at %d: recording stopped", latest, newest)
+		}
+		st := s.Status()
+		if !st.RetentionWedged && st.Unsummarized == 0 {
+			t.Error("the store says nothing about a retention it could not do: neither stuck nor a loss counted")
 		}
 	}
 
@@ -786,7 +799,10 @@ func TestAFoldThatCannotBeDoneStopsRetentionAndNothingElse(t *testing.T) {
 		if err := s.Flush(); err != nil {
 			t.Fatal(err)
 		}
-		live(t, s)
+		live(t, s, day(2026, time.January, 10, 9).Add(time.Duration(wrote-1)*time.Second).Unix())
+		if !s.Status().RetentionWedged {
+			t.Error("the store does not say retention is stuck, though the summary's name is a link it will never write through")
+		}
 		raw, err := os.ReadFile(target)
 		if err != nil {
 			t.Fatal(err)
@@ -823,12 +839,7 @@ func TestAFoldThatCannotBeDoneStopsRetentionAndNothingElse(t *testing.T) {
 		if err := s.Flush(); err != nil {
 			t.Fatal(err)
 		}
-		if got := s.Status().Dropped; got != 0 {
-			t.Errorf("%d records were lost because one file could not be read", got)
-		}
-		if !s.Status().RetentionWedged {
-			t.Error("the store does not say retention is stuck")
-		}
+		live(t, s, day(2026, time.January, 10, 9).Add(time.Duration(wrote-1)*time.Second).Unix())
 	})
 }
 
@@ -1021,5 +1032,291 @@ func TestASummaryDaySaysWhetherAnyOfItsDetailIsHeld(t *testing.T) {
 	}
 	if !partly.DetailHeld {
 		t.Error("a day the store still holds records from is reported as one whose detail is gone")
+	}
+}
+
+// promptly runs what a wedged store must never make a caller wait for, and
+// fails rather than hanging the suite. A named pipe left under a name the
+// store reads parks whoever opens it forever, and the store's lifecycle lock
+// is held on the way in — so this is the difference between a store that
+// refuses and an app whose settings, figures and shutdown are all stuck while
+// it goes on answering requests.
+func promptly(t *testing.T, what string, fn func()) {
+	t.Helper()
+	done := make(chan struct{})
+	go func() { defer close(done); fn() }()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("%s did not return within five seconds: a file planted in the store directory has parked it", what)
+	}
+}
+
+// A pipe, a device or a directory under a name the store reads must be refused
+// on the handle, not opened and waited on.
+func TestSomethingThatIsNotAFileUnderTheSummaryNameIsRefusedNotWaitedOn(t *testing.T) {
+	t.Run("planted before recording starts", func(t *testing.T) {
+		clock := &testClock{}
+		clock.set(day(2026, time.January, 10, 9))
+		s, dir := summarizeTestStore(t, clock, StoreOptions{Months: 1})
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := syscall.Mkfifo(filepath.Join(dir, summaryFileName), 0o600); err != nil {
+			t.Skipf("this filesystem will not take a named pipe: %v", err)
+		}
+		promptly(t, "switching recording on", func() { s.SetEnabled(true) })
+		if !s.Enabled() {
+			t.Fatal("the store refused to record because of a file that is not one of its own")
+		}
+		promptly(t, "recording a request", func() {
+			if err := s.AppendRequest(request(day(2025, time.January, 10, 9), "org/a")); err != nil {
+				t.Error(err)
+			}
+		})
+		promptly(t, "reading the summaries", func() {
+			// An error is the right answer; hanging is not.
+			_ = s.Summaries(0, func(SummaryDay) bool { return true })
+		})
+		promptly(t, "flushing", func() {
+			if err := s.Flush(); err != nil {
+				t.Error(err)
+			}
+		})
+		promptly(t, "closing", func() {
+			if err := s.Close(); err != nil {
+				t.Error(err)
+			}
+		})
+		fi, err := os.Lstat(filepath.Join(dir, summaryFileName))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if fi.Mode()&os.ModeNamedPipe == 0 {
+			t.Error("the store wrote over what was planted rather than refusing it")
+		}
+	})
+
+	t.Run("planted while recording", func(t *testing.T) {
+		clock := &testClock{}
+		clock.set(day(2026, time.January, 10, 9))
+		s, dir := summarizeTestStore(t, clock, StoreOptions{MaxBytes: 8 << 10, RotateBytes: 1 << 10})
+		on(t, s)
+		if err := s.AppendRequest(request(day(2026, time.January, 10, 9), "org/a")); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.Flush(); err != nil {
+			t.Fatal(err)
+		}
+		if err := syscall.Mkfifo(filepath.Join(dir, summaryFileName), 0o600); err != nil {
+			t.Skipf("this filesystem will not take a named pipe: %v", err)
+		}
+		promptly(t, "recording through a rotation", func() {
+			for i := range 200 {
+				if err := s.AppendRequest(request(day(2026, time.January, 10, 9).Add(time.Duration(i)*time.Second), "org/a")); err != nil {
+					t.Error(err)
+					return
+				}
+			}
+		})
+		promptly(t, "flushing", func() {
+			if err := s.Flush(); err != nil {
+				t.Error(err)
+			}
+		})
+		promptly(t, "reading the summaries", func() {
+			_ = s.Summaries(0, func(SummaryDay) bool { return true })
+		})
+		promptly(t, "switching recording off", func() {
+			if err := s.SetEnabled(false); err != nil {
+				t.Error(err)
+			}
+		})
+		if !s.Status().RetentionWedged {
+			t.Error("the store does not say retention is stuck, though it cannot write its summary")
+		}
+	})
+}
+
+// The size limit is the hard bound and it still wins. Keeping records that
+// cannot be summarized is the right first answer; growing without end because
+// of it is not, and a full disk is exactly the case that makes the fold fail.
+func TestTheSizeLimitStillWinsWhenTheSummaryCannotBeWritten(t *testing.T) {
+	const cap = 8 << 10
+	clock := &testClock{}
+	clock.set(day(2026, time.January, 10, 9))
+	s, dir := summarizeTestStore(t, clock, StoreOptions{MaxBytes: cap, RotateBytes: 1 << 10})
+	on(t, s)
+	if err := s.AppendRequest(request(day(2026, time.January, 10, 9), "org/a")); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	// A summary that cannot be read is a summary that cannot be written: the
+	// fold reads it before it folds into it. This is what a full disk does to
+	// the same path.
+	blocked := filepath.Join(dir, summaryFileName)
+	if err := os.WriteFile(blocked, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(blocked, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(blocked, 0o600) })
+
+	for i := range 400 {
+		if err := s.AppendRequest(request(day(2026, time.January, 10, 9).Add(time.Duration(i)*time.Second), "org/a")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.Flush(); err != nil {
+		t.Fatal(err)
+	}
+
+	var total int64
+	for _, name := range names(t, dir) {
+		fi, err := os.Lstat(filepath.Join(dir, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		total += fi.Size()
+	}
+	if total > cap+(1<<10) {
+		t.Errorf("the store holds %d bytes against a %d-byte cap it cannot summarize its way down to", total, cap)
+	}
+	st := s.Status()
+	if !st.RetentionWedged {
+		t.Error("the store dropped records without a summary and does not say retention is stuck")
+	}
+	if st.Unsummarized == 0 {
+		t.Error("records were dropped without a summary and the figure nobody can see is zero")
+	}
+	if st.Dropped != 0 {
+		t.Errorf("%d records were lost from the write path; only retention should be losing anything here", st.Dropped)
+	}
+}
+
+// Lines this build cannot read are carried through, but they are inside the
+// bound like everything else: a blob of them would otherwise be a permanent
+// tax on the records the operator asked to keep.
+func TestCarriedLinesAreInsideTheSummarysShareOfTheCap(t *testing.T) {
+	const cap = 64 << 10
+	clock := &testClock{}
+	clock.set(day(2026, time.January, 10, 9))
+	s, dir := summarizeTestStore(t, clock, StoreOptions{Months: 1, MaxBytes: cap, RotateBytes: 2 << 10})
+	on(t, s)
+	if err := s.AppendRequest(request(day(2025, time.January, 10, 9), "org/a")); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	var planted strings.Builder
+	fmt.Fprintf(&planted, "{\"v\":%d,\"kind\":%q,\"folded\":[]}\n", SchemaVersion, KindSummaryIndex)
+	for i := range 400 {
+		fmt.Fprintf(&planted, `{"v":99,"kind":"summary","day":"2019-01-01","model":"org/from-the-future","n":%d,"pad":"%s"}`+"\n",
+			i, strings.Repeat("x", 200))
+	}
+	if err := os.WriteFile(filepath.Join(dir, summaryFileName), []byte(planted.String()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.Stat(filepath.Join(dir, summaryFileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if before.Size() <= SummaryShareOfCap(cap) {
+		t.Fatalf("the planted summary is %d bytes, inside the %d-byte share, so this proves nothing",
+			before.Size(), SummaryShareOfCap(cap))
+	}
+
+	on(t, s)
+	s.SetRetention(2, cap)
+	s.SetRetention(1, cap)
+	if err := s.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.Stat(filepath.Join(dir, summaryFileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Size() > SummaryShareOfCap(cap) {
+		t.Errorf("the summary holds %d bytes, over its %d-byte share, because the lines it carries through are exempt from it",
+			after.Size(), SummaryShareOfCap(cap))
+	}
+	// What it folded itself survives, and some of what it carried does too.
+	if _, n := find(summaries(t, s), "2025-01-10", "org/a"); n != 1 {
+		t.Error("the fold dropped its own day rather than the lines it cannot read")
+	}
+	raw, err := os.ReadFile(filepath.Join(dir, summaryFileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), "org/from-the-future") {
+		t.Error("every carried line was dropped; the bound should take the oldest, not all of them")
+	}
+}
+
+// A pass that changed nothing must not rewrite the file. Every rewrite is an
+// fsync, and a fold that is only retrying a removal changes nothing at all.
+func TestAPassThatChangedNothingDoesNotRewriteTheSummary(t *testing.T) {
+	clock := &testClock{}
+	clock.set(day(2026, time.January, 10, 9))
+	stick := true
+	s, dir := summarizeTestStore(t, clock, StoreOptions{Months: 1, afterSummary: func() error {
+		if stick {
+			return errStoppedForTest
+		}
+		return nil
+	}})
+	on(t, s)
+	if err := s.AppendRequest(request(day(2025, time.January, 10, 9), "org/a")); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	s.SetRetention(2, 1<<20)
+	s.SetRetention(1, 1<<20)
+	if err := s.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	summary := filepath.Join(dir, summaryFileName)
+	// A line this build cannot read, which is the case the condition got
+	// wrong: it is already in the file exactly as it would be written back.
+	f, err := os.OpenFile(summary, os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(`{"v":99,"kind":"summary","day":"2019-01-01","model":"org/from-the-future"}` + "\n"); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	first, err := os.Stat(summary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A whole second, so a rewrite cannot land inside the same timestamp.
+	clock.set(day(2026, time.January, 10, 10))
+	os.Chtimes(summary, first.ModTime().Add(-time.Hour), first.ModTime().Add(-time.Hour))
+	was, err := os.Stat(summary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range 3 {
+		s.SetRetention(2, 1<<20)
+		s.SetRetention(1, 1<<20)
+		if err := s.Flush(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	now, err := os.Stat(summary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !now.ModTime().Equal(was.ModTime()) {
+		t.Errorf("the summary was rewritten by a pass that folded nothing: %s became %s", was.ModTime(), now.ModTime())
 	}
 }

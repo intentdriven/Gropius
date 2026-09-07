@@ -219,6 +219,12 @@ func readSummarySet(root *os.Root) (*summarySet, error) {
 			if err := json.Unmarshal(b, &idx); err == nil {
 				set.index = idx.Folded
 			}
+		default:
+			// A line this file has no use for but that reads as something: a
+			// record kind that has no business here, or one a newer Gropius
+			// puts here for a reason this build does not know. Kept, for the
+			// same reason an unreadable line is.
+			set.kept = append(set.kept, append([]byte(nil), bytes.TrimSpace(b)...))
 		}
 	}
 	return set, nil
@@ -403,10 +409,12 @@ func (w *storeWriter) fold(doomed []storeFile) error {
 		folded++
 		pending = append(pending, fp)
 	}
-	if len(set.kept) == 0 && len(pending) == len(set.index) && folded == 0 {
+	if len(pending) == len(set.index) && folded == 0 {
 		// Nothing new counted and the index says the same thing: a rewrite
-		// would only churn the file. This is the ordinary case while a removal
-		// that failed is being retried.
+		// would only churn the file, and every rewrite is an fsync. This is the
+		// ordinary case while a removal that failed is being retried. Lines
+		// carried through are no reason to rewrite either — they are already in
+		// the file exactly as they will be written back.
 		return nil
 	}
 	set.index = pending
@@ -455,6 +463,25 @@ func (w *storeWriter) writeSummary(set *summarySet) error {
 	b, err := set.encode()
 	if err != nil {
 		return err
+	}
+	// Lines carried through are inside the bound like everything else. Keeping
+	// what this build cannot read is a courtesy to the reader that wrote it,
+	// not a promise worth a permanent tax on the records the operator asked to
+	// keep: up to a whole read's worth of them could otherwise sit in the
+	// summary forever, counted against the cap, starving the detail. They go
+	// first, oldest first, because a day this build folded itself is worth more
+	// than a line it cannot even parse.
+	carried := 0
+	for int64(len(b)) > share && len(set.kept) > 0 {
+		set.kept = set.kept[1:]
+		carried++
+		if b, err = set.encode(); err != nil {
+			return err
+		}
+	}
+	if carried > 0 {
+		w.opts.Log.Warn("lines in the request statistics summary that this build cannot read were dropped to keep it within its share of the size limit",
+			"lines", carried, "share_bytes", share)
 	}
 	dropped := 0
 	for int64(len(b)) > share && set.dropOldestDay() {

@@ -861,8 +861,11 @@ function renderStatsStore() {
   }
   parts.push(`${(store.bytes / (1024 * 1024)).toFixed(1)} MB in ${store.files} file${store.files === 1 ? '' : 's'}`);
   if (store.retention_wedged) {
-    parts.push('the limits are not being applied — what would be dropped cannot be summarised first, ' +
-      'so the records are being kept rather than deleted uncounted (its own log says why)');
+    parts.push('what is being dropped cannot be summarised first — the records are kept while there is ' +
+      'room for them, and once there is not the oldest go without a summary (its own log says why)');
+  }
+  if (store.unsummarized) {
+    parts.push(`${store.unsummarized} removed without a summary`);
   }
   if (store.dropped) {
     parts.push(`${store.dropped} not written — the disk could not keep up`);

@@ -68,8 +68,17 @@ func TestThePanelSaysWhenRetentionIsStuck(t *testing.T) {
 	if !strings.Contains(src, "retention_wedged") {
 		t.Error("the panel never reads retention_wedged, so a store past its own limits looks like one within them")
 	}
-	if !strings.Contains(src, "the limits are not being applied") {
+	if !strings.Contains(src, "cannot be summarised first") {
 		t.Error("the panel does not say what a stuck retention means for the figures beside it")
+	}
+	// The size limit still wins, so a stuck retention eventually costs records
+	// that nothing counted. A loss nobody can see is the one thing this store
+	// does not do.
+	if !strings.Contains(src, "unsummarized") {
+		t.Error("the panel never reads unsummarized, so records dropped without a summary are lost silently")
+	}
+	if !strings.Contains(src, "without a summary") {
+		t.Error("the panel does not say that records were removed without a summary")
 	}
 }
 
