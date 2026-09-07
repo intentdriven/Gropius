@@ -92,7 +92,43 @@ the bytes the detail occupied.
 ## Audit Notes
 
 <!-- abcd-review: OWED receipt=rcp-849f518f44a0 -->
-Fidelity review OWED (receipt rcp-849f518f44a0).
+Fidelity review OWED (receipt rcp-849f518f44a0). The audit compares this
+promise against what was delivered, so it runs after the branch merges; the
+receipt's request lives in the per-machine tier and does not travel, so
+whoever runs it re-emits the request with `abcd intent audit`.
+
+**2026-09-07.** What shipped diverges from the spec's Approach in five places
+and answers two of its three open design points: see the spec's "As built"
+section and the 2026-09-07 lines in `.abcd/work/DECISIONS.md`, which also carry
+the three review rounds this change went through. None of those five touches an
+acceptance criterion.
+
+**Diverged, at the level of this intent's press release.** The press release
+says of the oldest records that "what she still has is a short summary written
+before they went". That is what happens, except in one case the press release
+does not imagine: when the summary itself cannot be written — a full disk, a
+file planted under its name, a folder Gropius may no longer read — and the
+store is over the size limit `adr-2609061610107154` makes the hard bound. The
+first answer is to keep the records rather than delete them uncounted, and the
+store says on the Settings page that its limits are not being applied. But that
+cannot be the last answer: a full disk is exactly what stops a summary being
+written, so a store that would not then free its own room would make a full
+disk permanent. Past the limit by more than one file's growth, the oldest file
+goes without a summary; the log names it, and Settings counts the records lost
+that way separately from every other figure. Alice can therefore, in that one
+case, lose a period with neither its detail nor its summary — and she is told
+so rather than left to find out. Flagged here rather than quietly closed,
+because the promise is the maintainer's to release. The reasoning is the
+2026-09-07 ledger line answering the independent security review.
+
+**Also worth the maintainer's eye.** The intent's Mechanism reasons that a
+summary is "roughly a thousandth of the bytes the detail occupied". Measured,
+it is better than that on a busy Mac and worse on a quiet one: a day of ten
+thousand requests is about 2.3 MB of detail against one line per model, so a
+thousandth is about right at ten models, while a Mac serving a hundred requests
+a day collapses 23 KB into the same line. The claim's conclusion — that the
+summary can outlive the detail by years at negligible cost — holds either way;
+the reference page states the measured figure rather than the ratio.
 
 ## Grounds
 

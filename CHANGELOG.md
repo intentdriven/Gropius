@@ -108,10 +108,11 @@ GitHub release notes.
   request never waits on the disk: records are queued and written by one
   goroutine, and a burst the disk cannot keep up with is counted and shown
   rather than allowed to slow an answer. A crash or a power cut costs the last few
-  seconds of records and leaves the line being written half-finished; nothing
-  forces a write to the disk, because a disk in the path of every answer costs
+  seconds of records and leaves the line being written half-finished; no record
+  is forced to the disk, because a disk in the path of every answer costs
   more than the figures are worth, and the next start closes the half-finished
-  line off before appending to it. The format, the
+  line off before appending to it. (The summary described below is forced to
+  the disk, once per drop rather than once per request.) The format, the
   retention rule and the location are
   [an architecture decision](.abcd/development/decisions/adrs/2609061610107154-statistics-store-format-json-lines-size-rotated-per-account.md),
   and every field is described in

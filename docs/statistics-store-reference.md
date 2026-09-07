@@ -183,7 +183,9 @@ changed.
 Before a file is removed, whichever limit removes it, its records are folded
 into `summary.jsonl`: one line per model per day, holding the counts and totals
 described above and nothing else. The summary is written and forced to the disk
-before the detail goes, so records are never lost without being counted. A day
+before the detail goes, so no record is lost without being counted — except in
+the one case below, where the size limit takes a file the summary could not be
+written for, and says how many records that was. A day
 already summarised is extended rather than written a second time, so the drop
 that takes the rest of a day adds to the line the first drop left.
 
