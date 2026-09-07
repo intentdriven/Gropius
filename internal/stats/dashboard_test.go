@@ -1,6 +1,8 @@
 package stats
 
 import (
+	"context"
+	"errors"
 	"reflect"
 	"testing"
 	"time"
@@ -57,7 +59,7 @@ func TestTokensPerDayAndShareAreTheFixturesOwnSums(t *testing.T) {
 		}
 	}
 
-	h, err := Aggregate(s, time.Unix(at(east, 2026, 9, 1, 0, 0), 0), time.Unix(at(east, 2026, 9, 4, 0, 0), 0), east)
+	h, err := Aggregate(t.Context(), s, time.Unix(at(east, 2026, 9, 1, 0, 0), 0), time.Unix(at(east, 2026, 9, 4, 0, 0), 0), east)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -124,7 +126,7 @@ func TestTheLatencyDistributionIsTheFixturesOwn(t *testing.T) {
 		}
 	}
 
-	h, err := Aggregate(s, time.Unix(at(east, 2026, 9, 1, 0, 0), 0), time.Unix(at(east, 2026, 9, 2, 0, 0), 0), east)
+	h, err := Aggregate(t.Context(), s, time.Unix(at(east, 2026, 9, 1, 0, 0), 0), time.Unix(at(east, 2026, 9, 2, 0, 0), 0), east)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -133,6 +135,11 @@ func TestTheLatencyDistributionIsTheFixturesOwn(t *testing.T) {
 		Requests:     10,
 		FirstTokenMS: Percentiles{P50: 500, P90: 900, P99: 1000},
 		Rate:         Percentiles{P50: 100, P90: 100, P99: 100},
+		// Every one of the ten generated more than one token in measurable
+		// time, so the rate rests on all ten; a table whose rate count could
+		// silently be smaller than its answer count is the thing this field
+		// exists to prevent.
+		RateRequests: 10,
 		// Edges 100, 250, 500, 1,000, 2,500, 5,000 and 10,000 ms: nothing
 		// under 100; 100 and 200; 300 and 400; 500 to 900; 1,000.
 		FirstTokenBuckets: []int{0, 2, 2, 5, 1, 0, 0, 0},
@@ -180,7 +187,7 @@ func TestEvictionsAndReloadsAreCountedByTheLocalHour(t *testing.T) {
 		{"west", west, 18, 5},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			h, err := Aggregate(s, from, to, c.loc)
+			h, err := Aggregate(t.Context(), s, from, to, c.loc)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -218,7 +225,7 @@ func TestOnlyTheRangesOwnRecordsAreCounted(t *testing.T) {
 	}
 
 	// The last seven local days ending on the 9th: the 1st falls outside.
-	h, err := Aggregate(s, time.Unix(at(east, 2026, 9, 2, 12, 0), 0), time.Unix(at(east, 2026, 9, 9, 12, 0), 0), east)
+	h, err := Aggregate(t.Context(), s, time.Unix(at(east, 2026, 9, 2, 12, 0), 0), time.Unix(at(east, 2026, 9, 9, 12, 0), 0), east)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -235,7 +242,7 @@ func TestOnlyTheRangesOwnRecordsAreCounted(t *testing.T) {
 func TestAnEmptyStoreAggregatesToNothing(t *testing.T) {
 	s := NewStore(t.TempDir(), StoreOptions{})
 	t.Cleanup(func() { s.Close() })
-	h, err := Aggregate(s, time.Unix(0, 0), time.Now(), time.UTC)
+	h, err := Aggregate(t.Context(), s, time.Unix(0, 0), time.Now(), time.UTC)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -253,7 +260,7 @@ func TestAnEmptyStoreAggregatesToNothing(t *testing.T) {
 
 	// And a store that is not there at all reads the same way, which is the
 	// state a Mac that has never had recording on is in.
-	none, err := Aggregate((*FileStore)(nil), time.Unix(0, 0), time.Now(), time.UTC)
+	none, err := Aggregate(t.Context(), (*FileStore)(nil), time.Unix(0, 0), time.Now(), time.UTC)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -270,7 +277,7 @@ func TestTheAggregateReportsTheBoundsItWasHeldTo(t *testing.T) {
 	if err := s.AppendRequest(Record{Model: "org/alpha", At: at(east, 2026, 9, 1, 12, 0), Class: ClassOK}); err != nil {
 		t.Fatal(err)
 	}
-	h, err := Aggregate(s, time.Unix(at(east, 2026, 9, 1, 0, 0), 0), time.Unix(at(east, 2026, 9, 2, 0, 0), 0), east)
+	h, err := Aggregate(t.Context(), s, time.Unix(at(east, 2026, 9, 1, 0, 0), 0), time.Unix(at(east, 2026, 9, 2, 0, 0), 0), east)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -293,7 +300,7 @@ func TestARangeWiderThanTheBoundIsNarrowedToIt(t *testing.T) {
 	s := fixtureStore(t)
 	to := time.Unix(at(east, 2026, 9, 1, 0, 0), 0)
 	from := to.AddDate(-5, 0, 0)
-	h, err := Aggregate(s, from, to, east)
+	h, err := Aggregate(t.Context(), s, from, to, east)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -302,5 +309,162 @@ func TestARangeWiderThanTheBoundIsNarrowedToIt(t *testing.T) {
 	}
 	if !h.Narrowed {
 		t.Error("the range was narrowed and the view does not say so")
+	}
+}
+
+// The pass walks back past the range's start by a margin, because the store's
+// order is not the order it reads by: a record is appended when its request
+// finishes and stamped with when the request arrived, so a slow request is
+// appended after requests that arrived later than it did. Stopping at the
+// first record older than the range would pass over the slow one.
+func TestARecordThatArrivedInRangeButFinishedLateIsStillCounted(t *testing.T) {
+	s := fixtureStore(t)
+	from := at(east, 2026, 9, 2, 0, 0)
+	// Appended in completion order, which is the order the store is written
+	// in. The first line arrived an hour inside the range and answered at
+	// once; the second arrived an hour before it and took hours to answer, so
+	// it is written last and, read newest first, comes out first.
+	for _, r := range []Record{
+		{Model: "org/alpha", At: from + 3600, Class: ClassOK, PromptTokens: 40, CompletionTokens: 60},
+		{Model: "org/alpha", At: from - 3600, Class: ClassOK, PromptTokens: 1, CompletionTokens: 1},
+	} {
+		if err := s.AppendRequest(r); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Read in the order the store holds them, to be sure the fixture is the
+	// awkward one this test is about rather than the easy one.
+	var order []int64
+	if err := s.Latest(0, func(l Line) bool { order = append(order, l.At); return true }); err != nil {
+		t.Fatal(err)
+	}
+	if len(order) != 2 || order[0] != from-3600 {
+		t.Fatalf("the store reads back %v; this test needs the out-of-range record read first", order)
+	}
+
+	h, err := Aggregate(t.Context(), s, time.Unix(from, 0), time.Unix(from+7200, 0), east)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(h.Days) != 1 || h.Days[0].CompletionTokens != 60 {
+		t.Errorf("the late-finishing request was passed over: days = %#v", h.Days)
+	}
+}
+
+// And it does stop: a record older than the margin means everything left to
+// read finished earlier still, so there is nothing in the range behind it.
+func TestThePassStopsOnceItIsPastTheMargin(t *testing.T) {
+	s := fixtureStore(t)
+	from := at(east, 2026, 9, 10, 0, 0)
+	old := from - int64(historyStopSlack/time.Second) - 3600
+	for _, r := range []Record{
+		{Model: "org/alpha", At: old - 60, Class: ClassOK, PromptTokens: 5, CompletionTokens: 5},
+		{Model: "org/alpha", At: old, Class: ClassOK, PromptTokens: 5, CompletionTokens: 5},
+		{Model: "org/alpha", At: from + 60, Class: ClassOK, PromptTokens: 1, CompletionTokens: 1},
+	} {
+		if err := s.AppendRequest(r); err != nil {
+			t.Fatal(err)
+		}
+	}
+	h, err := Aggregate(t.Context(), s, time.Unix(from, 0), time.Unix(from+7200, 0), east)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The in-range record and the first record past the margin are read; the
+	// one behind that is not, which is the whole point of stopping.
+	if h.Records != 2 {
+		t.Errorf("the pass read %d records, want it to stop at the first one past the margin", h.Records)
+	}
+	if len(h.Days) != 1 || h.Days[0].CompletionTokens != 1 {
+		t.Errorf("the range's own record was not the only one counted: %#v", h.Days)
+	}
+}
+
+// A pass that stops at its record bound says so, because a table that quietly
+// covered the newest records only would be read as covering the range.
+func TestAPassThatStopsAtTheRecordBoundSaysSo(t *testing.T) {
+	s := fixtureStore(t)
+	day := at(east, 2026, 9, 1, 12, 0)
+	for i := range 6 {
+		if err := s.AppendRequest(Record{
+			Model: "org/alpha", At: day + int64(i), Class: ClassOK, PromptTokens: 1, CompletionTokens: 1,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Lowered rather than reached: reaching the real bound would mean writing
+	// a million records to assert one boolean.
+	was := historyRecordBound
+	historyRecordBound = 4
+	t.Cleanup(func() { historyRecordBound = was })
+
+	h, err := Aggregate(t.Context(), s, time.Unix(day-3600, 0), time.Unix(day+3600, 0), east)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !h.Truncated {
+		t.Error("the pass stopped at its record bound and does not say so")
+	}
+	if h.Records != 4 || h.MaxRecords != 4 {
+		t.Errorf("the pass read %d records under a bound reported as %d, want 4 and 4", h.Records, h.MaxRecords)
+	}
+	// And the figures are the ones it did read, not a refusal.
+	if len(h.Days) != 1 || h.Days[0].Requests != 4 {
+		t.Errorf("a truncated pass drew %#v, want the four records it read", h.Days)
+	}
+}
+
+// A range far wider than the bound is narrowed whatever end date it names. An
+// end so far in the future that date arithmetic on it wraps would otherwise
+// narrow nothing while reporting that it had.
+func TestAnAbsurdEndDateStillNarrowsTheRange(t *testing.T) {
+	s := fixtureStore(t)
+	widest := time.Duration(MaxHistoryDays) * 24 * time.Hour
+	for _, to := range []time.Time{
+		time.Unix(1<<38, 0),
+		time.Unix(1<<50, 0),
+		time.Unix(1<<62, 0),
+	} {
+		h, err := Aggregate(t.Context(), s, time.Unix(0, 0), to, east)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !h.Narrowed {
+			t.Errorf("a range ending at %d was not narrowed and says it was not", to.Unix())
+		}
+		if got := time.Duration(h.To-h.From) * time.Second; got != widest {
+			t.Errorf("a range ending at %d was aggregated over %v, want %v", to.Unix(), got, widest)
+		}
+	}
+}
+
+// A reader who closes the panel part-way through a pass over months of records
+// stops being paid for.
+func TestAPassStopsWhenTheReaderGoesAway(t *testing.T) {
+	s := fixtureStore(t)
+	day := at(east, 2026, 9, 1, 12, 0)
+	if err := s.AppendRequest(Record{Model: "org/alpha", At: day, Class: ClassOK}); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	if _, err := Aggregate(ctx, s, time.Unix(day-3600, 0), time.Unix(day+3600, 0), east); !errors.Is(err, context.Canceled) {
+		t.Errorf("a cancelled reading returned %v, want context.Canceled", err)
+	}
+}
+
+// The bucket edges the aggregate hands out are its own copy: a caller that
+// changed the slice it was given would change every aggregation that followed.
+func TestTheBucketEdgesHandedOutAreACopy(t *testing.T) {
+	h, err := Aggregate(t.Context(), nil, time.Unix(0, 0), time.Now(), time.UTC)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(h.FirstTokenBucketEdgesMS) == 0 {
+		t.Fatal("the aggregate carries no bucket edges, so the table has no headings")
+	}
+	h.FirstTokenBucketEdgesMS[0] = 999999
+	if FirstTokenBucketEdgesMS[0] == 999999 {
+		t.Error("the aggregate handed out the package's own slice")
 	}
 }

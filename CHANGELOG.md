@@ -126,13 +126,21 @@ GitHub release notes.
   figures are exact and the panel carries no charting library. The reading and
   the arithmetic happen in Gropius, on the control plane that answers this Mac
   and nothing else, so the browser is handed sums and counts and never a
-  request's own row. Days and hours are this Mac's own, and only a removal that
+  request's own row. The boundary stays the Mac rather than one account, and
+  these tables widen what that means: the record files are the serving
+  account's own, but the tab reads them back to whoever has the panel open, so
+  on a Mac several people share, any of them sees months of which models served
+  what rather than the last thousand requests alone.
+  Days and hours are this Mac's own, and only a removal that
   was an eviction is counted as one — an idle reap, an unload, a crash and a
   shutdown are removals. The line above the tables says what the figures cover
   and what bounded them: the range, whether it was narrowed to the widest one
   view covers, whether the reading stopped at its record bound, how many lines
   could not be read, and that nothing recorded while the switch was off appears.
-  With recording off the tab says so and shows no figure, as it already does.
+  With recording off the tab says so and shows no figure, as it already does. A
+  reading covers at most a year and at most a million records, at most two run
+  at once, and a reader who closes the panel part-way through one stops being
+  paid for.
   See [Understanding the historical views](docs/statistics-explained.md).
 - **Merge system messages**, a per-model setting in Settings that is off until
   it is switched on. Some models refuse a conversation whose instructions are

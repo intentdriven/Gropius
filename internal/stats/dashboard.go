@@ -1,23 +1,27 @@
 package stats
 
 import (
+	"context"
 	"math"
+	"slices"
 	"sort"
 	"time"
 )
 
 // The usage dashboard's arithmetic (itd-2609061521159233).
 //
-// Everything the panel's three historical tables show is worked out here, in
+// Everything the panel's four historical tables show is worked out here, in
 // one pass over the durable store, and handed to the control plane as sums,
 // counts and buckets. The browser never sees a record: it is given the
 // aggregate, so the only strings that reach it are the repo ids of models this
 // Mac holds.
 //
-// It reads and writes nothing. The dashboard can therefore only show what was
-// already recorded under the opt-in adr-2609061503319212 requires, which is
-// what makes "nothing appears that was not recorded" a property of the code
-// rather than a promise.
+// It records nothing. Reading the store flushes what the writer has buffered
+// and publishes the count of lines the read could not use, which are the
+// store's own housekeeping; no record is made here and none is changed. The
+// dashboard can therefore only show what was already recorded under the opt-in
+// adr-2609061503319212 requires, which is what makes "nothing appears that was
+// not recorded" a property of the code rather than a promise.
 
 // The bounds one aggregate is held to, so that the panel stays responsive on a
 // store at its size cap and a reader can be told what the figures cover.
@@ -36,17 +40,44 @@ const (
 	MaxHistoryDays    = 366
 )
 
-// historyStopRun is how many consecutive records older than the range are read
-// before the pass gives up on finding any more inside it.
+// historyRecordBound is the record bound the pass actually applies. It is the
+// constant above; it is a variable so that a test can lower it and watch the
+// pass stop and say it stopped, which a test cannot do against a million
+// records without writing a million records.
+var historyRecordBound = MaxHistoryRecords
+
+// MaxHistoryRows bounds the tokens-per-day table, and with it everything the
+// pass holds in memory that the record bound does not.
 //
-// The store is append-only and read newest first, so records arrive in very
-// nearly the order they were made, and a run this long past the start of the
-// range means the rest of the store is older still. It is a run rather than a
-// single record because "very nearly" is not "exactly": a clock stepped
-// backwards, or a caller stamping its own arrival time, can put one record out
-// of order, and stopping on the first of those would silently drop the rest of
-// the range.
-const historyStopRun = 4096
+// The record bound caps the timings, which are one number per record. It does
+// not cap the tables, which are one row per day per model: a store whose model
+// ids were all different would be a million rows and a response body to match.
+// Nothing this Mac writes can produce that — a model id is the name of a
+// directory the registry resolved — but a store is a directory of plain files
+// that outlives the build that wrote it, and a reader of one must be bounded by
+// its own arithmetic rather than by a promise about what wrote it. A year of
+// days against fifty-odd models is comfortably inside this.
+const MaxHistoryRows = 20_000
+
+// historyStopSlack is how far past the start of the range the pass reads
+// before it stops.
+//
+// It exists because the store's order is not the order this pass reads by. A
+// record is appended when its request finishes and stamped with when the
+// request arrived, so the file is in completion order and the timestamps being
+// scanned are arrival times; a request that waited for a model to load is
+// appended after requests that arrived later than it did.
+//
+// The slack makes stopping provable rather than likely. Reading newest first
+// is reading in reverse completion order, so on meeting a record whose arrival
+// is more than the slack before the range, every record still to be read
+// finished earlier than it. If one of those had arrived inside the range, it
+// would have both arrived at or after the range's start and finished before a
+// record that finished after the range's start — which means the record just
+// met took longer than the slack to answer. Two days is far past anything the
+// gateway's own timeouts allow, so the case cannot arise, and no record inside
+// the range is ever passed over.
+const historyStopSlack = 48 * time.Hour
 
 // FirstTokenBucketEdgesMS are the boundaries of the time-to-first-token
 // histogram, in milliseconds. There is a bucket below the first edge and one
@@ -68,13 +99,17 @@ type DayTokens struct {
 	// PromptTokens and CompletionTokens are the model server's own counts.
 	PromptTokens     int64 `json:"prompt_tokens"`
 	CompletionTokens int64 `json:"completion_tokens"`
-	// SummaryOnly marks a day whose own records the store's retention has
-	// dropped, leaving only the coarse per-model per-day summary written
-	// before they went (itd-2609061602043757). It is false throughout while
-	// nothing writes those summaries, and it is here rather than added later
-	// because a table that cannot say which of its rows are coarse is a table
-	// that quietly mixes the two.
-	SummaryOnly bool `json:"summary_only,omitempty"`
+	// FromSummary marks a row some or all of whose figures come from the
+	// coarse per-model per-day summary the store writes before retention drops
+	// a day's own records (itd-2609061602043757), rather than from the records
+	// themselves. It is false throughout while nothing writes those summaries.
+	//
+	// It is a row's property rather than a day's because the fold is additive:
+	// on the day where the records run out, a row can carry both the records
+	// still held and the summary of the ones that have gone, and a table that
+	// could not say which of its rows are partly coarse would quietly mix the
+	// two.
+	FromSummary bool `json:"from_summary,omitempty"`
 }
 
 // Tokens is the day's whole traffic for that model, in and out.
@@ -119,6 +154,12 @@ type ModelLatency struct {
 	// them. Unweighted, so a model's median request is the one in the middle
 	// of its requests rather than of its tokens.
 	Rate Percentiles `json:"rate"`
+	// RateRequests is how many answers the rate figures rest on, which is not
+	// Requests: an answer of a single token has no rate, and neither has one
+	// that spent no measurable time generating. A model mostly asked for
+	// one-word answers would otherwise show a rate over a handful of requests
+	// under a count of hundreds.
+	RateRequests int `json:"rate_requests"`
 	// FirstTokenBuckets counts the requests falling between
 	// FirstTokenBucketEdgesMS, with one bucket below the first edge and one
 	// above the last.
@@ -139,7 +180,7 @@ type HourCounts struct {
 	Loads int `json:"loads"`
 }
 
-// History is everything the dashboard's three tables draw.
+// History is everything the dashboard's four tables draw.
 type History struct {
 	// Enabled is filled in by whoever serves this: the aggregation itself has
 	// no opinion about the switch, and a store holds what it holds.
@@ -208,7 +249,7 @@ type RecordSource interface {
 // The location is the Mac's own, not UTC: "most evictions fall in one hour of
 // the day" is a claim about the hours a person keeps, and a day boundary drawn
 // in UTC would put a late-evening request on tomorrow.
-func Aggregate(src RecordSource, from, to time.Time, loc *time.Location) (History, error) {
+func Aggregate(ctx context.Context, src RecordSource, from, to time.Time, loc *time.Location) (History, error) {
 	if loc == nil {
 		loc = time.UTC
 	}
@@ -220,25 +261,34 @@ func Aggregate(src RecordSource, from, to time.Time, loc *time.Location) (Histor
 		zone = loc.String()
 	}
 	h := History{
-		Zone:                    zone,
-		Hours:                   make([]HourCounts, 24),
-		FirstTokenBucketEdgesMS: FirstTokenBucketEdgesMS,
-		MaxRecords:              MaxHistoryRecords,
+		Zone:  zone,
+		Hours: make([]HourCounts, 24),
+		// Cloned: the package's own slice is what bucketOf reads, and a caller
+		// that mutated the one it was handed would change every aggregation
+		// that followed.
+		FirstTokenBucketEdgesMS: slices.Clone(FirstTokenBucketEdgesMS),
+		MaxRecords:              historyRecordBound,
 		MaxDays:                 MaxHistoryDays,
 	}
 	for i := range h.Hours {
 		h.Hours[i].Hour = i
 	}
-	if widest := to.AddDate(0, 0, -MaxHistoryDays); from.Before(widest) {
-		from, h.Narrowed = widest, true
+	// By subtraction rather than by date arithmetic on `to`: a caller naming
+	// an absurd end date would make `to.AddDate(...)` wrap, and a comparison
+	// against a wrapped value narrows nothing while reporting that it did.
+	if widest := time.Duration(MaxHistoryDays) * 24 * time.Hour; to.Sub(from) > widest {
+		from, h.Narrowed = to.Add(-widest), true
 	}
 	h.From, h.To = from.Unix(), to.Unix()
 	if src == nil {
 		return h, nil
 	}
 
-	a := newHistoryAgg(h.From, h.To, loc)
+	a := newHistoryAgg(ctx, h.From, h.To, loc)
 	err := src.Latest(0, a.take)
+	if a.err != nil {
+		return h, a.err
+	}
 	h.Records, h.Truncated = a.read, a.truncated
 	h.Skipped = src.Status().Skipped
 	if err != nil {
@@ -255,8 +305,12 @@ type dayKey struct {
 }
 
 // latencySamples are one model's timings, kept until the pass is over because
-// a percentile cannot be worked out from a running total. They are bounded by
-// the pass itself: at most MaxHistoryRecords timings across every model.
+// a percentile cannot be worked out from a running total.
+//
+// The timings are bounded by the record bound: at most one first-token figure
+// and one rate for each record the pass reads, however they are spread across
+// models. What the record bound does not bound is how many models there are to
+// spread them across, which MaxHistoryRows does.
 type latencySamples struct {
 	firstToken []int64
 	rate       []float64
@@ -265,14 +319,18 @@ type latencySamples struct {
 
 // historyAgg is the state of one pass.
 type historyAgg struct {
+	ctx      context.Context
 	from, to int64
 	loc      *time.Location
+	// stopAt is the arrival time past which nothing inside the range can
+	// still be found; see historyStopSlack.
+	stopAt int64
 
 	read      int
 	truncated bool
-	// stale counts the consecutive records read from before the range, which
-	// is how the pass knows it has walked back past everything it wants.
-	stale int
+	// err is the reason the pass gave up, when it was not the record bound:
+	// the caller going away.
+	err error
 
 	days     map[dayKey]*DayTokens
 	models   map[string]*ModelShare
@@ -282,9 +340,10 @@ type historyAgg struct {
 	dayOrder []dayKey
 }
 
-func newHistoryAgg(from, to int64, loc *time.Location) *historyAgg {
+func newHistoryAgg(ctx context.Context, from, to int64, loc *time.Location) *historyAgg {
 	a := &historyAgg{
-		from: from, to: to, loc: loc,
+		ctx: ctx, from: from, to: to, loc: loc,
+		stopAt:  from - int64(historyStopSlack/time.Second),
 		days:    map[dayKey]*DayTokens{},
 		models:  map[string]*ModelShare{},
 		latency: map[string]*latencySamples{},
@@ -295,9 +354,19 @@ func newHistoryAgg(from, to int64, loc *time.Location) *historyAgg {
 
 // take folds one line in, reporting whether the pass should carry on.
 func (a *historyAgg) take(l Line) bool {
-	if a.read >= MaxHistoryRecords {
+	if a.read >= historyRecordBound || len(a.days) >= MaxHistoryRows {
 		a.truncated = true
 		return false
+	}
+	// Checked now and then rather than per record: a pass over a store at its
+	// size cap is over a second of work, and a client that has gone away
+	// should not be paid for to the end of it. The cost of asking is a channel
+	// read, which is why it is not asked a million times.
+	if a.read%4096 == 0 && a.ctx != nil {
+		if err := a.ctx.Err(); err != nil {
+			a.err = err
+			return false
+		}
 	}
 	a.read++
 	if l.At > a.to {
@@ -305,11 +374,12 @@ func (a *historyAgg) take(l Line) bool {
 		// about how far back the pass has walked.
 		return true
 	}
-	if l.At < a.from {
-		a.stale++
-		return a.stale < historyStopRun
+	if l.At < a.stopAt {
+		return false
 	}
-	a.stale = 0
+	if l.At < a.from {
+		return true
+	}
 
 	when := time.Unix(l.At, 0).In(a.loc)
 	switch l.Kind {
@@ -325,28 +395,51 @@ func (a *historyAgg) take(l Line) bool {
 	return true
 }
 
-// request folds one request record into the day, model and latency figures.
-func (a *historyAgg) request(r Record, when time.Time) {
-	key := dayKey{day: when.Format("2006-01-02"), model: r.Model}
+// addTokens is the one place a day's figures are added up.
+//
+// Everything the tokens-per-day table and the share column rest on goes
+// through here — the day's row, the model's total for the range, and the
+// range's own total — so there is one fold rather than three that have to stay
+// in step. It is additive and never subtracts, which is what lets a second
+// source be folded in on top of the records.
+//
+// That second source is the coarse per-model per-day summary the store writes
+// before retention drops a day's records (itd-2609061602043757). When its
+// reader exists, walking it newest day first and calling this with
+// fromSummary true is the whole of the change: a day held only as a summary
+// gains its row, and the one day that has both gains the summary's figures on
+// top of the records still held, which is the fold that reader's contract
+// asks for. Nothing else moves, and the latency table is deliberately not fed
+// from it — a summary carries mergeable sums and counts, and a percentile
+// cannot be recovered from those.
+func (a *historyAgg) addTokens(day, model string, requests int, in, out int64, fromSummary bool) {
+	key := dayKey{day: day, model: model}
 	d, ok := a.days[key]
 	if !ok {
 		d = &DayTokens{Day: key.day, Model: key.model}
 		a.days[key] = d
 		a.dayOrder = append(a.dayOrder, key)
 	}
-	d.Requests++
-	d.PromptTokens += int64(r.PromptTokens)
-	d.CompletionTokens += int64(r.CompletionTokens)
+	d.Requests += requests
+	d.PromptTokens += in
+	d.CompletionTokens += out
+	d.FromSummary = d.FromSummary || fromSummary
 
-	m, ok := a.models[r.Model]
+	m, ok := a.models[model]
 	if !ok {
-		m = &ModelShare{Model: r.Model}
-		a.models[r.Model] = m
+		m = &ModelShare{Model: model}
+		a.models[model] = m
 	}
-	m.Requests++
-	m.PromptTokens += int64(r.PromptTokens)
-	m.CompletionTokens += int64(r.CompletionTokens)
-	a.total += int64(r.PromptTokens) + int64(r.CompletionTokens)
+	m.Requests += requests
+	m.PromptTokens += in
+	m.CompletionTokens += out
+	a.total += in + out
+}
+
+// request folds one request record into the day, model and latency figures.
+func (a *historyAgg) request(r Record, when time.Time) {
+	a.addTokens(when.Format("2006-01-02"), r.Model, 1,
+		int64(r.PromptTokens), int64(r.CompletionTokens), false)
 
 	if r.Class != ClassOK || r.FirstTokenMS < 0 {
 		return
@@ -404,17 +497,14 @@ func (a *historyAgg) fill(h *History) {
 
 	h.Latency = make([]ModelLatency, 0, len(a.latency))
 	for model, s := range a.latency {
-		sort.Slice(s.firstToken, func(i, j int) bool { return s.firstToken[i] < s.firstToken[j] })
-		sort.Float64s(s.rate)
-		first := make([]float64, len(s.firstToken))
-		for i, v := range s.firstToken {
-			first[i] = float64(v)
-		}
+		slices.Sort(s.firstToken)
+		slices.Sort(s.rate)
 		h.Latency = append(h.Latency, ModelLatency{
 			Model:             model,
 			Requests:          len(s.firstToken),
-			FirstTokenMS:      percentilesOf(first),
+			FirstTokenMS:      percentilesOfInts(s.firstToken),
 			Rate:              percentilesOf(s.rate),
+			RateRequests:      len(s.rate),
 			FirstTokenBuckets: s.buckets,
 		})
 	}
@@ -455,15 +545,27 @@ func generationRate(r Record) (float64, bool) {
 // percentilesOf reads the three points off a sorted slice by nearest rank.
 func percentilesOf(sorted []float64) Percentiles {
 	return Percentiles{
-		P50: nearestRank(sorted, 0.50),
-		P90: nearestRank(sorted, 0.90),
-		P99: nearestRank(sorted, 0.99),
+		P50: nearestRankOf(sorted, 0.50),
+		P90: nearestRankOf(sorted, 0.90),
+		P99: nearestRankOf(sorted, 0.99),
 	}
 }
 
-// nearestRank is the value at the given fraction of a sorted slice, counting
+// percentilesOfInts is percentilesOf over the timings, which are whole
+// milliseconds. It reads the sorted slice in place: copying a million int64s
+// into a million float64s to reuse one function would be eight megabytes spent
+// on nothing.
+func percentilesOfInts(sorted []int64) Percentiles {
+	return Percentiles{
+		P50: float64(nearestRankOf(sorted, 0.50)),
+		P90: float64(nearestRankOf(sorted, 0.90)),
+		P99: float64(nearestRankOf(sorted, 0.99)),
+	}
+}
+
+// nearestRankOf is the value at the given fraction of a sorted slice, counting
 // from one: the p90 of ten values is the ninth of them.
-func nearestRank(sorted []float64, p float64) float64 {
+func nearestRankOf[T int64 | float64](sorted []T, p float64) T {
 	if len(sorted) == 0 {
 		return 0
 	}

@@ -225,3 +225,73 @@ func TestTheHistoryEndpointTakesARangeAndNothingElse(t *testing.T) {
 		}
 	}
 }
+
+// The range is held to one rule, applied after the defaults are filled in.
+// Each of these was a way of asking for a pass over the whole store that the
+// panel would never ask for, and one of them made the aggregation's own
+// narrowing narrow nothing while reporting that it had.
+func TestTheHistoryRangeIsHeldToOneRule(t *testing.T) {
+	now := time.Date(2026, 9, 7, 12, 0, 0, 0, time.UTC)
+	horizon := now.AddDate(0, 0, -stats.MaxHistoryDays)
+	for _, c := range []struct {
+		name     string
+		from, to time.Time
+		ok       bool
+		wantTo   time.Time
+	}{
+		{"the ordinary one", now.AddDate(0, 0, -30), now, true, now},
+		{"an end in the future is brought back to now", now.AddDate(0, 0, -30), now.AddDate(1, 0, 0), true, now},
+		{"an absurd end is brought back to now", now.AddDate(0, 0, -30), time.Unix(1<<62, 0), true, now},
+		{"an end before the horizon is refused", time.Unix(0, 0), horizon.Add(-time.Hour), false, time.Time{}},
+		{"an end near the epoch is refused", time.Unix(0, 0), time.Unix(1, 0), false, time.Time{}},
+		{"an empty range is refused", now, now, false, time.Time{}},
+		{"a backwards range is refused", now, now.AddDate(0, 0, -1), false, time.Time{}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			from, to, ok := historyRange(c.from, c.to, now)
+			if ok != c.ok {
+				t.Fatalf("historyRange(...) accepted = %v, want %v", ok, c.ok)
+			}
+			if !ok {
+				return
+			}
+			if !to.Equal(c.wantTo) {
+				t.Errorf("the range ends at %v, want %v", to, c.wantTo)
+			}
+			// The start is left alone: narrowing it is the aggregation's to do
+			// and to report, and a handler that cut it quietly first would
+			// leave the answer with nothing to say about it.
+			if !from.Equal(c.from) {
+				t.Errorf("the range starts at %v, want the %v it was asked for", from, c.from)
+			}
+		})
+	}
+}
+
+// And the endpoint applies it: a range the panel would never send is refused
+// rather than turned into a reading of the whole store.
+func TestTheHistoryEndpointRefusesARangeOutsideTheHorizon(t *testing.T) {
+	_, srv, _ := recordingServer(t)
+	for _, path := range []string{
+		"/api/stats/history?to=1",
+		"/api/stats/history?from=0&to=1000000",
+	} {
+		resp, err := srv.Client().Get(srv.URL + path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Errorf("GET %s = %d, want 400 — that range is a reading of the whole store", path, resp.StatusCode)
+		}
+	}
+
+	// An end in the future is not a refusal, though: it is the panel's own
+	// clock being a moment ahead of the server's.
+	ahead := time.Now().Add(time.Hour)
+	view, raw := getJSON(t, srv, historyPath(ahead.AddDate(0, 0, -7), ahead))
+	to, _ := view["to"].(float64)
+	if int64(to) > time.Now().Add(time.Minute).Unix() {
+		t.Errorf("the range was answered as ending at %v, want it brought back to now:\n%s", int64(to), raw)
+	}
+}

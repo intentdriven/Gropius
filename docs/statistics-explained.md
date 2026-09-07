@@ -18,8 +18,16 @@ themselves, field by field, see
 Every figure is a sum, a count or a percentile over the records already on this
 Mac. Gropius reads them, adds them up and hands the panel the totals; the
 browser never receives a request's own row. The reading happens on the control
-plane, which answers this Mac and nothing else, so the figures go no further
-than the panel you are looking at.
+plane, which answers this Mac and nothing else, so nothing here reaches your
+network or leaves the machine.
+
+The boundary is the Mac, not your account. The control panel asks for no
+password and answers every account on this Mac by design, and these tables read
+the whole of the records kept on disk — so where several people log in, any of
+them can open the panel and see months of which models served what, when, and
+how fast, not merely the last thousand requests the live view holds.
+[Who can see it](request-statistics.md#who-can-see-it) says what that means
+before you switch recording on.
 
 They are only as good as what was recorded. The token counts are the model
 server's own — Gropius repeats them and does not count tokens itself — and the
@@ -113,10 +121,15 @@ This is the point of the opt-in rather than a shortcoming of the views.
 
 **Further back than the records reach.** Two limits bound the store, a number
 of months and a size cap, and the size cap is the hard one. When the store
-passes it the oldest file goes, and the days in it go with it. A day kept only
-as a coarse per-model daily total is marked **daily total only** in the
-tokens-per-day table, so exact rows and summary totals are never mixed without
-saying so.
+passes it the oldest file goes, and the days in it go with it — so the horizon
+is the size cap rather than a promise of months, and beyond it a day is simply
+absent.
+
+The tokens-per-day table follows one rule about that edge: a row whose figures
+come from a coarse per-model daily total rather than from the day's own records
+is marked **from daily totals**, so exact rows and summary totals are never
+mixed without saying so. Gropius writes no such totals, so no row carries the
+mark; the rule is what the table does with one when there is one.
 
 **Who sent anything.** No client address is recorded, so every table is per
 model and per period and never says who: not which machine on your network,

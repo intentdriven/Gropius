@@ -9,7 +9,7 @@ import (
 	"github.com/intentdriven/Gropius/internal/stats"
 )
 
-// The three historical views are the whole of the usage dashboard, and each of
+// The four historical views are the whole of the usage dashboard, and each of
 // them is drawn from records that stop somewhere. A page that described the
 // views without describing where they stop would be worse than no page: a
 // reader would take a bounded month for a quiet one.
@@ -108,5 +108,34 @@ func TestTheStatisticsExplanationStaysAnExplanation(t *testing.T) {
 	}
 	if !strings.Contains(readRepoFile(t, repoRoot, "README.md"), "statistics-explained.md") {
 		t.Error("the README does not point at the page that explains the historical views")
+	}
+}
+
+// The views widen what another account on this Mac can read: from the last
+// thousand requests the live view holds to the whole of the retained store.
+// The store's own files are the account's, but these tables read them back to
+// whoever has the panel open, and the pages have to say so — an opt-in is only
+// as good as what the person switching it on was told.
+func TestThePagesSayTheViewsWidenWhatOtherAccountsCanRead(t *testing.T) {
+	explained := readDoc(t, "statistics-explained.md")
+	if !containsAll(explained, "The boundary is the Mac, not your account") {
+		t.Error("the explanation does not say the boundary is the Mac rather than the account")
+	}
+	if !strings.Contains(explained, "request-statistics.md#who-can-see-it") {
+		t.Error("the explanation does not send the reader to Who can see it")
+	}
+	// The claim this replaced, which was false on a Mac several people share.
+	if strings.Contains(explained, "go no further than the panel you are looking at") {
+		t.Error("the explanation claims the figures go no further than the panel")
+	}
+
+	howTo := readDoc(t, "request-statistics.md")
+	for _, phrase := range []string{
+		"as far back as the records do, not merely as far as the live view",
+		"not the last thousand requests alone",
+	} {
+		if !containsAll(howTo, phrase) {
+			t.Errorf("Who can see it does not say %q", phrase)
+		}
 	}
 }

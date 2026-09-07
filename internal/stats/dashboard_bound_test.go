@@ -45,7 +45,7 @@ func TestAStoreAtTheSizeCapAggregatesWithinTheBound(t *testing.T) {
 	t.Cleanup(func() { s.Close() })
 
 	started := time.Now()
-	h, err := Aggregate(s, end.AddDate(0, 0, -30), end, time.Local)
+	h, err := Aggregate(t.Context(), s, end.AddDate(0, 0, -30), end, time.Local)
 	took := time.Since(started)
 	if err != nil {
 		t.Fatal(err)

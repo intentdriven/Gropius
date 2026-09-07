@@ -1098,9 +1098,9 @@ function millis(ms) {
 }
 
 // ── the historical views ─────────────────────────────────
-// Three tables over a chosen range, read from the records kept on this Mac:
+// Four tables over a chosen range, read from the records kept on this Mac:
 // tokens per day by model with each model's share, how long requests took,
-// and when models were evicted and started. Everything shown is a sum, a
+// the spread of those times, and when models were evicted and started. Everything shown is a sum, a
 // count or the id of a model this Mac holds — the browser is handed the
 // aggregate, never the records it was worked out from.
 
@@ -1127,8 +1127,14 @@ async function refreshHistory() {
 function renderHistory(h) {
   if (!h) return;
   const days = h.days || [];
-  $('statsHistoryBody').hidden = days.length === 0;
-  $('statsHistoryEmpty').hidden = days.length !== 0;
+  // Emptiness is judged on every table, not on the requests alone: a range
+  // that holds only loads and evictions has an hourly table with figures in
+  // it, and saying "nothing was recorded" over the top of it would deny the
+  // records it is drawn from.
+  const anything = days.length > 0 || (h.latency || []).length > 0
+    || (h.hours || []).some((x) => x.evictions || x.loads);
+  $('statsHistoryBody').hidden = !anything;
+  $('statsHistoryEmpty').hidden = anything;
   $('statsHistoryBounds').textContent = historyBoundsLine(h);
 
   // The share is the model's over the whole range, so it is looked up per row
@@ -1152,7 +1158,8 @@ function renderHistory(h) {
 // did: a reader would take a bounded month for a quiet one.
 function historyBoundsLine(h) {
   const day = (secs) => new Date(secs * 1000).toLocaleDateString();
-  const parts = [`${day(h.from)} to ${day(h.to)}, by this Mac's own days and hours`];
+  const zone = h.zone ? ` (${h.zone})` : '';
+  const parts = [`${day(h.from)} to ${day(h.to)}, by this Mac's own days and hours${zone}`];
   if (h.narrowed) {
     parts.push(`narrowed to the ${h.max_days} days one view covers`);
   }
@@ -1174,7 +1181,7 @@ function dayRowHtml(d, share) {
   // A day whose own records the retention has dropped keeps only the coarse
   // daily total, and a table that mixed the two without saying so would be
   // read as exact throughout.
-  const coarse = d.summary_only ? ' <span class="pill">daily total only</span>' : '';
+  const coarse = d.from_summary ? ' <span class="pill">from daily totals</span>' : '';
   return `<tr>
       <td>${escapeHtml(d.day)}</td>
       <td>${escapeHtml(d.model || '—')}${coarse}</td>
@@ -1197,6 +1204,7 @@ function latencyRowHtml(l) {
       <td class="figure">${msFigure(first.p50)}</td>
       <td class="figure">${msFigure(first.p90)}</td>
       <td class="figure">${msFigure(first.p99)}</td>
+      <td class="figure">${l.rate_requests}</td>
       <td class="figure">${rateFigure(rate.p50)}</td>
       <td class="figure">${rateFigure(rate.p90)}</td>
       <td class="figure">${rateFigure(rate.p99)}</td>

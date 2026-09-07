@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-// The three historical tables are the dashboard, so what each row of each of
+// The four historical tables are the dashboard, so what each row of each of
 // them says is a pure function of one aggregate row — testable without a DOM,
 // the way the request table's row already is.
 
@@ -28,9 +28,9 @@ func TestTheTokensPerDayRowShowsTheDaysFiguresAndTheRangesShare(t *testing.T) {
 	// read as exact throughout.
 	coarse := evalPanel(t,
 		`dayRowHtml({"day":"2026-06-01","model":"org/alpha","requests":9,`+
-			`"prompt_tokens":1,"completion_tokens":2,"summary_only":true}, 0.5)`,
+			`"prompt_tokens":1,"completion_tokens":2,"from_summary":true}, 0.5)`,
 		"dayRowHtml", "sharePercent")
-	if !strings.Contains(coarse, "daily total only") {
+	if !strings.Contains(coarse, "from daily totals") {
 		t.Errorf("a summary-only day is drawn as an exact one:\n%s", coarse)
 	}
 }
@@ -39,11 +39,13 @@ func TestTheTokensPerDayRowShowsTheDaysFiguresAndTheRangesShare(t *testing.T) {
 // for the first token and for the generation rate.
 func TestTheLatencyRowShowsThePercentiles(t *testing.T) {
 	got := evalPanel(t,
-		`latencyRowHtml({"model":"org/alpha","requests":10,`+
+		`latencyRowHtml({"model":"org/alpha","requests":10,"rate_requests":7,`+
 			`"first_token_ms":{"p50":500,"p90":900,"p99":1000},`+
 			`"rate":{"p50":100,"p90":42.25,"p99":0}})`,
 		"latencyRowHtml", "msFigure", "rateFigure", "millis")
-	for _, want := range []string{"esc(org/alpha)", ">10<", ">500 ms<", ">900 ms<", ">1.0 s<", ">100.0 tok/s<", ">42.3 tok/s<"} {
+	// The rate figures rest on seven of the ten answers, and the table says so
+	// rather than putting one count over two populations.
+	for _, want := range []string{"esc(org/alpha)", ">10<", ">7<", ">500 ms<", ">900 ms<", ">1.0 s<", ">100.0 tok/s<", ">42.3 tok/s<"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("the latency row does not show %q:\n%s", want, got)
 		}
@@ -102,7 +104,7 @@ func TestEveryHistoricalTableEscapesTheModelId(t *testing.T) {
 	}{
 		{"tokens per day", `dayRowHtml({"day":"2026-09-01","model":"` + nasty + `","requests":1,"prompt_tokens":1,"completion_tokens":1}, 1)`,
 			[]string{"dayRowHtml", "sharePercent"}},
-		{"latency", `latencyRowHtml({"model":"` + nasty + `","requests":1,"first_token_ms":{"p50":1},"rate":{"p50":1}})`,
+		{"latency", `latencyRowHtml({"model":"` + nasty + `","requests":1,"rate_requests":1,"first_token_ms":{"p50":1},"rate":{"p50":1}})`,
 			[]string{"latencyRowHtml", "msFigure", "rateFigure", "millis"}},
 		{"spread", `spreadRowHtml({"model":"` + nasty + `","first_token_buckets":[1]})`,
 			[]string{"spreadRowHtml"}},
@@ -179,5 +181,25 @@ func TestTheHistoricalTablesLiveInTheStatisticsViewAndAreFetchedOnce(t *testing.
 	}
 	if !strings.Contains(extractFunction(t, src, "renderHistory"), "statsHistoryEmpty") {
 		t.Error("a range with nothing in it draws no empty state")
+	}
+}
+
+// Emptiness is judged on every table, not on the requests alone. A range that
+// holds only loads and evictions has an hourly table with figures in it, and
+// "nothing was recorded" printed over the top of that would deny the records
+// it was drawn from.
+func TestTheEmptyStateIsJudgedOnEveryTable(t *testing.T) {
+	body := extractFunction(t, readPanelSource(t), "renderHistory")
+	for _, source := range []string{"latency", "hours", "evictions", "loads"} {
+		if !strings.Contains(body, source) {
+			t.Errorf("the empty state does not consider %q, so a range holding only those reads as empty", source)
+		}
+	}
+	// The tell-tale of the version this replaced: emptiness read off the day
+	// rows alone.
+	for _, wrong := range []string{"hidden = days.length === 0", "hidden = days.length !== 0"} {
+		if strings.Contains(body, wrong) {
+			t.Errorf("the empty state is keyed on the day rows alone (%q)", wrong)
+		}
 	}
 }
