@@ -217,7 +217,8 @@ func TestTheSwitchExplainsItselfInWholeSentences(t *testing.T) {
 		"streamed, how many tokens went in and came out, how long the first token took, how " +
 		"long the whole request took, and how long it waited for the model. It never records " +
 		"a prompt, an answer, an API key or the address of the client that sent it, and " +
-		"nothing recorded leaves this Mac. Turning it off again empties what is held. " +
+		"nothing recorded leaves this Mac. Turning it off again empties the live view and stops " +
+		"new records; the records already kept on this Mac stay until you clear them. " +
 		"Everyone who can open this panel can turn it on and read it, which on a Mac that " +
 		"several people log into means every account on it \u2014 so on a shared Mac this is a " +
 		"decision for all of them, and while it is on Recording appears beside the server " +
