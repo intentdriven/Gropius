@@ -99,6 +99,7 @@ type Line struct {
 	Request  Record
 	Event    Event
 	Settings Settings
+	Summary  Summary
 }
 
 // The wire shapes. Each embeds the record it carries, so the fields on disk
@@ -128,7 +129,8 @@ type (
 func StoreFields() []string {
 	out := []string{"v", "kind"}
 	seen := map[string]bool{"v": true, "kind": true}
-	for _, fields := range [][]string{jsonFields(Record{}), jsonFields(Event{}), jsonFields(Settings{})} {
+	for _, fields := range [][]string{jsonFields(Record{}), jsonFields(Event{}), jsonFields(Settings{}),
+		SummaryFields(), summaryIndexFields()} {
 		for _, f := range fields {
 			if !seen[f] {
 				seen[f] = true
@@ -172,6 +174,16 @@ type StoreOptions struct {
 	// has stopped and before it is started again, which is the window in which
 	// a switch-off must not be able to slip past.
 	duringClear func()
+	// afterSummary is a test seam: it runs after the summary of the files
+	// about to be dropped is on disk and before they are removed, which is the
+	// one window a crash can leave a fold half-done in. An error from it stands
+	// for the crash.
+	afterSummary func() error
+
+	// loc is the zone whose days the summary buckets by. It is this Mac's own
+	// zone everywhere but in a test, which needs to say which day a record
+	// falls on without asking where this Mac is.
+	loc *time.Location
 }
 
 // Defaults for a store built without them.
@@ -292,6 +304,9 @@ func NewStore(dir string, opts StoreOptions) *FileStore {
 	}
 	if opts.Log == nil {
 		opts.Log = slog.Default()
+	}
+	if opts.loc == nil {
+		opts.loc = time.Local
 	}
 	return &FileStore{dir: dir, opts: opts, now: opts.Now, log: opts.Log,
 		months: opts.Months, maxBytes: opts.MaxBytes}
@@ -625,6 +640,12 @@ func (s *FileStore) Clear() error {
 		return err
 	}
 	files, listErr := listStoreFiles(root)
+	// The summary of what was already dropped goes with the detail: it is one
+	// of the store's own files, and a Clear that left it would leave a record
+	// of the traffic behind.
+	if err := removeSummary(root); err != nil && listErr == nil {
+		listErr = err
+	}
 	for _, f := range files {
 		// A file that is already gone is a file this was asked to remove: two
 		// clears at once must not make the second one report a failure.
@@ -790,6 +811,7 @@ type storeWriter struct {
 	root *os.Root
 	opts StoreOptions
 	now  func() time.Time
+	loc  *time.Location
 
 	// limits reads the retention bounds, which the operator can change while
 	// the writer is running.
@@ -809,6 +831,9 @@ type storeWriter struct {
 	failing bool
 	cur     int64 // bytes in the open file, buffered ones included
 	oldest  int64 // the oldest record still held, or 0
+	// summaryBytes is the room the summary of what has already been dropped
+	// takes, which counts toward the cap along with the detail.
+	summaryBytes int64
 }
 
 // openWriter checks the store's directory, creates it if it is not there, and
@@ -821,7 +846,15 @@ func (s *FileStore) openWriter() (*storeWriter, error) {
 	if err != nil {
 		return nil, err
 	}
-	w := &storeWriter{root: root, opts: s.opts, now: s.now, limits: s.limits}
+	w := &storeWriter{root: root, opts: s.opts, now: s.now, loc: s.opts.loc, limits: s.limits}
+	// Before anything is listed: a fold whose removal a crash interrupted is
+	// finished here, so the file it already counted cannot be counted again and
+	// cannot be listed as though it were still held.
+	if err := w.reconcileSummary(); err != nil {
+		root.Close()
+		return nil, err
+	}
+	w.summaryBytes = w.summaryFileBytes()
 	if w.files, err = listStoreFiles(root); err != nil {
 		root.Close()
 		return nil, err
@@ -1135,41 +1168,76 @@ func (w *storeWriter) rotate() error {
 // in, and rewriting one to drop its first half would mean holding two copies
 // of it on a disk the operator asked to keep a limit on.
 func (w *storeWriter) prune() error {
+	// Around the pass rather than inside it, because folding what is dropped
+	// makes the summary larger and the summary counts toward the cap: a pass
+	// that took the store to its limit can leave it a little over, and the next
+	// one takes the next file. Each pass drops at least one file or stops, and
+	// a pass that drops nothing ends the loop.
+	for {
+		dropped, err := w.pruneOnce()
+		if err != nil || dropped == 0 {
+			w.oldest = w.oldestRecord()
+			return err
+		}
+	}
+}
+
+// pruneOnce is one pass of retention: it decides which files go, summarises
+// them, and removes them. It reports how many it removed.
+func (w *storeWriter) pruneOnce() (int, error) {
 	months, maxBytes := w.limits()
 	total := w.totalBytes()
+	// Which files go is decided before any of them is removed, because what is
+	// about to be dropped has to be summarised first and a summary written a
+	// file at a time would rewrite the summary once per file.
+	doomed := 0
 	// Room for the file about to be opened, not just for what is already
 	// there: pruning to exactly the cap and then opening a new file would put
 	// the store over it for as long as that file took to fill, and the cap is
 	// meant to be a bound rather than an average.
-	for len(w.files) > 1 && total+w.opts.RotateBytes > maxBytes {
-		if err := w.root.Remove(w.files[0].name); err != nil && !errors.Is(err, fs.ErrNotExist) {
-			return err
-		}
-		total -= w.files[0].size
-		w.files = w.files[1:]
+	for doomed < len(w.files)-1 && total+w.opts.RotateBytes > maxBytes {
+		total -= w.files[doomed].size
+		doomed++
 	}
-
 	cutoff := w.now().UTC().AddDate(0, -months, 0).Unix()
-	for len(w.files) > 0 {
-		newest := w.newestRecordIn(w.files[0].name)
+	for doomed < len(w.files) {
+		newest := w.newestRecordIn(w.files[doomed].name)
 		if newest == 0 || newest >= cutoff {
 			break
 		}
-		// The file being written can fall off the horizon too, on a Mac quiet
-		// enough that it never fills: close it first, and the next record
-		// starts a new one.
-		if len(w.files) == 1 && w.f != nil {
-			if err := w.closeFile(); err != nil {
-				return err
-			}
-		}
-		if err := w.root.Remove(w.files[0].name); err != nil && !errors.Is(err, fs.ErrNotExist) {
-			return err
-		}
-		w.files = w.files[1:]
+		doomed++
 	}
-	w.oldest = w.oldestRecord()
-	return nil
+	if doomed == 0 {
+		return 0, nil
+	}
+	// The file being written can be dropped too, on a Mac quiet enough that it
+	// never fills: close it first, so what is buffered is counted and the next
+	// record starts a new file.
+	if doomed == len(w.files) && w.f != nil {
+		if err := w.closeFile(); err != nil {
+			return 0, err
+		}
+		w.files[len(w.files)-1].size = w.cur
+	}
+	// Counted before it goes, and on disk before it goes: this is the whole of
+	// itd-2609061602043757. A crash between the two leaves the summary and the
+	// detail both, which the next start reconciles; a crash the other way round
+	// would lose the records with nothing to show they had ever been there.
+	if err := w.fold(w.files[:doomed]); err != nil {
+		return 0, err
+	}
+	if w.opts.afterSummary != nil {
+		if err := w.opts.afterSummary(); err != nil {
+			return 0, err
+		}
+	}
+	for _, f := range w.files[:doomed] {
+		if err := w.root.Remove(f.name); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return 0, err
+		}
+	}
+	w.files = w.files[doomed:]
+	return doomed, nil
 }
 
 func (w *storeWriter) flush() error {
@@ -1216,9 +1284,11 @@ func (w *storeWriter) summary() (int, int64, int64) {
 	return len(w.files), w.totalBytes(), w.oldest
 }
 
-// totalBytes is how much room the store is using.
+// totalBytes is how much room the store is using, the summary of what it has
+// already dropped included: the cap is the room the operator gave the records,
+// and the summary is one of them.
 func (w *storeWriter) totalBytes() int64 {
-	var total int64
+	total := w.summaryBytes
 	for _, f := range w.files {
 		total += f.size
 	}
@@ -1534,6 +1604,14 @@ func parseLine(b []byte) (Line, bool) {
 		if err := json.Unmarshal(b, &l.Settings); err != nil {
 			return Line{}, false
 		}
+	case KindSummary:
+		if err := json.Unmarshal(b, &l.Summary); err != nil {
+			return Line{}, false
+		}
+	case KindSummaryIndex:
+		// The head of the summary file, which carries no record at all: read as
+		// a line so that a reader walking the file recognizes it rather than
+		// counting it as one it could not use.
 	default:
 		return Line{}, false
 	}

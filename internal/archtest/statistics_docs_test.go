@@ -95,6 +95,11 @@ func TestTheStatisticsPageNamesEveryFieldTheStoreWrites(t *testing.T) {
 			t.Errorf("the page does not name %q, which a request line can carry as its class", class)
 		}
 	}
+	for _, kind := range stats.StoreKinds() {
+		if !strings.Contains(page, "`"+kind+"`") {
+			t.Errorf("the page does not name %q, which is one of the kinds of line the store writes", kind)
+		}
+	}
 	// And the file naming and the two limits, which are the rest of what
 	// someone pointing their own tools at the files has to know.
 	for _, phrase := range []string{
@@ -116,6 +121,11 @@ func knownOther(name string) bool {
 	switch name {
 	case "stream_options", "include_usage", "config_json":
 		return true
+	}
+	for _, kind := range stats.StoreKinds() {
+		if kind == name {
+			return true
+		}
 	}
 	for _, reason := range stats.RemovalReasons() {
 		if reason == name {
