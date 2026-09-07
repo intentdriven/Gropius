@@ -1,6 +1,6 @@
 # Reference: response headers
 
-Gropius adds two headers to every answer it gives a completion request, on
+Gropius adds two headers to the answers it gives a completion request, on
 `POST /v1/chat/completions` and `POST /v1/completions`. They say what the
 request spent getting to a model server, which the OpenAI response body has no
 field for.
@@ -9,6 +9,13 @@ Both appear on a successful answer, streamed or not, and on the 503 that a
 request gets when this Mac has no memory for its model. They carry no model
 name and no count of anything: what they say is that this machine was busy and
 for how long, which is what a client with a stopwatch already knows.
+
+They are absent from every other answer: a request refused before a model was
+chosen at all (400, 401, 404), the 503 for a model that is already serving as
+many requests as it will take, and the 503 for a model server that could not be
+started. None of those spent time getting to a model server, so there is
+nothing for the headers to say — read their absence as "this did not wait",
+not as "this waited an unknown amount".
 
 ```
 HTTP/1.1 200 OK

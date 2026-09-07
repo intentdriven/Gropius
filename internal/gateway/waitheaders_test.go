@@ -2,15 +2,20 @@ package gateway
 
 import (
 	"bufio"
+	"context"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/intentdriven/Gropius/internal/config"
+	"github.com/intentdriven/Gropius/internal/mlxtest"
+	"github.com/intentdriven/Gropius/internal/registry"
 	"github.com/intentdriven/Gropius/internal/runtime"
 )
 
@@ -161,5 +166,92 @@ func TestAModelServerCannotAddASecondValueToTheWaitHeaders(t *testing.T) {
 	}
 	if got := out.Get("Content-Type"); got != "application/json" {
 		t.Errorf("Content-Type = %q; the model server's own headers must still come through", got)
+	}
+}
+
+// A request refused after a wait tells the client how long it waited and must
+// tell the operator too. The statistics store is where "is grace costing my
+// clients anything" is answered, and recording nothing for the outcome grace
+// produces when it fails would make it blind to exactly that.
+func TestARefusalAfterAWaitIsRecordedWithTheWaitItPaid(t *testing.T) {
+	srv, rec, _, pool := statsGateway(t, true, mlxtest.Options{})
+	pool.acquireErr = &runtime.NoRoomError{Limit: 8 << 30, Waited: 300 * time.Second}
+
+	status, _ := completion(t, srv, `{"model":"`+testModelID+`","messages":[{"role":"user","content":"hi"}]}`)
+	if status != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503", status)
+	}
+	got := onlyRecord(t, rec)
+	if got.QueueWaitMS != 300_000 {
+		t.Errorf("queue_wait_ms = %d, want the 300 s the request spent queued for memory",
+			got.QueueWaitMS)
+	}
+}
+
+// The whole path, with a real pool and a request that genuinely waits: the
+// stub-pool tests hold each side of the seam, and only this catches a mistake
+// in the mapping between them.
+func TestARequestThatReallyWaitedSaysSoOnTheWire(t *testing.T) {
+	paths := config.NewPaths(t.TempDir())
+	if err := paths.EnsureDirs(); err != nil {
+		t.Fatal(err)
+	}
+	reg, err := registry.Open(paths.State)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 200 bytes is charged 240, so a 250-byte budget holds exactly one.
+	for _, id := range []string{"org/warm", "org/wanted"} {
+		if err := reg.Put(registry.Model{
+			RepoID: id, Path: paths.ModelDir(id), Bytes: 200,
+			State: registry.StateReady, Progress: 100,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	l := &recordingLauncher{specs: map[string]runtime.Spec{}}
+	const grace = 300 * time.Millisecond
+	pool := runtime.NewPool(runtime.PoolOptions{
+		Launcher:         l,
+		Models:           registrySource{reg},
+		MaxResidentBytes: 250,
+		EvictionGrace:    grace,
+		MaxEvictionWait:  20 * time.Second,
+		ReadyTimeout:     10 * time.Second,
+		HTTP:             &http.Client{Timeout: 5 * time.Second},
+	})
+	defer pool.Close()
+
+	// Loaded and let go, so it is idle and inside its grace.
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	_, release, err := pool.Acquire(ctx, "org/warm")
+	if err != nil {
+		t.Fatalf("Acquire(org/warm): %v", err)
+	}
+	release()
+
+	srv := httptest.NewServer(New(Options{
+		Config: config.Default(), Pool: pool, Models: reg,
+	}).Handler())
+	defer srv.Close()
+
+	resp := postRaw(t, srv, `{"model":"org/wanted","messages":[{"role":"user","content":"hi"}]}`)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d, body %s", resp.StatusCode, body)
+	}
+	if got := resp.Header.Get("X-Gropius-State"); got != "waited" {
+		t.Errorf("X-Gropius-State = %q, want waited: the request queued for room", got)
+	}
+	ms, err := strconv.ParseInt(resp.Header.Get("X-Gropius-Queue-Time"), 10, 64)
+	if err != nil {
+		t.Fatalf("X-Gropius-Queue-Time = %q, which is not a number: %v",
+			resp.Header.Get("X-Gropius-Queue-Time"), err)
+	}
+	if want := (grace / 2).Milliseconds(); ms < want {
+		t.Errorf("X-Gropius-Queue-Time = %d ms, want at least %d — it waited out a grace", ms, want)
 	}
 }

@@ -173,6 +173,12 @@ func New(opts Options) (*App, error) {
 	a.cfg.Pinned = a.adoptPinned(a.cfg.Pinned)
 
 	grace, maxWait := evictionGraceFor(opts.Config)
+	// Held down here for the same reason SetConfig holds it down below: the
+	// pool must never protect a model for longer than the reaper leaves it
+	// alone. At a start the two agree, since config.Validate holds a save to
+	// the idle timeout it saves and Load repairs a file that does not; this is
+	// belt and braces on the one invariant the record wrote a refusal for.
+	grace = clampGraceToIdle(grace, time.Duration(opts.Config.IdleTimeoutSec)*time.Second)
 	a.Pool = runtime.NewPool(runtime.PoolOptions{
 		Launcher:    launcher,
 		Models:      modelSource{reg},
@@ -320,7 +326,7 @@ func (a *App) SetConfig(c config.Config) error {
 	// models already in memory, and switching it off releases the requests
 	// already waiting rather than leaving them to sit out a grace nobody wants
 	// any more.
-	a.Pool.SetEvictionGrace(evictionGraceFor(c))
+	a.Pool.SetEvictionGrace(a.enforcedGrace(c))
 	return nil
 }
 
@@ -338,6 +344,40 @@ func evictionGraceFor(c config.Config) (grace, maxWait time.Duration) {
 	}
 	return time.Duration(c.GraceSeconds()) * time.Second,
 		time.Duration(c.MaxWaitSeconds()) * time.Second
+}
+
+// enforcedGrace is what the pool is given: the operator's figures, with the
+// grace held down to the idle timeout the pool is actually reaping on.
+//
+// config.Validate holds a save to the idle timeout it saves, but the idle
+// timeout only reaches the pool at a restart while the grace is applied live,
+// so between a save that raises the timeout and that restart the two disagree.
+// The pool must not be where that disagreement shows: a grace longer than the
+// idle timeout in force means the reaper unloads the very model a request is
+// waiting on, which is the one thing this record wrote a refusal for.
+//
+// Clamped rather than refused, following enforcedBudget: the operator's own
+// figures stay stored as they wrote them, and a save that changes something
+// else is never refused over a pair this Mac is not yet able to honour. The
+// operator restarts and gets what they asked for.
+func (a *App) enforcedGrace(c config.Config) (grace, maxWait time.Duration) {
+	grace, maxWait = evictionGraceFor(c)
+	held := clampGraceToIdle(grace, a.Pool.IdleTimeout())
+	if held != grace {
+		a.Log.Warn("the eviction grace is longer than the idle timeout this Gropius is running with; models are protected for the shorter figure until a restart",
+			"grace", grace, "idle_timeout", a.Pool.IdleTimeout(), "enforced", held)
+	}
+	return held, maxWait
+}
+
+// clampGraceToIdle is the rule itself, with no logging, so both callers apply
+// exactly one of it. A zero idle timeout means nothing is reaped, and then no
+// grace is too long.
+func clampGraceToIdle(grace, idle time.Duration) time.Duration {
+	if grace > 0 && idle > 0 && grace > idle {
+		return idle
+	}
+	return grace
 }
 
 // MachineRAM is how much memory this Mac has, or 0 when that cannot be read.

@@ -129,3 +129,43 @@ func functionBody(t *testing.T, src, signature string) string {
 	}
 	return rest
 }
+
+// The idle timeout only changes at a restart, but the grace is applied live,
+// so one save can leave the pool protecting a model for longer than the reaper
+// leaves it alone — the very state the record wrote a refusal for. The stored
+// figures are the operator's to keep; what the pool is given is held down to
+// the idle timeout it is actually reaping on, the way the memory budget is
+// held down to the memory this Mac has.
+func TestTheEnforcedGraceIsNeverLongerThanTheIdleTimeoutInForce(t *testing.T) {
+	cfg := config.Default()
+	cfg.IdleTimeoutSec = 60
+	a, err := New(Options{Paths: config.NewPaths(t.TempDir()), Config: cfg})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	t.Cleanup(func() { a.Close() })
+
+	// Raising the idle timeout takes a restart; the grace does not. The save
+	// is accepted — it is coherent, and refusing it would put a setting the
+	// operator is in the middle of changing between them and every other one.
+	next := a.Config()
+	next.IdleTimeoutSec = 600
+	next.EvictionGrace = true
+	next.EvictionGraceSec = 300
+	if err := a.SetConfig(next); err != nil {
+		t.Fatalf("SetConfig: %v", err)
+	}
+	if got := a.Config().EvictionGraceSec; got != 300 {
+		t.Errorf("the stored grace is %d s, want the 300 s the operator saved", got)
+	}
+
+	idle := a.Pool.IdleTimeout()
+	grace, _ := a.Pool.EvictionGrace()
+	if idle != 60*time.Second {
+		t.Fatalf("the pool reaps at %s; this test needs the start-up figure", idle)
+	}
+	if grace > idle {
+		t.Errorf("the pool protects a model for %s while reaping it after %s: "+
+			"the idle timeout unloads the model a request is waiting on", grace, idle)
+	}
+}

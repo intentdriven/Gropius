@@ -85,10 +85,11 @@ shortened to the idle timeout instead, and the start-up log says so.
 
 ## What a client sees
 
-Every answer carries two headers saying whether the request waited and for how
-long: `X-Gropius-State` and `X-Gropius-Queue-Time`. The 503 a refused request
-gets carries them too. See
-[the response header reference](response-headers.md).
+An answer that came from a model server carries two headers saying whether the
+request waited and for how long: `X-Gropius-State` and `X-Gropius-Queue-Time`.
+The 503 a request refused for want of memory gets carries them too. See
+[the response header reference](response-headers.md), which says which answers
+do not carry them.
 
 A client that would rather not wait at all can read residency from
 [the models list](models-list.md) and ask for a model that is already loaded.

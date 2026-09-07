@@ -1,10 +1,14 @@
 package runtime
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"fmt"
+	"log/slog"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -248,11 +252,13 @@ func TestARequestThatCanNeverFitIsRefusedWithoutWaiting(t *testing.T) {
 // at once with the refusal that names no model.
 func TestPastTheLoadWaiterCapARequestIsRefusedAtOnce(t *testing.T) {
 	l := newFakeLauncher()
+	var logged safeBuffer
 	p := newTestPool(t, l, graceModels(), PoolOptions{
 		MaxResidentBytes: graceBudget,
 		EvictionGrace:    10 * time.Second,
 		MaxEvictionWait:  30 * time.Second,
 		MaxLoadWaiters:   1,
+		Log:              slog.New(slog.NewTextHandler(&logged, nil)),
 	})
 
 	warm(t, p, "org/a")
@@ -286,6 +292,12 @@ func TestPastTheLoadWaiterCapARequestIsRefusedAtOnce(t *testing.T) {
 	}
 	if n := p.Waiting(); n != 1 {
 		t.Errorf("Waiting() = %d, want the cap's worth and no more", n)
+	}
+	// The wire says nothing, deliberately; this Mac's own log has to say which
+	// of the two facts it is, or an operator cannot tell a full queue from a
+	// machine whose memory is all spoken for.
+	if got := logged.String(); !strings.Contains(got, "already waiting for memory") {
+		t.Errorf("the log says %q; it does not say the queue was full", got)
 	}
 }
 
@@ -400,42 +412,64 @@ func TestPinningTheOnlyCandidateReleasesAWaitingRequestAtOnce(t *testing.T) {
 	}
 }
 
-// Switching grace off is the operator saying "swap now". A request already
-// waiting takes its victim rather than sitting out a grace nobody wants any
-// more.
-func TestSwitchingGraceOffReleasesAWaitingRequest(t *testing.T) {
+// Switching grace off is the operator saying "swap now". Every request already
+// waiting is released to take the path it would have taken with grace off all
+// along — which is to evict, and to be refused only if there is genuinely
+// nothing to evict. Releasing only the one at the head and refusing the rest
+// would turn the off switch into a 503 for every client already queued.
+//
+// Seven waiters, because the failure needs one to reach the pool's lock while
+// another is still at the head of the queue: with one waiter there is no such
+// moment, and with seven the odds of them all arriving in queue order are
+// negligible.
+func TestSwitchingGraceOffReleasesEveryWaitingRequest(t *testing.T) {
 	l := newFakeLauncher()
-	p := newTestPool(t, l, graceModels(), PoolOptions{
-		MaxResidentBytes: graceBudget,
-		EvictionGrace:    10 * time.Second,
-		MaxEvictionWait:  30 * time.Second,
+	models := map[string]int64{"org/held": 4000} // charged 4800 of a 5000 budget
+	for i := range 7 {
+		models[fmt.Sprintf("org/w%d", i)] = 200 // charged 240 each
+	}
+	p := newTestPool(t, l, &fakeSource{models: models}, PoolOptions{
+		MaxResidentBytes: 5000,
+		EvictionGrace:    30 * time.Second,
+		MaxEvictionWait:  20 * time.Second,
+		MaxLoadWaiters:   7,
 	})
 
-	warm(t, p, "org/a")
+	// Resident, idle and protected, and large enough that nothing else fits
+	// beside it — so every request behind it queues, and once it goes they all
+	// fit at once with nothing further to evict.
+	warm(t, p, "org/held")
 
-	done := make(chan error, 1)
-	go func() {
-		_, release, err := p.Acquire(context.Background(), "org/b")
-		if err == nil {
-			release()
-		}
-		done <- err
-	}()
-	waitUntil(t, 2*time.Second, func() bool { return p.Waiting() == 1 },
-		"the request never joined the queue")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	errs := make(chan error, 7)
+	for i := range 7 {
+		go func(i int) {
+			_, release, err := p.Acquire(ctx, fmt.Sprintf("org/w%d", i))
+			if err == nil {
+				release()
+			}
+			errs <- err
+		}(i)
+	}
+	waitUntil(t, 5*time.Second, func() bool { return p.Waiting() == 7 },
+		"the requests never all joined the queue")
 
 	p.SetEvictionGrace(0, 0)
 
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatalf("Acquire(org/b) after grace was switched off: %v", err)
+	for i := range 7 {
+		select {
+		case err := <-errs:
+			if err != nil {
+				t.Errorf("a request waiting when grace was switched off was refused "+
+					"rather than released: %v", err)
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatalf("only %d of the 7 waiting requests were answered", i)
 		}
-	case <-time.After(3 * time.Second):
-		t.Fatal("switching grace off left the request waiting")
 	}
-	if ids := residentIDs(p); !slices.Equal(ids, []string{"org/b"}) {
-		t.Errorf("resident = %v, want the swap the operator asked for", ids)
+	if n := p.Waiting(); n != 0 {
+		t.Errorf("Waiting() = %d after the queue was drained, want 0", n)
 	}
 }
 
@@ -921,4 +955,22 @@ func TestAParkedWaiterDoesNoFilesystemWorkOnEveryCompletedRequest(t *testing.T) 
 		t.Errorf("20 requests to a resident model cost %d launch prechecks on the "+
 			"parked waiter's behalf, want none: it could not have proceeded", got)
 	}
+}
+
+// safeBuffer collects log output from whichever goroutine writes it.
+type safeBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *safeBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *safeBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
 }

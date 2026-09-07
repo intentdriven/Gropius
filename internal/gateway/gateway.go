@@ -407,6 +407,11 @@ func (g *Gateway) handleCompletions(w http.ResponseWriter, r *http.Request) {
 		var noRoom *runtime.NoRoomError
 		if errors.As(err, &noRoom) {
 			setWaitHeaders(w.Header(), noRoom.Waited)
+			// Recorded as well as reported. A request that held a connection
+			// for five minutes and got a 503 is the outcome an operator would
+			// go to the statistics to find, and it is exactly the one eviction
+			// grace produces when it fails.
+			obs.waited(runtime.AcquireStats{QueueWait: noRoom.Waited})
 		}
 		if errors.Is(err, context.Canceled) {
 			obs.failed(stats.ClassCancelled)
