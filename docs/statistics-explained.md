@@ -42,11 +42,11 @@ short reads exactly like a quiet month.
 
 ## Tokens per day
 
-A row for each model on each day it served anything: the requests it answered,
-the tokens in, the tokens out, and their total. Beside them is that model's
-share of every token in the range — so the question "which model actually does
-the work" is answered by one column, and the answer is often not the model you
-would have named.
+A row for each model on each day it served anything: how many requests it took
+that day — every one of them, refusals included — the tokens in, the tokens out,
+and their total. Beside them is that model's share of every token in the range,
+so the question "which model actually does the work" is answered by one column,
+and the answer is often not the model you would have named.
 
 The share is over the range, not over the day, which is why the same figure
 repeats down a model's rows. A day where you served nothing looks the same as a

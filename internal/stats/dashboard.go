@@ -212,8 +212,15 @@ func Aggregate(src RecordSource, from, to time.Time, loc *time.Location) (Histor
 	if loc == nil {
 		loc = time.UTC
 	}
+	// The zone's own abbreviation at the end of the range, rather than the
+	// location's name: a Mac's location is "Local", which tells a reader
+	// nothing about which day a row is on.
+	zone, _ := to.In(loc).Zone()
+	if zone == "" {
+		zone = loc.String()
+	}
 	h := History{
-		Zone:                    loc.String(),
+		Zone:                    zone,
 		Hours:                   make([]HourCounts, 24),
 		FirstTokenBucketEdgesMS: FirstTokenBucketEdgesMS,
 		MaxRecords:              MaxHistoryRecords,
