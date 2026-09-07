@@ -9,12 +9,12 @@ while the switch is off.
 In a `stats` folder inside your own Gropius data folder — normally
 `~/Library/Application Support/Gropius/stats`.
 
-On a Mac with the shared model cache the store is the one thing that does not
-follow the models: the models, `config.json` and `registry.json` are in
-`/Users/Shared/Gropius`, and the records stay in the serving account's own
-`~/Library/Application Support/Gropius/stats`. A shared folder is writable by
-every account on the Mac, and one account's record of what it served has no
-business there.
+On a Mac with the [shared model cache](getting-started.md#9-sharing-across-user-accounts-optional)
+the store is the one thing that does not follow the models: the models,
+`config.json` and `registry.json` move to the shared folder, and the records
+stay in the serving account's own `~/Library/Application Support/Gropius/stats`.
+A shared folder is writable by every account on the Mac, and one account's
+record of what it served has no business there.
 
 The folder is yours alone (mode `0700`), and so is every file in it (`0600`).
 Gropius refuses to write records into a folder any other account on this Mac
