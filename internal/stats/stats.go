@@ -14,8 +14,6 @@
 package stats
 
 import (
-	"reflect"
-	"strings"
 	"sync"
 	"time"
 )
@@ -120,15 +118,7 @@ type Record struct {
 // the names they are written down as. The documentation's field table is held
 // to this list, so a field added here without a word about it on the page
 // fails the build.
-func RecordFields() []string {
-	rt := reflect.TypeOf(Record{})
-	out := make([]string, 0, rt.NumField())
-	for i := range rt.NumField() {
-		name, _, _ := strings.Cut(rt.Field(i).Tag.Get("json"), ",")
-		out = append(out, name)
-	}
-	return out
-}
+func RecordFields() []string { return jsonFields(Record{}) }
 
 // EventKind distinguishes the two things that happen to a model server as
 // against a request.
@@ -163,15 +153,17 @@ type Event struct {
 // two. A recorder built without a store keeps everything in memory and writes
 // nowhere, which is what this build does.
 //
-// It carries two of the three kinds of record that ADR names: the request
-// lines and the load and removal events, which are the two the recorder
-// produces. The third — a startup record of the settings in effect — is not
-// the recorder's to produce and arrives with the store that writes it, which
-// is also where a lifecycle (a flush, a close, a rotation) belongs. Adding
-// either here would be deciding the store's shape from the outside.
+// It carries all three kinds of record that ADR names: the request lines, the
+// load and removal events, and a record of the settings in force. The first
+// two the recorder produces itself; the third it does not, and only passes on
+// (see Recorder.RecordSettings), so that everything reaching a store has been
+// through the one switch rather than through two. A lifecycle — a flush, a
+// rotation, a close — belongs to the store that has one and is not on this
+// interface.
 type Store interface {
 	AppendRequest(Record) error
 	AppendEvent(Event) error
+	AppendSettings(Settings) error
 }
 
 // ModelCounters is what one model has done since recording was turned on.
@@ -272,6 +264,37 @@ func (r *Recorder) SetEnabled(on bool) {
 		r.clearLocked()
 		return
 	}
+	r.ring = make([]Record, RingSize)
+}
+
+// RecordSettings passes a record of the settings in force to the store, when
+// there is one and recording is on.
+//
+// The recorder does not produce this record and keeps nothing from it: the
+// settings in force are the composition root's to know. It goes through the
+// recorder all the same, so that the switch that decides whether anything is
+// recorded is asked exactly once, in one place, about all three kinds of
+// record.
+func (r *Recorder) RecordSettings(set Settings) {
+	if r == nil || r.store == nil || !r.Enabled() {
+		return
+	}
+	_ = r.store.AppendSettings(set)
+}
+
+// Clear empties everything the recorder holds without switching it off, which
+// is what the panel's Clear does to the live view while the store clears the
+// files beside it.
+func (r *Recorder) Clear() {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !r.enabled {
+		return
+	}
+	r.clearLocked()
 	r.ring = make([]Record, RingSize)
 }
 
