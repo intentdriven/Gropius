@@ -214,11 +214,14 @@ type FileStore struct {
 	lastSettings Settings
 	haveSettings bool
 
-	// statusMu guards the figures the panel reads. It is its own lock because
-	// the writer updates them while a Flush may be holding mu and waiting for
-	// that same writer.
+	// statusMu guards the figures the panel reads and the two retention bounds
+	// the writer applies. It is its own lock because the writer touches both
+	// while a Flush may be holding mu and waiting for that same writer, and a
+	// writer that had to take mu would deadlock against it.
 	statusMu sync.Mutex
 	status   StoreStatus
+	months   int
+	maxBytes int64
 }
 
 // NewStore returns a store for dir. It touches no filesystem: a store that is
@@ -248,7 +251,32 @@ func NewStore(dir string, opts StoreOptions) *FileStore {
 		opts.Log = slog.Default()
 	}
 	return &FileStore{dir: dir, opts: opts, now: opts.Now, log: opts.Log,
-		status: StoreStatus{Dir: dir}}
+		months: opts.Months, maxBytes: opts.MaxBytes, status: StoreStatus{Dir: dir}}
+}
+
+// SetRetention changes the two bounds. They are applied the next time the
+// store rotates or is opened, which is where retention is enforced; nothing is
+// deleted at the moment a figure is typed.
+func (s *FileStore) SetRetention(months int, maxBytes int64) {
+	if s == nil {
+		return
+	}
+	if months <= 0 {
+		months = defaultMonths
+	}
+	if maxBytes <= 0 {
+		maxBytes = defaultMaxBytes
+	}
+	s.statusMu.Lock()
+	s.months, s.maxBytes = months, maxBytes
+	s.statusMu.Unlock()
+}
+
+// limits is what the writer prunes against.
+func (s *FileStore) limits() (int, int64) {
+	s.statusMu.Lock()
+	defer s.statusMu.Unlock()
+	return s.months, s.maxBytes
 }
 
 // Enabled reports whether the store is writing.
@@ -486,7 +514,7 @@ type storeEntry struct {
 // nothing else ever writes to it.
 func (s *FileStore) run(ch chan storeEntry, done chan struct{}, w *storeWriter) {
 	defer close(done)
-	t := time.NewTicker(s.opts.FlushEvery)
+	t := time.NewTicker(w.opts.FlushEvery)
 	defer t.Stop()
 	for {
 		select {
@@ -504,8 +532,8 @@ func (s *FileStore) run(ch chan storeEntry, done chan struct{}, w *storeWriter) 
 				e.ack <- err
 				continue
 			}
-			if s.opts.beforeWrite != nil {
-				s.opts.beforeWrite()
+			if w.opts.beforeWrite != nil {
+				w.opts.beforeWrite()
 			}
 			if err := w.write(e.line); err != nil {
 				// A store that cannot be written is not a request that failed.
@@ -547,6 +575,10 @@ type storeWriter struct {
 	opts StoreOptions
 	now  func() time.Time
 
+	// limits reads the retention bounds, which the operator can change while
+	// the writer is running.
+	limits func() (int, int64)
+
 	files  []storeFile // oldest first, including the open one
 	f      *os.File
 	buf    *bufio.Writer
@@ -564,7 +596,7 @@ func (s *FileStore) openWriter() (*storeWriter, error) {
 	if err != nil {
 		return nil, err
 	}
-	w := &storeWriter{root: root, opts: s.opts, now: s.now}
+	w := &storeWriter{root: root, opts: s.opts, now: s.now, limits: s.limits}
 	if w.files, err = listStoreFiles(root); err != nil {
 		root.Close()
 		return nil, err
@@ -777,7 +809,12 @@ func (w *storeWriter) write(b []byte) error {
 	w.cur++
 	w.files[len(w.files)-1].size = w.cur
 	if w.oldest == 0 {
-		w.oldest = w.oldestRecord()
+		// Read off the line being written rather than off the file: the file
+		// is what the buffer has not reached yet, so an empty store would go
+		// on reporting that it holds nothing for as long as it was buffering.
+		if l, ok := parseLine(b); ok {
+			w.oldest = l.At
+		}
 	}
 	return nil
 }
@@ -806,11 +843,12 @@ func (w *storeWriter) rotate() error {
 // in, and rewriting one to drop its first half would mean holding two copies
 // of it on a disk the operator asked to keep a limit on.
 func (w *storeWriter) prune() error {
+	months, maxBytes := w.limits()
 	var total int64
 	for _, f := range w.files {
 		total += f.size
 	}
-	for len(w.files) > 1 && total > w.opts.MaxBytes {
+	for len(w.files) > 1 && total > maxBytes {
 		if err := w.root.Remove(w.files[0].name); err != nil && !errors.Is(err, fs.ErrNotExist) {
 			return err
 		}
@@ -818,7 +856,7 @@ func (w *storeWriter) prune() error {
 		w.files = w.files[1:]
 	}
 
-	cutoff := w.now().UTC().AddDate(0, -w.opts.Months, 0).Unix()
+	cutoff := w.now().UTC().AddDate(0, -months, 0).Unix()
 	for len(w.files) > 1 {
 		newest := w.newestRecordIn(w.files[0].name)
 		if newest == 0 || newest >= cutoff {

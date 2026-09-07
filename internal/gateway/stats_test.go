@@ -46,12 +46,20 @@ type countingStore struct {
 	mu       sync.Mutex
 	requests []stats.Record
 	events   []stats.Event
+	settings []stats.Settings
 }
 
 func (s *countingStore) AppendRequest(r stats.Record) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.requests = append(s.requests, r)
+	return nil
+}
+
+func (s *countingStore) AppendSettings(set stats.Settings) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.settings = append(s.settings, set)
 	return nil
 }
 

@@ -206,6 +206,10 @@ type View struct {
 	Models   []ModelCounters `json:"models"`
 	Requests []Record        `json:"requests"`
 	Rollups  []Rollup        `json:"rollups"`
+	// Store describes the records kept on disk, when there are any to
+	// describe. It is filled in by whoever holds the store; the recorder
+	// itself neither has one nor knows what is in it.
+	Store *StoreStatus `json:"store,omitempty"`
 }
 
 // Options configures a Recorder.
