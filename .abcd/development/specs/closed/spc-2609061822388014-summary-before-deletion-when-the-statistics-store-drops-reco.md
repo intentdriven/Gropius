@@ -170,3 +170,44 @@ nothing: a summary line always describes records that no longer exist.
 - Whether the fold also summarises load and eviction events, which the intent
   does not ask for and this spec does not do; the counts and token totals are
   the whole of it.
+
+## As built (2026-09-07)
+
+Five places where the shipped code parts from the Approach above. A closed
+spec is not edited, so they are listed here and argued in the dated
+`.abcd/work/DECISIONS.md` line of the same date; none of them touches an
+acceptance criterion.
+
+1. **The summary line carries more than the fields named above.** Beside
+   `requests`, `prompt_tokens` and `completion_tokens` it holds `by_class`
+   (the outcome-class counts), the four latency sums
+   (`duration_ms_total`, `queue_wait_ms_total`, `load_wait_ms_total`,
+   `first_token_ms_total`) with `first_token_requests` as the divisor the last
+   is a mean over, and `loads`, `failed_loads` and `removals` — which resolves
+   the third open design point in favour of folding events. Every one is a
+   count or a total over a whole day, so the intent's "coarse by construction,
+   never a per-request figure" holds; the byte-scan criterion is written
+   against this closed set.
+2. **The summary is not removed by the months horizon**, only by its share of
+   the size cap: a twentieth of `stats_max_bytes`, oldest days first. The
+   intent's press release is a year on from the period it describes and the
+   default horizon is six months, so a summary pruned by the horizon would go
+   exactly when it became the only thing left.
+3. **The most recent day is never dropped from the summary.** On a cap small
+   enough that one day's lines and the index together exceed a twentieth of
+   it, a summary that emptied itself would still take room while saying
+   nothing.
+4. **The index fingerprints a folded file by name, size and newest record**
+   rather than by name alone, and the startup pass removes only names matching
+   the store's own pattern. A store the horizon has emptied can hand a new file
+   the name of one that is gone, and a pass keyed on the name alone would
+   delete records nothing had counted.
+5. **The fold runs once per retention pass rather than once per file**, and
+   the pass is applied in a loop, because folding what is dropped makes the
+   summary larger and the summary counts toward the cap.
+
+The second open design point is answered by the reader rather than by a mark
+in the data: every day `FileStore.Summaries` yields is a day whose detail has
+been dropped, and where a day appears in `Summaries` and `Latest` both the
+detail is what is still held and the summary is what is not — the fold never
+subtracts, so a caller adds the two.

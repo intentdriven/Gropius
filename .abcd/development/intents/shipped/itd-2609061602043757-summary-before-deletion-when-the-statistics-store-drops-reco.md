@@ -91,7 +91,8 @@ the bytes the detail occupied.
 
 ## Audit Notes
 
-_Empty. Populated by intent-auditor when intent moves to shipped/._
+<!-- abcd-review: OWED receipt=rcp-849f518f44a0 -->
+Fidelity review OWED (receipt rcp-849f518f44a0).
 
 ## Grounds
 
