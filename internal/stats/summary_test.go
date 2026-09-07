@@ -2,6 +2,7 @@ package stats
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -11,6 +12,10 @@ import (
 	"testing"
 	"time"
 )
+
+// errStoppedForTest is what the fold's afterSummary seam returns to stand for
+// a crash between writing the summary and dropping the detail it counts.
+var errStoppedForTest = errors.New("stopped for test")
 
 // testClock is a clock a test moves by hand, so a store can be made to write
 // across days and to look at its horizon from a chosen date.
@@ -625,5 +630,86 @@ func TestTheIndexCannotAimTheStartupPassAtAnotherFile(t *testing.T) {
 	on(t, again)
 	if _, err := os.Stat(notes); err != nil {
 		t.Errorf("the startup pass removed a file that is not the store's: %v", err)
+	}
+}
+
+// A record file that goes from under the writer — deleted by hand, restored
+// from a backup — must cost that file and nothing else. Before the fold, a
+// removal that found nothing there was tolerated; the fold must tolerate it
+// too, or every rotation from then on fails and the store stops recording for
+// the life of the process.
+func TestARecordFileThatVanishesDoesNotStopTheStoreRecording(t *testing.T) {
+	clock := &testClock{}
+	clock.set(day(2026, time.January, 10, 9))
+	s, dir := summarizeTestStore(t, clock, StoreOptions{MaxBytes: 8 << 10, RotateBytes: 1 << 10})
+	on(t, s)
+	for i := range 40 {
+		if err := s.AppendRequest(request(day(2026, time.January, 10, 9).Add(time.Duration(i)*time.Second), "org/a")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	held := recordFiles(t, dir)
+	if len(held) < 2 {
+		t.Fatalf("the store holds %v, want more than one file so one can be taken away", held)
+	}
+	if err := os.Remove(filepath.Join(dir, held[0])); err != nil {
+		t.Fatal(err)
+	}
+
+	// Everything that follows must still be recorded.
+	for i := range 200 {
+		if err := s.AppendRequest(request(day(2026, time.January, 11, 9).Add(time.Duration(i)*time.Second), "org/b")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	seen := 0
+	if err := s.Latest(0, func(l Line) bool {
+		if l.Kind == KindRequest && l.Request.Model == "org/b" {
+			seen++
+		}
+		return true
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if seen == 0 {
+		t.Errorf("nothing recorded after a file was taken away; %d records were dropped", s.Status().Dropped)
+	}
+}
+
+// A crash between making the summary's temporary file and renaming it into
+// place leaves an orphan. Nothing else names it, so nothing else would ever
+// remove it, and it would sit against a cap it was not counted toward.
+func TestAHalfWrittenSummaryIsSweptAtTheNextStart(t *testing.T) {
+	clock := &testClock{}
+	clock.set(day(2026, time.January, 10, 9))
+	s, dir := summarizeTestStore(t, clock, StoreOptions{Months: 1})
+	on(t, s)
+	if err := s.AppendRequest(request(day(2026, time.January, 10, 9), "org/a")); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	orphan := filepath.Join(dir, summaryTempPrefix+"deadbeef"+summaryTempSuffix)
+	if err := os.WriteFile(orphan, make([]byte, 900<<10), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	keep := filepath.Join(dir, "notes.txt")
+	if err := os.WriteFile(keep, []byte("mine\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	on(t, s)
+	if _, err := os.Stat(orphan); !os.IsNotExist(err) {
+		t.Errorf("a half-written summary survived the restart, against a cap that does not count it: %v", err)
+	}
+	if _, err := os.Stat(keep); err != nil {
+		t.Errorf("the sweep took a file that is not the store's: %v", err)
 	}
 }

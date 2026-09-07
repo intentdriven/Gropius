@@ -9,6 +9,7 @@ import (
 	"io/fs"
 	"os"
 	"sort"
+	"strings"
 	"syscall"
 	"time"
 )
@@ -58,10 +59,6 @@ const summaryShare = 20
 // class seen, every removal reason, a long repo id. It is what the
 // documentation's arithmetic about how many days a summary holds rests on.
 const ApproxSummaryBytes = 512
-
-// errStoppedForTest is what the fold's test seam returns to stand for a crash
-// between writing the summary and dropping the detail it counts.
-var errStoppedForTest = errors.New("stopped for test")
 
 // Summary is one model's day, as counts and totals.
 //
@@ -335,6 +332,14 @@ func (w *storeWriter) fold(doomed []storeFile) error {
 	}
 	for _, f := range doomed {
 		fp, err := w.fingerprint(f.name)
+		if errors.Is(err, fs.ErrNotExist) {
+			// Gone from under the writer: deleted by hand, restored from a
+			// backup, or taken by another process on the same directory. There
+			// is nothing to count and nothing to lose, and the removal below
+			// tolerates it too. Failing here would wedge retention, and a
+			// rotation that cannot prune stops the store recording at all.
+			continue
+		}
 		if err != nil {
 			return err
 		}
@@ -465,6 +470,14 @@ func (w *storeWriter) createSummaryTemp() (string, *os.File, error) {
 // wearing that name has not, so it stays. Either way the index is emptied,
 // because after this pass there is no fold left half-done.
 func (w *storeWriter) reconcileSummary() error {
+	// A crash between making the temporary file and renaming it into place
+	// leaves an orphan that nothing else names, so nothing else would ever
+	// remove it and it would sit against a cap that does not count it. Nothing
+	// can be writing one here: this runs under the lifecycle lock with no
+	// writer goroutine.
+	if err := removeSummaryTemps(w.root); err != nil {
+		return err
+	}
 	set, err := readSummarySet(w.root)
 	if err != nil {
 		return err
@@ -498,7 +511,30 @@ func (w *storeWriter) summaryFileBytes() int64 {
 // removeSummary takes the summary and any half-written one with it, which is
 // what Clear means by every file the store wrote.
 func removeSummary(root *os.Root) error {
-	var first error
+	err := removeSummaryFiles(root, func(name string) bool { return name == summaryFileName })
+	if e := removeSummaryTemps(root); err == nil {
+		err = e
+	}
+	return err
+}
+
+// removeSummaryTemps removes what a crash between writing a summary and
+// renaming it into place leaves behind.
+func removeSummaryTemps(root *os.Root) error {
+	return removeSummaryFiles(root, isSummaryTemp)
+}
+
+// isSummaryTemp reports whether a name is one createSummaryTemp makes.
+func isSummaryTemp(name string) bool {
+	return len(name) > len(summaryTempPrefix)+len(summaryTempSuffix) &&
+		strings.HasPrefix(name, summaryTempPrefix) &&
+		strings.HasSuffix(name, summaryTempSuffix)
+}
+
+// removeSummaryFiles removes the regular files in the store directory whose
+// names the predicate accepts. Regular only, and by name only: the store
+// removes what it wrote, never whatever a directory listing happens to return.
+func removeSummaryFiles(root *os.Root, match func(string) bool) error {
 	d, err := root.Open(".")
 	if err != nil {
 		return err
@@ -508,15 +544,12 @@ func removeSummary(root *os.Root) error {
 	if err != nil {
 		return err
 	}
+	var first error
 	for _, e := range ents {
-		name := e.Name()
-		isTemp := len(name) > len(summaryTempPrefix)+len(summaryTempSuffix) &&
-			name[:len(summaryTempPrefix)] == summaryTempPrefix &&
-			name[len(name)-len(summaryTempSuffix):] == summaryTempSuffix
-		if name != summaryFileName && !isTemp {
+		if !e.Type().IsRegular() || !match(e.Name()) {
 			continue
 		}
-		if err := root.Remove(name); err != nil && !errors.Is(err, fs.ErrNotExist) && first == nil {
+		if err := root.Remove(e.Name()); err != nil && !errors.Is(err, fs.ErrNotExist) && first == nil {
 			first = err
 		}
 	}
