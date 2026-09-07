@@ -62,6 +62,7 @@ func (c *Control) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/settings", c.handleGetSettings)
 	mux.HandleFunc("POST /api/settings", c.handleSetSettings)
 	mux.HandleFunc("GET /api/stats", c.handleStats)
+	mux.HandleFunc("GET /api/stats/history", c.handleStatsHistory)
 	mux.HandleFunc("POST /api/stats/clear", c.handleClearStats)
 	mux.HandleFunc("GET /api/events", c.handleEvents)
 	mux.HandleFunc("GET /api/instance", c.handleInstance)
@@ -282,6 +283,75 @@ func (c *Control) handleStats(w http.ResponseWriter, r *http.Request) {
 		view.Store = &status
 	}
 	writeJSON(w, http.StatusOK, view)
+}
+
+// DefaultHistoryDays is how far back the dashboard looks when a request names
+// no range: the last month, which is the span the store's default retention
+// comfortably covers and the one a reader asking "which model does the work"
+// means.
+const DefaultHistoryDays = 30
+
+// handleStatsHistory serves the dashboard's three historical tables: tokens
+// per day by model with each model's share, request latency by model, and
+// evictions and reloads by hour of the local day (itd-2609061521159233).
+//
+// It takes a range and nothing else — two whole UTC seconds — and answers with
+// aggregates: sums, counts, buckets and the repo ids of models this Mac holds.
+// No record reaches the browser, so the panel is never in a position to add up
+// requests itself, and there is no path, file name or model filter in the
+// request that could be turned into one.
+//
+// It is on the control plane and so behind the loopback guard, for the reason
+// /api/stats is: these figures are the operator's and the machine is the
+// boundary (adr-2609061503319212). With recording off it answers with an empty
+// view, which is what the panel says "nothing is recorded" from — the same
+// contract /api/stats has, so the panel needs no separate way of asking.
+func (c *Control) handleStatsHistory(w http.ResponseWriter, r *http.Request) {
+	to, ok := historyTime(r, "to", time.Now())
+	if !ok {
+		writeError(w, http.StatusBadRequest, "the range's end is not a time in whole seconds")
+		return
+	}
+	from, ok := historyTime(r, "from", to.AddDate(0, 0, -DefaultHistoryDays))
+	if !ok {
+		writeError(w, http.StatusBadRequest, "the range's start is not a time in whole seconds")
+		return
+	}
+	if !from.Before(to) {
+		writeError(w, http.StatusBadRequest, "the range ends before it starts")
+		return
+	}
+	if !c.App.Stats.Enabled() {
+		writeJSON(w, http.StatusOK, stats.History{})
+		return
+	}
+
+	history, err := stats.Aggregate(c.App.StatsStore, from, to, time.Local)
+	if err != nil {
+		// The reason is logged, not returned: these errors name the store's
+		// directory, and the control plane answers every account on this Mac.
+		c.App.Log.Warn("the request statistics could not be aggregated", "err", err)
+		writeError(w, http.StatusInternalServerError, "the records could not be read")
+		return
+	}
+	history.Enabled = true
+	writeJSON(w, http.StatusOK, history)
+}
+
+// historyTime reads one end of the range out of the query, falling back to a
+// default when it is absent. A value that is not a whole non-negative number
+// of seconds is a refusal rather than a silent fallback: a panel sending a
+// broken range should hear about it, and so should anything else that asks.
+func historyTime(r *http.Request, name string, fallback time.Time) (time.Time, bool) {
+	raw := r.URL.Query().Get(name)
+	if raw == "" {
+		return fallback, true
+	}
+	secs, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || secs < 0 {
+		return time.Time{}, false
+	}
+	return time.Unix(secs, 0), true
 }
 
 // handleClearStats throws away everything recording has produced: the files
