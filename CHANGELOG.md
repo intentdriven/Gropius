@@ -168,9 +168,12 @@ GitHub release notes.
   month whose records have been dropped no longer looks like a month with no
   traffic in it. **Clear records** removes them with everything else. If
   Gropius cannot summarise what it is about to drop — an unreadable file, a
-  summary it cannot write — it keeps the records past their limits rather than
-  deleting them uncounted, says so on the Settings page and explains why in its
-  own log. See [Retention](docs/statistics-store-reference.md#retention).
+  summary it cannot write — it keeps the records rather than deleting them
+  uncounted, says so on the Settings page and explains why in its own log;
+  and if it is over its size limit and still cannot, the oldest file goes
+  without a summary and Settings counts what that cost, because a full disk is
+  exactly what stops a summary being written and a store that could not free
+  its own room would make a full disk permanent. See [Retention](docs/statistics-store-reference.md#retention).
 - **Merge system messages**, a per-model setting in Settings that is off until
   it is switched on. Some models refuse a conversation whose instructions are
   not all at the top, which breaks any assistant that repeats its instructions

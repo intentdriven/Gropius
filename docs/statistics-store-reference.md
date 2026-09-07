@@ -49,7 +49,9 @@ A reader should ignore a field it does not know, and skip a line it cannot
 parse. A line whose `v` is newer than the reader understands is one to skip:
 the version changes only when the shape changes. Gropius holds itself to the
 same rule when it rewrites the summary: a line it cannot read is written back
-exactly as it was found, never dropped.
+exactly as it was found. Those lines are inside the summary's size bound like
+everything else, so a great many of them are dropped oldest first rather than
+allowed to crowd out the records.
 
 Records are written a couple of seconds behind the requests they describe, and
 Gropius never asks the disk to make sure they are really on it — forcing a
@@ -196,8 +198,17 @@ daily lines for ten models, and far more for fewer.
 
 A file the store is about to drop that it cannot read, or a summary it cannot
 write, stops retention rather than the records: nothing is removed that has not
-been counted, the Settings page says the limits are not being applied, and
-Gropius's own log says why.
+been counted, the Settings page says so, and Gropius's own log says why. The
+size limit is still the limit, though. Once the store is over it by more than
+one file's growth and still cannot summarise what it would drop, the oldest
+file goes without a summary — a full disk is exactly what stops a summary being
+written, and a store that could not then free its own room would make a full
+disk permanent. Settings counts those records separately, so a loss is never
+silent.
+
+Anything under one of these names that is not a plain file — a named pipe, a
+device, a folder — is refused rather than read. Gropius never waits on
+something in this folder to answer it.
 
 A record measures about 230 bytes, so 200 MB is roughly three months of ten
 thousand requests a day. How far back the store actually reaches is shown on
