@@ -234,7 +234,19 @@ argued in the 2026-09-07 lines of `.abcd/work/DECISIONS.md`, which govern.
   and the horizon can retire the file being written. Without that a quiet Mac
   kept records for years against a figure reading months.
 
+One further departure, at the level of the intent and of
+adr-2609061610107154 rather than of this spec: a `load` event carries no
+reason. It is recorded in the shipped intent's Audit Notes, which is where a
+promise the code did not keep belongs.
+
+The "Docs to change" list asked for a new reference page and it exists:
+`docs/statistics-store-reference.md` carries every record kind and field, the
+file naming, the rotation and retention rules, the permissions, and that the
+size cap always wins. The how-to beside it keeps the procedure.
+
 The measured single-pass scan time this spec asks for is on the branch as
 `BenchmarkLatestAtTheCap` in `internal/stats/store_bench_test.go`, with the
-reading recorded in the same ledger. The dropped-record counter is shown in
-the panel, beside the count of lines a read could not use.
+reading recorded in the same ledger — and it refutes this spec's own
+arithmetic: a record measures about 230 bytes, not the 150 the open design
+points reason from, so 200 MB is roughly three months of ten thousand requests
+a day rather than four. The dropped-record counter is shown in the panel.
