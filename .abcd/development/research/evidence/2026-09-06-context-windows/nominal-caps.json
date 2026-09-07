@@ -1,0 +1,88 @@
+{
+ "source": "config.json of each repository on the HuggingFace hub, main revision, read 2026-09-06 (the local model directory belongs to the service account and is not readable from the measuring account)",
+ "kv_bytes_per_token_f16": "full-attention layers x kv heads x head_dim x 2 (K and V) x 2 bytes; linear-attention and Mamba layers hold a fixed-size state per sequence instead",
+ "models": {
+  "mlx-community/Qwen3-Coder-Next-4bit": {
+   "model_type": "qwen3_next",
+   "max_position_embeddings": 262144,
+   "rope_scaling": null,
+   "rope_theta": 5000000,
+   "layers": 48,
+   "full_attention_layers": 12,
+   "other_layers": "gated DeltaNet linear attention (constant state per sequence)",
+   "kv_heads": 2,
+   "head_dim": 256,
+   "experts_per_token": 10,
+   "quantization_bits": 4,
+   "kv_bytes_per_token_f16": 24576,
+   "weights_bytes_on_disk": 44855964256,
+   "routed_experts": 512
+  },
+  "mlx-community/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-4bit": {
+   "model_type": "nemotron_h",
+   "max_position_embeddings": 262144,
+   "rope_scaling": null,
+   "rope_theta": 10000,
+   "layers": 52,
+   "full_attention_layers": 6,
+   "other_layers": "Mamba-2 (23, constant state per sequence) and MoE (23)",
+   "kv_heads": 2,
+   "head_dim": 128,
+   "experts_per_token": 6,
+   "quantization_bits": 4,
+   "kv_bytes_per_token_f16": 6144,
+   "weights_bytes_on_disk": 17792583132,
+   "routed_experts": 128
+  },
+  "mlx-community/GLM-4.7-Flash-8bit": {
+   "model_type": "glm4_moe_lite",
+   "max_position_embeddings": 202752,
+   "rope_scaling": null,
+   "rope_theta": 1000000,
+   "layers": 47,
+   "full_attention_layers": 47,
+   "other_layers": "none; multi-head latent attention (kv_lora_rank 512, rope dim 64) on every layer",
+   "kv_heads": 20,
+   "head_dim": {
+    "qk_nope": 192,
+    "qk_rope": 64,
+    "v": 256
+   },
+   "experts_per_token": 4,
+   "quantization_bits": 8,
+   "kv_bytes_per_token_f16": {
+    "latent_cache": 54144,
+    "decompressed_k_and_v": 962560
+   },
+   "weights_bytes_on_disk": 31841402692,
+   "routed_experts": 64
+  },
+  "mlx-community/Qwen3.8-27B-8bit": {
+   "model_type": "qwen3_5_text",
+   "max_position_embeddings": 262144,
+   "rope_scaling": null,
+   "rope_parameters": {
+    "mrope_interleaved": true,
+    "mrope_section": [
+     11,
+     11,
+     10
+    ],
+    "partial_rotary_factor": 0.25,
+    "rope_theta": 10000000,
+    "rope_type": "default"
+   },
+   "layers": 64,
+   "full_attention_layers": 16,
+   "other_layers": "gated DeltaNet linear attention (48, constant state per sequence); no MoE, every parameter active",
+   "kv_heads": 4,
+   "head_dim": 256,
+   "experts_per_token": null,
+   "quantization_bits": 8,
+   "kv_bytes_per_token_f16": 65536,
+   "weights_bytes_on_disk": 29531519752,
+   "routed_experts": null
+  }
+ },
+ "weights_bytes_on_disk": "the model directory's size as the control panel's state endpoint reports it"
+}

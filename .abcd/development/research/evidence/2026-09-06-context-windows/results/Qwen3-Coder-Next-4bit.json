@@ -1,0 +1,553 @@
+{
+ "model": "mlx-community/Qwen3-Coder-Next-4bit",
+ "load": {
+  "already_resident": false,
+  "load_s": 8.5
+ },
+ "server_pid_found": true,
+ "idle_memory": {
+  "top": 46170898432,
+  "vm": {
+   "free_bytes": 20417413120,
+   "available_bytes": 81088982548,
+   "wired_bytes": 50431705088,
+   "active_bytes": 8695070720,
+   "compressor_bytes": 4967268352,
+   "swapouts": 5926129
+  }
+ },
+ "chars_per_token": 4.574,
+ "floor_probe": {
+  "prompt_tokens": 921,
+  "total_s": 0.7
+ },
+ "sweep": [
+  {
+   "ok": true,
+   "total_s": 6.2,
+   "prompt_tokens": 8010,
+   "completion_tokens": 1,
+   "finish_reason": "length",
+   "target": 8192,
+   "server_pid": 36013,
+   "load_average": 26.83,
+   "memory": {
+    "top_before": 46170898432,
+    "top_peak": 48318382080,
+    "top_after": 47244640256,
+    "sys_free_before": 392019968,
+    "sys_free_min": 188841984,
+    "sys_free_after": 4544806912,
+    "swapouts_before": 5726893,
+    "swapouts_after": 5726893,
+    "compressor_before": 1430847488,
+    "compressor_after": 1426522112,
+    "samples": 3,
+    "swap_grew": false
+   },
+   "tokens_per_s": 1291.9
+  },
+  {
+   "ok": false,
+   "skipped": true,
+   "target": 32768,
+   "total_s": 0.0,
+   "error": "skipped for memory safety: projected growth 12.3 GB against 4.2 GB free",
+   "memory": {
+    "top_before": 47244640256,
+    "sys_free_before": 4546740224
+   }
+  },
+  {
+   "ok": true,
+   "total_s": 30.3,
+   "prompt_tokens": 31952,
+   "completion_tokens": 1,
+   "finish_reason": "length",
+   "target": 32768,
+   "server_pid": 36013,
+   "load_average": 32.37,
+   "memory": {
+    "top_before": 47244640256,
+    "top_peak": 51539607552,
+    "top_after": 48318382080,
+    "sys_free_before": 3659366400,
+    "sys_free_min": 105496576,
+    "sys_free_after": 6927269888,
+    "swapouts_before": 5726893,
+    "swapouts_after": 5726893,
+    "compressor_before": 1411792896,
+    "compressor_after": 1409515520,
+    "samples": 11,
+    "swap_grew": false
+   },
+   "tokens_per_s": 1054.5
+  },
+  {
+   "ok": true,
+   "total_s": 78.6,
+   "prompt_tokens": 63855,
+   "completion_tokens": 1,
+   "finish_reason": "length",
+   "target": 65536,
+   "server_pid": 36013,
+   "load_average": 50.1,
+   "memory": {
+    "top_before": 48318382080,
+    "top_peak": 56908316672,
+    "top_after": 51539607552,
+    "sys_free_before": 6957465600,
+    "sys_free_min": 94601216,
+    "sys_free_after": 6791184384,
+    "swapouts_before": 5726893,
+    "swapouts_after": 5726893,
+    "compressor_before": 1409515520,
+    "compressor_after": 1405501440,
+    "samples": 27,
+    "swap_grew": false
+   },
+   "tokens_per_s": 812.4
+  },
+  {
+   "ok": true,
+   "total_s": 148.5,
+   "prompt_tokens": 95758,
+   "completion_tokens": 1,
+   "finish_reason": "length",
+   "target": 98304,
+   "server_pid": 36013,
+   "load_average": 86.99,
+   "memory": {
+    "top_before": 51539607552,
+    "top_peak": 64424509440,
+    "top_after": 56908316672,
+    "sys_free_before": 6820495360,
+    "sys_free_min": 140656640,
+    "sys_free_after": 36219650048,
+    "swapouts_before": 5726893,
+    "swapouts_after": 5726893,
+    "compressor_before": 1405501440,
+    "compressor_after": 1399029760,
+    "samples": 50,
+    "swap_grew": false
+   },
+   "tokens_per_s": 644.8
+  },
+  {
+   "ok": false,
+   "skipped": true,
+   "target": 261120,
+   "total_s": 0.0,
+   "error": "skipped for memory safety: projected growth 97.8 GB against 121.6 GB available",
+   "memory": {
+    "top_before": 56908316672,
+    "top_peak": null,
+    "top_after": null,
+    "sys_free_before": 36222353408,
+    "available_before": 130567005798
+   }
+  },
+  {
+   "ok": false,
+   "skipped": true,
+   "target": 261120,
+   "total_s": 0.0,
+   "error": "skipped for memory safety: projected growth 49.1 GB against 67.8 GB available",
+   "memory": {
+    "top_before": 1785856,
+    "top_peak": null,
+    "top_after": null,
+    "sys_free_before": 35984621568,
+    "available_before": 72842645340
+   }
+  },
+  {
+   "ok": false,
+   "error": "HTTP 502: {\"error\":{\"code\":502,\"message\":\"the model server did not respond\",\"type\":\"invalid_request_error\"}}\n",
+   "total_s": 600.0,
+   "target": 261120,
+   "server_pid": 36013,
+   "load_average": 56.63,
+   "memory": {
+    "top_before": 56908316672,
+    "top_peak": 82678120448,
+    "top_after": 80530636800,
+    "sys_free_before": 36021370880,
+    "sys_free_min": 8900476928,
+    "sys_free_after": 10072932352,
+    "swapouts_before": 5726893,
+    "swapouts_after": 5726893,
+    "compressor_before": 1389756416,
+    "compressor_after": 1384546304,
+    "samples": 172,
+    "swap_grew": false
+   }
+  },
+  {
+   "ok": false,
+   "skipped": true,
+   "target": 179712,
+   "total_s": 0.0,
+   "error": "skipped for memory safety: projected growth 33.8 GB against 47.4 GB available",
+   "memory": {
+    "top_before": 82678120448,
+    "top_peak": null,
+    "top_after": null,
+    "sys_free_before": 8771485696,
+    "available_before": 50852412784
+   }
+  },
+  {
+   "ok": false,
+   "skipped": true,
+   "target": 139008,
+   "total_s": 0.0,
+   "error": "skipped for memory safety: projected growth 26.1 GB against 43.5 GB available",
+   "memory": {
+    "top_before": 81604378624,
+    "top_peak": null,
+    "top_after": null,
+    "sys_free_before": 9644949504,
+    "available_before": 46729244180
+   }
+  },
+  {
+   "ok": false,
+   "skipped": true,
+   "target": 118656,
+   "total_s": 0.0,
+   "error": "skipped for memory safety: projected growth 22.3 GB against 44.8 GB available",
+   "memory": {
+    "top_before": 79456894976,
+    "top_peak": null,
+    "top_after": null,
+    "sys_free_before": 12184518656,
+    "available_before": 48103633715
+   }
+  },
+  {
+   "ok": true,
+   "total_s": 472.1,
+   "prompt_tokens": 105638,
+   "completion_tokens": 1,
+   "finish_reason": "length",
+   "target": 108480,
+   "server_pid": 36013,
+   "load_average": 31.84,
+   "memory": {
+    "top_before": 81604378624,
+    "top_peak": 110595407872,
+    "top_after": 79456894976,
+    "sys_free_before": 10539614208,
+    "sys_free_min": 23560192,
+    "sys_free_after": 26100678656,
+    "swapouts_before": 5726893,
+    "swapouts_after": 5764689,
+    "compressor_before": 1384857600,
+    "compressor_after": 6883966976,
+    "samples": 134,
+    "swap_grew": true
+   },
+   "tokens_per_s": 223.8,
+   "note": "contaminated: ran while the server was still prefilling the 256K request the gateway had abandoned at 600 s, from a baseline holding that request's cache; timing and memory are not this prompt's own"
+  },
+  {
+   "ok": false,
+   "skipped": true,
+   "target": 113568,
+   "total_s": 0.0,
+   "error": "skipped for memory safety: projected growth 258.6 GB against 116.5 GB available",
+   "memory": {
+    "top_before": 79456894976,
+    "top_peak": null,
+    "top_after": null,
+    "sys_free_before": 26134904832,
+    "available_before": 125069447659
+   }
+  },
+  {
+   "ok": false,
+   "error": "HTTP 502: {\"error\":{\"code\":502,\"message\":\"the model server did not respond\",\"type\":\"invalid_request_error\"}}\n",
+   "total_s": 600.0,
+   "target": 261120,
+   "server_pid": 54039,
+   "load_average": 6.99,
+   "memory": {
+    "top_before": 46170898432,
+    "top_peak": 73014444032,
+    "top_after": 73014444032,
+    "sys_free_before": 13765689344,
+    "sys_free_min": 76922880,
+    "sys_free_after": 1566195712,
+    "swapouts_before": 5764689,
+    "swapouts_after": 5764689,
+    "compressor_before": 6712541184,
+    "compressor_after": 5987680256,
+    "samples": 172,
+    "swap_grew": false
+   }
+  },
+  {
+   "ok": false,
+   "skipped": true,
+   "target": 184800,
+   "total_s": 0.0,
+   "error": "skipped for memory safety: projected growth 34.8 GB against 49.9 GB available",
+   "memory": {
+    "top_before": 69793218560,
+    "top_peak": null,
+    "top_after": null,
+    "sys_free_before": 5124866048,
+    "available_before": 53601191854
+   }
+  },
+  {
+   "ok": false,
+   "skipped": true,
+   "target": 146640,
+   "total_s": 0.0,
+   "error": "skipped for memory safety: projected growth 27.6 GB against 51.2 GB available",
+   "memory": {
+    "top_before": 73014444032,
+    "top_peak": null,
+    "top_after": null,
+    "sys_free_before": 1842593792,
+    "available_before": 54975581388
+   }
+  },
+  {
+   "ok": true,
+   "total_s": 481.3,
+   "prompt_tokens": 124234,
+   "completion_tokens": 1,
+   "finish_reason": "length",
+   "target": 127560,
+   "server_pid": 54039,
+   "load_average": 4.07,
+   "memory": {
+    "top_before": 63350767616,
+    "top_peak": 107374182400,
+    "top_after": 71940702208,
+    "sys_free_before": 8760033280,
+    "sys_free_min": 27836416,
+    "sys_free_after": 32146096128,
+    "swapouts_before": 5764689,
+    "swapouts_after": 5764689,
+    "compressor_before": 5982109696,
+    "compressor_after": 7112867840,
+    "samples": 140,
+    "swap_grew": false
+   },
+   "tokens_per_s": 258.1,
+   "note": "contaminated: same as the 105,638 probe, after the second abandoned 256K request"
+  },
+  {
+   "ok": true,
+   "total_s": 444.1,
+   "prompt_tokens": 189260,
+   "completion_tokens": 1,
+   "finish_reason": "length",
+   "target": 194340,
+   "server_pid": 81347,
+   "reloaded_before": true,
+   "reload_s": 8.3,
+   "load_average": 2.78,
+   "memory": {
+    "top_before": 46170898432,
+    "top_peak": 69793218560,
+    "top_after": 55834574848,
+    "sys_free_before": 13975879680,
+    "sys_free_min": 77152256,
+    "sys_free_after": 14706130944,
+    "swapouts_before": 5764689,
+    "swapouts_after": 5764689,
+    "compressor_before": 6973128704,
+    "compressor_after": 6669647872,
+    "samples": 130,
+    "swap_grew": false
+   },
+   "tokens_per_s": 426.2
+  },
+  {
+   "ok": true,
+   "total_s": 591.4,
+   "prompt_tokens": 221743,
+   "completion_tokens": 1,
+   "finish_reason": "length",
+   "target": 227730,
+   "server_pid": 92070,
+   "reloaded_before": true,
+   "reload_s": 4.3,
+   "load_average": 3.6,
+   "memory": {
+    "top_before": 46170898432,
+    "top_peak": 73014444032,
+    "top_after": 56908316672,
+    "sys_free_before": 12763086848,
+    "sys_free_min": 70860800,
+    "sys_free_after": 16927899648,
+    "swapouts_before": 5764689,
+    "swapouts_after": 5764689,
+    "compressor_before": 6660702208,
+    "compressor_after": 6488932352,
+    "samples": 173,
+    "swap_grew": false
+   },
+   "tokens_per_s": 374.9
+  },
+  {
+   "ok": false,
+   "error": "HTTP 502: {\"error\":{\"code\":502,\"message\":\"the model server did not respond\",\"type\":\"invalid_request_error\"}}\n",
+   "total_s": 600.0,
+   "target": 244425,
+   "server_pid": 25089,
+   "reloaded_before": true,
+   "reload_s": 5.0,
+   "load_average": 2.66,
+   "memory": {
+    "top_before": 46170898432,
+    "top_peak": 115964116992,
+    "top_after": 95563022336,
+    "sys_free_before": 8383053824,
+    "sys_free_min": 35258368,
+    "sys_free_after": 16955686912,
+    "swapouts_before": 5764689,
+    "swapouts_after": 5926129,
+    "compressor_before": 6484852736,
+    "compressor_after": 5783928832,
+    "samples": 174,
+    "swap_grew": true
+   },
+   "note": "ran while the needle check had been started by mistake, so two long requests overlapped: the needle's 16K runs of that period took 192 s and 285 s instead of 14 s (dropped from the needle list when that run was stopped; they are in the run log) and the machine swapped about 2.5 GB; the 600 s failure itself is consistent with the 221,743-token probe at 591 s"
+  }
+ ],
+ "verified": {
+  "max_verified_prompt_tokens": 221743,
+  "max_ok_target": 227730,
+  "first_failing_target": 244425,
+  "failure_error": "HTTP 502: {\"error\":{\"code\":502,\"message\":\"the model server did not respond\",\"type\":\"invalid_request_error\"}}\n",
+  "stopped_on_time_budget": false
+ },
+ "needle": [
+  {
+   "target": 16384,
+   "depth": 0.9,
+   "thinking_enabled": false,
+   "reloaded_before": false,
+   "ok": true,
+   "total_s": 13.8,
+   "prompt_tokens": 16009,
+   "completion_tokens": 12,
+   "finish_reason": "stop",
+   "hit": true,
+   "hit_in_reasoning": false,
+   "reasoning_chars": 0,
+   "error": null,
+   "load_average": 4.9,
+   "content_chars": 15
+  },
+  {
+   "target": 65536,
+   "depth": 0.1,
+   "thinking_enabled": false,
+   "reloaded_before": true,
+   "ok": true,
+   "total_s": 77.3,
+   "prompt_tokens": 63892,
+   "completion_tokens": 12,
+   "finish_reason": "stop",
+   "hit": true,
+   "hit_in_reasoning": false,
+   "reasoning_chars": 0,
+   "error": null,
+   "load_average": 5.09,
+   "content_chars": 15
+  },
+  {
+   "target": 65536,
+   "depth": 0.5,
+   "thinking_enabled": false,
+   "reloaded_before": true,
+   "ok": true,
+   "total_s": 77.3,
+   "prompt_tokens": 63892,
+   "completion_tokens": 12,
+   "finish_reason": "stop",
+   "hit": true,
+   "hit_in_reasoning": false,
+   "reasoning_chars": 0,
+   "error": null,
+   "load_average": 3.48,
+   "content_chars": 15
+  },
+  {
+   "target": 65536,
+   "depth": 0.9,
+   "thinking_enabled": false,
+   "reloaded_before": true,
+   "ok": true,
+   "total_s": 77.4,
+   "prompt_tokens": 63892,
+   "completion_tokens": 12,
+   "finish_reason": "stop",
+   "hit": true,
+   "hit_in_reasoning": false,
+   "reasoning_chars": 0,
+   "error": null,
+   "load_average": 3.99,
+   "content_chars": 15
+  },
+  {
+   "target": 194340,
+   "depth": 0.1,
+   "thinking_enabled": false,
+   "reloaded_before": true,
+   "ok": true,
+   "total_s": 445.6,
+   "prompt_tokens": 189295,
+   "completion_tokens": 12,
+   "finish_reason": "stop",
+   "hit": true,
+   "hit_in_reasoning": false,
+   "reasoning_chars": 0,
+   "error": null,
+   "load_average": 5.86,
+   "content_chars": 15
+  },
+  {
+   "target": 194340,
+   "depth": 0.5,
+   "thinking_enabled": false,
+   "reloaded_before": true,
+   "ok": true,
+   "total_s": 445.7,
+   "prompt_tokens": 189296,
+   "completion_tokens": 12,
+   "finish_reason": "stop",
+   "hit": true,
+   "hit_in_reasoning": false,
+   "reasoning_chars": 0,
+   "error": null,
+   "load_average": 3.42,
+   "content_chars": 15
+  },
+  {
+   "target": 194340,
+   "depth": 0.9,
+   "thinking_enabled": false,
+   "reloaded_before": true,
+   "ok": true,
+   "total_s": 445.3,
+   "prompt_tokens": 189295,
+   "completion_tokens": 12,
+   "finish_reason": "stop",
+   "hit": true,
+   "hit_in_reasoning": false,
+   "reasoning_chars": 0,
+   "error": null,
+   "load_average": 6.24,
+   "content_chars": 15
+  }
+ ],
+ "needle_note": "the 16K prompts at 10% and 50% depth were first run while a bisection probe was still in flight (both hit, 191.9 s and 284.9 s); that run was stopped and the 16K at 90%, 64K and 194K prompts were run alone, with a reload before each 64K-plus prompt"
+}
