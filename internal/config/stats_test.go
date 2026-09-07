@@ -135,9 +135,9 @@ func TestTheSharedRootIsRecognisedHoweverItIsSpelled(t *testing.T) {
 		SharedRoot,
 		SharedRoot + "/",
 		SharedRoot + "/.",
-		"/Users/Shared/./Gropius",
-		"//Users/Shared/Gropius",
-		"/Users/Shared/Gropius/../Gropius",
+		filepath.Dir(SharedRoot) + "/./" + filepath.Base(SharedRoot),
+		"/" + SharedRoot,
+		SharedRoot + "/../" + filepath.Base(SharedRoot),
 	} {
 		if got := StatsDir(spelling); got != want {
 			t.Errorf("StatsDir(%q) = %q, want the account's own %q", spelling, got, want)
