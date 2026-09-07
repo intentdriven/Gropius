@@ -734,7 +734,7 @@ $('setStats').addEventListener('change', () => { settingsTouched = true; });
 // Clear is not part of saving the form: it throws away what was recorded, so
 // it happens when it is pressed and says what it did.
 $('statsClear').addEventListener('click', async () => {
-  if (!confirm('Remove every request record kept on this Mac? Recording stays on.')) return;
+  if (!confirm('Remove every request record kept on this Mac? This cannot be undone. The recording switch is left as it is.')) return;
   try {
     await api('/api/stats/clear', { method: 'POST' });
     // Say so at once rather than at the next snapshot, so the button visibly

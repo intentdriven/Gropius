@@ -631,9 +631,13 @@ func (c Config) Clone() Config {
 
 // Retention bounds for the statistics store.
 //
-// The defaults are the ADR's starting values: at about 150 bytes a record,
-// 200 MB is over four months of ten thousand requests a day, so the ceiling
-// and the horizon are of the same order and neither is decorative. The floor
+// The defaults are the ADR's starting values, with its arithmetic corrected by
+// measurement: internal/stats' BenchmarkLatestAtTheCap fills the cap and
+// reports about 230 bytes a record — a JSON Lines record carries its field
+// names on every line — so 200 MB is roughly three months of ten thousand
+// requests a day, not the four the ADR reasoned to from 150 bytes. The size
+// cap therefore bites at about half the six-month horizon on a Mac that busy,
+// which is what makes it the hard bound rather than a formality. The floor
 // on the ceiling is two rotated files, below which the store would drop a file
 // it had only just opened; the ceiling on the ceiling and the horizon are
 // there so a mistyped figure is refused rather than filling a disk or being

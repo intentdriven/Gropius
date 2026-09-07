@@ -35,6 +35,15 @@ import (
 // an answer, a key or a client's address: the store is handed the recorder's
 // own records, which cannot carry any of those.
 
+// ApproxRecordBytes is what one line of the store measures, near enough for
+// arithmetic about how long a size cap lasts: BenchmarkLatestAtTheCap fills
+// the default cap and reports 206,342,511 bytes for 901,059 records, which is
+// 229. It is a measured figure rather than a guess because the settings a
+// person chooses rest on it — and the guess it replaces, 150 bytes, is not
+// reachable: the field names are on every line, so the smallest request line
+// this format can emit is already over 190 bytes.
+const ApproxRecordBytes = 230
+
 // SchemaVersion is stamped on every line as "v". It is bumped only for a
 // change a reader of an older file could not survive; a new field is not one,
 // because readers ignore what they do not know.

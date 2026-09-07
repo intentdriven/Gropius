@@ -26,7 +26,7 @@ GitHub release notes.
   and the only text it can be given is the id of a model already on this Mac.
   The live figures are held in memory, a restart empties them, and turning the
   switch off empties them at once; the records themselves are kept on this Mac
-  (see the entry below). The boundary is the Mac rather than one account: the
+  in files that outlive the process (see the entry below). The boundary is the Mac rather than one account: the
   control panel asks for no password and answers every account on this Mac by
   design, so where several people log in, any of them can turn the switch on
   and read what it holds — and the panel says **Recording** beside the server
@@ -57,7 +57,10 @@ GitHub release notes.
   an API key, the models list carries a `pinned` field beside the residency
   ones. See [Pin a model so it stays in memory](docs/pinning-models.md).
 - **A durable store for those records.** With recording on, each record is
-  also written to a `stats` folder inside the Gropius data folder: append-only
+  also written to a `stats` folder inside your own account's Gropius data
+  folder — the one place that does not move to the shared folder when the
+  model cache is shared, because a shared folder is writable by every account
+  on the Mac: append-only
   JSON Lines, one object per line, rotated into dated files, every line
   stamped with the version of the format it was written under so a later
   Gropius still reads an older file. Any tool reads it — `jq`, a spreadsheet,
@@ -81,7 +84,9 @@ GitHub release notes.
   more than the figures are worth, and the next start closes the half-finished
   line off before appending to it. The format, the
   retention rule and the location are
-  [an architecture decision](.abcd/development/decisions/adrs/2609061610107154-statistics-store-format-json-lines-size-rotated-per-account.md).
+  [an architecture decision](.abcd/development/decisions/adrs/2609061610107154-statistics-store-format-json-lines-size-rotated-per-account.md),
+  and every field is described in
+  [Reference: the request statistics store](docs/statistics-store-reference.md).
 - **Merge system messages**, a per-model setting in Settings that is off until
   it is switched on. Some models refuse a conversation whose instructions are
   not all at the top, which breaks any assistant that repeats its instructions

@@ -123,11 +123,11 @@ func TestLoadRepairsRetentionRatherThanRefusingTheWholeFile(t *testing.T) {
 	}
 }
 
-// The shared root is recognised however it is spelled. A root that names the
+// The shared root is recognized however it is spelled. A root that names the
 // same directory by another spelling — a trailing slash, a dot segment, a
 // doubled separator — must not slip past the exception and put a per-account
 // record file inside the group-writable shared root.
-func TestTheSharedRootIsRecognisedHoweverItIsSpelled(t *testing.T) {
+func TestTheSharedRootIsRecognizedHoweverItIsSpelled(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	want := filepath.Join(home, "Library", "Application Support", "Gropius", "stats")

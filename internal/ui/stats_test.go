@@ -227,7 +227,7 @@ func TestTheSwitchExplainsItselfInWholeSentences(t *testing.T) {
 	if got := statisticsHint(t); got != want {
 		t.Errorf("the paragraph beside the switch reads:\n  %s\nwant:\n  %s", got, want)
 	}
-	if !strings.Contains(readPanelMarkup(t), `href="https://github.com/intentdriven/Gropius/blob/main/docs/request-statistics.md"`) {
+	if !strings.Contains(readPanelMarkup(t), `href="https://github.com/intentdriven/Gropius/blob/main/docs/statistics-store-reference.md"`) {
 		t.Error("the switch no longer links to the page that says what it records")
 	}
 }

@@ -50,4 +50,12 @@ func TestThePanelSaysHowFarBackTheStoreReaches(t *testing.T) {
 	if !strings.Contains(src, "could not open the store") {
 		t.Error("the panel reports a refused store as an empty one")
 	}
+	// Clear works whether recording is on or off, so what it asks before
+	// removing months of records must not claim anything about the switch.
+	if strings.Contains(src, "Recording stays on") {
+		t.Error("the Clear dialog says recording stays on; Clear leaves the switch as it found it, which may be off")
+	}
+	if !strings.Contains(src, "cannot be undone") {
+		t.Error("the Clear dialog does not say the records cannot be got back")
+	}
 }

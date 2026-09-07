@@ -1206,3 +1206,32 @@ func TestTheAccountsOwnFolderIsCreatedWhenItIsNotThereYet(t *testing.T) {
 		}
 	}
 }
+
+// The figure the documentation and the settings arithmetic rest on is the size
+// of a line, so it is held to a line this build actually writes rather than to
+// a guess: the guess it replaced was 150 bytes, which the format cannot reach
+// because every line carries its field names.
+func TestARecordLineIsTheSizeTheDocumentationSays(t *testing.T) {
+	smallest, err := json.Marshal(requestLine{V: SchemaVersion, Kind: KindRequest,
+		Record: Record{FirstTokenMS: NoFirstToken}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := len(smallest) + 1; n < 150 {
+		t.Errorf("the smallest request line is %d bytes; the documentation may claim less than it does", n)
+	}
+
+	typical, err := json.Marshal(requestLine{V: SchemaVersion, Kind: KindRequest, Record: Record{
+		Model: "mlx-community/Qwen3-8B-4bit", At: 1788696030, Class: ClassOK, Streamed: true,
+		PromptTokens: 1234, CompletionTokens: 567, FirstTokenMS: 210,
+		DurationMS: 4200, QueueWaitMS: 12, LoadWaitMS: 0,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := len(typical) + 1
+	if n < ApproxRecordBytes*4/5 || n > ApproxRecordBytes*6/5 {
+		t.Errorf("a typical request line is %d bytes, nowhere near the %d the documentation says",
+			n, ApproxRecordBytes)
+	}
+}

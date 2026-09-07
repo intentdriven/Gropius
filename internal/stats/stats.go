@@ -85,6 +85,16 @@ const (
 	ReasonShutdown   = "shutdown"
 )
 
+// OutcomeClasses lists every way a request can be recorded as having ended, so
+// that the documentation's list of them is held to this one: a class added
+// here without a word about it fails the build.
+func OutcomeClasses() []Class {
+	return []Class{
+		ClassOK, ClassClientError, ClassUpstreamStatus, ClassBusy, ClassRefused,
+		ClassLaunchFailed, ClassNotReady, ClassUnreachable, ClassCancelled, ClassGatewayError,
+	}
+}
+
 // RemovalReasons lists every reason an entry leaves the pool, so the
 // documentation's list of them is held to this one rather than to someone's
 // memory: a reason added here without a word about it fails the build.

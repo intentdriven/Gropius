@@ -260,3 +260,44 @@ func TestClearingTheRecordsIsNoted(t *testing.T) {
 		t.Errorf("clearing the records left no line in the log:\n%s", logged.String())
 	}
 }
+
+// Clear works with the switch off. Someone who stops recording and then
+// decides the history should go too must not have to turn recording back on to
+// remove it — and while it is off the panel shows nothing about the store, so
+// this is the one control pressed without a figure beside it.
+func TestClearWorksWhileRecordingIsOff(t *testing.T) {
+	a, srv, paths := recordingServer(t)
+	a.Stats.Add(stats.Record{Model: "org/a", At: 1788696030, Class: stats.ClassOK})
+	if err := a.StatsStore.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	if files, err := a.StatsStore.Files(); err != nil || len(files) == 0 {
+		t.Fatalf("nothing was recorded (%v, %v), so this test proves nothing", files, err)
+	}
+
+	off := config.Default()
+	if err := a.SetConfig(off); err != nil {
+		t.Fatal(err)
+	}
+	state, raw := getJSON(t, srv, "/api/state")
+	if _, present := state["stats_store"]; present {
+		t.Errorf("the panel describes the store with recording off:\n%s", raw)
+	}
+
+	resp := postJSON(t, srv, "/api/stats/clear", `{}`)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("POST /api/stats/clear with recording off = %d, want 200", resp.StatusCode)
+	}
+	if files, err := a.StatsStore.Files(); err != nil {
+		t.Fatal(err)
+	} else if len(files) != 0 {
+		t.Errorf("the store still holds %v", files)
+	}
+	if a.StatsStore.Enabled() || a.Stats.Enabled() {
+		t.Error("clearing with the switch off turned recording back on")
+	}
+	if _, err := os.Stat(paths.Stats); err != nil {
+		t.Errorf("the store directory went with the records: %v", err)
+	}
+}

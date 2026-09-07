@@ -30,26 +30,12 @@ remove them; [What removes the records](#what-removes-the-records) says how.
 
 ## What is recorded
 
-One record per request, made of these and nothing else:
-
-- `model` — which of your models served it, as its repo id. A request that was
-  refused before it named a model you have is recorded with no model at all;
-  the name the client asked for is never kept.
-- `at` — when the request arrived, to the second.
-- `class` — how it ended: answered, rejected, too busy, no room, could not
-  start, never ready, no answer, the model server's own refusal, the client
-  leaving before the answer was done, or Gropius's own failure.
-- `streamed` — whether the client asked for the answer a chunk at a time.
-- `prompt_tokens` and `completion_tokens` — the model server's own count of
-  what went in and what came out. Only an answered request carries them.
-- `first_token_ms` — how long the model took to produce the first chunk of a
-  streamed answer, measured from the request arriving to that chunk reaching
-  Gropius. It is `-1` for a request that produced no streamed chunk at all,
-  and the panel shows a dash.
-- `duration_ms` — how long the whole request took, from the moment it arrived.
-- `queue_wait_ms` — how long it waited for a free slot on a model that was
-  already loaded.
-- `load_wait_ms` — how long it waited for the model to load.
+One record per request: which of your models served it, when it arrived, how
+it ended, whether it streamed, the model server's own count of the tokens in
+and out, how long the first token took, how long the whole request took, and
+how long it waited for a free slot or for the model to load. That is the whole
+of it, field by field, in
+[Reference: the request statistics store](statistics-store-reference.md).
 
 Alongside those, Gropius counts per model how many requests each outcome
 accounted for, how many tokens went in and came out altogether, how many
@@ -61,88 +47,51 @@ tokens for the last day.
 The Statistics tab shows the most recent thousand requests one by one, and the
 totals for the last hour and the last day, which reach back further than a
 thousand rows do on a busy Mac. Those live figures are held in memory and a
-restart empties them; the records themselves are kept on disk and outlive the
-process, which is what the rest of this page is about.
+restart empties them.
 
-## Where the records are kept
+The records themselves are written to a folder of plain text files that
+outlives the process — one line of JSON each, which any tool can read. Where
+they are, what every line holds and what removes them is the
+[reference page](statistics-store-reference.md); the rest of this page is what
+you do about them.
 
-In a `stats` folder inside your own Gropius data folder — the same folder the
-models and the settings live in, `~/Library/Application Support/Gropius`,
-unless you moved it. The folder is yours alone (mode `0700`) and so is every file in it (`0600`),
-and Gropius refuses to write records into a folder any other account on this
-Mac could write to. If it has to refuse, it says so in its log and keeps the
-figures in memory instead.
+## How much is kept, and where
 
-Files are named `stats-YYYYMMDD-NNN.jsonl`, dated in UTC, and hold one JSON
-object per line — the format every tool already reads:
+Records go to a `stats` folder inside your own Gropius data folder, normally
+`~/Library/Application Support/Gropius/stats`. On a Mac with the shared model
+cache, the models live in the shared folder and the records do not: they stay
+in the serving account's own folder, because a shared folder is writable by
+every account on the Mac.
 
-```sh
-cat ~/Library/Application\ Support/Gropius/stats/*.jsonl | jq -r 'select(.kind == "request") | [.model, .class, .completion_tokens] | @tsv'
-```
+Two limits, both under the switch in **Settings → Request statistics**:
 
-Each line carries `v`, the version of the format it was written under, so a
-later Gropius can still read an older file. A reader should ignore a field it
-does not know and skip a line that does not parse.
+1. **Keep records for (months)** — six by default.
+2. **Never use more than (MB)** — 200 by default. This is the limit that always
+   wins.
 
-Records are written a couple of seconds behind the requests they describe, and
-Gropius never asks the disk to make sure they are really on it — forcing a
-write on every request would be a slow disk in the path of every answer, to
-protect figures that are worth less than the answer is. So a crash or a power
-cut costs the last few seconds of records, and the line being written at that
-moment is left half-finished. Everything before that is there, and the
-half-finished line costs itself alone: the next start closes it off before
-appending, and any reader that skips a line it cannot parse is unaffected.
+Set either and **Save settings**; a limit you lower takes effect when you save
+it. A record measures about 230 bytes, so 200 MB is roughly three months of
+ten thousand requests a day — but how far back your own store reaches depends
+on how much you use it, which is why Settings shows the date beside the two
+limits rather than promising a span.
 
-There are four kinds of line, told apart by `kind`:
+Beside them Settings also shows how much room the records use, and says when
+something went wrong: how many records were dropped rather than made to hold up
+an answer, if the disk could not keep up with a burst; and, if Gropius could not
+open the store at all, that the figures are being kept in memory and nothing is
+on disk.
 
-- `request` — one request, carrying the fields listed above.
-- `load` — a model server became ready, or failed to. `duration_ms` is how
-  long it took and `failed` says which of the two happened.
-- `removed` — a model server left memory, with `reason`: `evicted` to make
-  room for another, `idle` after a spell with no requests, `unloaded` because
-  you asked, `crashed`, `shutdown`, `abandoned` or `load_failed`. Only
-  `evicted` is an eviction; counting the others as one would make the figures
-  disagree with what happened.
-- `settings` — written each time recording starts and whenever one of these
-  changes, so you can tell a change in the figures from a change in the
-  settings that produced them: `budget_bytes`, `decode_concurrency`,
-  `idle_timeout_sec`, `stats_months` and `stats_max_bytes`. These are the
-  values in force, not the ones saved: the first three take a restart.
-
-## How much is kept
-
-Two limits, both in **Settings → Request statistics**:
-
-- **Keep records for (months)** — six by default. A file whose newest record
-  is older than this is removed even when there is room for it.
-- **Never use more than (MB)** — 200 by default. This is the limit that always
-  wins: while the records take more room than this, the oldest file goes,
-  whatever the months figure says.
-
-Both limits are applied as records arrive, at least once an hour while Gropius
-is running, when recording starts, and the moment you change either figure —
-so a limit you lower takes effect when you save it rather than at some later
-moment.
-
-Records are removed a whole file at a time, oldest first, so the store loses
-its past rather than its present; a file that was being written across the
-horizon is kept until its own newest record falls beyond it, and then it goes
-too. A record is about 150 bytes, so 200 MB is over four months of ten
-thousand requests a day.
-
-Beside the two limits, Settings shows the date the records reach back to and
-how much room they use. It also says when something went wrong: how many
-records were dropped rather than made to hold up an answer, if the disk could
-not keep up with a burst; how many lines could not be read back, if a file was
-damaged; and, if Gropius could not open the store at all, that the figures are
-being kept in memory and nothing is on disk.
+The exact rules — when the limits are applied, and what is removed — are on the
+[reference page](statistics-store-reference.md#retention).
 
 ## What removes the records
 
 - **Clear records**, the button under the two limits, removes every record
   file and empties the Statistics tab. It leaves recording as it found it, and
   works whether recording is on or off — so you can stop recording first and
-  then decide the history should go too.
+  then decide the history should go too. While recording is off the panel shows
+  nothing about the store, here as everywhere else, so this is the one control
+  you press without a figure beside it.
 - **Deleting the Gropius data folder** removes them with everything else, as
   [Uninstalling](getting-started.md#uninstalling) describes.
 
@@ -154,10 +103,10 @@ already written where they are.
 With the shared model cache, whoever launches Gropius first runs the server
 and everyone else's menu-bar app points at it, so one process serves every
 account. The records are that account's: they are kept in the serving
-account's own folder, under that account's opt-in, and they cover every
-request the server handled — including requests from other accounts on this
-Mac. The records still say nothing about who sent a request, because no client
-address is recorded.
+account's own folder — not the shared one the models are in — under that
+account's opt-in, and they cover every request the server handled — including
+requests from other accounts on this Mac. The records still say nothing about
+who sent a request, because no client address is recorded.
 
 ## Who can see it
 
@@ -182,7 +131,8 @@ server status, so anyone who opens it can see that it is.
 
 - **No prompt.** Not the messages, not the text of them, not a hash of them.
   The model server's own count of the tokens they came to is recorded, and is
-  listed above; nothing else about them is.
+  named on the [reference page](statistics-store-reference.md); nothing else
+  about them is.
 - **No answer.** The tokens are counted, by the model server; the words are
   not read.
 - **No API key**, yours or a client's.
@@ -210,7 +160,8 @@ Recording is one of three separate states, and no two of them share a switch:
 1. **Off.** Nothing worked out from a request is recorded or shown. This is
    how Gropius starts and how it stays until you say otherwise.
 2. **Recording on.** The switch on this page: the counts and timings above,
-   and nothing else, held in memory on this Mac.
+   and nothing else, kept on this Mac — in memory for the live view, and in
+   the files the [reference page](statistics-store-reference.md) describes.
 3. **A model server's own log level.** Every model server Gropius starts runs
    at a level that writes what it is loading and its own errors, and writes no
    prompt and no answer. Above that level it would write every request and

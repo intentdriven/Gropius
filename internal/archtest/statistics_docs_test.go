@@ -2,6 +2,7 @@ package archtest_test
 
 import (
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -14,19 +15,25 @@ import (
 // what the person switching it on was told.
 func TestTheStatisticsPageNamesEveryFieldThatIsRecorded(t *testing.T) {
 	page := readDoc(t, "request-statistics.md")
+	reference := readDoc(t, "statistics-store-reference.md")
 
-	// 1. Every field of a record is named on the page, and no field that does
-	//    not exist is. Read off the record itself, so a field added without a
-	//    word about it fails here rather than shipping undocumented.
+	// 1. Every field of a record is named on the reference page, and no field
+	//    that does not exist is. Read off the record itself, so a field added
+	//    without a word about it fails here rather than shipping
+	//    undocumented.
 	for _, field := range stats.RecordFields() {
-		if !strings.Contains(page, "`"+field+"`") {
-			t.Errorf("the page does not name %q, which every record carries", field)
+		if !strings.Contains(reference, "`"+field+"`") {
+			t.Errorf("the reference page does not name %q, which every record carries", field)
 		}
 	}
-	for _, name := range backticked(page) {
+	for _, name := range backticked(reference) {
 		if strings.Contains(name, "_") && !recorded(name) && !knownOther(name) {
-			t.Errorf("the page names %q as if it were recorded; no such field exists", name)
+			t.Errorf("the reference page names %q as if it were recorded; no such field exists", name)
 		}
+	}
+	// And the how-to points at it rather than repeating it.
+	if !strings.Contains(page, "statistics-store-reference.md") {
+		t.Error("the how-to does not point at the page that says what is recorded, field by field")
 	}
 
 	// 2. What is never recorded, in the reader's words rather than the code's.
@@ -72,7 +79,7 @@ func recorded(field string) bool {
 // files outlive the build that wrote them and are read with other people's
 // tools, so an undocumented field is worse here than anywhere else.
 func TestTheStatisticsPageNamesEveryFieldTheStoreWrites(t *testing.T) {
-	page := readDoc(t, "request-statistics.md")
+	page := readDoc(t, "statistics-store-reference.md")
 	for _, field := range stats.StoreFields() {
 		if !strings.Contains(page, "`"+field+"`") {
 			t.Errorf("the page does not name %q, which a line of the store can carry", field)
@@ -81,6 +88,11 @@ func TestTheStatisticsPageNamesEveryFieldTheStoreWrites(t *testing.T) {
 	for _, reason := range stats.RemovalReasons() {
 		if !strings.Contains(page, "`"+reason+"`") {
 			t.Errorf("the page does not name %q, which a removal line can carry as its reason", reason)
+		}
+	}
+	for _, class := range stats.OutcomeClasses() {
+		if !strings.Contains(page, "`"+string(class)+"`") {
+			t.Errorf("the page does not name %q, which a request line can carry as its class", class)
 		}
 	}
 	// And the file naming and the two limits, which are the rest of what
@@ -110,18 +122,31 @@ func knownOther(name string) bool {
 			return true
 		}
 	}
+	for _, class := range stats.OutcomeClasses() {
+		if string(class) == name {
+			return true
+		}
+	}
 	return false
 }
 
-// docs/ carries one Diataxis type per page, and this one is a how-to: a
-// procedure a reader follows, not a table they consult.
-func TestTheStatisticsPageIsAHowTo(t *testing.T) {
+// docs/ carries one Diataxis type per page. The switch's page is a how-to — a
+// procedure a reader follows — and everything a reader consults rather than
+// follows is on the reference page beside it.
+func TestTheStatisticsPagesAreOneTypeEach(t *testing.T) {
 	page := readDoc(t, "request-statistics.md")
 	if !strings.Contains(page, "\n1. ") {
-		t.Error("the page has no numbered procedure, so it is not a how-to")
+		t.Error("the how-to has no numbered procedure, so it is not a how-to")
 	}
 	if strings.Contains(page, "| Field |") {
-		t.Error("the page carries a reference table; a how-to is a procedure")
+		t.Error("the how-to carries a reference table; a how-to is a procedure")
+	}
+	reference := readDoc(t, "statistics-store-reference.md")
+	if !strings.Contains(reference, "| Field |") {
+		t.Error("the reference page has no field table; a reference is something a reader consults")
+	}
+	if strings.Contains(reference, "\n1. Open the control panel") {
+		t.Error("the reference page carries a procedure; that belongs on the how-to")
 	}
 }
 
@@ -168,5 +193,31 @@ func TestTheStatisticsPageSaysWhoCanSeeIt(t *testing.T) {
 	}
 	if !containsAll(readRepoFile(t, repoRoot, "README.md"), "The boundary is the Mac rather than your account") {
 		t.Error("the README claims a record for one account alone")
+	}
+}
+
+// The arithmetic a person's retention settings rest on is one figure, measured
+// rather than guessed, and it says the same thing everywhere it appears: on
+// the two pages a reader sees and in the comment beside the defaults
+// themselves.
+func TestTheRecordSizeIsTheSameFigureEverywhere(t *testing.T) {
+	want := strconv.Itoa(stats.ApproxRecordBytes)
+	for _, doc := range []string{"statistics-store-reference.md", "request-statistics.md"} {
+		if !strings.Contains(readDoc(t, doc), want+" bytes") {
+			t.Errorf("%s does not say a record measures %s bytes, which is what it does", doc, want)
+		}
+	}
+	repoRoot, err := filepath.Abs("../..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(readRepoFile(t, repoRoot, "internal/config/config.go"), want+" bytes") {
+		t.Error("the comment beside the retention defaults reasons from a different record size")
+	}
+	// The figure the branch replaced, which the format cannot reach.
+	for _, doc := range []string{"statistics-store-reference.md", "request-statistics.md"} {
+		if strings.Contains(readDoc(t, doc), "150 bytes") {
+			t.Errorf("%s still reasons from 150 bytes a record", doc)
+		}
 	}
 }
