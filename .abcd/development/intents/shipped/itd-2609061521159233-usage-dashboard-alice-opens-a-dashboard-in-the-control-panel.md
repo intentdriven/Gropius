@@ -126,6 +126,24 @@ assertion on a shared build machine flakes; a bound with that much headroom
 catches an order-of-magnitude regression instead, and the benchmark still
 carries the figure.
 
+**Three views, drawn as four tables (2026-09-07).** The press release above
+promises three tables and the panel draws four: the spread of the times to
+first token is its own table rather than eight more columns on the latency row,
+which is a row nobody reads across. It is the same figures and the same three
+views the maintainer settled — tokens per day with model share, latency
+distributions, and the eviction and reload timeline — with the second drawn as
+two tables. The press release is left as it was written; the spec's "As built"
+carries it as a departure, and the panel, the changelog, the explanation page
+and an architecture test all say four.
+
+**The read side the next reader should take (2026-09-07).** The store's bounded,
+cancellable read is `stats.FileStore.Read(ctx, ReadOptions, fn) (ReadStats,
+error)`, and `stats.RecordSource` is the interface this intent depends on.
+`Latest` remains as a thin wrapper that passes no context and no line bound, and
+is documented as unsuitable for a request path. The per-model per-day summary
+reader of itd-2609061602043757 is the next reader of this store and should align
+with `Read`/`ReadOptions` rather than adding a third shape.
+
 **The spec's pre-implementation gate did not run (2026-09-07).**
 spc-2609061822385499 asked for one month of the maintainer's own store records
 aggregated by hand with a command-line tool, and named that output as the

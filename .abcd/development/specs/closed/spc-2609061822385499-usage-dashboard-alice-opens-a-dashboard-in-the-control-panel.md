@@ -199,7 +199,18 @@ closed spec against the code would otherwise find them unexplained.
    `/api/stats`.** Extending it would have put a pass over months of records on
    the panel's two-second tick.
 
-A fifth departure, from "Dependencies and sequencing" rather than from the
+5. **The spread is a view of its own, so four tables ship where this spec says
+   three.** The Approach put the histogram "beside" the percentiles in the
+   latency table. Beside them it is eight more columns on a row that already
+   carries seven, which is a table nobody reads across; as its own table, with
+   the bucket edges as its headings, it answers the question the percentiles
+   cannot — whether a model is evenly slow or quick most of the time and
+   occasionally not. It is the same figures either way and no view was added to
+   the cut the maintainer settled: all three of those ship, and the second of
+   them is drawn as two tables. The panel, the CHANGELOG, the explanation page
+   and the architecture test that binds them all say four.
+
+A sixth departure, from "Dependencies and sequencing" rather than from the
 Approach: **the gate before implementation did not run.** One month of the
 maintainer's own records, hand-aggregated, was to be the fixture for the
 tokens-per-day and share criteria and the cheaper test of the intent's
@@ -221,7 +232,10 @@ The tests that satisfy each criterion, in order:
 `stats.TestTheLatencyDistributionIsTheFixturesOwn`,
 `stats.TestEvictionsAndReloadsAreCountedByTheLocalHour`,
 `gateway.TestTheHistoryEndpointSaysNothingIsRecordedWithTheSwitchOff` with
-`ui.TestTheHistoricalTablesLiveInTheStatisticsViewAndAreFetchedOnce`,
+`ui.TestTheOffStateDrawsNoFigureAndNoRange` — which runs the renderer against a
+document stub and asserts the sentence a reader is shown and the absence of any
+figure, where `ui.TestTheHistoricalTablesLiveInTheStatisticsViewAndAreFetchedOnce`
+beside it only holds the view's wiring —
 `gateway.TestTheHistoryEndpointIsRefusedFromAnywhereButThisMac` with
-`gateway.TestTheHistoryBodyCarriesNoRecords`, and the four documentation tests
+`gateway.TestTheHistoryBodyCarriesNoRecords`, and the five documentation tests
 in `internal/archtest/dashboard_docs_test.go`.
