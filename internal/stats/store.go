@@ -153,6 +153,10 @@ type StoreOptions struct {
 	// each write, which is the only way to hold the writer still and see what
 	// a request does when the queue fills.
 	beforeWrite func()
+	// duringClear is a test seam too: it runs inside Clear, after the writer
+	// has stopped and before it is started again, which is the window in which
+	// a switch-off must not be able to slip past.
+	duringClear func()
 }
 
 // Defaults for a store built without them.
@@ -175,11 +179,8 @@ var storeFilePattern = regexp.MustCompile(`^stats-(\d{8})-(\d{3,})\.jsonl$`)
 // figures: how far back it reaches, how much room it is using, and whether
 // anything was lost.
 type StoreStatus struct {
-	// Dir is where the files are, so a person can point their own tools at
-	// them.
-	Dir   string `json:"dir"`
-	Files int    `json:"files"`
-	Bytes int64  `json:"bytes"`
+	Files int   `json:"files"`
+	Bytes int64 `json:"bytes"`
 	// Oldest is the oldest record still held, in whole UTC seconds, and zero
 	// when the store holds nothing.
 	Oldest int64 `json:"oldest"`
@@ -202,11 +203,19 @@ type FileStore struct {
 	now  func() time.Time
 	log  *slog.Logger
 
-	// mu guards the lifecycle: whether the store is on, and the channel the
-	// writer is reading. Append holds it only for a non-blocking send.
+	// lifeMu serializes the whole of switching on, switching off and clearing
+	// against each other. Without it a Clear that began while recording was on
+	// could finish by reopening a store the operator had switched off in the
+	// meantime — and creating its directory in the act.
+	lifeMu sync.Mutex
+
+	// mu guards the lifecycle's own state: whether the store is on, and the
+	// channels the writer is reading. Append holds it only for a non-blocking
+	// send, and no path holds it while waiting for the writer.
 	mu      sync.Mutex
 	enabled bool
 	ch      chan storeEntry
+	quit    chan struct{}
 	done    chan struct{}
 	// lastSettings is the settings record last written, so that restarts and
 	// saves that change nothing do not fill the store with a record of
@@ -254,7 +263,7 @@ func NewStore(dir string, opts StoreOptions) *FileStore {
 		opts.Log = slog.Default()
 	}
 	return &FileStore{dir: dir, opts: opts, now: opts.Now, log: opts.Log,
-		months: opts.Months, maxBytes: opts.MaxBytes, status: StoreStatus{Dir: dir}}
+		months: opts.Months, maxBytes: opts.MaxBytes}
 }
 
 // SetRetention changes the two bounds. They are applied the next time the
@@ -305,25 +314,39 @@ func (s *FileStore) SetEnabled(on bool) error {
 	if s == nil {
 		return nil
 	}
+	s.lifeMu.Lock()
+	defer s.lifeMu.Unlock()
+	return s.setEnabled(on)
+}
+
+// setEnabled is SetEnabled without the lifecycle lock, for the paths that
+// already hold it. Callers must hold s.lifeMu.
+func (s *FileStore) setEnabled(on bool) error {
 	if !on {
 		s.stop()
 		return nil
 	}
 	s.mu.Lock()
-	if s.enabled {
-		s.mu.Unlock()
+	already := s.enabled
+	s.mu.Unlock()
+	if already {
 		return nil
 	}
+	// Outside s.mu: opening reads the directory and can prune, which scans
+	// files, and every request goroutine takes s.mu to offer a record.
+	// s.lifeMu is what makes that safe — nothing else can be switching the
+	// store on or off while this runs.
 	w, err := s.openWriter()
 	if err != nil {
-		s.mu.Unlock()
 		s.log.Warn("request statistics stay in memory: the store cannot be opened", "dir", s.dir, "err", err)
 		return err
 	}
+	s.mu.Lock()
 	s.enabled = true
 	s.ch = make(chan storeEntry, s.opts.QueueSize)
+	s.quit = make(chan struct{})
 	s.done = make(chan struct{})
-	go s.run(s.ch, s.done, w)
+	go s.run(s.ch, s.quit, s.done, w)
 	s.mu.Unlock()
 	return nil
 }
@@ -337,10 +360,13 @@ func (s *FileStore) stop() {
 		return
 	}
 	s.enabled = false
-	ch, done := s.ch, s.done
-	s.ch, s.done = nil, nil
+	quit, done := s.quit, s.done
+	s.ch, s.quit, s.done = nil, nil, nil
 	s.haveSettings, s.pendingSettings = false, false
-	close(ch)
+	// The channel itself is never closed. A Flush waits for the writer with
+	// s.mu released, so a close here would be a send on a closed channel;
+	// closing quit tells the writer to drain what is queued and stop.
+	close(quit)
 	s.mu.Unlock()
 	<-done
 }
@@ -350,6 +376,8 @@ func (s *FileStore) Close() error {
 	if s == nil {
 		return nil
 	}
+	s.lifeMu.Lock()
+	defer s.lifeMu.Unlock()
 	s.stop()
 	return nil
 }
@@ -455,16 +483,32 @@ func (s *FileStore) Flush() error {
 		return nil
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	if !s.enabled {
+	ch, done := s.ch, s.done
+	on := s.enabled
+	s.mu.Unlock()
+	if !on {
 		return nil
 	}
 	// Through the writer's own queue rather than past it: everything already
 	// offered has to reach the file before the flush answers, or a reader that
 	// flushed first would still miss the record it had just made.
+	//
+	// And with s.mu released, because this waits for the writer: holding the
+	// lock every record takes would turn one slow disk into a stall of every
+	// request goroutine. The writer stopping underneath is not an error — the
+	// records were flushed as it closed.
 	ack := make(chan error, 1)
-	s.ch <- storeEntry{ack: ack}
-	return <-ack
+	select {
+	case ch <- storeEntry{ack: ack}:
+	case <-done:
+		return nil
+	}
+	select {
+	case err := <-ack:
+		return err
+	case <-done:
+		return nil
+	}
 }
 
 // Status is what the panel shows beside the retention figures.
@@ -484,6 +528,9 @@ func (s *FileStore) Clear() error {
 	if s == nil {
 		return nil
 	}
+	s.lifeMu.Lock()
+	defer s.lifeMu.Unlock()
+
 	// The settings in force are carried across the stop, so that the emptied
 	// store can state them again before the first record that follows. Without
 	// that, every record made between a Clear and the next restart would sit
@@ -498,13 +545,17 @@ func (s *FileStore) Clear() error {
 		s.mu.Unlock()
 	}
 
-	root, err := os.OpenRoot(s.dir)
+	if s.opts.duringClear != nil {
+		s.opts.duringClear()
+	}
+
+	root, err := openStoreRoot(s.dir)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			err = nil
 		}
 		if was {
-			if e := s.SetEnabled(true); err == nil {
+			if e := s.setEnabled(true); err == nil {
 				err = e
 			}
 		}
@@ -512,7 +563,9 @@ func (s *FileStore) Clear() error {
 	}
 	files, listErr := listStoreFiles(root)
 	for _, f := range files {
-		if e := root.Remove(f.name); e != nil && listErr == nil {
+		// A file that is already gone is a file this was asked to remove: two
+		// clears at once must not make the second one report a failure.
+		if e := root.Remove(f.name); e != nil && !errors.Is(e, fs.ErrNotExist) && listErr == nil {
 			listErr = e
 		}
 	}
@@ -523,7 +576,7 @@ func (s *FileStore) Clear() error {
 	s.statusMu.Unlock()
 
 	if was {
-		if e := s.SetEnabled(true); listErr == nil {
+		if e := s.setEnabled(true); listErr == nil {
 			listErr = e
 		}
 	}
@@ -540,44 +593,58 @@ type storeEntry struct {
 
 // run is the writer. It owns the open file for as long as the store is on, and
 // nothing else ever writes to it.
-func (s *FileStore) run(ch chan storeEntry, done chan struct{}, w *storeWriter) {
+func (s *FileStore) run(ch chan storeEntry, quit chan struct{}, done chan struct{}, w *storeWriter) {
 	defer close(done)
 	t := time.NewTicker(w.opts.FlushEvery)
 	defer t.Stop()
 	for {
 		select {
-		case e, ok := <-ch:
-			if !ok {
-				if err := w.close(); err != nil {
-					s.log.Warn("the statistics store could not be closed cleanly", "err", err)
-				}
-				s.publish(w)
-				return
-			}
-			if e.ack != nil {
-				err := w.flush()
-				s.publish(w)
-				e.ack <- err
-				continue
-			}
-			if w.opts.beforeWrite != nil {
-				w.opts.beforeWrite()
-			}
-			if err := w.write(e.line); err != nil {
-				// A store that cannot be written is not a request that failed.
-				// It is logged once per occurrence and the records go on being
-				// counted in memory, which is where they were before any of
-				// this existed.
-				s.log.Warn("a request statistics record could not be written", "err", err)
-			}
-			s.publish(w)
+		case e := <-ch:
+			s.apply(w, e)
 		case <-t.C:
 			if err := w.flush(); err != nil {
 				s.log.Warn("the statistics store could not be flushed", "err", err)
 			}
 			s.publish(w)
+		case <-quit:
+			// Everything already queued is written before the file is closed:
+			// switching recording off must not lose the records of the last
+			// few seconds it was on.
+			for {
+				select {
+				case e := <-ch:
+					s.apply(w, e)
+				default:
+					if err := w.close(); err != nil {
+						s.log.Warn("the statistics store could not be closed cleanly", "err", err)
+					}
+					s.publish(w)
+					return
+				}
+			}
 		}
 	}
+}
+
+// apply does one thing the writer was asked for: append a line, or answer a
+// flush.
+func (s *FileStore) apply(w *storeWriter, e storeEntry) {
+	if e.ack != nil {
+		err := w.flush()
+		s.publish(w)
+		e.ack <- err
+		return
+	}
+	if w.opts.beforeWrite != nil {
+		w.opts.beforeWrite()
+	}
+	if err := w.write(e.line); err != nil {
+		// A store that cannot be written is not a request that failed. It is
+		// logged and the records go on being counted in memory, which is where
+		// they were before any of this existed.
+		s.log.Warn("a request statistics record could not be written", "err", err)
+	}
+	s.publish(w)
 }
 
 // publish copies the writer's own view of the store into the figures the panel
@@ -620,7 +687,7 @@ func (s *FileStore) openWriter() (*storeWriter, error) {
 	if err := ensureStoreDir(s.dir); err != nil {
 		return nil, err
 	}
-	root, err := os.OpenRoot(s.dir)
+	root, err := openStoreRoot(s.dir)
 	if err != nil {
 		return nil, err
 	}
@@ -657,14 +724,41 @@ func ensureStoreDir(dir string) error {
 		return err
 	}
 	fi, err := os.Lstat(dir)
-	switch {
-	case errors.Is(err, fs.ErrNotExist):
-		if err := os.Mkdir(dir, 0o700); err != nil {
-			return err
-		}
-		return nil
-	case err != nil:
+	if errors.Is(err, fs.ErrNotExist) {
+		return os.Mkdir(dir, 0o700)
+	}
+	if err != nil {
 		return err
+	}
+	return checkStoreDir(dir, fi)
+}
+
+// openStoreRoot opens a handle to the store's directory, having first held it
+// to the same rule the writer does.
+//
+// Reading and clearing check what writing checks. os.Root refuses a symbolic
+// link *inside* the root but not one standing where the root itself should be,
+// so without this a store directory replaced by a link would have Clear delete
+// every matching file in whatever directory the link pointed at — this
+// account's real store, or any directory it can write.
+func openStoreRoot(dir string) (*os.Root, error) {
+	if err := checkAncestors(filepath.Dir(dir)); err != nil {
+		return nil, err
+	}
+	fi, err := os.Lstat(dir)
+	if err != nil {
+		return nil, err
+	}
+	if err := checkStoreDir(dir, fi); err != nil {
+		return nil, err
+	}
+	return os.OpenRoot(dir)
+}
+
+// checkStoreDir refuses a store directory that is a link, is not a directory,
+// or is one another account on this Mac can write.
+func checkStoreDir(dir string, fi os.FileInfo) error {
+	switch {
 	case fi.Mode()&os.ModeSymlink != 0:
 		return fmt.Errorf("%s is a symbolic link, not a directory", dir)
 	case !fi.IsDir():
@@ -744,11 +838,11 @@ const fileFlags = os.O_CREATE | os.O_WRONLY | os.O_APPEND | syscall.O_NONBLOCK |
 
 // open opens the file to append to: the newest one if it has room, a new one
 // otherwise.
-func (w *storeWriter) open() error {
+func (w *storeWriter) open(fresh bool) error {
 	day := w.now().UTC().Format("20060102")
 	dayNum, _ := strconv.Atoi(day)
 	name := ""
-	if n := len(w.files); n > 0 {
+	if n := len(w.files); n > 0 && !fresh {
 		last := w.files[n-1]
 		if last.day == dayNum && last.size < w.opts.RotateBytes {
 			name = last.name
@@ -817,7 +911,7 @@ func endsInNewline(root *os.Root, name string) (bool, error) {
 // first if the line would not fit in it.
 func (w *storeWriter) write(b []byte) error {
 	if w.f == nil {
-		if err := w.open(); err != nil {
+		if err := w.open(false); err != nil {
 			return err
 		}
 	}
@@ -855,7 +949,10 @@ func (w *storeWriter) rotate() error {
 	if err := w.prune(); err != nil {
 		return err
 	}
-	if err := w.open(); err != nil {
+	// A fresh file, always: the rotation is pre-emptive, so the file just
+	// closed is still under the limit and reusing it would put the record that
+	// triggered the rotation past it.
+	if err := w.open(true); err != nil {
 		return err
 	}
 	w.oldest = w.oldestRecord()
@@ -863,7 +960,8 @@ func (w *storeWriter) rotate() error {
 }
 
 // prune enforces both bounds, oldest file first. The size cap is the hard one:
-// while the store is over it the oldest file goes, whatever the horizon says.
+// while the store is within one file's growth of it, the oldest file goes,
+// whatever the horizon says.
 // The horizon then removes what is left over from before it, so a quiet Mac
 // still loses records it promised to forget.
 //
@@ -876,7 +974,11 @@ func (w *storeWriter) prune() error {
 	for _, f := range w.files {
 		total += f.size
 	}
-	for len(w.files) > 1 && total > maxBytes {
+	// Room for the file about to be opened, not just for what is already
+	// there: pruning to exactly the cap and then opening a new file would put
+	// the store over it for as long as that file took to fill, and the cap is
+	// meant to be a bound rather than an average.
+	for len(w.files) > 1 && total+w.opts.RotateBytes > maxBytes {
 		if err := w.root.Remove(w.files[0].name); err != nil && !errors.Is(err, fs.ErrNotExist) {
 			return err
 		}
@@ -957,7 +1059,7 @@ func (w *storeWriter) firstRecordIn(name string) int64 {
 		return 0
 	}
 	defer f.Close()
-	sc := bufio.NewScanner(f)
+	sc := bufio.NewScanner(io.LimitReader(f, maxStoreFileBytes))
 	sc.Buffer(make([]byte, 0, 64<<10), 1<<20)
 	for sc.Scan() {
 		if l, ok := parseLine(sc.Bytes()); ok {
@@ -977,7 +1079,7 @@ func (w *storeWriter) newestRecordIn(name string) int64 {
 	}
 	defer f.Close()
 	var newest int64
-	sc := bufio.NewScanner(f)
+	sc := bufio.NewScanner(io.LimitReader(f, maxStoreFileBytes))
 	sc.Buffer(make([]byte, 0, 64<<10), 1<<20)
 	for sc.Scan() {
 		if l, ok := parseLine(sc.Bytes()); ok {
@@ -993,7 +1095,7 @@ func (s *FileStore) Files() ([]string, error) {
 	if s == nil {
 		return nil, nil
 	}
-	root, err := os.OpenRoot(s.dir)
+	root, err := openStoreRoot(s.dir)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return nil, nil
@@ -1028,7 +1130,7 @@ func (s *FileStore) Latest(limit int, fn func(Line) bool) error {
 	if err := s.Flush(); err != nil {
 		return err
 	}
-	root, err := os.OpenRoot(s.dir)
+	root, err := openStoreRoot(s.dir)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return nil

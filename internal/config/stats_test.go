@@ -122,3 +122,25 @@ func TestLoadRepairsRetentionRatherThanRefusingTheWholeFile(t *testing.T) {
 		t.Errorf("the rest of the file was discarded: host = %q", c.Host)
 	}
 }
+
+// The shared root is recognised however it is spelled. A root that names the
+// same directory by another spelling — a trailing slash, a dot segment, a
+// doubled separator — must not slip past the exception and put a per-account
+// record file inside the group-writable shared root.
+func TestTheSharedRootIsRecognisedHoweverItIsSpelled(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	want := filepath.Join(home, "Library", "Application Support", "Gropius", "stats")
+	for _, spelling := range []string{
+		SharedRoot,
+		SharedRoot + "/",
+		SharedRoot + "/.",
+		"/Users/Shared/./Gropius",
+		"//Users/Shared/Gropius",
+		"/Users/Shared/Gropius/../Gropius",
+	} {
+		if got := StatsDir(spelling); got != want {
+			t.Errorf("StatsDir(%q) = %q, want the account's own %q", spelling, got, want)
+		}
+	}
+}

@@ -147,7 +147,7 @@ func NewPaths(root string) Paths {
 // is what stops the records being written: this function decides where to
 // look, never whether the place is safe.
 func StatsDir(root string) string {
-	if root != SharedRoot {
+	if !sameDir(root, SharedRoot) {
 		return filepath.Join(root, "stats")
 	}
 	home, err := os.UserHomeDir()
@@ -155,6 +155,29 @@ func StatsDir(root string) string {
 		return filepath.Join(root, "stats")
 	}
 	return filepath.Join(home, "Library", "Application Support", "Gropius", "stats")
+}
+
+// sameDir reports whether two paths name the same directory.
+//
+// Cleaned, and then resolved through any symbolic links when both sides exist:
+// the root arrives from GROPIUS_ROOT or the -root flag exactly as it was
+// typed, so a trailing slash, a dot segment or a link would otherwise let a
+// root that IS the shared root compare unequal to it — and the whole point of
+// the comparison is to keep a per-account record file out of a directory every
+// account on the Mac can write to.
+func sameDir(a, b string) bool {
+	if filepath.Clean(a) == filepath.Clean(b) {
+		return true
+	}
+	ra, err := filepath.EvalSymlinks(a)
+	if err != nil {
+		return false
+	}
+	rb, err := filepath.EvalSymlinks(b)
+	if err != nil {
+		return false
+	}
+	return ra == rb
 }
 
 // UV is the path to the uv binary Gropius manages.
@@ -614,12 +637,14 @@ func (c Config) Clone() Config {
 // on the ceiling is two rotated files, below which the store would drop a file
 // it had only just opened; the ceiling on the ceiling and the horizon are
 // there so a mistyped figure is refused rather than filling a disk or being
-// read as "forever".
+// read as "forever". Ten gigabytes is decades of records at the rate above,
+// and small enough that a mistyped figure cannot quietly become the whole
+// disk — nothing here asks the filesystem how much room is left.
 const (
 	DefaultStatsMonths   = 6
 	DefaultStatsMaxBytes = 200 << 20
 	MinStatsMaxBytes     = 10 << 20
-	MaxStatsMaxBytes     = 1 << 40
+	MaxStatsMaxBytes     = 10 << 30
 	MaxStatsMonths       = 120
 )
 

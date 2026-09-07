@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -730,5 +731,193 @@ func TestAnEmptiedStoreStatesTheSettingsAgainBeforeTheNextRecord(t *testing.T) {
 	}
 	if got[1].Settings.At == 10 {
 		t.Error("the restated settings carry the old record's time, not the time they were written again")
+	}
+}
+
+// Reading and clearing hold the same rule about where the store may be as
+// writing does. os.OpenRoot does not refuse a symbolic link at its own final
+// component, so a store directory that is a link into somebody else's
+// directory would otherwise have every matching file in that directory
+// deleted by Clear.
+func TestReadingAndClearingRefuseADirectoryTheWriterWouldRefuse(t *testing.T) {
+	base := t.TempDir()
+	victim := filepath.Join(base, "victim")
+	if err := os.Mkdir(victim, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	planted := filepath.Join(victim, "stats-20260907-001.jsonl")
+	if err := os.WriteFile(planted, []byte(`{"v":1,"kind":"request","model":"org/a","at":1,"class":"ok"}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(base, "stats")
+	if err := os.Symlink(victim, dir); err != nil {
+		t.Fatal(err)
+	}
+
+	s := NewStore(dir, StoreOptions{})
+	defer s.Close()
+	if err := s.Clear(); err == nil {
+		t.Error("Clear followed a symbolic link standing where the store's own directory should be")
+	}
+	if _, err := os.Stat(planted); err != nil {
+		t.Errorf("Clear deleted a file in the directory the link pointed at: %v", err)
+	}
+	if _, err := s.Files(); err == nil {
+		t.Error("Files listed a directory the writer would refuse")
+	}
+	if err := s.Latest(0, func(Line) bool { return true }); err == nil {
+		t.Error("Latest read a directory the writer would refuse")
+	}
+}
+
+// A request is never made to wait for a flush, either. Flush waits for the
+// writer, so a flush that held the lock every record takes would turn one slow
+// disk into a stall of every request goroutine.
+func TestAFlushDoesNotHoldUpARecord(t *testing.T) {
+	held := make(chan struct{})
+	s, _ := newTestStore(t, StoreOptions{beforeWrite: func() { <-held }})
+	on(t, s)
+	if err := s.AppendRequest(Record{Model: "org/a", At: 1, Class: ClassOK}); err != nil {
+		t.Fatal(err)
+	}
+
+	flushing := make(chan struct{})
+	go func() {
+		close(flushing)
+		s.Flush()
+	}()
+	<-flushing
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		s.AppendRequest(Record{Model: "org/a", At: 2, Class: ClassOK})
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		close(held)
+		t.Fatal("recording a request waited for a flush that was waiting for the disk")
+	}
+	close(held)
+}
+
+// Rotation starts a new file at the limit rather than one record past it, so
+// "one file at a time, rotated by size" is what the files on disk actually
+// show.
+func TestNoFileGrowsPastTheRotationLimit(t *testing.T) {
+	const limit = 512
+	s, dir := newTestStore(t, StoreOptions{RotateBytes: limit, MaxBytes: 1 << 20})
+	on(t, s)
+	for i := range 100 {
+		if err := s.AppendRequest(Record{Model: "org/a", At: int64(1788696030 + i), Class: ClassOK}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range names(t, dir) {
+		fi, err := os.Stat(filepath.Join(dir, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if fi.Size() > limit {
+			t.Errorf("%s is %d bytes, past the %d-byte rotation limit", name, fi.Size(), limit)
+		}
+	}
+}
+
+// Switching off and clearing cannot interleave. A Clear that began while
+// recording was on must not finish by reopening a store the operator switched
+// off while it ran — which would create the directory, and leave it recording,
+// with the switch off.
+func TestASwitchOffCannotSlipInsideAClear(t *testing.T) {
+	var s *FileStore
+	inside := make(chan struct{}, 1)
+	switched := make(chan struct{})
+	opts := StoreOptions{}
+	opts.duringClear = func() {
+		select {
+		case inside <- struct{}{}:
+		default:
+			return // only the first Clear
+		}
+		go func() {
+			s.SetEnabled(false)
+			close(switched)
+		}()
+		select {
+		case <-switched:
+			t.Error("recording was switched off in the middle of a Clear, which would leave the Clear to switch it back on")
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+	s, _ = newTestStore(t, opts)
+	on(t, s)
+	if err := s.AppendRequest(Record{Model: "org/a", At: 1, Class: ClassOK}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Clear(); err != nil {
+		t.Fatal(err)
+	}
+	<-switched
+	if s.Enabled() {
+		t.Error("the store is recording after the switch went off")
+	}
+}
+
+// And the same property under a hammer, as the race detector sees it.
+func TestClearingAndSwitchingOffDoNotInterleave(t *testing.T) {
+	s, dir := newTestStore(t, StoreOptions{})
+	var wg sync.WaitGroup
+	for range 2 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for range 50 {
+				s.SetEnabled(true)
+				s.AppendRequest(Record{Model: "org/a", At: 1, Class: ClassOK})
+				s.Clear()
+				s.SetEnabled(false)
+			}
+		}()
+	}
+	wg.Wait()
+
+	if s.Enabled() {
+		t.Error("the store is recording after both goroutines switched it off")
+	}
+	// And with the switch off nothing may be added to what is on disk.
+	before := snapshotDir(t, dir)
+	s.AppendRequest(Record{Model: "org/a", At: 2, Class: ClassOK})
+	if after := snapshotDir(t, dir); fmt.Sprint(after) != fmt.Sprint(before) {
+		t.Errorf("the store changed with the switch off:\n before %v\n after  %v", before, after)
+	}
+}
+
+// Clear removes the records whether or not recording is on: a person who
+// switches recording off and then decides the history should go too must not
+// have to switch it back on to remove it.
+func TestClearWorksWithTheSwitchOff(t *testing.T) {
+	s, dir := newTestStore(t, StoreOptions{})
+	on(t, s)
+	if err := s.AppendRequest(Record{Model: "org/a", At: 1, Class: ClassOK}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetEnabled(false); err != nil {
+		t.Fatal(err)
+	}
+	if len(names(t, dir)) == 0 {
+		t.Fatal("nothing was recorded, so this test proves nothing")
+	}
+	if err := s.Clear(); err != nil {
+		t.Fatal(err)
+	}
+	if got := names(t, dir); len(got) != 0 {
+		t.Errorf("the store still holds %v after Clear", got)
+	}
+	if s.Enabled() {
+		t.Error("Clear switched recording back on")
 	}
 }

@@ -68,8 +68,7 @@ process, which is what the rest of this page is about.
 
 In a `stats` folder inside your own Gropius data folder — the same folder the
 models and the settings live in, `~/Library/Application Support/Gropius`,
-unless you moved it. Settings shows the exact location beside the two limits.
-The folder is yours alone (mode `0700`) and so is every file in it (`0600`),
+unless you moved it. The folder is yours alone (mode `0700`) and so is every file in it (`0600`),
 and Gropius refuses to write records into a folder any other account on this
 Mac could write to. If it has to refuse, it says so in its log and keeps the
 figures in memory instead.
@@ -125,7 +124,9 @@ many records were dropped rather than made to hold up an answer.
 ## What removes the records
 
 - **Clear records**, the button under the two limits, removes every record
-  file and empties the Statistics tab. It leaves recording on.
+  file and empties the Statistics tab. It leaves recording as it found it, and
+  works whether recording is on or off — so you can stop recording first and
+  then decide the history should go too.
 - **Deleting the Gropius data folder** removes them with everything else, as
   [Uninstalling](getting-started.md#uninstalling) describes.
 

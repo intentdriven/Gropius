@@ -69,8 +69,14 @@ func TestTheStatisticsEndpointSaysHowFarBackTheStoreReaches(t *testing.T) {
 	if got, _ := store["bytes"].(float64); got <= 0 {
 		t.Errorf("the store is reported as using %v bytes", got)
 	}
-	if got, _ := store["dir"].(string); got != paths.Stats {
-		t.Errorf("the store is reported as living at %q, want %q", got, paths.Stats)
+	// The panel is told what the store holds, never where it is: the path
+	// carries the serving account's name, and the control plane answers every
+	// account on this Mac.
+	if _, present := store["dir"]; present {
+		t.Errorf("the statistics endpoint publishes the store's path:\n%s", raw)
+	}
+	if strings.Contains(raw, paths.Stats) {
+		t.Errorf("the statistics endpoint carries the store's location:\n%s", raw)
 	}
 
 	// And the same figures reach the snapshot the Settings page draws from,
