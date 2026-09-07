@@ -322,3 +322,39 @@ differ.
 - **`docs/statistics-store-reference.md`'s `queue_wait_ms` row** now states the
   wait for room as well as the wait for a slot, which point 3 of the section
   above changed and that page did not carry.
+
+## As built, second addendum (2026-09-07, after the security re-review)
+
+The first review round saw a tree that had been poisoned by another agent's
+in-flight mutation, so the branch was frozen and re-reviewed. The re-review
+confirmed every fix above by mutation and found one thing they had introduced.
+
+- **A caller that will not wait is not held behind the queue either.** Making
+  the fairness gate cover admission (first addendum, point 1) caught
+  `AcquireNow` with it: `mayEvictLocked(nil)` is false whenever anything is
+  queued, so a start-up preload was refused — with a message saying no model
+  could be freed, when nothing needed freeing — and the model was left cold for
+  the session. `acquire` now sets both the grace waiver and the queue waiver
+  together for a non-waiting caller. Held by
+  `TestAcquireNowIsNotHeldBehindTheQueue`, which is a behavioural test where
+  `TestPreloadDoesNotWaitOutAnEvictionGrace` is only a source assertion.
+- **A parked waiter asks for a load only when it could proceed**
+  (`worthTryingLocked`). `startLocked` resolves the model and stats two files
+  before it reaches the eviction plan, and every completed request wakes every
+  waiter, so a waiter that could not have proceeded was doing filesystem work
+  under the pool's one lock at the rate the machine serves requests. Held by
+  `TestAParkedWaiterDoesNoFilesystemWorkOnEveryCompletedRequest`, which counts
+  launch prechecks.
+- **The `MaxLoadWaiters` arithmetic is corrected.** A waiter holds the request
+  body twice — the bytes the gateway read and the decoded value, which copies
+  rather than aliases — so the figure the default is chosen against is about
+  64 MiB a waiter and half a gigabyte for eight, not 256 MiB.
+- **`loadWaiter.need` can go stale** and its comment now says what that costs:
+  only whether a waiter is woken early or parked a little longer, never what is
+  admitted, since the load itself resolves the model again.
+- **Two findings are captured rather than fixed.** The waiter queue is one
+  queue for the whole machine and its cap counts requests rather than sources
+  (iss-2609070252377294); the control panel's Load button can fill it from
+  loopback (iss-2609070252378091). Both are bounded and behind a switch that is
+  off; a per-source cap is a design decision this record does not settle. The
+  first is stated in `docs/eviction-grace.md`'s "What it costs".
