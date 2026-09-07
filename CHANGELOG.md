@@ -27,12 +27,17 @@ GitHub release notes.
   a settings file copied to a smaller Mac gets that Mac's default rather than
   the first one's figure. Lowering the budget unloads nothing — no model is
   taken away at the moment you press Save — and the panel says the machine is
-  over its budget until those models go. A budget larger than the Mac is
-  refused, naming what it has, and so is one below what the pinned models cost
-  together, naming their sum. A budget claiming most of the machine is saved
-  with a warning rather than refused: a model is charged the weights it loads
-  and not the cache a long prompt adds, so a Mac committed in full on paper can
-  still run out under load. See
+  over its budget until those models go. What a save refuses is a change that
+  makes matters worse: one that raises the budget past what this Mac has, naming
+  what it has, and one that lowers it under what the pinned models need, naming
+  their sum. A figure that arrives already over the machine — a settings file
+  carried from a larger Mac — is applied and reported instead, so it never
+  stands between you and saving an unrelated setting, and models are held to the
+  memory that exists whatever it says. A budget claiming most of the machine is
+  saved with a warning rather than refused: a model is charged the weights it
+  loads and not the cache a long prompt adds, so a Mac committed in full on
+  paper can still run out under load. One too small to hold any model on this
+  Mac is reported too. See
   [Set how much memory models may use](docs/memory-budget.md).
 - **Request statistics**, a switch in Settings that is off until it is turned
   on. While it is on, Gropius records one content-free row per request it

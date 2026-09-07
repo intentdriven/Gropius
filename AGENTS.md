@@ -89,7 +89,8 @@ CI (`.github/workflows/ci.yml`) gates on: `gofmt -l .` (must be empty),
 - Trust boundaries — changes here need an adversarial security review before
   they land: `internal/gateway` (network input), `internal/hub` (remote
   downloads), `internal/runtime` (subprocess management), `internal/config`
-  (file parsing).
+  (file parsing), `internal/capability` (executes `sysctl` to read this Mac's
+  memory, and every memory figure the app enforces comes from it).
 - Read `.abcd/development/decisions/DECISIONS.md` before touching model
   routing or the runtime: it records empirically verified constraints (the
   request's `model` field is a load instruction the gateway must rewrite;
