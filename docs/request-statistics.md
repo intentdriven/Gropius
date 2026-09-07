@@ -94,6 +94,8 @@ they ended, and how often the model was loaded or left memory. It holds no
 figure for any single request, it takes a thousandth of the room the records
 did, and it stays long after them — so a year on you can still see which models
 last spring's work ran on, even though no request from that spring survives.
+The **Statistics** tab shows those days under **Earlier days**, and says which
+of them have no detailed records left at all.
 
 The exact rules — when the limits are applied, what is removed, and what the
 summary holds — are on the

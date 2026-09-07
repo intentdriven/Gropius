@@ -231,3 +231,30 @@ func TestTheRecordSizeIsTheSameFigureEverywhere(t *testing.T) {
 		}
 	}
 }
+
+// The summary's arithmetic is held to the code the same way a record's is. The
+// page tells a reader how far back a summary reaches before they set a limit,
+// and a bound changed in one place and not the other would make that a guess.
+func TestTheSummarySizeIsTheSameFigureEverywhere(t *testing.T) {
+	page := readDoc(t, "statistics-store-reference.md")
+	if want := strconv.Itoa(stats.ApproxSummaryBytes); !strings.Contains(page, want+" bytes") {
+		t.Errorf("the reference page does not say a summary line is at most %s bytes, which is what it is", want)
+	}
+	// The default cap the page itself names, a twentieth of it for the
+	// summary, one line per model per day, ten models — which is the shape the
+	// page's sentence is about.
+	const defaultCap = 200 << 20
+	const modelsADay = 10
+	years := stats.SummaryShareOfCap(defaultCap) / stats.ApproxSummaryBytes / modelsADay / 365
+	if years <= 0 {
+		t.Fatalf("the summary's share of the default cap holds less than a year of days: %d bytes",
+			stats.SummaryShareOfCap(defaultCap))
+	}
+	if want := strconv.FormatInt(years, 10) + " years"; !strings.Contains(page, want) {
+		t.Errorf("the reference page does not say the summary holds %q at the default limit", want)
+	}
+	// The figure the branch replaced, which the widest line is well past.
+	if strings.Contains(page, "decades of days") {
+		t.Error("the reference page still promises decades of days, which the measured line size does not reach")
+	}
+}

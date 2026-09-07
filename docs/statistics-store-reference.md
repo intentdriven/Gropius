@@ -47,7 +47,9 @@ Every line carries two fields before anything else:
 
 A reader should ignore a field it does not know, and skip a line it cannot
 parse. A line whose `v` is newer than the reader understands is one to skip:
-the version changes only when the shape changes.
+the version changes only when the shape changes. Gropius holds itself to the
+same rule when it rewrites the summary: a line it cannot read is written back
+exactly as it was found, never dropped.
 
 Records are written a couple of seconds behind the requests they describe, and
 Gropius never asks the disk to make sure they are really on it — forcing a
@@ -152,7 +154,7 @@ it.
 
 | Field | Meaning |
 | --- | --- |
-| `folded` | The files already counted, each as the three fields below. Normally empty. |
+| `folded` | The files already counted whose removal has not been seen through, each as the three fields below. Normally empty. |
 | `name` | The file's name. |
 | `bytes` | How large it was when it was counted. |
 | `newest` | Its newest record, in whole UTC seconds. Together with `bytes` this tells the file that was counted from a later file that happens to have taken its name. |
@@ -187,9 +189,15 @@ Summaries are not removed by the months limit — a summary of last spring is
 what makes the shape of last spring's use visible once its detail is gone.
 What bounds them is room: the summary counts toward `stats_max_bytes` like
 everything else, and it may use a twentieth of it. Over that, its oldest days
-go first, and the most recent day is always kept. A summary line is at most
-about 512 bytes, so at the 200 MB default a summary of ten models has room for
-decades of days.
+go first, and the most recent day is always kept, because a summary that
+emptied itself would take room while saying nothing. A summary line is at most
+800 bytes, so at the 200 MB default the summary's twentieth holds 3 years of
+daily lines for ten models, and far more for fewer.
+
+A file the store is about to drop that it cannot read, or a summary it cannot
+write, stops retention rather than the records: nothing is removed that has not
+been counted, the Settings page says the limits are not being applied, and
+Gropius's own log says why.
 
 A record measures about 230 bytes, so 200 MB is roughly three months of ten
 thousand requests a day. How far back the store actually reaches is shown on

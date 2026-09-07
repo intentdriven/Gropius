@@ -161,10 +161,16 @@ GitHub release notes.
   and it does so before the records it counts are removed, so a power cut in
   the middle of a drop can leave the records and their summary both and never
   neither. The months limit does not remove summaries; what bounds them is a
-  twentieth of the size limit, with the oldest days going first, which at the
-  200 MB default is decades of them. **Clear records** removes them with
-  everything else. See
-  [Retention](docs/statistics-store-reference.md#retention).
+  twentieth of the size limit, with the oldest days going first and the most
+  recent day always kept, which at the 200 MB default is three years of them
+  for ten models. The **Statistics** tab shows those days under **Earlier
+  days** and says which of them have no detailed records left at all, so a
+  month whose records have been dropped no longer looks like a month with no
+  traffic in it. **Clear records** removes them with everything else. If
+  Gropius cannot summarise what it is about to drop — an unreadable file, a
+  summary it cannot write — it keeps the records past their limits rather than
+  deleting them uncounted, says so on the Settings page and explains why in its
+  own log. See [Retention](docs/statistics-store-reference.md#retention).
 - **Merge system messages**, a per-model setting in Settings that is off until
   it is switched on. Some models refuse a conversation whose instructions are
   not all at the top, which breaks any assistant that repeats its instructions
