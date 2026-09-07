@@ -212,19 +212,7 @@ type entry struct {
 
 	loadedAt time.Time
 	lastUsed time.Time
-	// lastFinished is when this model last stopped working: stamped when
-	// inFlight falls to zero, and at load, for a model that has not served
-	// anything yet. The eviction grace is read from it.
-	//
-	// It is a field of its own even though, today, an idle entry's lastUsed
-	// carries the same instant — release stamps both — because the two are the
-	// same only while the candidate filter skips every entry with a request in
-	// flight. lastUsed is refreshed when a request *arrives* as well as when
-	// it ends, so it says a model is live, not that it is idle; a grace read
-	// from it would be correct by the filter's leave rather than by its own
-	// rule, and would go quietly wrong the day the filter changed.
-	lastFinished time.Time
-	inFlight     int
+	inFlight int
 
 	// sem bounds how many requests run against this one model server at once. Its
 	// capacity is a small multiple of the server's --decode-concurrency: mlx-lm
@@ -248,6 +236,13 @@ type entry struct {
 // pool's clock instead, because that is what stamps lastFinished.
 type loadWaiter struct {
 	arrived time.Time
+	// need is what this load asked for, remembered from the attempt that
+	// failed. A waiter that is not at the head of the queue is judged on it —
+	// can this still ever fit, is it still inside its maximum — rather than by
+	// asking the registry and stat-ing the launcher's files again. Every
+	// wake-up wakes every waiter, so without it each release would do
+	// filesystem work under p.mu once per parked request.
+	need int64
 	// signal is buffered so that waking a waiter never blocks the goroutine
 	// holding p.mu, and so that a wake-up arriving between two checks is not
 	// lost.
@@ -283,12 +278,7 @@ func NewPool(opts PoolOptions) *Pool {
 	if opts.MaxQueueDepth <= 0 {
 		opts.MaxQueueDepth = 64
 	}
-	if opts.EvictionGrace < 0 {
-		opts.EvictionGrace = 0
-	}
-	if opts.EvictionGrace > 0 && opts.MaxEvictionWait <= 0 {
-		opts.MaxEvictionWait = opts.EvictionGrace
-	}
+	opts.EvictionGrace, opts.MaxEvictionWait = normalizeGrace(opts.EvictionGrace, opts.MaxEvictionWait)
 	if opts.MaxLoadWaiters <= 0 {
 		opts.MaxLoadWaiters = defaultMaxLoadWaiters
 	}
@@ -372,12 +362,7 @@ func (p *Pool) MemoryBudget() int64 {
 // now": every request already waiting is woken and takes its victim rather
 // than sitting out a grace nobody wants any more.
 func (p *Pool) SetEvictionGrace(grace, maxWait time.Duration) {
-	if grace < 0 {
-		grace = 0
-	}
-	if maxWait <= 0 {
-		maxWait = grace
-	}
+	grace, maxWait = normalizeGrace(grace, maxWait)
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.grace, p.maxWait = grace, maxWait
@@ -395,6 +380,21 @@ func (p *Pool) EvictionGrace() (grace, maxWait time.Duration) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.grace, p.maxWait
+}
+
+// normalizeGrace resolves the two intervals the one way, so that a pool built
+// with PoolOptions and a pool told to change while it runs cannot disagree
+// about what a zero means. A negative grace is no grace; a maximum wait of
+// zero beside a real grace is the grace itself, since a wait shorter than the
+// protection could only ever be served by a model that was already idle.
+func normalizeGrace(grace, maxWait time.Duration) (time.Duration, time.Duration) {
+	if grace < 0 {
+		grace = 0
+	}
+	if maxWait <= 0 {
+		maxWait = grace
+	}
+	return grace, maxWait
 }
 
 // Waiting is how many requests are parked for want of room right now.
@@ -525,25 +525,49 @@ func (p *Pool) acquire(ctx context.Context, repoID string, mayWait bool) (*Upstr
 			p.mu.Unlock()
 			return nil, nil, ErrClosed
 		}
+		// Checked on every pass, not only where the wait is parked. A woken
+		// waiter blocks on p.mu — the lock every Acquire, Resident, Unload and
+		// control-panel snapshot takes — and the client can hang up while it
+		// is blocked. Going on to evict a warm model and start a server for a
+		// request that no longer exists is the exact outcome this feature is
+		// here to prevent, paid for by nobody.
+		if err := ctx.Err(); err != nil {
+			p.leaveQueueLocked(w)
+			p.mu.Unlock()
+			return nil, nil, err
+		}
 		if held, ok := p.entries[key]; ok {
 			e = held
 			break
 		}
-		// A caller that will not wait does not honour the grace either: there
-		// is no point protecting a model from a load that is going to take it
-		// anyway, and reporting no room to a start-up preload that the grace
-		// alone was refusing would leave the model cold for nothing.
-		age := p.waitedBy(w)
-		if !mayWait {
-			age = p.grace
-		}
-		started, err := p.startLocked(repoID, age, p.mayEvictLocked(w))
-		if err == nil {
-			e = started
-			// Somebody may have been queued for this very model; it has an
-			// entry to join now.
-			p.wakeWaitersLocked()
-			break
+
+		var err error
+		if w == nil || p.mayEvictLocked(w) {
+			// A caller that will not wait does not honour the grace either:
+			// there is no point protecting a model from a load that is going
+			// to take it anyway, and reporting no room to a start-up preload
+			// that the grace alone was refusing would leave the model cold for
+			// nothing.
+			age := p.waitedBy(w)
+			if !mayWait {
+				age = p.grace
+			}
+			var started *entry
+			started, err = p.startLocked(repoID, age, p.mayEvictLocked(w))
+			if err == nil {
+				e = started
+				// Somebody may have been queued for this very model; it has an
+				// entry to join now.
+				p.wakeWaitersLocked()
+				break
+			}
+		} else {
+			// Not this waiter's turn, and asking again would resolve the model
+			// and stat the launcher's files under p.mu — on every wake-up, for
+			// every parked request. What is still worth re-checking (can this
+			// ever fit now, is it still inside its maximum) needs only what the
+			// waiter already carries.
+			err = p.noRoomLocked(w.need)
 		}
 		if !p.willWaitLocked(mayWait, w, err) {
 			p.leaveQueueLocked(w)
@@ -565,7 +589,11 @@ func (p *Pool) acquire(ctx context.Context, repoID string, mayWait bool) (*Upstr
 			return nil, nil, err
 		}
 		if w == nil {
-			w = &loadWaiter{arrived: time.Now(), signal: make(chan struct{}, 1)}
+			// willWaitLocked said yes, so the refusal is a *NoRoomError and
+			// carries what this load asked for.
+			var noRoom *NoRoomError
+			_ = errors.As(err, &noRoom)
+			w = &loadWaiter{arrived: time.Now(), need: noRoom.need, signal: make(chan struct{}, 1)}
 			p.waiters = append(p.waiters, w)
 		}
 		delay := p.wakeDelayLocked(w)
@@ -620,12 +648,6 @@ func (p *Pool) acquire(ctx context.Context, repoID string, mayWait bool) (*Upstr
 		p.mu.Lock()
 		e.inFlight--
 		e.lastUsed = p.opts.now()
-		if e.inFlight == 0 {
-			// The clock the eviction grace reads. It is stamped here and not
-			// on the way in, because a model between requests is what grace
-			// protects and lastUsed cannot tell that apart from a busy one.
-			e.lastFinished = p.opts.now()
-		}
 		// evictForLocked refuses to evict an entry that is still loading (see
 		// its isReady guard), so a caller giving up mid-load must not leave
 		// the entry to sit there instead: with nobody left to wait for it,
@@ -730,11 +752,7 @@ func (p *Pool) startLocked(repoID string, waited time.Duration, mayEvict bool) (
 		modelArg: path,
 		loadedAt: p.opts.now(),
 		lastUsed: p.opts.now(),
-		// A model that has just loaded has not finished a request, but it has
-		// not been idle either: protecting it from the moment it arrives is
-		// what stops two competing loads tearing each other down.
-		lastFinished: p.opts.now(),
-		ready:        make(chan struct{}),
+		ready:    make(chan struct{}),
 		// Allow twice the decode batch size in flight: enough to keep mlx-lm's
 		// batching full without letting an unbounded burst exhaust GPU memory.
 		sem: make(chan struct{}, 2*p.opts.DecodeConcurrency),
@@ -891,9 +909,16 @@ func (p *Pool) probeReady(ctx context.Context, e *entry) error {
 // works. A request that is about to join the queue must not have torn a model
 // down on its way there — it would be waiting for room it had already spent
 // somebody else's warm model to fail to make.
+//
+// mayEvict is false for anyone but the oldest waiter, and it refuses the load
+// whether or not the plan needs a victim. Gating only the eviction would let a
+// stream of small requests take the room as it appears while the waiter at the
+// head, needing more of it than any single release frees, never fits — which
+// is the "smallest first starves a large model" failure the queue exists to
+// prevent, reached by the other door.
 func (p *Pool) evictForLocked(need int64, waited time.Duration, mayEvict bool) error {
 	victims, enough := p.evictionPlanLocked(need, waited)
-	if p.grace > 0 && (!enough || (len(victims) > 0 && !mayEvict)) {
+	if p.grace > 0 && (!enough || !mayEvict) {
 		return p.noRoomLocked(need)
 	}
 	for _, v := range victims {
@@ -967,7 +992,13 @@ func (p *Pool) graceElapsedLocked(e *entry, waited time.Duration) bool {
 	if p.grace <= 0 || waited >= p.grace {
 		return true
 	}
-	return p.opts.now().Sub(e.lastFinished) >= p.grace
+	// lastUsed is the clock, and for a candidate it is the moment the model
+	// stopped working: release stamps it when a request ends, and every caller
+	// of this has already skipped the entries with a request in flight, so
+	// nothing has touched it since. It is stamped on the way in as well, which
+	// is why that skip is part of this rule rather than merely part of the
+	// caller's — read from a busy entry, this would measure the wrong thing.
+	return p.opts.now().Sub(e.lastUsed) >= p.grace
 }
 
 // noRoomLocked builds the refusal a load gets when the budget cannot be made
@@ -1018,13 +1049,13 @@ func (p *Pool) canEverFitLocked(need int64) bool {
 	return protected+need <= p.maxResident
 }
 
-// mayEvictLocked reports whether this caller is allowed to take a victim.
-// Callers must hold p.mu.
+// mayEvictLocked reports whether this caller is allowed to load at all while
+// others are queued. Callers must hold p.mu.
 //
 // Only the oldest waiter may, which is the whole of the fairness rule — and it
 // applies to a request that has not queued at all, or a new arrival would step
-// over everyone already waiting. A caller that needs no eviction is never
-// asked.
+// over everyone already waiting. It gates the load and not merely the
+// eviction: free room is as much the head waiter's as a victim is.
 func (p *Pool) mayEvictLocked(w *loadWaiter) bool {
 	return len(p.waiters) == 0 || p.waiters[0] == w
 }
@@ -1056,7 +1087,7 @@ func (p *Pool) wakeDelayLocked(w *loadWaiter) time.Duration {
 		if e.inFlight > 0 || !isReady(e) || p.isPinnedLocked(e.repoID) {
 			continue
 		}
-		if left := p.grace - now.Sub(e.lastFinished); left > 0 && left < delay {
+		if left := p.grace - now.Sub(e.lastUsed); left > 0 && left < delay {
 			delay = left
 		}
 	}

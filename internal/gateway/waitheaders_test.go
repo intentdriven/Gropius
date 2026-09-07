@@ -136,3 +136,30 @@ func TestTheResponseHeaderReferenceDescribesEveryHeaderServed(t *testing.T) {
 		}
 	}
 }
+
+// The two headers are Gropius's own statement about this request. A model
+// server that happens to emit either name must not add a second value beside
+// it: copyResponseHeaders merges rather than replaces, so a client reading the
+// first value it finds could be handed the model server's.
+func TestAModelServerCannotAddASecondValueToTheWaitHeaders(t *testing.T) {
+	upstream := http.Header{
+		"X-Gropius-State":      []string{"whatever the model server says"},
+		"X-Gropius-Queue-Time": []string{"999999"},
+		"Content-Type":         []string{"application/json"},
+	}
+	out := http.Header{}
+	setWaitHeaders(out, 1500*time.Millisecond)
+	copyResponseHeaders(out, upstream)
+
+	for header, want := range map[string]string{
+		"X-Gropius-State":      "waited",
+		"X-Gropius-Queue-Time": "1500",
+	} {
+		if got := out.Values(header); len(got) != 1 || got[0] != want {
+			t.Errorf("%s = %v, want exactly [%q]", header, got, want)
+		}
+	}
+	if got := out.Get("Content-Type"); got != "application/json" {
+		t.Errorf("Content-Type = %q; the model server's own headers must still come through", got)
+	}
+}

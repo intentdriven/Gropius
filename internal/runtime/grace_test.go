@@ -197,7 +197,10 @@ func TestATrickleOfRequestsCannotStarveAWaitingRequest(t *testing.T) {
 	if took < grace/2 {
 		t.Errorf("the waiter was served after %s, before its own age passed the grace", took)
 	}
-	if took > 10*grace {
+	// Bounded by its own age passing the grace, not by the maximum wait. The
+	// margin is wide because the bound this holds is "far short of the
+	// maximum", and a tight one would be a timing flake rather than a fact.
+	if took > 5*time.Second {
 		t.Errorf("the waiter took %s to be served, want it bounded by its own age passing the grace", took)
 	}
 	if up.Waits.QueueWait < grace/2 {
@@ -572,5 +575,261 @@ func TestAModelHeldPastTheGraceIsProtectedFromWhenItIsReleased(t *testing.T) {
 	if took := time.Since(start); took < 100*time.Millisecond {
 		t.Errorf("the competing request was served after %s; the model it evicted had "+
 			"only just finished work", took)
+	}
+}
+
+// fairnessModels are three small models and one that needs two of them out of
+// the way, so a test can tell a waiter that fits in the room going spare from
+// one that does not.
+func fairnessModels() *fakeSource {
+	return &fakeSource{models: map[string]int64{
+		"org/s1": 200, "org/s2": 200, "org/s3": 200, "org/big": 400,
+	}}
+}
+
+// LoadCost is 1.2x: the small models are charged 240 and the big one 480,
+// against a budget of 500 that holds two small ones or one big one.
+const fairnessBudget = 500
+
+// Waiters are served oldest first, and that binds a request needing no
+// eviction at all. Gating only the eviction would let a stream of small
+// requests take the room as it appears while the waiter at the head — needing
+// more of it than any one release frees — never fits, which is the
+// "smallest-to-load first starves a large model" failure the queue exists to
+// prevent, reached by the other door.
+func TestARequestThatFitsDoesNotStepOverTheWaiterAtTheHead(t *testing.T) {
+	l := newFakeLauncher()
+	p := newTestPool(t, l, fairnessModels(), PoolOptions{
+		MaxResidentBytes: fairnessBudget,
+		EvictionGrace:    30 * time.Second,
+		MaxEvictionWait:  20 * time.Second,
+	})
+
+	// One small model resident and protected; 260 bytes of the budget spare,
+	// which is room for another small model but not for the big one.
+	warm(t, p, "org/s1")
+
+	head, cancelHead := context.WithCancel(context.Background())
+	defer cancelHead()
+	go func() {
+		if _, rel, err := p.Acquire(head, "org/big"); err == nil {
+			rel()
+		}
+	}()
+	waitUntil(t, 2*time.Second, func() bool { return p.Waiting() == 1 },
+		"the big model's request never joined the queue")
+
+	behind, cancelBehind := context.WithCancel(context.Background())
+	defer cancelBehind()
+	go func() {
+		if _, rel, err := p.Acquire(behind, "org/s2"); err == nil {
+			rel()
+		}
+	}()
+	waitUntil(t, 2*time.Second, func() bool { return p.Waiting() == 2 },
+		"the second request was served rather than queued behind the head")
+
+	time.Sleep(200 * time.Millisecond)
+	if ids := residentIDs(p); slices.Contains(ids, "org/s2") {
+		t.Errorf("resident = %v; a request that fits stepped over the waiter at the head", ids)
+	}
+
+	// And when the head gives up, the one behind it is served — which is the
+	// wake-up a waiter owes the queue as it leaves.
+	cancelHead()
+	waitUntil(t, 3*time.Second, func() bool { return slices.Contains(residentIDs(p), "org/s2") },
+		"the waiter behind the head was not woken when the head left the queue")
+}
+
+// A model falling idle is the commonest way room appears, and the release is
+// what says so. Without that wake-up a waiter sleeps until its next timer,
+// which for a model that is busy rather than protected is the whole maximum
+// wait.
+func TestReleasingAModelWakesAWaitingRequest(t *testing.T) {
+	l := newFakeLauncher()
+	grace := 50 * time.Millisecond
+	p := newTestPool(t, l, graceModels(), PoolOptions{
+		MaxResidentBytes: graceBudget,
+		EvictionGrace:    grace,
+		MaxEvictionWait:  20 * time.Second,
+	})
+
+	// Held open, so it is not a candidate at all — no grace timer covers it.
+	_, release, err := p.Acquire(context.Background(), "org/a")
+	if err != nil {
+		t.Fatalf("Acquire(org/a): %v", err)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		_, rel, err := p.Acquire(context.Background(), "org/b")
+		if err == nil {
+			rel()
+		}
+		done <- err
+	}()
+	waitUntil(t, 2*time.Second, func() bool { return p.Waiting() == 1 },
+		"the request never joined the queue")
+	// Past its own grace, so the model is eligible the moment it is free.
+	time.Sleep(4 * grace)
+
+	release()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Acquire(org/b) after the model was released: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("releasing the model did not wake the waiting request")
+	}
+}
+
+// The operator's own unload is the other way room appears, and every removal
+// goes through the same place, so this holds the wake-up for eviction, the
+// idle reaper and a crash as well.
+func TestUnloadingAModelWakesAWaitingRequest(t *testing.T) {
+	l := newFakeLauncher()
+	p := newTestPool(t, l, graceModels(), PoolOptions{
+		MaxResidentBytes: graceBudget,
+		EvictionGrace:    30 * time.Second,
+		MaxEvictionWait:  20 * time.Second,
+	})
+
+	warm(t, p, "org/a")
+
+	done := make(chan error, 1)
+	go func() {
+		_, rel, err := p.Acquire(context.Background(), "org/b")
+		if err == nil {
+			rel()
+		}
+		done <- err
+	}()
+	waitUntil(t, 2*time.Second, func() bool { return p.Waiting() == 1 },
+		"the request never joined the queue")
+
+	if err := p.Unload("org/a"); err != nil {
+		t.Fatalf("Unload: %v", err)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Acquire(org/b) after the resident model was unloaded: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("unloading the resident model did not wake the waiting request")
+	}
+}
+
+// The plan takes the least recently used candidate first. Every other eviction
+// test in the suite has one eligible candidate, so the order the plan produces
+// is otherwise asserted nowhere — and this change rewrote the code that
+// produces it.
+func TestTheEvictionPlanTakesTheLeastRecentlyUsedFirst(t *testing.T) {
+	l := newFakeLauncher()
+	clock := &testClock{now: time.Unix(1_700_000_000, 0)}
+	p := newTestPool(t, l, fairnessModels(), PoolOptions{
+		MaxResidentBytes: fairnessBudget,
+		now:              clock.Now,
+	})
+
+	for _, id := range []string{"org/s1", "org/s2"} {
+		warm(t, p, id)
+		clock.advance(time.Minute)
+	}
+	// Both fit; the third needs one of them out, and s1 is the older.
+	_, release, err := p.Acquire(context.Background(), "org/s3")
+	if err != nil {
+		t.Fatalf("Acquire(org/s3): %v", err)
+	}
+	defer release()
+
+	if ids := residentIDs(p); !slices.Equal(ids, []string{"org/s2", "org/s3"}) {
+		t.Errorf("resident = %v, want the least recently used model evicted", ids)
+	}
+}
+
+// With grace off, a load that cannot be made to fit still frees everything it
+// could before it is refused. That is what the pool has always done and the
+// record says the off path is unchanged, so it is pinned here rather than left
+// to be rediscovered — it is also why the off path keeps the incremental
+// behaviour the on path deliberately does not have.
+func TestWithGraceOffALoadThatCannotFitStillFreesWhatItCan(t *testing.T) {
+	l := newFakeLauncher()
+	p := newTestPool(t, l, fairnessModels(), PoolOptions{MaxResidentBytes: fairnessBudget})
+
+	// One model held open, so it is not a candidate, and one idle beside it.
+	_, holdS1, err := p.Acquire(context.Background(), "org/s1")
+	if err != nil {
+		t.Fatalf("Acquire(org/s1): %v", err)
+	}
+	defer holdS1()
+	warm(t, p, "org/s2")
+
+	if _, _, err := p.Acquire(context.Background(), "org/big"); err == nil {
+		t.Fatal("the big model loaded although only one small model could be freed")
+	}
+	if ids := residentIDs(p); !slices.Equal(ids, []string{"org/s1"}) {
+		t.Errorf("resident = %v, want the idle model freed even though it was not enough", ids)
+	}
+}
+
+// A client that hangs up while its waiter is blocked on the pool's lock must
+// not go on to evict a warm model and start a server for a request that no
+// longer exists — the exact outcome grace is here to prevent, paid for by
+// nobody. The window is real: a woken waiter blocks on p.mu, which every
+// Acquire, Resident, Unload and control-panel snapshot takes.
+//
+// The window is held open here by taking p.mu from the test, which is what
+// makes this reproducible rather than a race the suite would hit once a
+// month. If the waiter happens to notice the cancellation in its own select
+// instead, the test still passes: that is the same correct answer by the
+// other door, so this can be quietly green but never wrongly red.
+func TestACancelledWaiterDoesNotEvictOnItsWayOut(t *testing.T) {
+	l := newFakeLauncher()
+	p := newTestPool(t, l, graceModels(), PoolOptions{
+		MaxResidentBytes: graceBudget,
+		EvictionGrace:    30 * time.Second,
+		MaxEvictionWait:  20 * time.Second,
+	})
+
+	warm(t, p, "org/a")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, release, err := p.Acquire(ctx, "org/b")
+		if err == nil {
+			release()
+		}
+		done <- err
+	}()
+	waitUntil(t, 2*time.Second, func() bool { return p.Waiting() == 1 },
+		"the request never joined the queue")
+
+	// Hold the lock, then wake the waiter and remove the one thing standing
+	// between it and the victim, so that a waiter which does not check its
+	// context would certainly evict.
+	p.mu.Lock()
+	p.grace = 0
+	p.wakeWaitersLocked()
+	time.Sleep(50 * time.Millisecond) // the waiter reaches p.mu and blocks
+	cancel()
+	time.Sleep(20 * time.Millisecond) // the cancellation lands before it runs
+	p.mu.Unlock()
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Acquire returned %v, want context.Canceled", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("the cancelled request never returned")
+	}
+	if ids := residentIDs(p); !slices.Equal(ids, []string{"org/a"}) {
+		t.Errorf("resident = %v; a request that had hung up evicted a warm model", ids)
+	}
+	if got := l.launchedRepos(); !slices.Equal(got, []string{"org/a"}) {
+		t.Errorf("launched %v; a request that had hung up started a model server", got)
 	}
 }

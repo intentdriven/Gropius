@@ -534,6 +534,13 @@ func (g *Gateway) handleCompletions(w http.ResponseWriter, r *http.Request) {
 //
 // They say that this machine was busy and for how long, and name no model and
 // no count: the same fact a client with a stopwatch already had.
+// gropiusHeaders are the response headers Gropius writes itself, which an
+// upstream may not add to.
+var gropiusHeaders = map[string]bool{
+	"x-gropius-state":      true,
+	"x-gropius-queue-time": true,
+}
+
 func setWaitHeaders(h http.Header, waited time.Duration) {
 	ms := waited.Milliseconds()
 	state := "warm"
@@ -854,6 +861,13 @@ var hopByHopHeaders = map[string]bool{
 func copyResponseHeaders(dst, src http.Header) {
 	for k, vs := range src {
 		if hopByHopHeaders[strings.ToLower(k)] {
+			continue
+		}
+		// Gropius's own statement about this request, already written. This
+		// merges rather than replaces, so a model server emitting either name
+		// would otherwise add a second value beside ours and a client reading
+		// the first one it finds could be handed the model server's.
+		if gropiusHeaders[strings.ToLower(k)] {
 			continue
 		}
 		for _, v := range vs {

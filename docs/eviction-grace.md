@@ -44,8 +44,10 @@ protected forever. Waiting requests are served oldest first.
 
 Three things end a wait early:
 
-- **The memory budget goes up**, or a pin is removed, and the model now fits.
-  The request proceeds without waiting for anything to finish.
+- **The memory budget goes up** so that the model now fits. The request
+  proceeds without waiting for anything to finish. Removing a pin wakes it
+  too, though a model that has just been unpinned is still inside its own
+  protection until that runs out.
 - **A pin is added** that makes the request impossible. It is refused at once
   rather than waiting out the maximum.
 - **The maximum wait runs out.** The request gets the same refusal it would
@@ -91,6 +93,18 @@ evicting somebody else's model, may now wait instead. That is the trade: the
 model in memory keeps it, and the request that wanted the room pays. On a Mac
 with one user and models that all fit the budget, nothing ever waits and
 nothing changes.
+
+A waiting request holds its connection open, so the maximum wait is also how
+long a client can occupy one. The queue's own length is the second bound, and
+it is short for that reason. The case that reaches the maximum most easily is
+not a protected model but a busy one: a model with a request still running is
+never an eviction candidate at all, so one long generation turns every request
+for another model into a wait rather than an instant refusal, for as long as it
+runs.
+
+Keep the maximum wait at least as long as the protection. A maximum shorter
+than the protection is accepted, but it means a request can only ever be served
+by a model that was already idle when it arrived.
 
 The control panel's **My Models** tab says how many requests are waiting for
 memory, so a queue that is not draining is visible rather than inferred.

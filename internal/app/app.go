@@ -172,6 +172,7 @@ func New(opts Options) (*App, error) {
 	// it — the pool, the panel and the next save all join on these strings.
 	a.cfg.Pinned = a.adoptPinned(a.cfg.Pinned)
 
+	grace, maxWait := evictionGraceFor(opts.Config)
 	a.Pool = runtime.NewPool(runtime.PoolOptions{
 		Launcher:    launcher,
 		Models:      modelSource{reg},
@@ -189,15 +190,12 @@ func New(opts Options) (*App, error) {
 		// The pool reports loads and removals to the recorder, which ignores
 		// them while recording is off. Adapting here keeps internal/stats a
 		// leaf package that imports nothing of ours.
-		Observer: poolObserver{rec: a.Stats, log: opts.Log},
-		Pinned:   a.cfg.Pinned,
-		Log:      opts.Log,
+		Observer:        poolObserver{rec: a.Stats, log: opts.Log},
+		Pinned:          a.cfg.Pinned,
+		EvictionGrace:   grace,
+		MaxEvictionWait: maxWait,
+		Log:             opts.Log,
 	})
-	// Applied after the pool exists rather than through PoolOptions, so that
-	// the switch and the two intervals are resolved in exactly one place —
-	// here and at every save — and cannot drift into two answers to "is grace
-	// on".
-	a.applyEvictionGrace(opts.Config)
 	a.applyStatistics(opts.Config)
 
 	// Settings read from disk have not been through SetConfig's checks: the
@@ -322,26 +320,24 @@ func (a *App) SetConfig(c config.Config) error {
 	// models already in memory, and switching it off releases the requests
 	// already waiting rather than leaving them to sit out a grace nobody wants
 	// any more.
-	a.applyEvictionGrace(c)
+	a.Pool.SetEvictionGrace(evictionGraceFor(c))
 	return nil
 }
 
-// applyEvictionGrace hands the pool the two intervals, or none at all while
-// the switch is off.
+// evictionGraceFor turns the stored settings into the two intervals the pool
+// enforces, at start-up and at every save alike, so "is grace on" has one
+// answer.
 //
 // Off is a grace of zero rather than a flag of its own: the pool has one
 // question to answer on the path of every load, and "is the grace non-zero" is
-// that question. The two figures are still stored while the switch is off, so
+// that question. The two figures stay stored while the switch is off, so
 // turning it back on restores what the operator chose.
-func (a *App) applyEvictionGrace(c config.Config) {
+func evictionGraceFor(c config.Config) (grace, maxWait time.Duration) {
 	if !c.EvictionGrace {
-		a.Pool.SetEvictionGrace(0, 0)
-		return
+		return 0, 0
 	}
-	a.Pool.SetEvictionGrace(
-		time.Duration(c.GraceSeconds())*time.Second,
-		time.Duration(c.MaxWaitSeconds())*time.Second,
-	)
+	return time.Duration(c.GraceSeconds()) * time.Second,
+		time.Duration(c.MaxWaitSeconds()) * time.Second
 }
 
 // MachineRAM is how much memory this Mac has, or 0 when that cannot be read.
