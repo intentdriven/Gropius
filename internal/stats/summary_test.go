@@ -40,10 +40,10 @@ func summarizeTestStore(t *testing.T, clock *testClock, opts StoreOptions) (*Fil
 
 // summaries returns every summary line the store holds, in the order the
 // reader gives them.
-func summaries(t *testing.T, s *FileStore) []Summary {
+func summaries(t *testing.T, s *FileStore) []SummaryDay {
 	t.Helper()
-	var out []Summary
-	if err := s.Summaries(0, func(sum Summary) bool { out = append(out, sum); return true }); err != nil {
+	var out []SummaryDay
+	if err := s.Summaries(0, func(sum SummaryDay) bool { out = append(out, sum); return true }); err != nil {
 		t.Fatalf("reading the summaries: %v", err)
 	}
 	return out
@@ -51,8 +51,8 @@ func summaries(t *testing.T, s *FileStore) []Summary {
 
 // find returns the summary line for one model and day, and whether there was
 // exactly one.
-func find(sums []Summary, day, model string) (Summary, int) {
-	var got Summary
+func find(sums []SummaryDay, day, model string) (SummaryDay, int) {
+	var got SummaryDay
 	n := 0
 	for _, s := range sums {
 		if s.Day == day && s.Model == model {
@@ -511,8 +511,8 @@ func TestSummariesComeBackNewestDayFirst(t *testing.T) {
 			t.Fatalf("the summaries came back %v, want newest day first", days(got))
 		}
 	}
-	var bounded []Summary
-	if err := s.Summaries(2, func(sum Summary) bool { bounded = append(bounded, sum); return true }); err != nil {
+	var bounded []SummaryDay
+	if err := s.Summaries(2, func(sum SummaryDay) bool { bounded = append(bounded, sum); return true }); err != nil {
 		t.Fatal(err)
 	}
 	if len(bounded) != 2 || bounded[0].Day != "2025-01-03" {
@@ -520,7 +520,7 @@ func TestSummariesComeBackNewestDayFirst(t *testing.T) {
 	}
 }
 
-func days(sums []Summary) []string {
+func days(sums []SummaryDay) []string {
 	out := make([]string, 0, len(sums))
 	for _, s := range sums {
 		out = append(out, s.Day)
@@ -562,21 +562,42 @@ func TestTheSummaryCountsTowardTheRoomTheStoreUses(t *testing.T) {
 	}
 }
 
-// A summary line is small enough for the arithmetic the page does with it.
+// A summary line is bounded, and the bound is the one the documentation does
+// its arithmetic with. The shape is the widest the format can emit: every
+// outcome class and every removal reason present, a long repo id, and every
+// counter run up as far as a real Mac could take it.
 func TestASummaryLineIsTheSizeTheDocumentationSays(t *testing.T) {
-	b, err := json.Marshal(summaryLine{V: SchemaVersion, Kind: KindSummary, Summary: Summary{
-		At: 1767009600, Day: "2026-01-10", Model: "mlx-community/Qwen3-30B-A3B-4bit",
-		Requests: 4200, ByClass: map[Class]int64{ClassOK: 4100, ClassCancelled: 100},
-		PromptTokens: 4200000, CompletionTokens: 8400000, DurationMSTotal: 42000000,
-		QueueWaitMSTotal: 400000, LoadWaitMSTotal: 900000,
-		FirstTokenMSTotal: 1200000, FirstTokenRequests: 4100,
-		Loads: 12, FailedLoads: 1, Removals: map[string]int64{ReasonEvicted: 8, ReasonIdle: 4},
-	}})
+	widest := Summary{
+		At: 1767009600, Day: "2026-01-10", TZOffsetMin: -720,
+		Model:              "mlx-community/DeepSeek-R1-Distill-Qwen-32B-8bit-mlx-experimental",
+		Requests:           999999,
+		PromptTokens:       999999999,
+		CompletionTokens:   999999999,
+		DurationMSTotal:    999999999,
+		QueueWaitMSTotal:   999999999,
+		LoadWaitMSTotal:    999999999,
+		FirstTokenMSTotal:  999999999,
+		FirstTokenRequests: 999999,
+		Loads:              999999,
+		FailedLoads:        999999,
+		ByClass:            map[Class]int64{},
+		Removals:           map[string]int64{},
+	}
+	for _, c := range OutcomeClasses() {
+		widest.ByClass[c] = 999999
+	}
+	for _, r := range RemovalReasons() {
+		widest.Removals[r] = 999999
+	}
+	b, err := json.Marshal(summaryLine{V: SchemaVersion, Kind: KindSummary, Summary: widest})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(b) > ApproxSummaryBytes {
-		t.Errorf("a busy day's summary line is %d bytes, over the %d the documentation reasons from: %s", len(b), ApproxSummaryBytes, b)
+		t.Errorf("the widest summary line is %d bytes, over the %d the documentation reasons from: %s", len(b), ApproxSummaryBytes, b)
+	}
+	if len(b) < ApproxSummaryBytes/2 {
+		t.Errorf("the widest summary line is %d bytes against a bound of %d, which is loose enough to hide a field being added", len(b), ApproxSummaryBytes)
 	}
 }
 
@@ -711,5 +732,294 @@ func TestAHalfWrittenSummaryIsSweptAtTheNextStart(t *testing.T) {
 	}
 	if _, err := os.Stat(keep); err != nil {
 		t.Errorf("the sweep took a file that is not the store's: %v", err)
+	}
+}
+
+// A fold that cannot be done must cost retention and nothing else. It reaches
+// the write path through rotate, where an error is counted as a lost record
+// and the open file is dropped — so one unreadable file would otherwise cost
+// every record from then on, silently, for the life of the process.
+func TestAFoldThatCannotBeDoneStopsRetentionAndNothingElse(t *testing.T) {
+	const wrote = 300
+	live := func(t *testing.T, s *FileStore) {
+		t.Helper()
+		if got := s.Status().Dropped; got != 0 {
+			t.Errorf("%d records were lost because retention could not summarize what it wanted to drop", got)
+		}
+		if !s.Status().RetentionWedged {
+			t.Error("the store does not say retention is stuck, so the panel would show a store quietly over its limit")
+		}
+		seen := 0
+		if err := s.Latest(0, func(l Line) bool {
+			if l.Kind == KindRequest {
+				seen++
+			}
+			return true
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if seen != wrote {
+			t.Errorf("%d of %d records are readable", seen, wrote)
+		}
+	}
+
+	t.Run("a link planted under the summary", func(t *testing.T) {
+		clock := &testClock{}
+		clock.set(day(2026, time.January, 10, 9))
+		s, dir := summarizeTestStore(t, clock, StoreOptions{MaxBytes: 8 << 10, RotateBytes: 1 << 10})
+		on(t, s)
+		target := filepath.Join(t.TempDir(), "elsewhere.jsonl")
+		if err := os.WriteFile(target, []byte("mine\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(target, filepath.Join(dir, summaryFileName)); err != nil {
+			t.Fatal(err)
+		}
+		for i := range wrote {
+			if err := s.AppendRequest(request(day(2026, time.January, 10, 9).Add(time.Duration(i)*time.Second), "org/a")); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := s.Flush(); err != nil {
+			t.Fatal(err)
+		}
+		live(t, s)
+		raw, err := os.ReadFile(target)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(raw) != "mine\n" {
+			t.Errorf("the file the link pointed at was written through: %q", raw)
+		}
+	})
+
+	t.Run("a record file that cannot be read", func(t *testing.T) {
+		clock := &testClock{}
+		clock.set(day(2026, time.January, 10, 9))
+		s, dir := summarizeTestStore(t, clock, StoreOptions{MaxBytes: 8 << 10, RotateBytes: 1 << 10})
+		on(t, s)
+		for i := range wrote {
+			if i == 30 {
+				if err := s.Flush(); err != nil {
+					t.Fatal(err)
+				}
+				held := recordFiles(t, dir)
+				if len(held) == 0 {
+					t.Fatal("nothing was written yet, so there is no file to make unreadable")
+				}
+				shut := filepath.Join(dir, held[0])
+				if err := os.Chmod(shut, 0o000); err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { os.Chmod(shut, 0o600) })
+			}
+			if err := s.AppendRequest(request(day(2026, time.January, 10, 9).Add(time.Duration(i)*time.Second), "org/a")); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := s.Flush(); err != nil {
+			t.Fatal(err)
+		}
+		if got := s.Status().Dropped; got != 0 {
+			t.Errorf("%d records were lost because one file could not be read", got)
+		}
+		if !s.Status().RetentionWedged {
+			t.Error("the store does not say retention is stuck")
+		}
+	})
+}
+
+// The fold rewrites the whole summary file, so a line it cannot read is a line
+// it would delete. The format's own promise is the opposite: a reader skips
+// what it does not understand. A newer Gropius's line must survive an older
+// one's fold.
+func TestAFoldCarriesALineThisBuildCannotReadThrough(t *testing.T) {
+	clock := &testClock{}
+	clock.set(day(2026, time.January, 10, 9))
+	s, dir := summarizeTestStore(t, clock, StoreOptions{Months: 1})
+	on(t, s)
+	if err := s.AppendRequest(request(day(2025, time.January, 10, 9), "org/a")); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	newer := fmt.Sprintf(`{"v":%d,"kind":%q,"at":1735516800,"day":"2025-01-01","model":"org/z","requests":7,"something_new":true}`,
+		SchemaVersion+1, KindSummary)
+	torn := `{"v":1,"kind":"summary","day":"2024-12-`
+	planted := fmt.Sprintf("{\"v\":%d,\"kind\":%q,\"folded\":[]}\n%s\n%s\n", SchemaVersion, KindSummaryIndex, newer, torn)
+	if err := os.WriteFile(filepath.Join(dir, summaryFileName), []byte(planted), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	on(t, s)
+	s.SetRetention(2, 1<<20)
+	s.SetRetention(1, 1<<20)
+	if err := s.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(filepath.Join(dir, summaryFileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), newer) {
+		t.Errorf("the fold deleted a line a newer Gropius wrote:\n%s", raw)
+	}
+	if !strings.Contains(string(raw), torn) {
+		t.Errorf("the fold deleted a line it could not parse:\n%s", raw)
+	}
+	if _, n := find(summaries(t, s), "2025-01-10", "org/a"); n != 1 {
+		t.Errorf("the fold did not do its own work while carrying the others through:\n%s", raw)
+	}
+}
+
+// A file that was counted and could not then be removed must never be appended
+// to. The next fold would count what was appended a second time, and the
+// records it holds are already in the summary.
+func TestAFoldedFileThatCouldNotBeRemovedIsNeverAppendedTo(t *testing.T) {
+	clock := &testClock{}
+	clock.set(day(2026, time.January, 10, 9))
+	stick := true
+	s, dir := summarizeTestStore(t, clock, StoreOptions{Months: 1, afterSummary: func() error {
+		if stick {
+			return errStoppedForTest
+		}
+		return nil
+	}})
+	on(t, s)
+	for range 3 {
+		if err := s.AppendRequest(request(day(2025, time.January, 10, 9), "org/a")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	s.SetRetention(2, 1<<20)
+	s.SetRetention(1, 1<<20)
+	if err := s.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	held := recordFiles(t, dir)
+	if len(held) != 1 {
+		t.Fatalf("the store holds %v, want the one file the fold counted and could not remove", held)
+	}
+	folded := filepath.Join(dir, held[0])
+	before, err := os.Stat(folded)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Everything recorded from here must go somewhere else.
+	if err := s.AppendRequest(request(day(2026, time.January, 10, 9), "org/b")); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.Stat(folded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Size() != before.Size() {
+		t.Errorf("a file already counted in the summary grew from %d to %d bytes; the next fold would count that twice",
+			before.Size(), after.Size())
+	}
+	if got := len(recordFiles(t, dir)); got != 2 {
+		t.Errorf("the store holds %v, want a fresh file beside the one it could not remove", recordFiles(t, dir))
+	}
+	if got, _ := find(summaries(t, s), "2025-01-10", "org/a"); got.Requests != 3 {
+		t.Errorf("the summary counts %d requests, want the 3 it folded once", got.Requests)
+	}
+}
+
+// The summary is bounded by its share of the cap, but a summary that dropped
+// its way to empty would take room while saying nothing.
+func TestTheLastDayOfTheSummaryIsKeptEvenOverItsShare(t *testing.T) {
+	clock := &testClock{}
+	clock.set(day(2026, time.January, 10, 9))
+	s, _ := summarizeTestStore(t, clock, StoreOptions{Months: 1, MaxBytes: 2 << 10, RotateBytes: 512})
+	on(t, s)
+	for range 3 {
+		if err := s.AppendRequest(request(day(2025, time.January, 10, 9), "org/a")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	s.SetRetention(2, 2<<10)
+	s.SetRetention(1, 2<<10)
+	if err := s.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	sums := summaries(t, s)
+	if len(sums) != 1 {
+		t.Fatalf("the summary holds %d lines against a share of %d bytes, want the one day it counted: %v",
+			len(sums), SummaryShareOfCap(2<<10), days(sums))
+	}
+}
+
+// A day the store still holds records from is only partly summarized, and a
+// view has to be able to tell the two apart: "these are the totals for a month
+// whose detail is gone" is a different sentence from "these are the totals for
+// the part of today that has been dropped".
+func TestASummaryDaySaysWhetherAnyOfItsDetailIsHeld(t *testing.T) {
+	clock := &testClock{}
+	clock.set(day(2026, time.January, 11, 9))
+	s, dir := summarizeTestStore(t, clock, StoreOptions{})
+	on(t, s)
+	// One file spanning two days, then a second file holding only the later
+	// day, so a drop of the first leaves the later day partly held. The clock
+	// moves between them because a file is started by the day it is opened on,
+	// not by the day its records fall on.
+	for _, at := range []time.Time{day(2026, time.January, 10, 9), day(2026, time.January, 11, 9)} {
+		if err := s.AppendRequest(request(at, "org/a")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	clock.set(day(2026, time.January, 12, 9))
+	on(t, s)
+	for range 3 {
+		if err := s.AppendRequest(request(day(2026, time.January, 11, 12), "org/a")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	held := recordFiles(t, dir)
+	if len(held) != 2 {
+		t.Fatalf("the store holds %v, want the two files this test wrote", held)
+	}
+	second, err := os.Stat(filepath.Join(dir, held[1]))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A cap with room for the second file and the next one, but not for both.
+	s.SetRetention(1200, second.Size()+(64<<10))
+	if err := s.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	sums := summaries(t, s)
+	gone, n := find(sums, "2026-01-10", "org/a")
+	if n != 1 {
+		t.Fatalf("the summary holds %d lines for the day that is wholly gone: %v", n, days(sums))
+	}
+	if gone.DetailHeld {
+		t.Error("a day with no records left is reported as one whose detail is still held")
+	}
+	partly, n := find(sums, "2026-01-11", "org/a")
+	if n != 1 {
+		t.Fatalf("the summary holds %d lines for the day that is partly gone: %v", n, days(sums))
+	}
+	if !partly.DetailHeld {
+		t.Error("a day the store still holds records from is reported as one whose detail is gone")
 	}
 }

@@ -282,6 +282,19 @@ func (c *Control) handleStats(w http.ResponseWriter, r *http.Request) {
 	if view.Enabled {
 		status := c.App.StatsStore.Status()
 		view.Store = &status
+		// And what is left of the days the store no longer holds in detail. A
+		// month whose records retention has dropped still has its per-model
+		// totals, and the view says so rather than showing a gap where the
+		// traffic was (itd-2609061602043757).
+		if err := c.App.StatsStore.Summaries(maxSummaryDays, func(d stats.SummaryDay) bool {
+			view.Summaries = append(view.Summaries, d)
+			return true
+		}); err != nil {
+			// Logged, not returned: the live figures are worth showing even
+			// when the summary cannot be read, and the reason names the store's
+			// directory, which the control plane must not publish.
+			c.App.Log.Warn("the request statistics summary could not be read", "err", err)
+		}
 	}
 	writeJSON(w, http.StatusOK, view)
 }
@@ -444,6 +457,10 @@ func historyRange(from, to, now time.Time) (time.Time, time.Time, bool) {
 	}
 	return from, to, true
 }
+// maxSummaryDays bounds what one answer carries. A day is one line per model,
+// so this is years of them on any Mac, and it is here so that a summary grown
+// by a build with a larger cap cannot make this answer unbounded.
+const maxSummaryDays = 1000
 
 // handleClearStats throws away everything recording has produced: the files
 // and the live view both. It is the only thing that removes a record —

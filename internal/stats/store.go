@@ -223,6 +223,12 @@ type StoreStatus struct {
 	// applies as to Dropped — a figure that is quietly missing is worse than
 	// one that says it is missing.
 	Skipped int64 `json:"skipped"`
+	// RetentionWedged reports that the store cannot summarize what it is about
+	// to drop, so it is holding on to records past its own limits rather than
+	// deleting them uncounted. The reason is in the log. It is the honest thing
+	// to show: the alternative to saying so is a store quietly over the size
+	// the operator set.
+	RetentionWedged bool `json:"retention_wedged"`
 	// Refused reports a store that could not be opened where it must live, so
 	// the figures are being kept in memory and nothing is on disk. The reason
 	// is in the log; it names the directory, which is not the panel's to
@@ -791,9 +797,10 @@ func (s *FileStore) retain(w *storeWriter) error {
 // publish copies the writer's own view of the store into the figures the panel
 // reads.
 func (s *FileStore) publish(w *storeWriter) {
-	files, bytes, oldest := w.summary()
+	files, bytes, oldest := w.figures()
 	s.statusMu.Lock()
 	s.status.Files, s.status.Bytes, s.status.Oldest = files, bytes, oldest
+	s.status.RetentionWedged = w.wedged
 	s.status.Refused = false
 	s.statusMu.Unlock()
 }
@@ -804,6 +811,12 @@ type storeFile struct {
 	day  int // YYYYMMDD, from the name
 	n    int // the counter within the day, from the name
 	size int64
+	// folded says this file's records are already counted in the summary and
+	// its removal did not go through. It must never be appended to again: the
+	// next fold would count what was added to it a second time, and the fold
+	// skips it only for as long as it is byte for byte the file that was
+	// counted.
+	folded bool
 }
 
 // storeWriter owns the store's directory handle and its open file.
@@ -834,6 +847,11 @@ type storeWriter struct {
 	// summaryBytes is the room the summary of what has already been dropped
 	// takes, which counts toward the cap along with the detail.
 	summaryBytes int64
+	// wedged says retention cannot run because what it would drop cannot be
+	// summarized first. wedgedLogged keeps a spell of that to one line in the
+	// log rather than one per attempt.
+	wedged       bool
+	wedgedLogged bool
 }
 
 // openWriter checks the store's directory, creates it if it is not there, and
@@ -1025,7 +1043,9 @@ func (w *storeWriter) open(fresh bool) error {
 	name := ""
 	if n := len(w.files); n > 0 && !fresh {
 		last := w.files[n-1]
-		if last.day == dayNum && last.size < w.opts.RotateBytes {
+		// Never a file already counted in the summary: appending to one would
+		// have the next fold count what was appended a second time.
+		if last.day == dayNum && last.size < w.opts.RotateBytes && !last.folded {
 			name = last.name
 			w.cur = last.size
 		}
@@ -1223,21 +1243,66 @@ func (w *storeWriter) pruneOnce() (int, error) {
 	// itd-2609061602043757. A crash between the two leaves the summary and the
 	// detail both, which the next start reconciles; a crash the other way round
 	// would lose the records with nothing to show they had ever been there.
+	//
+	// A fold that cannot be done stops retention and nothing else. It must not
+	// reach the caller: on the rotation path a prune error travels into the
+	// write path, where it is counted as a lost record and the file is dropped
+	// — so one unreadable file would cost every record from then on. The store
+	// holds what it cannot summarize, says so on the panel, and carries on
+	// recording.
 	if err := w.fold(w.files[:doomed]); err != nil {
-		return 0, err
+		w.retentionWedged(err)
+		return 0, nil
 	}
+	w.retentionRan()
+	// The seam stands for the removals not happening: a crash after the rename,
+	// or a removal that fails. Both leave the same state, and it is the state
+	// the next pass and the next start have to survive.
+	skip := false
 	if w.opts.afterSummary != nil {
-		if err := w.opts.afterSummary(); err != nil {
-			return 0, err
-		}
+		skip = w.opts.afterSummary() != nil
 	}
+	removed := 0
+	var stuck []storeFile
 	for _, f := range w.files[:doomed] {
-		if err := w.root.Remove(f.name); err != nil && !errors.Is(err, fs.ErrNotExist) {
-			return 0, err
+		err := error(nil)
+		if skip {
+			err = fs.ErrPermission
+		} else if e := w.root.Remove(f.name); e != nil && !errors.Is(e, fs.ErrNotExist) {
+			err = e
 		}
+		if err != nil {
+			// Counted but still here. It stays in the list so its bytes are
+			// still accounted for and the next pass tries again; it is marked
+			// so that nothing appends to it in the meantime, and the fold skips
+			// it for as long as it is the file that was counted.
+			if !skip && !w.wedgedLogged {
+				w.wedgedLogged = true
+				w.opts.Log.Warn("a summarized statistics file could not be removed; it is kept until it can be", "err", err)
+			}
+			f.folded = true
+			stuck = append(stuck, f)
+			continue
+		}
+		removed++
 	}
-	w.files = w.files[doomed:]
-	return doomed, nil
+	w.files = append(stuck, w.files[doomed:]...)
+	return removed, nil
+}
+
+// retentionWedged records that retention cannot run, once per spell.
+func (w *storeWriter) retentionWedged(err error) {
+	w.wedged = true
+	if w.wedgedLogged {
+		return
+	}
+	w.wedgedLogged = true
+	w.opts.Log.Warn("the statistics store is keeping records past its limits: what it would drop cannot be summarized first", "err", err)
+}
+
+// retentionRan records that retention is working again.
+func (w *storeWriter) retentionRan() {
+	w.wedged, w.wedgedLogged = false, false
 }
 
 func (w *storeWriter) flush() error {
@@ -1278,9 +1343,9 @@ func (w *storeWriter) close() error {
 	return err
 }
 
-// summary is what the panel is shown: how many files, how many bytes, and how
+// figures is what the panel is shown: how many files, how many bytes, and how
 // far back the store reaches.
-func (w *storeWriter) summary() (int, int64, int64) {
+func (w *storeWriter) figures() (int, int64, int64) {
 	return len(w.files), w.totalBytes(), w.oldest
 }
 
@@ -1298,7 +1363,7 @@ func (w *storeWriter) totalBytes() int64 {
 // oldestRecord is the timestamp of the first record still held.
 func (w *storeWriter) oldestRecord() int64 {
 	for _, f := range w.files {
-		if at := w.firstRecordIn(f.name); at != 0 {
+		if at := firstRecordIn(w.root, f.name); at != 0 {
 			return at
 		}
 	}
@@ -1317,8 +1382,8 @@ const maxStoreFileBytes = 64 << 20
 const maxLatestBytes = 16 << 30
 
 // firstRecordIn returns the timestamp of the first record in a file, or zero.
-func (w *storeWriter) firstRecordIn(name string) int64 {
-	lines, err := readRawLines(w.root, name)
+func firstRecordIn(root *os.Root, name string) int64 {
+	lines, err := readRawLines(root, name)
 	if err != nil {
 		return 0
 	}

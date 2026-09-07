@@ -1,6 +1,7 @@
 package stats
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -55,10 +56,20 @@ const summaryTempSuffix = ".tmp"
 // to outlive. Over that, its oldest days go first.
 const summaryShare = 20
 
-// ApproxSummaryBytes is what one summary line measures at its widest — every
-// class seen, every removal reason, a long repo id. It is what the
-// documentation's arithmetic about how many days a summary holds rests on.
-const ApproxSummaryBytes = 512
+// ApproxSummaryBytes bounds one summary line, which is what the
+// documentation's arithmetic about how many days a summary holds rests on. It
+// is measured rather than guessed: the widest line this format can emit — all
+// ten outcome classes and all seven removal reasons present, a 64-character
+// repo id, and every counter run up into the millions and billions — marshals
+// to 767 bytes, which TestASummaryLineIsTheSizeTheDocumentationSays builds and
+// holds to this figure. The bound is round, so a longer repo id has room.
+const ApproxSummaryBytes = 800
+
+// SummaryShareOfCap is how much of the store's size limit the summary may use:
+// a twentieth. It is exported so the documentation's arithmetic about how many
+// days that holds can be held to this one figure rather than to someone's
+// memory.
+func SummaryShareOfCap(maxBytes int64) int64 { return maxBytes / summaryShare }
 
 // Summary is one model's day, as counts and totals.
 //
@@ -76,7 +87,9 @@ type Summary struct {
 	// none.
 	Day string `json:"day"`
 	// TZOffsetMin is the offset from UTC in force on that day, in minutes, so a
-	// day recorded in one zone can still be placed by a reader in another.
+	// day recorded in one zone can still be placed by a reader in another. A
+	// day is keyed by its date alone, so a Mac that changed zone between two
+	// drops for the same day keeps the offset the first of them recorded.
 	TZOffsetMin int `json:"tz_offset_min"`
 	// Model is the repo id that served the requests, empty for requests refused
 	// before they resolved to one.
@@ -104,6 +117,24 @@ type Summary struct {
 	Loads       int64            `json:"loads"`
 	FailedLoads int64            `json:"failed_loads"`
 	Removals    map[string]int64 `json:"removals,omitempty"`
+}
+
+// SummaryDay is one summary line and what it means for the day it covers.
+//
+// The summary always describes records that no longer exist, so a caller adds
+// it to whatever detail is still held rather than reconciling the two. What it
+// cannot say on its own is whether there is any such detail left, which is the
+// difference between "this day is partly summarized" and "the detail for this
+// day is gone" — the sentence a view has to be able to write.
+type SummaryDay struct {
+	Summary
+	// DetailHeld says the store still holds records from this day, so this line
+	// covers only the part of it that has been dropped. False means every
+	// record of that day is gone and this line is all there is. It is computed
+	// at read time from what the store still holds, not written to disk: a day
+	// only partly dropped becomes wholly dropped later, and a field on disk
+	// would say the wrong thing from the moment it was written.
+	DetailHeld bool `json:"detail_held"`
 }
 
 // SummaryFields lists a summary line's fields under the names they are written
@@ -155,6 +186,12 @@ type summaryKey struct {
 type summarySet struct {
 	index []foldedFile
 	days  map[summaryKey]*Summary
+	// kept are the lines this build could not read: one a newer Gropius wrote,
+	// one a crash tore. The fold is a read-modify-rename, so a line dropped on
+	// the way in is a line deleted — and the format's own promise is that a
+	// reader skips what it does not understand rather than destroying it. They
+	// are written back exactly as they were found.
+	kept [][]byte
 }
 
 // readSummarySet reads the summary file. A file that is not there is an empty
@@ -168,6 +205,9 @@ func readSummarySet(root *os.Root) (*summarySet, error) {
 	for _, b := range lines {
 		l, ok := parseLine(b)
 		if !ok {
+			if t := bytes.TrimSpace(b); len(t) > 0 {
+				set.kept = append(set.kept, append([]byte(nil), t...))
+			}
 			continue
 		}
 		switch l.Kind {
@@ -297,6 +337,9 @@ func (set *summarySet) encode() ([]byte, error) {
 		return nil, err
 	}
 	out = append(append(out, idx...), '\n')
+	for _, b := range set.kept {
+		out = append(append(out, b...), '\n')
+	}
 	for _, s := range set.sorted() {
 		b, err := json.Marshal(summaryLine{V: SchemaVersion, Kind: KindSummary, Summary: *s})
 		if err != nil {
@@ -324,6 +367,7 @@ func (w *storeWriter) fold(doomed []storeFile) error {
 	// Forget the files the index names that are no longer on disk: they were
 	// removed as intended, and the index is only ever the short list of folds
 	// whose removal has not been seen through.
+	folded := 0
 	pending := make([]foldedFile, 0, len(set.index))
 	for _, e := range set.index {
 		if w.stillOnDisk(e) {
@@ -356,7 +400,14 @@ func (w *storeWriter) fold(doomed []storeFile) error {
 				set.add(w.loc, l)
 			}
 		}
+		folded++
 		pending = append(pending, fp)
+	}
+	if len(set.kept) == 0 && len(pending) == len(set.index) && folded == 0 {
+		// Nothing new counted and the index says the same thing: a rewrite
+		// would only churn the file. This is the ordinary case while a removal
+		// that failed is being retried.
+		return nil
 	}
 	set.index = pending
 	return w.writeSummary(set)
@@ -405,10 +456,18 @@ func (w *storeWriter) writeSummary(set *summarySet) error {
 	if err != nil {
 		return err
 	}
+	dropped := 0
 	for int64(len(b)) > share && set.dropOldestDay() {
+		dropped++
 		if b, err = set.encode(); err != nil {
 			return err
 		}
+	}
+	if dropped > 0 {
+		// The summary losing a day is the last thing that happens to a record
+		// of it, so it is said out loud rather than done quietly.
+		w.opts.Log.Info("the oldest days of the request statistics summary were dropped to keep it within its share of the size limit",
+			"days", dropped, "share_bytes", share)
 	}
 	name, f, err := w.createSummaryTemp()
 	if err != nil {
@@ -435,6 +494,15 @@ func (w *storeWriter) writeSummary(set *summarySet) error {
 	if err := w.root.Rename(name, summaryFileName); err != nil {
 		_ = w.root.Remove(name)
 		return err
+	}
+	// The directory entry itself, so the rename is as durable as the bytes it
+	// published. Without it a power cut can leave the summary written and the
+	// name still pointing at what it replaced, which is the one ordering this
+	// design rests on. A directory that will not sync is not a reason to keep
+	// the detail: the summary is on the disk either way.
+	if d, err := w.root.Open("."); err == nil {
+		_ = d.Sync()
+		d.Close()
 	}
 	w.summaryBytes = int64(len(b))
 	return nil
@@ -566,9 +634,14 @@ func removeSummaryFiles(root *os.Root, match func(string) bool) error {
 // day appears here and in Latest both, the detail is what is still held and
 // the summary is what is not — the fold never subtracts, so the two are added
 // rather than reconciled.
-func (s *FileStore) Summaries(limit int, fn func(Summary) bool) error {
+func (s *FileStore) Summaries(limit int, fn func(SummaryDay) bool) error {
 	if s == nil {
 		return nil
+	}
+	// The same flush Latest does, so a caller that reads both sees one store
+	// rather than two moments of it.
+	if err := s.Flush(); err != nil {
+		return err
 	}
 	root, err := openStoreRoot(s.dir)
 	if err != nil {
@@ -582,10 +655,27 @@ func (s *FileStore) Summaries(limit int, fn func(Summary) bool) error {
 	if err != nil {
 		return err
 	}
+	// The oldest record still held, which is what tells a summarized day from
+	// a day that is only partly summarized. One file's read, and only the first
+	// line of it that parses.
+	oldest := int64(0)
+	if files, err := listStoreFiles(root); err == nil {
+		for _, f := range files {
+			if at := firstRecordIn(root, f.name); at != 0 {
+				oldest = at
+				break
+			}
+		}
+	}
 	all := set.sorted()
 	given := 0
 	for i := len(all) - 1; i >= 0; i-- {
-		if !fn(*all[i]) {
+		d := SummaryDay{Summary: *all[i]}
+		// The day ends a day after it starts, in the zone that was in force.
+		// A day whose last second is still older than the oldest record held
+		// has nothing left of it but this line.
+		d.DetailHeld = oldest != 0 && oldest < all[i].At+86400
+		if !fn(d) {
 			return nil
 		}
 		given++
