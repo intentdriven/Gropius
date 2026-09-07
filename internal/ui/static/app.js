@@ -13,6 +13,29 @@ function bytes(n) {
   return `${n.toFixed(i === 0 ? 0 : 1)} ${u[i]}`;
 }
 
+// foldRepoID is config.FoldRepoID: the one rule for when two repo ids name the
+// same model. The panel joins pins against model ids, and a pin can be carried
+// in a spelling the registry does not use — set before the model was
+// downloaded — until the next save reconciles it, so the join folds like every
+// other join on a repo id in this project does.
+function foldRepoID(id) { return String(id ?? '').toLowerCase(); }
+
+// pinLabel is the pill a model's card carries when it is pinned: which of the
+// two things being pinned means right now, or '' when it is not. A model that
+// is protected but that nothing has loaded says so, because an operator
+// reading "pinned" would otherwise assume it was running.
+function pinLabel(m, pinned, loaded) {
+  if (m.state !== 'ready') return '';
+  const want = foldRepoID(m.repo_id);
+  if (!(pinned || []).some((id) => foldRepoID(id) === want)) return '';
+  return loaded ? 'pinned' : 'pinned, not loaded';
+}
+
+// size is bytes() for a figure that is genuinely a measurement: nothing pinned
+// is "0 B", not the em dash bytes() shows for a size it does not know. This
+// line is read before anything is ticked, so zero is its opening state.
+function size(n) { return n ? bytes(n) : '0 B'; }
+
 // contextLabel renders a model's architectural maximum context for its card.
 // The label says "max context" so the figure is not read as the window this
 // Mac can hold at once, which is a smaller and separate number. The
@@ -136,6 +159,12 @@ function renderModels() {
   const list = $('modelList');
   const models = state.models || [];
   const resident = new Set((state.resident || []).map((r) => r.repo_id));
+  // The set the pool is actually enforcing, not the stored settings: those two
+  // are the same except for the moment between a model arriving and the pin
+  // for it being reconciled, and this surface is the one an operator would act
+  // on. A pinned model that nothing has loaded is marked too — "pinned" is a
+  // fact about the model, not about its memory.
+  const pinned = state.pinned || [];
 
   $('modelsEmpty').hidden = models.length > 0;
   list.innerHTML = '';
@@ -150,6 +179,8 @@ function renderModels() {
       ? '<span class="pill loaded">loaded</span>'
       : '<span class="pill ready">ready</span>';
     else if (m.state === 'failed') pill = '<span class="pill failed">failed</span>';
+    const pinText = pinLabel(m, pinned, loaded);
+    if (pinText) pill += `<span class="pill pinned">${pinText}</span>`;
 
     const info = modelInfoLine(m);
 
@@ -423,6 +454,120 @@ function renderSettings() {
   overrides = { ...(c.model_sampling || {}) };
   renderOverrides();
   renderMergeSwitches();
+  renderPinSwitches();
+}
+
+// renderPinSwitches draws one box per downloaded model, and the figure that
+// says what the ticked ones leave of the memory budget. The figure is what
+// makes a pinned set that cannot fit visible while it is being chosen, rather
+// than at the first request Gropius has to refuse.
+function renderPinSwitches() {
+  const box = $('pinList');
+  const rows = pinRows(state.models || [], state.pinned || []);
+  box.innerHTML = '';
+  if (!rows.length) {
+    box.innerHTML = '<p class="hint">Download a model and it appears here.</p>';
+    updatePinBudget();
+    return;
+  }
+  rows.forEach((r) => {
+    const row = document.createElement('label');
+    row.className = 'switch';
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.dataset.model = r.id;
+    cb.checked = r.checked;
+    cb.addEventListener('change', () => { settingsTouched = true; updatePinBudget(); });
+    const name = document.createElement('span');
+    name.textContent = r.absent ? `${r.id} (not on this Mac)` : r.id;
+    row.appendChild(cb);
+    row.appendChild(name);
+    box.appendChild(row);
+  });
+  updatePinBudget();
+}
+
+// pinRows is the whole list of boxes the form draws: one per model on this
+// Mac, then one per pin that names a model this Mac does not have.
+//
+// The second half is not a nicety. The form carries through every pin it does
+// not list (see pinnedModels), so a pin with no box could never be removed —
+// and a model deleted after it was pinned, or pinned before it was downloaded,
+// leaves exactly that. Showing it is what makes every pin removable by the
+// form that made it.
+function pinRows(models, pinned) {
+  const want = (pinned || []).map(foldRepoID);
+  const have = new Set((models || []).map((m) => foldRepoID(m.repo_id)));
+  const rows = (models || []).map((m) => ({
+    id: m.repo_id,
+    checked: want.includes(foldRepoID(m.repo_id)),
+    absent: false,
+  }));
+  (pinned || []).filter((id) => !have.has(foldRepoID(id))).forEach((id) => {
+    rows.push({ id, checked: true, absent: true });
+  });
+  return rows;
+}
+
+// pinBoxes are the boxes drawn above, one per model the form lists.
+function pinBoxes() {
+  return Array.from(document.querySelectorAll('#pinList input[type=checkbox]'));
+}
+
+// listedPinModels lists the models the form drew a box for.
+function listedPinModels() {
+  return pinBoxes().map((cb) => cb.dataset.model);
+}
+
+// checkedPinModels lists the models whose box is ticked.
+function checkedPinModels() {
+  return pinBoxes().filter((cb) => cb.checked).map((cb) => cb.dataset.model);
+}
+
+// pinnedModels returns the whole pinned list a save posts. The server replaces
+// what it holds with this, so a model whose box is clear is simply left out —
+// a list cannot be shortened by omission any other way. A pin for a model the
+// form does not list is carried through, because a model can be pinned before
+// it is downloaded and a form with no box for it has nothing to say about it.
+function pinnedModels(current, listed, checked) {
+  const shown = new Set((listed || []).map(foldRepoID));
+  const out = (current || []).filter((id) => !shown.has(foldRepoID(id)));
+  (checked || []).forEach((id) => out.push(id));
+  return out;
+}
+
+// pinnedCharge is what the pinned models cost against the memory budget: each
+// one's size plus a fifth, which is what the pool charges a loaded model
+// (runtime.LoadCost). A model still downloading is charged the size it
+// declares, because ticking its box now is a promise about the memory it will
+// take when it lands. A pin naming a model this Mac does not have at all has
+// no size to charge.
+function pinnedCharge(models, pinned) {
+  const want = new Set((pinned || []).map(foldRepoID));
+  return (models || []).reduce((sum, m) => {
+    if (!want.has(foldRepoID(m.repo_id))) return sum;
+    const b = m.bytes || m.size_bytes || 0;
+    return sum + b + Math.floor(b / 5);
+  }, 0);
+}
+
+// updatePinBudget writes the line beside the boxes: what the ticked models
+// cost, and what that leaves for everything else.
+function updatePinBudget() {
+  const line = $('pinBudget');
+  if (!line) return;
+  const budget = state.memory_budget || 0;
+  const charge = pinnedCharge(state.models || [], checkedPinModels());
+  if (!budget) {
+    line.textContent = charge ? `Pinned models use about ${size(charge)}.` : '';
+    line.className = 'hint';
+    return;
+  }
+  const left = budget - charge;
+  line.textContent = left >= 0
+    ? `Pinned models use about ${size(charge)} of the ${size(budget)} memory budget, leaving ${size(left)} for everything else.`
+    : `Pinned models use about ${size(charge)}, more than the ${size(budget)} memory budget — this cannot be saved.`;
+  line.className = left >= 0 ? 'hint' : 'msg err';
 }
 
 // renderMergeSwitches draws one box per downloaded model. Merging is per model
@@ -611,6 +756,7 @@ $('settingsForm').addEventListener('submit', async (e) => {
     sampling:           readSampling('input'),
     model_sampling:     overrides,
     per_model:         perModelSettings(state.config.per_model, listedMergeModels(), checkedMergeModels()),
+    pinned:            pinnedModels(state.pinned, listedPinModels(), checkedPinModels()),
   };
   try {
     const res = await api('/api/settings', {

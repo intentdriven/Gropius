@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -517,7 +519,7 @@ func TestEvictsLRUModelWhenBudgetExceeded(t *testing.T) {
 		"org/a": 100,
 		"org/b": 100,
 	}}
-	// loadCost is 1.2x, so 100 bytes costs 120. A 200-byte budget fits exactly one.
+	// LoadCost is 1.2x, so 100 bytes costs 120. A 200-byte budget fits exactly one.
 	p := newTestPool(t, l, src, PoolOptions{MaxResidentBytes: 200})
 
 	_, relA, err := p.Acquire(context.Background(), "org/a")
@@ -553,7 +555,7 @@ func TestFailedLaunchPreconditionDoesNotEvictAnUnrelatedModel(t *testing.T) {
 		"org/a": 100,
 		"org/b": 100,
 	}}
-	// loadCost is 1.2x, so 100 bytes costs 120. A 200-byte budget fits exactly
+	// LoadCost is 1.2x, so 100 bytes costs 120. A 200-byte budget fits exactly
 	// one model at a time, so loading org/b would otherwise have to evict org/a.
 	p := newTestPool(t, l, src, PoolOptions{MaxResidentBytes: 200})
 
@@ -581,7 +583,7 @@ func TestLoadingModelWithAnActiveWaiterIsNotEvicted(t *testing.T) {
 	l := newFakeLauncher()
 	l.loadDelay = 200 * time.Millisecond
 	src := &fakeSource{models: map[string]int64{"org/a": 100, "org/b": 100}}
-	// loadCost is 1.2x, so 100 bytes costs 120. A 200-byte budget fits exactly one.
+	// LoadCost is 1.2x, so 100 bytes costs 120. A 200-byte budget fits exactly one.
 	p := newTestPool(t, l, src, PoolOptions{MaxResidentBytes: 200})
 
 	// org/a's caller keeps waiting for the whole (slow, simulated) load.
@@ -632,7 +634,7 @@ func TestAbandonedLoadIsTornDownPromptly(t *testing.T) {
 	l := newFakeLauncher()
 	l.loadDelay = 200 * time.Millisecond
 	src := &fakeSource{models: map[string]int64{"org/a": 100, "org/b": 100}}
-	// loadCost is 1.2x, so 100 bytes costs 120. A 200-byte budget fits exactly one.
+	// LoadCost is 1.2x, so 100 bytes costs 120. A 200-byte budget fits exactly one.
 	p := newTestPool(t, l, src, PoolOptions{
 		MaxResidentBytes: 200,
 		ReadyTimeout:     10 * time.Minute, // must not matter: teardown is immediate.
@@ -802,8 +804,8 @@ func TestCloseStopsEverything(t *testing.T) {
 }
 
 func TestLoadCostAddsHeadroom(t *testing.T) {
-	if got := loadCost(1000); got != 1200 {
-		t.Errorf("loadCost(1000) = %d, want 1200 (weights + KV-cache headroom)", got)
+	if got := LoadCost(1000); got != 1200 {
+		t.Errorf("LoadCost(1000) = %d, want 1200 (weights + KV-cache headroom)", got)
 	}
 }
 
@@ -817,8 +819,8 @@ func TestHumanBytes(t *testing.T) {
 		{5 << 30, "5.0 GB"},
 	}
 	for _, tt := range tests {
-		if got := humanBytes(tt.in); got != tt.want {
-			t.Errorf("humanBytes(%d) = %q, want %q", tt.in, got, tt.want)
+		if got := HumanBytes(tt.in); got != tt.want {
+			t.Errorf("HumanBytes(%d) = %q, want %q", tt.in, got, tt.want)
 		}
 	}
 }
@@ -966,3 +968,306 @@ func TestUnloadFindsTheModelWhateverTheSpelling(t *testing.T) {
 		t.Errorf("Resident() = %+v after Unload, want none", got)
 	}
 }
+
+// A pinned model is protected against every other client's request: the pool
+// refuses the load rather than taking the memory back. The refusal must name
+// no model — it is written verbatim into the 503 body an unauthenticated LAN
+// client reads, and which models the operator has chosen to protect is not
+// that client's business.
+func TestPinnedModelsAreNeverEvictedAndTheRefusalNamesNoModel(t *testing.T) {
+	l := newFakeLauncher()
+	src := &fakeSource{models: map[string]int64{"org/a": 100, "org/b": 100, "org/c": 100}}
+	// LoadCost is 1.2x, so 100 bytes costs 120. A 250-byte budget holds two.
+	p := newTestPool(t, l, src, PoolOptions{
+		MaxResidentBytes: 250,
+		Pinned:           []string{"org/a", "org/b"},
+	})
+
+	for _, id := range []string{"org/a", "org/b"} {
+		_, release, err := p.Acquire(context.Background(), id)
+		if err != nil {
+			t.Fatalf("Acquire(%q): %v", id, err)
+		}
+		release() // idle, so only the pin protects it
+	}
+
+	_, _, err := p.Acquire(context.Background(), "org/c")
+	if err == nil {
+		t.Fatal("a third model loaded although both resident models are pinned")
+	}
+	if !errors.Is(err, ErrBusy) {
+		t.Errorf("error = %v, want it to wrap ErrBusy so callers can test for it", err)
+	}
+	for _, id := range []string{"org/a", "org/b"} {
+		if strings.Contains(err.Error(), id) {
+			t.Errorf("the refusal names %q; it reaches an unauthenticated LAN client: %v", id, err)
+		}
+	}
+	if got := len(p.Resident()); got != 2 {
+		t.Errorf("Resident() holds %d models after the refusal, want both pinned ones", got)
+	}
+}
+
+// The pin removes a model from the candidate set before the least-recently-used
+// comparison runs, so it survives even when it is the better victim by age.
+func TestEvictionSkipsThePinnedModelEvenWhenItIsTheLeastRecentlyUsed(t *testing.T) {
+	l := newFakeLauncher()
+	src := &fakeSource{models: map[string]int64{"org/pinned": 100, "org/spare": 100, "org/new": 100}}
+	clock := &testClock{now: time.Unix(1_700_000_000, 0)}
+	p := newTestPool(t, l, src, PoolOptions{
+		MaxResidentBytes: 250,
+		Pinned:           []string{"org/pinned"},
+		now:              clock.Now,
+	})
+
+	// The pinned model is used first and then left alone, so it is the older
+	// of the two and the one LRU would choose.
+	for _, id := range []string{"org/pinned", "org/spare"} {
+		_, release, err := p.Acquire(context.Background(), id)
+		if err != nil {
+			t.Fatalf("Acquire(%q): %v", id, err)
+		}
+		release()
+		clock.advance(time.Minute)
+	}
+
+	_, release, err := p.Acquire(context.Background(), "org/new")
+	if err != nil {
+		t.Fatalf("Acquire(org/new): %v", err)
+	}
+	defer release()
+
+	if ids := residentIDs(p); !slices.Equal(ids, []string{"org/new", "org/pinned"}) {
+		t.Errorf("resident = %v, want the pinned model kept and the spare one evicted", ids)
+	}
+}
+
+// The idle timeout is a second eviction path with the same effect, so a pin
+// that did not cover it would make the promise false after idle_timeout_sec
+// seconds of quiet.
+func TestPinnedModelIgnoresTheIdleTimeout(t *testing.T) {
+	l := newFakeLauncher()
+	src := &fakeSource{models: map[string]int64{"org/pinned": 100, "org/spare": 100}}
+	clock := &testClock{now: time.Unix(1_700_000_000, 0)}
+	p := newTestPool(t, l, src, PoolOptions{
+		MaxResidentBytes: 1 << 30,
+		IdleTimeout:      80 * time.Millisecond,
+		Pinned:           []string{"org/pinned"},
+		now:              clock.Now,
+	})
+
+	for _, id := range []string{"org/pinned", "org/spare"} {
+		_, release, err := p.Acquire(context.Background(), id)
+		if err != nil {
+			t.Fatalf("Acquire(%q): %v", id, err)
+		}
+		release()
+	}
+	// Both models are now well past the timeout as far as the pool is
+	// concerned; only the reaper's ticker still runs on real time.
+	clock.advance(time.Hour)
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if slices.Equal(residentIDs(p), []string{"org/pinned"}) {
+			// And it stays: a later tick must not take it either.
+			time.Sleep(100 * time.Millisecond)
+			if ids := residentIDs(p); !slices.Equal(ids, []string{"org/pinned"}) {
+				t.Fatalf("resident = %v, want the pinned model still held", ids)
+			}
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("resident = %v; the idle unpinned model was never reaped", residentIDs(p))
+}
+
+// SetPinned is the live seam: pinning in Settings protects a model that is
+// already loaded, without Gropius being restarted and without a new pool.
+func TestSetPinnedProtectsAModelWithoutANewPool(t *testing.T) {
+	l := newFakeLauncher()
+	src := &fakeSource{models: map[string]int64{"org/keep": 100, "org/spare": 100, "org/new": 100}}
+	clock := &testClock{now: time.Unix(1_700_000_000, 0)}
+	p := newTestPool(t, l, src, PoolOptions{MaxResidentBytes: 250, now: clock.Now})
+
+	for _, id := range []string{"org/keep", "org/spare"} {
+		_, release, err := p.Acquire(context.Background(), id)
+		if err != nil {
+			t.Fatalf("Acquire(%q): %v", id, err)
+		}
+		release()
+		clock.advance(time.Minute)
+	}
+
+	// Pinned under a spelling the pool never saw: Settings canonicalizes, but
+	// a hand-edited settings file need not, and a pin that silently matched
+	// nothing would be the worst failure this feature has.
+	p.SetPinned([]string{"ORG/Keep"})
+
+	_, release, err := p.Acquire(context.Background(), "org/new")
+	if err != nil {
+		t.Fatalf("Acquire(org/new): %v", err)
+	}
+	defer release()
+
+	if ids := residentIDs(p); !slices.Equal(ids, []string{"org/keep", "org/new"}) {
+		t.Errorf("resident = %v, want the newly pinned model kept and the spare one evicted", ids)
+	}
+}
+
+// Pinning protects a model from other clients' requests, not from the
+// operator's own hand: every loopback caller is by design the administrator.
+func TestUnloadSucceedsOnAPinnedModel(t *testing.T) {
+	l := newFakeLauncher()
+	src := &fakeSource{models: map[string]int64{"org/m": 1 << 20}}
+	p := newTestPool(t, l, src, PoolOptions{MaxResidentBytes: 1 << 30, Pinned: []string{"org/m"}})
+
+	_, release, err := p.Acquire(context.Background(), "org/m")
+	if err != nil {
+		t.Fatal(err)
+	}
+	release()
+
+	if err := p.Unload("org/m"); err != nil {
+		t.Fatalf("Unload of a pinned model: %v", err)
+	}
+	if got := p.Resident(); len(got) != 0 {
+		t.Errorf("Resident() = %+v after unloading a pinned model, want none", got)
+	}
+}
+
+// The fit check the app runs before a settings save is against this figure, so
+// it has to be the figure the pool actually enforces — not a second number the
+// pool merely remembers. A model charged one byte over what MemoryBudget()
+// reports must be refused, and one charged exactly it must load.
+func TestMemoryBudgetReportsTheCeilingEvictionUses(t *testing.T) {
+	l := newFakeLauncher()
+	// LoadCost is 1.2x, so these are charged 240 and 246.
+	src := &fakeSource{models: map[string]int64{"org/fits": 200, "org/over": 205}}
+	p := newTestPool(t, l, src, PoolOptions{MaxResidentBytes: 240})
+
+	if got := p.MemoryBudget(); got != 240 {
+		t.Fatalf("MemoryBudget() = %d, want 240", got)
+	}
+	if _, _, err := p.Acquire(context.Background(), "org/over"); err == nil {
+		t.Errorf("a model charged %d loaded under a budget of %d",
+			LoadCost(205), p.MemoryBudget())
+	}
+	_, release, err := p.Acquire(context.Background(), "org/fits")
+	if err != nil {
+		t.Errorf("a model charged exactly the budget was refused: %v", err)
+	} else {
+		release()
+	}
+}
+
+// testClock is an injectable clock, so eviction order is set by the test
+// rather than by how long the test took to run.
+type testClock struct {
+	mu  sync.Mutex
+	now time.Time
+}
+
+func (c *testClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.now
+}
+
+func (c *testClock) advance(d time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.now = c.now.Add(d)
+}
+
+// residentIDs lists the repo ids the pool is holding, sorted, so a test can
+// compare the whole set rather than one entry.
+func residentIDs(p *Pool) []string {
+	var out []string
+	for _, r := range p.Resident() {
+		out = append(out, r.RepoID)
+	}
+	slices.Sort(out)
+	return out
+}
+
+// The refusal's log line names the protected models, and the names travel on
+// the error rather than being written while p.mu is held. p.mu is the pool's
+// one lock: Acquire, Resident, Pinned and Unload all take it, and the models
+// list takes it on every request, so a slow log sink — a stalled stderr pipe,
+// a busy disk — would let a client that can provoke refusals stall every other
+// caller for the length of a write.
+func TestRefusalLogsTheProtectedModelsWithoutHoldingTheLock(t *testing.T) {
+	l := newFakeLauncher()
+	src := &fakeSource{models: map[string]int64{"org/pinned": 100, "org/other": 100}}
+	h := &blockingHandler{enter: make(chan struct{}), leave: make(chan struct{})}
+	p := newTestPool(t, l, src, PoolOptions{
+		MaxResidentBytes: 150,
+		Pinned:           []string{"org/pinned"},
+		Log:              slog.New(h),
+	})
+	// Registered after the pool, so it runs before the pool's own Close: a
+	// failing assertion below leaves the handler mid-write, and Close would
+	// then wait on the lock this test is claiming is free.
+	t.Cleanup(h.release)
+
+	_, release, err := p.Acquire(context.Background(), "org/pinned")
+	if err != nil {
+		t.Fatal(err)
+	}
+	release()
+
+	refused := make(chan error, 1)
+	go func() {
+		_, _, err := p.Acquire(context.Background(), "org/other")
+		refused <- err
+	}()
+
+	select {
+	case <-h.enter:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the refusal never reached the log")
+	}
+	// The log sink is stuck mid-write. Every other caller must still be served.
+	done := make(chan []Resident, 1)
+	go func() { done <- p.Resident() }()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Resident() blocked behind the refusal's log write, so the log runs under p.mu")
+	}
+	h.release()
+
+	err = <-refused
+	var noRoom *NoRoomError
+	if !errors.As(err, &noRoom) {
+		t.Fatalf("error = %v, want a *NoRoomError carrying the protected names", err)
+	}
+	if !slices.Equal(noRoom.Protected, []string{"org/pinned"}) {
+		t.Errorf("Protected = %v, want the pinned model", noRoom.Protected)
+	}
+	if strings.Contains(err.Error(), "org/pinned") {
+		t.Errorf("the names reached the message a LAN client reads: %v", err)
+	}
+}
+
+// blockingHandler is a slog handler that stalls inside Handle until it is let
+// go, so a test can see what else is held up while it writes.
+type blockingHandler struct {
+	enter     chan struct{}
+	leave     chan struct{}
+	entered   sync.Once
+	releasing sync.Once
+}
+
+func (h *blockingHandler) Enabled(context.Context, slog.Level) bool { return true }
+func (h *blockingHandler) Handle(context.Context, slog.Record) error {
+	h.entered.Do(func() { close(h.enter) })
+	<-h.leave
+	return nil
+}
+
+// release lets every stalled write through. Safe to call more than once.
+func (h *blockingHandler) release()                           { h.releasing.Do(func() { close(h.leave) }) }
+func (h *blockingHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h *blockingHandler) WithGroup(string) slog.Handler      { return h }

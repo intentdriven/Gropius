@@ -323,6 +323,7 @@ func TestEffectiveSamplingIsDeterministic(t *testing.T) {
 func TestCloneCopiesEveryReferenceInTheType(t *testing.T) {
 	cfg := Default()
 	cfg.Preload = []string{"org/one"}
+	cfg.Pinned = []string{"org/one"}
 	full := Sampling{
 		Temperature: f64(0.7), TopP: f64(0.9), TopK: intp(40),
 		MinP: f64(0.05), MaxTokens: intp(4096),

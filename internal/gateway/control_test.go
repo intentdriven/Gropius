@@ -4,12 +4,14 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/intentdriven/Gropius/internal/app"
 	"github.com/intentdriven/Gropius/internal/config"
+	"github.com/intentdriven/Gropius/internal/registry"
 )
 
 func newTestControl(t *testing.T, cfg config.Config) *httptest.Server {
@@ -438,4 +440,196 @@ func TestSearchAuthorEmptyOverrideKeepsDefault(t *testing.T) {
 			t.Errorf("searchAuthor(%q) = (%q, %q), want (%q, %q)", tc.q, author, rest, tc.wantAuthor, tc.wantRest)
 		}
 	}
+}
+
+// Pins apply the moment they are saved, so the answer must not tell the
+// operator to restart for a change that has already taken effect.
+func TestSavingPinnedModelsNeedsNoRestart(t *testing.T) {
+	srv, a := newTestControlApp(t, config.Default())
+
+	body := `{"host":"0.0.0.0","port":11535,"api_key":"","decode_concurrency":4,` +
+		`"idle_timeout_sec":0,"pinned":["org/keeper"]}`
+	resp := postJSON(t, srv, "/api/settings", body)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	var out struct {
+		Restart bool `json:"restart"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	if out.Restart {
+		t.Error("pinning reported restart=true, but the pool is told at once")
+	}
+	if got := a.Pool.Pinned(); len(got) != 1 || got[0] != "org/keeper" {
+		t.Errorf("the pool holds %v, want the model just pinned", got)
+	}
+}
+
+// The settings form does not own the pinned list on every save, and a save
+// that names it replaces it — leaving a model out is the only way a form can
+// unpin one.
+func TestSavingSettingsWithoutNamingPinnedKeepsThePins(t *testing.T) {
+	cfg := config.Default()
+	cfg.Pinned = []string{"org/keeper"}
+	srv, a := newTestControlApp(t, cfg)
+
+	resp := postJSON(t, srv, "/api/settings",
+		`{"host":"0.0.0.0","port":11535,"api_key":"","decode_concurrency":4,"idle_timeout_sec":0}`)
+	resp.Body.Close()
+	if got := a.Config().Pinned; len(got) != 1 || got[0] != "org/keeper" {
+		t.Errorf("Pinned = %v after an unrelated save, want the pin kept", got)
+	}
+}
+
+// A settings save whose pinned models cannot all be in memory at once is
+// refused, and the panel shows the operator why.
+func TestSettingsRefusesAPinnedSetLargerThanTheBudget(t *testing.T) {
+	srv, a := newTestControlApp(t, config.Default())
+	if err := a.Registry.Put(registry.Model{
+		RepoID: "org/enormous", Path: a.Paths.ModelDir("org/enormous"),
+		Bytes: 1 << 50, State: registry.StateReady, Progress: 100,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	resp := postJSON(t, srv, "/api/settings",
+		`{"host":"0.0.0.0","port":11535,"api_key":"","decode_concurrency":4,`+
+			`"idle_timeout_sec":0,"pinned":["org/enormous"]}`)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 for a pinned set that cannot fit", resp.StatusCode)
+	}
+	if got := a.Config().Pinned; len(got) != 0 {
+		t.Errorf("the refused pins reached the running configuration: %v", got)
+	}
+}
+
+// A save that names the pinned list replaces it. Unlike the two per-model maps
+// beside it, no guard is needed for that — encoding/json resets a slice's
+// length rather than merging into it — but the difference is subtle enough
+// that removing a pin deserves a test of its own.
+func TestSavingAShorterPinnedListRemovesTheRest(t *testing.T) {
+	cfg := config.Default()
+	cfg.Pinned = []string{"org/one", "org/two"}
+	srv, a := newTestControlApp(t, cfg)
+
+	resp := postJSON(t, srv, "/api/settings",
+		`{"host":"0.0.0.0","port":11535,"api_key":"","decode_concurrency":4,`+
+			`"idle_timeout_sec":0,"pinned":["org/one"]}`)
+	resp.Body.Close()
+	if got := a.Config().Pinned; len(got) != 1 || got[0] != "org/one" {
+		t.Errorf("Pinned = %v, want only the model the save named", got)
+	}
+	if got := a.Pool.Pinned(); len(got) != 1 || got[0] != "org/one" {
+		t.Errorf("the pool holds %v, want only the model the save named", got)
+	}
+
+	// And an explicit null clears it, the way naming a collection means "these
+	// are its members" everywhere else in this handler.
+	resp = postJSON(t, srv, "/api/settings",
+		`{"host":"0.0.0.0","port":11535,"api_key":"","decode_concurrency":4,`+
+			`"idle_timeout_sec":0,"pinned":null}`)
+	resp.Body.Close()
+	if got := a.Config().Pinned; len(got) != 0 {
+		t.Errorf("Pinned = %v after an explicit null, want none", got)
+	}
+}
+
+// A pinned set can stop fitting without a settings save: a pinned model that
+// was deleted is charged nothing until it is downloaded back. Nothing refuses
+// that, so the panel is where the operator finds out — beside the warning about
+// an open LAN endpoint, on the same surface, not only in the log.
+func TestStateWarnsWhenThePinnedSetNoLongerFits(t *testing.T) {
+	srv, a := newTestControlApp(t, config.Default())
+	if err := a.Registry.Put(registry.Model{
+		RepoID: "org/enormous", Path: a.Paths.ModelDir("org/enormous"),
+		Bytes: 1 << 50, State: registry.StateReady, Progress: 100,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if warned(t, srv) {
+		t.Fatal("the panel warns about the pinned set before anything is pinned")
+	}
+
+	// Pinned while the model was not there to be charged, as a delete and a
+	// re-download leave it.
+	cfg := a.Config()
+	cfg.Pinned = []string{"org/gone"}
+	if err := a.SetConfig(cfg); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Registry.Put(registry.Model{
+		RepoID: "org/gone", Path: a.Paths.ModelDir("org/gone"),
+		Bytes: 1 << 50, State: registry.StateReady, Progress: 100,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if !warned(t, srv) {
+		t.Error("the panel says nothing although the pinned set no longer fits")
+	}
+}
+
+// warned reports whether /api/state carries a warning about the pinned models.
+func warned(t *testing.T, srv *httptest.Server) bool {
+	t.Helper()
+	for _, w := range fetchState(t, srv).Warnings {
+		if strings.Contains(w, "pinned") {
+			return true
+		}
+	}
+	return false
+}
+
+// The panel's whole view of pinning — which boxes are ticked, which cards carry
+// the pill, and what the pinned set leaves of the budget — is drawn from these
+// two fields. Without them the operator sees no pin anywhere and an empty
+// budget line, which is silently the opposite of the promise, so the snapshot
+// has to be held to carrying them.
+func TestStateCarriesThePinnedSetAndTheMemoryBudget(t *testing.T) {
+	srv, a := newTestControlApp(t, config.Default())
+	if err := a.Registry.Put(registry.Model{
+		RepoID: "org/keeper", Path: a.Paths.ModelDir("org/keeper"),
+		Bytes: 1 << 20, State: registry.StateReady, Progress: 100,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := a.Config()
+	cfg.Pinned = []string{"org/keeper"}
+	if err := a.SetConfig(cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	st := fetchState(t, srv)
+	if !reflect.DeepEqual(st.Pinned, []string{"org/keeper"}) {
+		t.Errorf("state.pinned = %v, want the pinned model — the panel draws every pin from this", st.Pinned)
+	}
+	if st.MemoryBudget <= 0 {
+		t.Errorf("state.memory_budget = %d, want the pool's budget — the panel cannot say what a pin leaves without it",
+			st.MemoryBudget)
+	}
+	// Read from the pool, not the stored settings: the two agree except in the
+	// moment a pin is reconciled with a model that has just arrived, and this
+	// is the surface an operator acts on.
+	if got := a.Pool.Pinned(); !reflect.DeepEqual(st.Pinned, got) {
+		t.Errorf("state.pinned = %v but the pool is enforcing %v", st.Pinned, got)
+	}
+}
+
+// fetchState decodes the control plane's whole snapshot.
+func fetchState(t *testing.T, srv *httptest.Server) State {
+	t.Helper()
+	resp, err := srv.Client().Get(srv.URL + "/api/state")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var st State
+	if err := json.NewDecoder(resp.Body).Decode(&st); err != nil {
+		t.Fatal(err)
+	}
+	return st
 }

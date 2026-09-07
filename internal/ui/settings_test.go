@@ -7,6 +7,8 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+
+	"github.com/intentdriven/Gropius/internal/runtime"
 )
 
 // evalPanelValue evaluates one expression against the named functions lifted
@@ -105,5 +107,116 @@ func TestSettingsFormIsWiredToThePerModelSwitches(t *testing.T) {
 		if !want.MatchString(src) {
 			t.Errorf("the control panel no longer matches %s — the per-model switches are then asserted by nothing", want)
 		}
+	}
+}
+
+// The pinned list a save posts is the whole list, not a patch: the server
+// replaces what it holds with what the form sends, which is how unticking a
+// box unpins a model. A pin for a model the form does not list — one that is
+// not downloaded yet — is carried through, because the form has nothing to say
+// about it.
+func TestSettingsFormPostsThePinnedListWhole(t *testing.T) {
+	cases := []struct {
+		name string
+		expr string
+		want []any
+	}{
+		{
+			name: "a ticked box pins the model",
+			expr: `pinnedModels([], ["org/a", "org/b"], ["org/a"])`,
+			want: []any{"org/a"},
+		},
+		{
+			name: "an unticked box leaves the model out",
+			expr: `pinnedModels(["org/a"], ["org/a"], [])`,
+			want: []any{},
+		},
+		{
+			name: "a pin for a model the form does not list survives",
+			expr: `pinnedModels(["org/not-downloaded"], ["org/a"], ["org/a"])`,
+			want: []any{"org/not-downloaded", "org/a"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := evalPanelArray(t, tc.expr, "foldRepoID", "pinnedModels")
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("%s = %v, want %v", tc.expr, got, tc.want)
+			}
+		})
+	}
+}
+
+// The figure beside the field is what makes an impossible pinned set visible
+// at pin time rather than at the first refused request, so it has to charge
+// each model what the pool charges it: its size on disk plus a fifth.
+func TestSettingsFormChargesPinnedModelsWhatThePoolCharges(t *testing.T) {
+	const models = `[{"repo_id":"org/a","bytes":1000},{"repo_id":"org/b","bytes":500}]`
+	cases := []struct {
+		expr string
+		want float64
+	}{
+		{fmt.Sprintf(`pinnedCharge(%s, [])`, models), 0},
+		{fmt.Sprintf(`pinnedCharge(%s, ["org/a"])`, models), float64(runtime.LoadCost(1000))},
+		{fmt.Sprintf(`pinnedCharge(%s, ["org/a","org/b"])`, models),
+			float64(runtime.LoadCost(1000) + runtime.LoadCost(500))},
+		// A pinned model this Mac has not downloaded has no size to charge.
+		{fmt.Sprintf(`pinnedCharge(%s, ["org/not-downloaded"])`, models), 0},
+	}
+	for _, tc := range cases {
+		got := evalPanelNumber(t, tc.expr, "foldRepoID", "pinnedCharge")
+		if got != tc.want {
+			t.Errorf("%s = %v, want %v", tc.expr, got, tc.want)
+		}
+	}
+}
+
+// Every pin has to be removable from the form that made it. A pin whose model
+// is not in the list — one deleted since it was pinned, or one pinned before
+// it was downloaded — gets a row of its own, or it can never be unticked: the
+// form carries through what it does not list, so a pin with no row is a pin
+// for good.
+func TestSettingsFormDrawsARowForEveryPin(t *testing.T) {
+	const models = `[{"repo_id":"org/here","bytes":10}]`
+	got := evalPanelValue(t,
+		fmt.Sprintf(`{"rows": pinRows(%s, ["org/here", "org/gone"])}`, models),
+		"foldRepoID", "pinRows")
+	want := map[string]any{"rows": []any{
+		map[string]any{"id": "org/here", "checked": true, "absent": false},
+		map[string]any{"id": "org/gone", "checked": true, "absent": true},
+	}}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("pinRows = %v, want %v", got, want)
+	}
+}
+
+// A model that is still downloading declares its size from the first byte.
+// Charging it nothing is how a pinned pair that cannot fit gets ticked: the
+// figure reads 0 while both boxes are ticked, and the machine is over budget
+// the moment the downloads land.
+func TestSettingsFormChargesADownloadItsDeclaredSize(t *testing.T) {
+	const models = `[{"repo_id":"org/incoming","bytes":0,"size_bytes":1000}]`
+	got := evalPanelNumber(t, fmt.Sprintf(`pinnedCharge(%s, ["org/incoming"])`, models), "foldRepoID", "pinnedCharge")
+	if want := float64(runtime.LoadCost(1000)); got != want {
+		t.Errorf("pinnedCharge = %v, want %v", got, want)
+	}
+}
+
+// The panel's pinned set comes from the pool, through the state snapshot, and
+// not from the stored settings: the two agree except in the moment a pin is
+// reconciled with a model that has just arrived, and the panel is the surface
+// an operator acts on. Asserted against the source because the alternative is
+// a whole DOM: the reverting edit is a one-word change, and this is what makes
+// it fail.
+func TestThePanelReadsThePinnedSetThePoolIsEnforcing(t *testing.T) {
+	src := readPanelSource(t)
+	if !strings.Contains(src, "state.pinned") {
+		t.Error("the panel never reads state.pinned, so it cannot show what the pool is protecting")
+	}
+	if strings.Contains(src, "state.config.pinned") {
+		t.Error("the panel reads state.config.pinned; the stored settings are not what is being enforced")
+	}
+	if !strings.Contains(src, "state.memory_budget") {
+		t.Error("the panel never reads state.memory_budget, so it cannot say what a pinned set leaves")
 	}
 }

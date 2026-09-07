@@ -322,6 +322,17 @@ type Config struct {
 	// blocking startup.
 	Preload []string `json:"preload,omitempty"`
 
+	// Pinned lists repo ids that stay in memory: a pinned model is never chosen
+	// as an eviction victim and is never unloaded by the idle timeout, so a
+	// request that would need its memory is refused instead.
+	//
+	// Separate from Preload, and the two do different things. Preload loads a
+	// model at startup and leaves it as evictable as any other; pinning
+	// protects a model but loads nothing, so a pinned model is protected from
+	// the moment something loads it. A model named in both is loaded at startup
+	// and protected from then on.
+	Pinned []string `json:"pinned,omitempty"`
+
 	// Sampling holds the machine-wide sampling defaults every model server is
 	// launched with, so a request that omits a parameter is served with them.
 	Sampling Sampling `json:"sampling,omitzero"`
@@ -451,6 +462,78 @@ func (c *Config) sanitizePerModel() []string {
 	return dropped
 }
 
+// MaxPinned bounds the pinned list for the same reason MaxPerModel bounds the
+// per-model settings beside it, and to the same figure: everything saved is
+// written to config.json, which Load refuses above MaxConfigBytes, and a
+// config.json that cannot be read sends the next start into its fail-closed
+// loopback-only branch. The memory budget bounds how many pins can be *useful*,
+// but Validate is machine-independent, so the count is what is bounded here.
+const MaxPinned = MaxPerModel
+
+// validatePinned checks the pinned list the way validateSampling checks the
+// sampling overrides: this is the settings path, where a human is waiting for
+// an answer, so an entry that names no model is refused rather than dropped.
+func (c Config) validatePinned() error {
+	if len(c.Pinned) > MaxPinned {
+		return fmt.Errorf("at most %d models may be pinned, got %d", MaxPinned, len(c.Pinned))
+	}
+	seen := map[string]string{}
+	for _, id := range c.Pinned {
+		if !ValidRepoID(id) {
+			return fmt.Errorf("pinned model %q: not a model id of the form <org>/<name>", id)
+		}
+		// Two spellings of one repo id are two entries but one model. The pool
+		// folds its lookup, so the duplicate would protect nothing extra while
+		// counting twice against the fit check the save is about to run.
+		folded := FoldRepoID(id)
+		if first, ok := seen[folded]; ok {
+			return fmt.Errorf("pinned models %q and %q name the same model", first, id)
+		}
+		seen[folded] = id
+	}
+	return nil
+}
+
+// sanitizePinned drops every pinned entry this build cannot use and returns
+// what it dropped, so a settings file written by hand, restored from a backup,
+// or produced by another build still loads.
+//
+// Refusing the file instead would be worse than useless, for the reason
+// sanitizePerModel gives: the panel serves the stored settings into its form
+// and the form posts them back, so one unusable entry would return on the next
+// save and be refused there, wedging every settings change there is.
+func (c *Config) sanitizePinned() []string {
+	if len(c.Pinned) == 0 {
+		return nil
+	}
+	var dropped []string
+	kept := make([]string, 0, len(c.Pinned))
+	seen := map[string]string{} // folded id -> the spelling kept
+	for _, id := range c.Pinned {
+		if !ValidRepoID(id) {
+			dropped = append(dropped, "pinned["+id+"]")
+			continue
+		}
+		folded := FoldRepoID(id)
+		if first, ok := seen[folded]; ok {
+			dropped = append(dropped, "pinned["+id+"] (duplicate of "+first+")")
+			continue
+		}
+		if len(kept) >= MaxPinned {
+			dropped = append(dropped, "pinned["+id+"] (beyond the "+
+				strconv.Itoa(MaxPinned)+"-model ceiling)")
+			continue
+		}
+		seen[folded] = id
+		kept = append(kept, id)
+	}
+	if len(kept) == 0 {
+		kept = nil
+	}
+	c.Pinned = kept
+	return dropped
+}
+
 // Clone returns a copy that shares no slice, map or pointer with the original.
 //
 // The settings endpoint decodes a posted body into a copy of the live config
@@ -463,6 +546,9 @@ func (c Config) Clone() Config {
 	out := c
 	if c.Preload != nil {
 		out.Preload = append([]string(nil), c.Preload...)
+	}
+	if c.Pinned != nil {
+		out.Pinned = append([]string(nil), c.Pinned...)
 	}
 	out.Sampling = c.Sampling.Clone()
 	if c.ModelSampling != nil {
@@ -502,6 +588,9 @@ func (c Config) Validate() error {
 	}
 	if c.DecodeConcurrency < 1 {
 		return fmt.Errorf("decode_concurrency must be >= 1, got %d", c.DecodeConcurrency)
+	}
+	if err := c.validatePinned(); err != nil {
+		return err
 	}
 	// A sampling default becomes a launch flag on every model server, and the
 	// model server validates the effective value of every request against it:
@@ -562,6 +651,7 @@ func Load(path string) (Config, []string, error) {
 		return Default(), nil, fmt.Errorf("parse config %s: %w", path, err)
 	}
 	dropped := append(cfg.sanitizeSampling(), cfg.sanitizePerModel()...)
+	dropped = append(dropped, cfg.sanitizePinned()...)
 	if err := cfg.Validate(); err != nil {
 		return Default(), nil, fmt.Errorf("invalid config %s: %w", path, err)
 	}

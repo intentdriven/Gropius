@@ -38,6 +38,23 @@ GitHub release notes.
   received. Switching this on never changes any model server's own log level,
   and two architecture tests hold that apart. See
   [Record request statistics on this Mac](docs/request-statistics.md).
+- **Pinned models**, a list in Settings of the models that stay in memory.
+  Gropius keeps as many models loaded as its memory budget allows and unloads
+  the one used longest ago when a request needs the room, which on a shared Mac
+  takes the models that matter most — an agent is idle between its turns. A
+  pinned model is never chosen to be unloaded and the idle timeout does not
+  touch it; a request for a different model that would need its memory is
+  refused instead, in a message that says only that there is not enough memory
+  and never which models are protected. Pins apply the moment they are saved,
+  with no restart, and a save that adds a pin the memory budget cannot hold is
+  refused with both figures. A set that arrives from another Mac and no longer
+  fits is reported rather than refused, so it never stands between you and
+  saving an unrelated setting. Pinning is separate from preloading and does a
+  different thing: preloading loads a model at start-up and leaves it as
+  evictable as any other, pinning protects a model but loads nothing. Your own
+  Unload still works on a pinned model, and the pin stays. On an install with
+  an API key, the models list carries a `pinned` field beside the residency
+  ones. See [Pin a model so it stays in memory](docs/pinning-models.md).
 - **Merge system messages**, a per-model setting in Settings that is off until
   it is switched on. Some models refuse a conversation whose instructions are
   not all at the top, which breaks any assistant that repeats its instructions

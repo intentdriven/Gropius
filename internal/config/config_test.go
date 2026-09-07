@@ -1,9 +1,11 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -521,5 +523,147 @@ func TestStatisticsIsOffByDefaultAndSurvivesARoundTrip(t *testing.T) {
 	}
 	if !again.Statistics {
 		t.Error("the switch did not survive being saved and read back")
+	}
+}
+
+// The pinned list is what protects a model from eviction, so it has to survive
+// a round trip through the settings file exactly as it was saved.
+func TestSaveLoadRoundTripKeepsPinnedModels(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	c := Default()
+	c.Pinned = []string{"mlx-community/Qwen3-8B-4bit", "org/reviewer"}
+
+	if err := Save(path, c); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	got, dropped, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(dropped) != 0 {
+		t.Errorf("dropped = %v, want nothing dropped", dropped)
+	}
+	if !reflect.DeepEqual(got.Pinned, c.Pinned) {
+		t.Errorf("Pinned = %v, want %v", got.Pinned, c.Pinned)
+	}
+}
+
+// A pin is matched against the id a request resolves to, so an entry of any
+// other shape names nothing and would sit in the settings file looking
+// effective while protecting no model. Refusing it at the point of saving is
+// the only moment the operator is there to see it.
+func TestValidateRefusesPinsThatNameNoModel(t *testing.T) {
+	cases := []struct {
+		name   string
+		pinned []string
+		want   string
+	}{
+		{"not a repo id", []string{"../../etc"}, "not a model id"},
+		{"two spellings of one model", []string{"Org/M", "org/m"}, "name the same model"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := Default()
+			c.Pinned = tc.pinned
+			err := c.Validate()
+			if err == nil {
+				t.Fatalf("Validate accepted pinned %v", tc.pinned)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("Validate error = %q, want it to mention %q", err, tc.want)
+			}
+		})
+	}
+}
+
+// Everything saved lands in config.json, which Load refuses above
+// MaxConfigBytes — and a config.json that cannot be read sends the next start
+// into its fail-closed loopback-only branch. A bounded list keeps this field
+// from being the lever for that.
+func TestValidateRefusesMorePinsThanTheCeiling(t *testing.T) {
+	c := Default()
+	for i := 0; i <= MaxPinned; i++ {
+		c.Pinned = append(c.Pinned, fmt.Sprintf("org/m%d", i))
+	}
+	err := c.Validate()
+	if err == nil {
+		t.Fatalf("Validate accepted %d pins, over the %d ceiling", len(c.Pinned), MaxPinned)
+	}
+	if !strings.Contains(err.Error(), strconv.Itoa(MaxPinned)) {
+		t.Errorf("Validate error = %q, want it to give the ceiling", err)
+	}
+}
+
+// The file path, not the settings path: a hand-edited pin that names nothing
+// is dropped and reported rather than refusing the whole file, which would
+// send the next start into its fail-closed loopback-only mode over one entry.
+func TestLoadDropsAPinThatNamesNoModel(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	body := `{"port":11535,"host":"0.0.0.0","decode_concurrency":4,` +
+		`"pinned":["../../etc","org/keeper","ORG/keeper"]}`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, dropped, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !reflect.DeepEqual(cfg.Pinned, []string{"org/keeper"}) {
+		t.Errorf("Pinned = %v, want only the one usable entry", cfg.Pinned)
+	}
+	if len(dropped) != 2 {
+		t.Fatalf("dropped = %v, want the bad id and the duplicate spelling named", dropped)
+	}
+	if !strings.Contains(dropped[0], "../../etc") {
+		t.Errorf("dropped = %v, want the entry that names no model named", dropped)
+	}
+	if !strings.Contains(dropped[1], "duplicate") {
+		t.Errorf("dropped = %v, want the duplicate spelling named", dropped)
+	}
+	// The whole point: what loaded is a config that can be saved again.
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("the loaded config does not validate: %v", err)
+	}
+}
+
+// Clone exists so a posted body cannot reach the live configuration before
+// Validate has looked at it. A shared backing array would defeat that for the
+// pinned list exactly as it would for the preload list beside it.
+func TestClonePinnedSharesNoStorage(t *testing.T) {
+	c := Default()
+	c.Pinned = []string{"org/a"}
+	clone := c.Clone()
+	clone.Pinned[0] = "org/b"
+	if c.Pinned[0] != "org/a" {
+		t.Errorf("the clone wrote through to the original: %v", c.Pinned)
+	}
+}
+
+// The two bounds together, for the pinned list as for the override map beside
+// it: a full list, at the longest ids allowed, must still round-trip through
+// the file rather than write one the next start cannot read.
+func TestAFullPinnedListStillFitsTheConfigFile(t *testing.T) {
+	c := Default()
+	for i := range MaxPinned {
+		c.Pinned = append(c.Pinned, fmt.Sprintf("%s%03d/%s",
+			strings.Repeat("o", MaxRepoComponent-3), i, strings.Repeat("n", MaxRepoComponent)))
+	}
+	if err := c.Validate(); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := Save(path, c); err != nil {
+		t.Fatalf("Save: %v — a legal pinned list does not fit the file", err)
+	}
+	loaded, dropped, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(dropped) != 0 {
+		t.Errorf("dropped %v from a config within every limit", dropped)
+	}
+	if len(loaded.Pinned) != MaxPinned {
+		t.Errorf("loaded %d pins, want %d", len(loaded.Pinned), MaxPinned)
 	}
 }

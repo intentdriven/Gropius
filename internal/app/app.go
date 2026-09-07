@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"maps"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -31,6 +32,19 @@ type App struct {
 	// at all until the operator turns recording on (adr-2609061503319212).
 	Stats *stats.Recorder
 	Log   *slog.Logger
+
+	// saveMu serialises whole settings saves. cfgMu guards the value; this
+	// guards the sequence — write the file, swap the value, tell the pool —
+	// which is not one step and must not interleave with another save's, or the
+	// pool ends up enforcing a pinned set that the file, the panel and
+	// /v1/models all say does not exist.
+	//
+	// It is a lock of its own rather than cfgMu held wider, because cfgMu
+	// cannot be held across the pool setter: startLocked runs under the pool's
+	// p.mu and calls SamplingFor, which takes cfgMu.RLock, so p.mu -> cfgMu is
+	// an established order and cfgMu -> p.mu would invert it. Nothing taken
+	// under p.mu or cfgMu takes saveMu, so it adds no order at all.
+	saveMu sync.Mutex
 
 	cfgMu sync.RWMutex
 	cfg   config.Config
@@ -123,6 +137,11 @@ func New(opts Options) (*App, error) {
 		launcher = exec
 	}
 
+	// Settings read from disk have not been through SetConfig's checks, so the
+	// pinned list is folded onto the registry's spellings before anything sees
+	// it — the pool, the panel and the next save all join on these strings.
+	a.cfg.Pinned = a.adoptPinned(a.cfg.Pinned)
+
 	a.Pool = runtime.NewPool(runtime.PoolOptions{
 		Launcher:          launcher,
 		Models:            modelSource{reg},
@@ -137,6 +156,8 @@ func New(opts Options) (*App, error) {
 		// them while recording is off. Adapting here keeps internal/stats a
 		// leaf package that imports nothing of ours.
 		Observer: poolObserver{rec: a.Stats, log: opts.Log},
+		Pinned:   a.cfg.Pinned,
+		Log:      opts.Log,
 	})
 	a.Stats.SetEnabled(opts.Config.Statistics)
 
@@ -145,6 +166,12 @@ func New(opts Options) (*App, error) {
 	// build. Fold them onto the registry's spellings here, where the log
 	// exists to say what was dropped.
 	a.cfg.PerModel = a.adoptPerModel(a.cfg.PerModel)
+
+	// The fit check cannot refuse a file — a hand-edited one can pin anything —
+	// so an over-budget set reaches the pool whatever this says. Passing the
+	// same list as both the incoming and the current set is what says "nothing
+	// was added here": every problem it finds is warned about, none refused.
+	_ = a.checkPinnedFit(a.cfg.Pinned, a.cfg.Pinned)
 
 	if len(opts.Config.Preload) > 0 {
 		go a.preload(opts.Config.Preload)
@@ -192,6 +219,9 @@ func (a *App) Config() config.Config {
 // listener and the model servers are already running with the old values, and
 // silently pretending otherwise would be worse than saying so.
 func (a *App) SetConfig(c config.Config) error {
+	a.saveMu.Lock()
+	defer a.saveMu.Unlock()
+
 	if err := c.Validate(); err != nil {
 		return err
 	}
@@ -200,6 +230,10 @@ func (a *App) SetConfig(c config.Config) error {
 		return err
 	}
 	c.PerModel = perModel
+	c.Pinned = a.canonicalPinned(c.Pinned)
+	if err := a.checkPinnedFit(c.Pinned, a.Config().Pinned); err != nil {
+		return err
+	}
 	if err := config.Save(a.Paths.Config, c); err != nil {
 		return err
 	}
@@ -213,6 +247,120 @@ func (a *App) SetConfig(c config.Config) error {
 	a.Stats.SetEnabled(c.Statistics)
 
 	a.Hub.Token = c.HFToken
+	// Applied live, so a model already in memory is protected from the next
+	// eviction rather than from the one after a restart. The pool takes its own
+	// lock, the one both eviction paths hold while they read the set.
+	a.Pool.SetPinned(c.Pinned)
+	return nil
+}
+
+// canonicalPinned rewrites each pinned id to the registry's spelling of the
+// model it names, for the reason canonicalPerModel does: that spelling is the
+// one the operator sees everywhere else, the one the panel joins its boxes on,
+// and the one Settings shows back to them. A pin for a model this machine does
+// not have is kept as it was typed, so a model can be pinned before it is
+// downloaded.
+//
+// Unlike the per-model maps, nothing here can fail: config.Validate has already
+// refused an entry that is not a well-formed repo id and refused two spellings
+// of one model, and folding onto the registry cannot turn two distinct ids into
+// one — two ids that fold differently name different models.
+func (a *App) canonicalPinned(in []string) []string {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(in))
+	for _, id := range in {
+		out = append(out, a.canonicalModelKey(id))
+	}
+	return out
+}
+
+// adoptPinned is canonicalPinned for a list read from disk rather than
+// submitted through Settings: an entry it cannot use is dropped and named in
+// the log, the way an unusable per-model key is, rather than refused.
+//
+// Without this pass a pin spelled in another case than the registry's protects
+// the model — the pool folds — while the panel, which joins its boxes on the
+// exact string, draws it unticked. Ticking that box then posts both spellings,
+// which Validate refuses as two names for one model, and every settings change
+// there is, the API key included, is refused with it until someone edits the
+// file by hand.
+func (a *App) adoptPinned(in []string) []string {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(in))
+	seen := map[string]bool{}
+	var dropped []string
+	for _, id := range in {
+		if !config.ValidRepoID(id) {
+			dropped = append(dropped, id)
+			continue
+		}
+		canonical := a.canonicalModelKey(id)
+		if seen[config.FoldRepoID(canonical)] {
+			dropped = append(dropped, id)
+			continue
+		}
+		seen[config.FoldRepoID(canonical)] = true
+		out = append(out, canonical)
+	}
+	if len(dropped) > 0 {
+		a.Log.Warn("dropped pinned models whose id is not a well-formed model id, or names one another entry already names",
+			"models", dropped)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// checkPinnedFit refuses a save that pins more than can be in memory at once.
+//
+// A pinned model is never evicted, so a set that overshoots the budget does not
+// fail at save time by itself — it fails later, as a refusal of every request
+// for a model that is not pinned, with no hint of why.
+//
+// What is refused is a save that makes the set worse: one that adds a pin. A
+// set the operator did not touch is accepted and warned about, however badly it
+// fits, because the fit is a fact about this Mac and the set may have arrived
+// from another one — and a settings page that will not save an API key until an
+// unrelated setting is fixed is the wedge adoptPinned exists to prevent. When
+// the memory budget itself becomes settable, a save that lowers it is the other
+// way to make the set worse and belongs in the same test here.
+//
+// A pin that names a model this Mac cannot measure is refused as it is added,
+// for the same reason: a fit check that silently skips a model is a promise it
+// cannot keep. One already in the set is warned about, not refused.
+func (a *App) checkPinnedFit(incoming, current []string) error {
+	problem := a.pinnedFitProblem(incoming)
+	if problem == nil {
+		return nil
+	}
+	if addsAPin(incoming, current) {
+		return problem
+	}
+	a.Log.Warn("the pinned models cannot all be kept in memory as configured", "err", problem)
+	return nil
+}
+
+// pinnedFitProblem says why a pinned set cannot be held, or nil when it can.
+//
+// A model it cannot measure is reported before the sum, because a sum with a
+// model missing from it is not a figure to act on.
+func (a *App) pinnedFitProblem(pinned []string) error {
+	sum, unsized := a.pinnedCharge(pinned)
+	if len(unsized) > 0 {
+		return fmt.Errorf(
+			"cannot measure %s against the memory budget — this Mac does not record how large it is",
+			strings.Join(unsized, ", "))
+	}
+	if budget := a.Pool.MemoryBudget(); sum > budget {
+		return fmt.Errorf(
+			"the pinned models need about %s of memory but the budget is %s — pin fewer models, or choose smaller quantizations",
+			runtime.HumanBytes(sum), runtime.HumanBytes(budget))
+	}
 	return nil
 }
 
@@ -259,6 +407,111 @@ var stopReasons = map[runtime.StopReason]string{
 	runtime.StopShutdown:   stats.ReasonShutdown,
 }
 
+// PinnedFitWarning is what the control panel says when the pinned models can no
+// longer be held together, and "" when they can.
+//
+// A settings save is the only moment a pinned set is refused, and the set can
+// stop fitting without one: a pinned model that was deleted — and so charged
+// nothing — is charged in full again when it is downloaded back, and a model
+// re-downloaded at a larger quantization grows. Nothing refuses either, so the
+// panel says so instead, beside the warning about an open LAN endpoint.
+func (a *App) PinnedFitWarning() string {
+	problem := a.pinnedFitProblem(a.Config().Pinned)
+	if problem == nil {
+		return ""
+	}
+	return "The pinned models can no longer all be kept in memory: " + problem.Error() + "."
+}
+
+// adoptPinnedSpelling re-folds the pinned list onto the registry's spellings
+// once a model has arrived.
+//
+// A pin may be set before its model is downloaded, and is kept as it was typed
+// because there is nothing to fold it onto yet. Every surface that joins on the
+// id joins on the registry's spelling, so a pin left in another one shows the
+// model as unpinned on its card and draws a second, ticked box for a model
+// "not on this Mac" — while the pool, which folds, protects it.
+//
+// It changes the running settings only. config.json keeps the operator's
+// spelling until the next save, which folds it through canonicalPinned anyway;
+// writing the file from here would make this a second writer of it.
+func (a *App) adoptPinnedSpelling() {
+	a.saveMu.Lock()
+	defer a.saveMu.Unlock()
+
+	a.cfgMu.RLock()
+	pinned := append([]string(nil), a.cfg.Pinned...)
+	a.cfgMu.RUnlock()
+	if len(pinned) == 0 {
+		return
+	}
+
+	folded := make([]string, 0, len(pinned))
+	changed := false
+	for _, id := range pinned {
+		canonical := a.canonicalModelKey(id)
+		changed = changed || canonical != id
+		folded = append(folded, canonical)
+	}
+	if !changed {
+		return
+	}
+	a.cfgMu.Lock()
+	a.cfg.Pinned = folded
+	a.cfgMu.Unlock()
+	a.Pool.SetPinned(folded)
+	a.Log.Info("a pinned model arrived; its pin now names it as the registry does", "pinned", folded)
+}
+
+// pinnedCharge is what a pinned set costs the memory budget, and the names of
+// any pinned models this Mac cannot measure.
+//
+// Only a model the pool could actually load is charged: one that is ready, and
+// one that is still downloading, which is charged the size it declares —
+// charging a download nothing is how a pinned pair that cannot possibly fit
+// gets accepted while the bytes are still arriving. A failed download is
+// charged nothing, because modelSource.Resolve refuses anything that is not
+// ready, so it can never occupy a byte however large it declared itself. A pin
+// naming a model this Mac does not have at all is not counted either; it
+// protects nothing until something loads it.
+func (a *App) pinnedCharge(pinned []string) (sum int64, unsized []string) {
+	for _, id := range pinned {
+		m, err := a.Registry.Get(id)
+		if err != nil || !chargeable(m) {
+			continue
+		}
+		size := chargedSize(m)
+		if size <= 0 {
+			unsized = append(unsized, m.RepoID)
+			continue
+		}
+		sum += runtime.LoadCost(size)
+	}
+	return sum, unsized
+}
+
+// chargeable reports whether a model could occupy memory at all. Anything the
+// pool would refuse to load costs the budget nothing, whatever its record says
+// about its size.
+func chargeable(m registry.Model) bool {
+	return m.Ready() || m.State == registry.StateDownloading
+}
+
+// addsAPin reports whether the incoming set names a model the current one does
+// not. Folded, because two spellings of one id are one pin.
+func addsAPin(incoming, current []string) bool {
+	have := make(map[string]bool, len(current))
+	for _, id := range current {
+		have[config.FoldRepoID(id)] = true
+	}
+	for _, id := range incoming {
+		if !have[config.FoldRepoID(id)] {
+			return true
+		}
+	}
+	return false
+}
+
 // canonicalPerModel checks the keys of a per-model settings map submitted
 // through Settings and rewrites each to the registry's spelling of the model
 // it names.
@@ -281,7 +534,7 @@ func (a *App) canonicalPerModel(in map[string]config.ModelSettings) (map[string]
 	}
 	out := make(map[string]config.ModelSettings, len(in))
 	for _, id := range perModelKeys(in) {
-		canonical := a.canonicalPerModelKey(id)
+		canonical := a.canonicalModelKey(id)
 		if _, dup := out[canonical]; dup {
 			return nil, fmt.Errorf("per-model settings name %s more than once", canonical)
 		}
@@ -305,7 +558,7 @@ func (a *App) adoptPerModel(in map[string]config.ModelSettings) map[string]confi
 	out := make(map[string]config.ModelSettings, len(in))
 	var dropped []string
 	for _, id := range perModelKeys(in) {
-		canonical := a.canonicalPerModelKey(id)
+		canonical := a.canonicalModelKey(id)
 		if !config.ValidRepoID(id) {
 			dropped = append(dropped, id)
 			continue
@@ -326,9 +579,24 @@ func (a *App) adoptPerModel(in map[string]config.ModelSettings) map[string]confi
 	return out
 }
 
-// canonicalPerModelKey is the registry's spelling of a model id, or the id as
-// it was given when this machine does not have that model.
-func (a *App) canonicalPerModelKey(id string) string {
+// chargedSize is what a model costs the memory budget: what is on disk once it
+// is downloaded, and what the download declares before that. The two are the
+// same figure at different moments, and a model in flight is the case the
+// check exists for. The disk figure wins where both are recorded, because it
+// is the one the pool charges. Zero from both means this Mac does not know how
+// large the model is — see pinnedCharge, which refuses to guess.
+func chargedSize(m registry.Model) int64 {
+	if m.Bytes > 0 {
+		return m.Bytes
+	}
+	return m.SizeBytes
+}
+
+// canonicalModelKey is the registry's spelling of a model id, or the id as it
+// was given when this machine does not have that model. It is what every
+// setting keyed or listed by a model id is stored under, so that the spelling
+// the operator sees in Settings is the one a request resolves to.
+func (a *App) canonicalModelKey(id string) string {
 	if m, err := a.Registry.Get(id); err == nil {
 		return m.RepoID
 	}
@@ -484,6 +752,14 @@ func (a *App) Download(repoID string) error {
 				a.Log.Error("model downloaded but could not be recorded", "model", repoID, "err", perr)
 			} else {
 				a.Log.Info("model downloaded", "model", repoID)
+			}
+			// A model arriving changes two things a save is not present for:
+			// which spelling its pin should carry, and what the pinned set
+			// costs. Neither refuses anything here — there is no save to
+			// refuse — so the second is a warning the panel repeats.
+			a.adoptPinnedSpelling()
+			if w := a.PinnedFitWarning(); w != "" {
+				a.Log.Warn("a model arrived and the pinned set no longer fits", "warning", w)
 			}
 
 		case errors.Is(err, context.Canceled):

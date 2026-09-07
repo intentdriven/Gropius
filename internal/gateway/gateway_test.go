@@ -66,6 +66,7 @@ type stubPool struct {
 	acquired []string
 	released int
 	resident []runtime.Resident
+	pinned   []string
 	blockFor time.Duration
 }
 
@@ -104,6 +105,7 @@ func (p *stubPool) Acquire(ctx context.Context, repoID string) (*runtime.Upstrea
 }
 
 func (p *stubPool) Resident() []runtime.Resident { return p.resident }
+func (p *stubPool) Pinned() []string             { return p.pinned }
 func (p *stubPool) Unload(string) error          { return nil }
 
 func (p *stubPool) releases() int {
@@ -1825,5 +1827,118 @@ func TestListModelsWithoutTheAuthMiddlewareReportsNoResidency(t *testing.T) {
 		if strings.Contains(w.Body.String(), name) {
 			t.Errorf("a handler reached without withAuth served %q: %s", name, w.Body.String())
 		}
+	}
+}
+
+// A pinned model is one the operator has protected from eviction, and a client
+// choosing where to send its work wants that as much as it wants residency:
+// a pinned model is the one that will still be warm on the next turn. The
+// field follows residency's rule exactly, because it discloses the same thing
+// — what the operator of this Mac cares about — and it is true for a pinned
+// model the pool is not holding, which is the case a residency record cannot
+// describe at all.
+func TestModelsListReportsPinnedOnlyOnAKeyedInstall(t *testing.T) {
+	fake := mlxtest.Start(mlxtest.Options{ModelArg: "/m"})
+	defer fake.Close()
+
+	added := time.Unix(1757145600, 0)
+	models := &stubModels{models: []registry.Model{
+		{RepoID: "org/warm", State: registry.StateReady, AddedAt: added},
+		{RepoID: "org/cold", State: registry.StateReady, AddedAt: added},
+		{RepoID: "org/plain", State: registry.StateReady, AddedAt: added},
+	}}
+	// org/warm is pinned and loaded; org/cold is pinned and not loaded, under a
+	// spelling the registry does not use; org/plain is neither.
+	pool := &stubPool{
+		srv:      fake,
+		pinned:   []string{"org/warm", "ORG/Cold"},
+		resident: []runtime.Resident{{RepoID: "org/warm", State: runtime.ResidencyLoaded}},
+	}
+
+	keyed := config.Default()
+	keyed.APIKey = "bh_secret"
+	entries, _ := listModelsEntries(t,
+		New(Options{Config: keyed, Pool: pool, Models: models}).Handler(), "bh_secret")
+	for id, want := range map[string]bool{"org/warm": true, "org/cold": true, "org/plain": false} {
+		if got := entryByID(t, entries, id)["pinned"]; got != want {
+			t.Errorf("%s: pinned = %v, want %v", id, got, want)
+		}
+	}
+
+	// Unkeyed: the listing is the OpenAI fields and the context figure, and
+	// says nothing about what this Mac is protecting.
+	open, _ := listModelsEntries(t,
+		New(Options{Config: config.Default(), Pool: pool, Models: models}).Handler(), "")
+	for _, entry := range open {
+		if _, ok := entry["pinned"]; ok {
+			t.Errorf("an unkeyed listing carries pinned: %v", entry)
+		}
+	}
+}
+
+// The refusal a network client gets when the memory is all spoken for must not
+// say which models the operator protected. This runs the whole path: a real
+// pool with a real pinned model in memory, and the gateway's own 503 body.
+func TestRefusalToANetworkClientNamesNoPinnedModel(t *testing.T) {
+	paths := config.NewPaths(t.TempDir())
+	if err := paths.EnsureDirs(); err != nil {
+		t.Fatal(err)
+	}
+	reg, err := registry.Open(paths.State)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 200 bytes is charged 240, so a 250-byte budget holds exactly one of them.
+	for _, id := range []string{"org/protected", "org/wanted"} {
+		if err := reg.Put(registry.Model{
+			RepoID: id, Path: paths.ModelDir(id), Bytes: 200,
+			State: registry.StateReady, Progress: 100,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	l := &recordingLauncher{specs: map[string]runtime.Spec{}}
+	pool := runtime.NewPool(runtime.PoolOptions{
+		Launcher:         l,
+		Models:           registrySource{reg},
+		MaxResidentBytes: 250,
+		Pinned:           []string{"org/protected"},
+		ReadyTimeout:     10 * time.Second,
+		HTTP:             &http.Client{Timeout: 5 * time.Second},
+	})
+	defer pool.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	_, release, err := pool.Acquire(ctx, "org/protected")
+	if err != nil {
+		t.Fatalf("Acquire(org/protected): %v", err)
+	}
+	release() // idle, so only the pin protects it
+
+	cfg := config.Default()
+	g := New(Options{Config: cfg, Pool: pool, Models: reg})
+	srv := httptest.NewServer(g.Handler())
+	defer srv.Close()
+
+	resp, err := http.Post(srv.URL+"/v1/chat/completions", "application/json",
+		strings.NewReader(`{"model":"org/wanted","messages":[{"role":"user","content":"hi"}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503: %s", resp.StatusCode, body)
+	}
+	if strings.Contains(string(body), "org/protected") {
+		t.Errorf("the 503 body names the protected model: %s", body)
+	}
+	if !strings.Contains(string(body), "memory") {
+		t.Errorf("the 503 body does not explain the memory pressure: %s", body)
+	}
+	if got := len(pool.Resident()); got != 1 {
+		t.Errorf("pool holds %d models after the refusal, want the pinned one still there", got)
 	}
 }

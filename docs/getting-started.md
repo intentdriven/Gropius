@@ -65,6 +65,16 @@ context so a client can size its prompts before sending. With an API key set it
 also says which models are loaded. The [models list reference](models-list.md)
 describes every field, including what those values do and do not promise.
 
+### Keep a model in memory
+
+**Settings → Pinned models** protects the models you rely on. A pinned model is
+never unloaded to make room for another and the idle timeout does not touch it;
+a request that would need its memory is refused instead, and that refusal never
+says which models are protected. Pinning is not preloading: preloading loads a
+model at start-up and leaves it as evictable as any other, pinning protects a
+model but loads nothing. See
+[Pin a model so it stays in memory](pinning-models.md).
+
 ## 5. Talk to it — from another machine
 
 Open the **Connect** tab. It lists the exact base URLs to use, for example

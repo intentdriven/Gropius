@@ -233,6 +233,17 @@
         down.</p>
       <div id="mergeList"></div>
     </fieldset>
+
+    <fieldset class="group">
+      <legend>Pinned models</legend>
+      <p class="hint">A pinned model stays in memory: Gropius never unloads it to make
+        room for another, and the idle timeout above does not touch it. A request for a
+        model that would need its memory is refused instead, so pin only the models you
+        want protected. Pinning is not preloading — a pinned model is not loaded at
+        start-up, it is protected from the moment something loads it.</p>
+      <div id="pinList"></div>
+      <p id="pinBudget" class="hint"></p>
+    </fieldset>
     <button type="submit">Save settings</button>
     <p id="settingsMsg" class="msg"></p>
   </form>
