@@ -58,9 +58,10 @@ pinning one already on disk.
 
 Pin close to the whole budget and Gropius has nothing left to serve anything
 else with: every request for an unpinned model is refused rather than served by
-a swap. A settings save whose pinned models cannot all be in memory at once is
-refused outright, naming both figures, and nothing is changed. Leave room for
-the models your clients ask for occasionally.
+a swap. Ticking a box that takes the set past the budget is refused when you
+save, naming both figures, and nothing is changed — see below for the sets
+Gropius warns about instead. Leave room for the models your clients ask for
+occasionally.
 
 ## When a pinned set stops fitting
 
@@ -73,12 +74,16 @@ A set can also stop fitting with no save at all:
 
 - A pinned model that was deleted is charged nothing until you download it
   again, and the download brings the whole charge back.
-- Downloading a model again at a larger quantization grows what it costs.
+- Downloading a model again at a larger quantisation grows what it costs.
 
 Nothing refuses either — there is no save to refuse — so Gropius says so on the
 control panel and in its log instead. The symptom to recognise, if the warning
 is missed, is every unpinned model being refused for memory on a Mac that
 plainly has some.
+
+Two other things are refused as you tick a box, both rare: pinning a model this
+Mac records no size for — Gropius will not measure a set against the budget with
+a model missing from the sum — and pinning more than 256 models.
 
 ## Unpin a model
 

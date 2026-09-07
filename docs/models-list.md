@@ -89,10 +89,9 @@ list always carries the exact number.
 
 ## Residency
 
-`state`, `in_flight`, `last_used` and `pinned` say what each model is doing
-right now and which models are protected, so
-a client can send its work to a model that is already warm instead of forcing a
-load it did not know about. Loading a model takes seconds to a minute, longer
+`state`, `in_flight`, `last_used` and `pinned` say what each model is doing right
+now and which models are protected, so a client can send its work to a model that
+is already warm instead of forcing a load it did not know about. Loading a model takes seconds to a minute, longer
 for the largest; picking the warm one costs nothing.
 
 **They appear only when an API key is configured.** Set a key in **Settings**
