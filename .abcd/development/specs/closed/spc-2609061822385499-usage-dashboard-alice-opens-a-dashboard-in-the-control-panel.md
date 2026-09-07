@@ -199,6 +199,16 @@ closed spec against the code would otherwise find them unexplained.
    `/api/stats`.** Extending it would have put a pass over months of records on
    the panel's two-second tick.
 
+A fifth departure, from "Dependencies and sequencing" rather than from the
+Approach: **the gate before implementation did not run.** One month of the
+maintainer's own records, hand-aggregated, was to be the fixture for the
+tokens-per-day and share criteria and the cheaper test of the intent's
+conjecture. The store it would read shipped days before this, so the month does
+not exist; the fixtures are synthetic and hand-computed, every criterion is met
+against them, and the conjecture itself is untested. It is the maintainer's to
+run after adoption, and it is recorded in the intent's Audit Notes so the
+fidelity review sees it.
+
 The open design points are settled: the default range is 30 days with a
 selector of 7, 30, 90 and everything kept; the first-token histogram's edges
 are 100, 250, 500, 1,000, 2,500, 5,000 and 10,000 ms; the rate percentiles are

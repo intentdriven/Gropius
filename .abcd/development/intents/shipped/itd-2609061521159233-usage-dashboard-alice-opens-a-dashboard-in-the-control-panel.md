@@ -126,6 +126,20 @@ assertion on a shared build machine flakes; a bound with that much headroom
 catches an order-of-magnitude regression instead, and the benchmark still
 carries the figure.
 
+**The spec's pre-implementation gate did not run (2026-09-07).**
+spc-2609061822385499 asked for one month of the maintainer's own store records
+aggregated by hand with a command-line tool, and named that output as the
+fixture for the tokens-per-day and share criteria: the cheaper test of this
+intent's own conjecture, run first. It could not be: the store it would read
+(itd-2609061521102742) shipped days before this, so no such month exists
+anywhere, and the live server on this Mac was out of bounds to the session that
+built this. The fixtures are synthetic and hand-computed instead, which
+satisfies every criterion as written. What is therefore still untested is the
+conjecture the gate was the cheap test of — that a month of records reveals a
+usage or eviction pattern that changes a model, quantisation or budget decision
+— and the Grounds above stand unexamined until the maintainer runs the hand
+aggregation against their own records after adopting this.
+
 **Not shipped, as this intent says.** No correlation with a change of memory
 budget, which needs itd-2609061441261073; no per-session breakdown; no chart of
 any kind, and no charting library, so no dependency sign-off is asked for. The
