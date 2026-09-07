@@ -2,6 +2,7 @@ package stats
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -201,10 +202,21 @@ type summarySet struct {
 // readSummarySet reads the summary file. A file that is not there is an empty
 // set; a line that cannot be read is skipped, as everywhere else in the store.
 func readSummarySet(root *os.Root) (*summarySet, error) {
+	set, _, err := readSummarySetSized(root)
+	return set, err
+}
+
+// readSummarySetSized is readSummarySet, also reporting how much file content
+// it read, which is what a bounded reader has to account for.
+func readSummarySetSized(root *os.Root) (*summarySet, int64, error) {
 	set := &summarySet{days: map[summaryKey]*Summary{}}
 	lines, err := readRawLines(root, summaryFileName)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
+	}
+	read := int64(0)
+	for _, b := range lines {
+		read += int64(len(b)) + 1
 	}
 	for _, b := range lines {
 		l, ok := parseLine(b)
@@ -231,7 +243,7 @@ func readSummarySet(root *os.Root) (*summarySet, error) {
 			set.kept = append(set.kept, append([]byte(nil), bytes.TrimSpace(b)...))
 		}
 	}
-	return set, nil
+	return set, read, nil
 }
 
 // dayOf returns the line for one model's local day, making it if it is not
@@ -655,69 +667,147 @@ func removeSummaryFiles(root *os.Root, match func(string) bool) error {
 	return first
 }
 
-// Summaries reads the store's summaries, newest day first, calling fn with
-// each until it returns false or limit lines have been given; a limit of zero
-// or less means every line.
+// SummaryOptions bounds one read of the summaries, the way ReadOptions bounds
+// one read of the records.
+//
+// The bounds are on the reading and not only on what it yields, for the reason
+// ReadOptions gives: a summary file this build cannot read a line of hands back
+// nothing while costing every byte of itself, so a caller that bounded only the
+// days it accepted would have bounded nothing at all.
+type SummaryOptions struct {
+	// Days is the most days handed to fn, newest first. A day is one line per
+	// model that served on it, so this is days rather than lines: a bound on
+	// lines would hand a Mac running ten models a tenth of the span it handed a
+	// Mac running one. Zero or less means every day the other bounds allow.
+	Days int
+	// MaxBytes is the most file content read — the summary itself, and the
+	// record files walked to find the oldest record still held. Zero or less
+	// means the store's own ceiling.
+	MaxBytes int64
+}
+
+// SummaryStats is what one read of the summaries cost and what it met, the way
+// ReadStats is for a read of the records.
+type SummaryStats struct {
+	// Days and Lines are how many days and how many lines were handed to fn.
+	Days  int
+	Lines int
+	// Skipped counts lines of the summary that could not be used: one a newer
+	// Gropius wrote, one a crash tore. They are kept on disk rather than
+	// dropped, so a reader meets them on every read.
+	Skipped int64
+	// Bytes is how much file content was read.
+	Bytes int64
+	// Bounded reports a read a bound stopped rather than one that reached the
+	// end; BoundedBy names which — "days" or "bytes" — so a caller telling a
+	// reader the list was cut short can name the figure that did it.
+	Bounded   bool
+	BoundedBy string
+}
+
+// Summaries reads the store's summaries, newest day first, calling fn with each
+// until it returns false or a bound is reached.
+//
+// It is the summary side of Read, and it is bounded and cancellable for the
+// same reasons: this runs on a control-plane request, and a caller who has gone
+// away must be let go of rather than paid for.
 //
 // This is how a view shows a month whose detail is gone: every day that comes
 // back from here is a day whose records were dropped, so a caller can render
 // the totals and say that the detail for that day is no longer held. Where a
-// day appears here and in Latest both, the detail is what is still held and
-// the summary is what is not — the fold never subtracts, so the two are added
+// day appears here and in Read both, the detail is what is still held and the
+// summary is what is not — the fold never subtracts, so the two are added
 // rather than reconciled.
-func (s *FileStore) Summaries(days int, fn func(SummaryDay) bool) error {
+func (s *FileStore) Summaries(ctx context.Context, opts SummaryOptions, fn func(SummaryDay) bool) (SummaryStats, error) {
+	var got SummaryStats
 	if s == nil {
-		return nil
+		return got, nil
 	}
-	// The same flush Latest does, so a caller that reads both sees one store
-	// rather than two moments of it.
+	// The same flush a read of the records does, so a caller that reads both
+	// sees one store rather than two moments of it.
 	if err := s.Flush(); err != nil {
-		return err
+		return got, err
 	}
 	root, err := openStoreRoot(s.dir)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			return nil
+			return got, nil
 		}
-		return err
+		return got, err
 	}
 	defer root.Close()
-	set, err := readSummarySet(root)
-	if err != nil {
-		return err
+	budget := opts.MaxBytes
+	if budget <= 0 {
+		budget = maxLatestBytes
 	}
+	if err := ctxErr(ctx); err != nil {
+		return got, err
+	}
+	set, size, err := readSummarySetSized(root)
+	if err != nil {
+		return got, err
+	}
+	got.Bytes, got.Skipped = size, int64(len(set.kept))
+	// Reported the same way a read of the records reports it, so a great many
+	// unreadable lines cannot pass for a quiet store whichever side is read.
+	defer func() {
+		s.statusMu.Lock()
+		s.status.Skipped = got.Skipped
+		s.statusMu.Unlock()
+	}()
+
 	// The oldest record still held, which is what tells a summarized day from
-	// a day that is only partly summarized. One file's read, and only the first
-	// line of it that parses.
+	// one that is only partly summarized. The walk is bounded like everything
+	// else: a store of many empty files must not turn a bounded read into an
+	// unbounded one, and a walk that runs out of budget simply cannot say
+	// whether any detail is held.
 	oldest := int64(0)
 	if files, err := listStoreFiles(root); err == nil {
 		for _, f := range files {
+			if got.Bytes >= budget {
+				got.Bounded, got.BoundedBy = true, "bytes"
+				break
+			}
+			if err := ctxErr(ctx); err != nil {
+				return got, err
+			}
+			got.Bytes += f.size
 			if at := firstRecordIn(root, f.name); at != 0 {
 				oldest = at
 				break
 			}
 		}
 	}
+
 	all := set.sorted()
-	seen, last := 0, ""
+	last := ""
 	for i := len(all) - 1; i >= 0; i-- {
-		// The bound is days, not lines. A day is one line per model that served
-		// on it, so a bound on lines would hand a Mac running ten models a
-		// tenth of the span it handed a Mac running one — and neither of them
-		// any way of telling that the list had been cut short.
+		if err := ctxErr(ctx); err != nil {
+			return got, err
+		}
 		if all[i].Day != last {
-			if days > 0 && seen >= days {
-				return nil
+			if opts.Days > 0 && got.Days >= opts.Days {
+				got.Bounded, got.BoundedBy = true, "days"
+				return got, nil
 			}
 			last = all[i].Day
-			seen++
+			got.Days++
 		}
-		d := SummaryDay{Summary: *all[i], DetailHeld: detailHeld(oldest, all[i], s.opts.loc)}
-		if !fn(d) {
-			return nil
+		if !fn(SummaryDay{Summary: *all[i], DetailHeld: detailHeld(oldest, all[i], s.opts.loc)}) {
+			return got, nil
 		}
+		got.Lines++
 	}
-	return nil
+	return got, nil
+}
+
+// ctxErr is the context check the readers share: nothing to do when there is no
+// context, which is what a test and a one-off pass.
+func ctxErr(ctx context.Context) error {
+	if ctx == nil {
+		return nil
+	}
+	return ctx.Err()
 }
 
 // detailHeld reports whether the store still holds records from a summarized

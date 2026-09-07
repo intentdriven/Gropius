@@ -286,10 +286,21 @@ func (c *Control) handleStats(w http.ResponseWriter, r *http.Request) {
 		// month whose records retention has dropped still has its per-model
 		// totals, and the view says so rather than showing a gap where the
 		// traffic was (itd-2609061602043757).
-		if err := c.App.StatsStore.Summaries(maxSummaryDays, func(d stats.SummaryDay) bool {
-			view.Summaries = append(view.Summaries, d)
-			return true
-		}); err != nil {
+		// The request's own context, so a reader who closes the panel part-way
+		// through stops being paid for, exactly as the history endpoint does.
+		if _, err := c.App.StatsStore.Summaries(r.Context(),
+			stats.SummaryOptions{Days: maxSummaryDays}, func(d stats.SummaryDay) bool {
+				view.Summaries = append(view.Summaries, d)
+				return true
+			}); err != nil {
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				// The reader went away. There is no socket left to answer, and
+				// logging it at Warn would let anyone who can open this
+				// endpoint write an unbounded run of failure lines into the
+				// operator's log.
+				c.App.Log.Debug("a reading of the request statistics summary was abandoned", "err", err)
+				return
+			}
 			// Logged, not returned: the live figures are worth showing even
 			// when the summary cannot be read, and the reason names the store's
 			// directory, which the control plane must not publish.

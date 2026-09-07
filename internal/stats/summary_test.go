@@ -1,6 +1,7 @@
 package stats
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -44,7 +45,10 @@ func summarizeTestStore(t *testing.T, clock *testClock, opts StoreOptions) (*Fil
 func summaries(t *testing.T, s *FileStore) []SummaryDay {
 	t.Helper()
 	var out []SummaryDay
-	if err := s.Summaries(0, func(sum SummaryDay) bool { out = append(out, sum); return true }); err != nil {
+	if _, err := s.Summaries(context.Background(), SummaryOptions{}, func(sum SummaryDay) bool {
+		out = append(out, sum)
+		return true
+	}); err != nil {
 		t.Fatalf("reading the summaries: %v", err)
 	}
 	return out
@@ -513,7 +517,10 @@ func TestSummariesComeBackNewestDayFirst(t *testing.T) {
 		}
 	}
 	var bounded []SummaryDay
-	if err := s.Summaries(2, func(sum SummaryDay) bool { bounded = append(bounded, sum); return true }); err != nil {
+	if _, err := s.Summaries(context.Background(), SummaryOptions{Days: 2}, func(sum SummaryDay) bool {
+		bounded = append(bounded, sum)
+		return true
+	}); err != nil {
 		t.Fatal(err)
 	}
 	if len(bounded) != 2 || bounded[0].Day != "2025-01-03" {
@@ -1076,7 +1083,7 @@ func TestSomethingThatIsNotAFileUnderTheSummaryNameIsRefusedNotWaitedOn(t *testi
 		})
 		promptly(t, "reading the summaries", func() {
 			// An error is the right answer; hanging is not.
-			_ = s.Summaries(0, func(SummaryDay) bool { return true })
+			_, _ = s.Summaries(context.Background(), SummaryOptions{}, func(SummaryDay) bool { return true })
 		})
 		promptly(t, "flushing", func() {
 			if err := s.Flush(); err != nil {
@@ -1125,7 +1132,7 @@ func TestSomethingThatIsNotAFileUnderTheSummaryNameIsRefusedNotWaitedOn(t *testi
 			}
 		})
 		promptly(t, "reading the summaries", func() {
-			_ = s.Summaries(0, func(SummaryDay) bool { return true })
+			_, _ = s.Summaries(context.Background(), SummaryOptions{}, func(SummaryDay) bool { return true })
 		})
 		promptly(t, "switching recording off", func() {
 			if err := s.SetEnabled(false); err != nil {
@@ -1351,7 +1358,10 @@ func TestTheBoundOnSummariesIsDaysNotLines(t *testing.T) {
 	}
 
 	var got []SummaryDay
-	if err := s.Summaries(3, func(d SummaryDay) bool { got = append(got, d); return true }); err != nil {
+	if _, err := s.Summaries(context.Background(), SummaryOptions{Days: 3}, func(d SummaryDay) bool {
+		got = append(got, d)
+		return true
+	}); err != nil {
 		t.Fatal(err)
 	}
 	seen := map[string]int{}
@@ -1403,5 +1413,87 @@ func TestADaysLengthIsWhateverTheZoneMadeIt(t *testing.T) {
 	// certainly still there.
 	if !detailHeld(start.Add(-time.Hour).Unix(), sum, london) {
 		t.Error("a store holding records from before the day is reported as holding none from it")
+	}
+}
+
+// The summary side of Read is bounded and cancellable for the same reasons the
+// record side is: it runs on a control-plane request, so a caller who has gone
+// away must be let go of, and a summary this build cannot read a line of must
+// still cost a bounded amount.
+func TestAReadOfTheSummariesIsBoundedAndCancellable(t *testing.T) {
+	clock := &testClock{}
+	clock.set(day(2026, time.January, 10, 9))
+	s, dir := summarizeTestStore(t, clock, StoreOptions{Months: 1})
+	on(t, s)
+	for d := range 5 {
+		if err := s.AppendRequest(request(day(2025, time.January, 1+d, 9), "org/a")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	s.SetRetention(2, 1<<20)
+	s.SetRetention(1, 1<<20)
+	if err := s.Flush(); err != nil {
+		t.Fatal(err)
+	}
+
+	// What it cost and what it met, reported rather than guessed at.
+	got, err := s.Summaries(context.Background(), SummaryOptions{}, func(SummaryDay) bool { return true })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Days != 5 || got.Lines != 5 {
+		t.Errorf("an unbounded read gave %d days and %d lines, want five of each", got.Days, got.Lines)
+	}
+	if got.Bytes == 0 {
+		t.Error("the read reports no bytes read at all")
+	}
+	if got.Bounded {
+		t.Errorf("an unbounded read says it was stopped by %q", got.BoundedBy)
+	}
+
+	// A bound says which bound.
+	got, err = s.Summaries(context.Background(), SummaryOptions{Days: 2}, func(SummaryDay) bool { return true })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.Bounded || got.BoundedBy != "days" {
+		t.Errorf("a read of two days came back bounded=%v by %q", got.Bounded, got.BoundedBy)
+	}
+	if got.Days != 2 {
+		t.Errorf("a bound of two days gave %d", got.Days)
+	}
+
+	// A caller who has gone away is let go of.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := s.Summaries(ctx, SummaryOptions{}, func(SummaryDay) bool {
+		t.Error("a cancelled read handed a day to its caller")
+		return true
+	}); !errors.Is(err, context.Canceled) {
+		t.Errorf("a cancelled read returned %v, want context.Canceled", err)
+	}
+
+	// Lines this build cannot read are counted, here and on the store, the same
+	// way a read of the records counts them.
+	raw, err := os.ReadFile(filepath.Join(dir, summaryFileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, summaryFileName),
+		append(raw, []byte("{\"v\":99,\"kind\":\"summary\"}\nnot json at all\n")...), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err = s.Summaries(context.Background(), SummaryOptions{}, func(SummaryDay) bool { return true })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Skipped != 2 {
+		t.Errorf("the read met %d lines it could not use, want the two just planted", got.Skipped)
+	}
+	if s.Status().Skipped != 2 {
+		t.Errorf("the store reports %d unreadable lines after the read, want 2", s.Status().Skipped)
 	}
 }
