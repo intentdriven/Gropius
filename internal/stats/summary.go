@@ -416,7 +416,7 @@ func (w *storeWriter) writeSummary(set *summarySet) error {
 		// The one place in this store that asks the disk to be sure. Everywhere
 		// else the records are worth less than the answer they describe and a
 		// forced write would put the disk in the path of every request; here the
-		// write happens once per drop and is what makes "summarise, then delete"
+		// write happens once per drop and is what makes "summarize, then delete"
 		// mean anything at all.
 		return f.Sync()
 	}()

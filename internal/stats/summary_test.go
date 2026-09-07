@@ -24,9 +24,9 @@ func day(y int, m time.Month, d, hour int) time.Time {
 	return time.Date(y, m, d, hour, 0, 0, 0, time.UTC)
 }
 
-// summariseTestStore is a store whose local day is UTC, so a test can say
+// summarizeTestStore is a store whose local day is UTC, so a test can say
 // which day a record falls on without asking where this Mac is.
-func summariseTestStore(t *testing.T, clock *testClock, opts StoreOptions) (*FileStore, string) {
+func summarizeTestStore(t *testing.T, clock *testClock, opts StoreOptions) (*FileStore, string) {
 	t.Helper()
 	opts.Now = clock.now
 	opts.loc = time.UTC
@@ -67,12 +67,12 @@ func request(at time.Time, model string) Record {
 }
 
 // The whole of the intent: what is dropped is counted first, per model and
-// per day, and a later drop for a day already summarised extends the line
+// per day, and a later drop for a day already summarized extends the line
 // rather than writing a second one.
-func TestADroppedFileIsSummarisedFirstAndALaterDropExtendsTheDay(t *testing.T) {
+func TestADroppedFileIsSummarizedFirstAndALaterDropExtendsTheDay(t *testing.T) {
 	clock := &testClock{}
 	clock.set(day(2026, time.January, 10, 9))
-	s, dir := summariseTestStore(t, clock, StoreOptions{Months: 2})
+	s, dir := summarizeTestStore(t, clock, StoreOptions{Months: 2})
 	on(t, s)
 
 	// One file, three days, two models: a quiet Mac writes across days into
@@ -115,7 +115,7 @@ func TestADroppedFileIsSummarisedFirstAndALaterDropExtendsTheDay(t *testing.T) {
 		t.Fatalf("the store holds %d files, want the two this test wrote: %v", got, names(t, dir))
 	}
 
-	// The horizon drops the first file. Every record in it is summarised
+	// The horizon drops the first file. Every record in it is summarized
 	// before it goes.
 	s.SetRetention(2, 1<<20)
 	s.SetRetention(1, 1<<20)
@@ -162,7 +162,7 @@ func TestADroppedFileIsSummarisedFirstAndALaterDropExtendsTheDay(t *testing.T) {
 		t.Errorf("the directory holds %v, want the surviving file and the summary", names(t, dir))
 	}
 
-	// A later drop covering a day already summarised extends that day's line.
+	// A later drop covering a day already summarized extends that day's line.
 	clock.set(day(2026, time.September, 1, 9))
 	s.SetRetention(2, 1<<20)
 	if err := s.Flush(); err != nil {
@@ -181,12 +181,12 @@ func TestADroppedFileIsSummarisedFirstAndALaterDropExtendsTheDay(t *testing.T) {
 	}
 }
 
-// The size cap drops files too, and a file dropped for room is summarised
+// The size cap drops files too, and a file dropped for room is summarized
 // exactly as one dropped for age.
-func TestAFileDroppedForRoomIsSummarisedToo(t *testing.T) {
+func TestAFileDroppedForRoomIsSummarizedToo(t *testing.T) {
 	clock := &testClock{}
 	clock.set(day(2026, time.January, 10, 9))
-	s, _ := summariseTestStore(t, clock, StoreOptions{MaxBytes: 8 << 10, RotateBytes: 1 << 10})
+	s, _ := summarizeTestStore(t, clock, StoreOptions{MaxBytes: 8 << 10, RotateBytes: 1 << 10})
 	on(t, s)
 	for i := range 300 {
 		if err := s.AppendRequest(request(day(2026, time.January, 10, 9).Add(time.Duration(i)*time.Second), "org/a")); err != nil {
@@ -214,7 +214,7 @@ func TestAFileDroppedForRoomIsSummarisedToo(t *testing.T) {
 		t.Fatal(err)
 	}
 	if int(got.Requests)+held != 300 {
-		t.Errorf("%d records summarised and %d still held, want 300 between them", got.Requests, held)
+		t.Errorf("%d records summarized and %d still held, want 300 between them", got.Requests, held)
 	}
 }
 
@@ -223,7 +223,7 @@ func TestAFileDroppedForRoomIsSummarisedToo(t *testing.T) {
 func TestNoSummaryIsWrittenWhileTheSwitchIsOff(t *testing.T) {
 	clock := &testClock{}
 	clock.set(day(2026, time.January, 10, 9))
-	s, dir := summariseTestStore(t, clock, StoreOptions{Months: 1})
+	s, dir := summarizeTestStore(t, clock, StoreOptions{Months: 1})
 	for i := range 20 {
 		if err := s.AppendRequest(request(day(2025, time.January, 10, 9).Add(time.Duration(i)*time.Second), "org/a")); err != nil {
 			t.Fatal(err)
@@ -258,7 +258,7 @@ func TestTheSummaryHoldsOnlyCountsAndTotals(t *testing.T) {
 	const sentinel = "org/pineapple-sentinel-7f3a"
 	clock := &testClock{}
 	clock.set(day(2026, time.January, 10, 9))
-	s, dir := summariseTestStore(t, clock, StoreOptions{Months: 1})
+	s, dir := summarizeTestStore(t, clock, StoreOptions{Months: 1})
 	on(t, s)
 	if err := s.AppendRequest(request(day(2025, time.January, 10, 9), sentinel)); err != nil {
 		t.Fatal(err)
@@ -312,7 +312,7 @@ func TestACrashBetweenTheSummaryAndTheDropCountsTheRecordsOnce(t *testing.T) {
 	clock := &testClock{}
 	clock.set(day(2026, time.January, 10, 9))
 	crash := true
-	s, dir := summariseTestStore(t, clock, StoreOptions{Months: 1, afterSummary: func() error {
+	s, dir := summarizeTestStore(t, clock, StoreOptions{Months: 1, afterSummary: func() error {
 		if crash {
 			return errStoppedForTest
 		}
@@ -366,7 +366,7 @@ func TestACrashBetweenTheSummaryAndTheDropCountsTheRecordsOnce(t *testing.T) {
 func TestTheSummaryStaysWithinItsShareOfTheCap(t *testing.T) {
 	clock := &testClock{}
 	const cap = 40 << 10
-	s, dir := summariseTestStore(t, clock, StoreOptions{Months: 1, MaxBytes: cap, RotateBytes: 2 << 10})
+	s, dir := summarizeTestStore(t, clock, StoreOptions{Months: 1, MaxBytes: cap, RotateBytes: 2 << 10})
 	on(t, s)
 	// A year of days, dropped a file at a time.
 	for d := range 200 {
@@ -409,7 +409,7 @@ func TestTheSummaryStaysWithinItsShareOfTheCap(t *testing.T) {
 func TestTheSummaryIsOwnerOnlyAndClearRemovesIt(t *testing.T) {
 	clock := &testClock{}
 	clock.set(day(2026, time.January, 10, 9))
-	s, dir := summariseTestStore(t, clock, StoreOptions{Months: 1})
+	s, dir := summarizeTestStore(t, clock, StoreOptions{Months: 1})
 	on(t, s)
 	if err := s.AppendRequest(request(day(2025, time.January, 10, 9), "org/a")); err != nil {
 		t.Fatal(err)
@@ -448,7 +448,7 @@ func TestTheSummaryIsOwnerOnlyAndClearRemovesIt(t *testing.T) {
 func TestALinkPlantedUnderTheSummaryNameIsRefused(t *testing.T) {
 	clock := &testClock{}
 	clock.set(day(2026, time.January, 10, 9))
-	s, dir := summariseTestStore(t, clock, StoreOptions{Months: 1})
+	s, dir := summarizeTestStore(t, clock, StoreOptions{Months: 1})
 	on(t, s)
 	if err := s.AppendRequest(request(day(2025, time.January, 10, 9), "org/a")); err != nil {
 		t.Fatal(err)
@@ -481,7 +481,7 @@ func TestALinkPlantedUnderTheSummaryNameIsRefused(t *testing.T) {
 func TestSummariesComeBackNewestDayFirst(t *testing.T) {
 	clock := &testClock{}
 	clock.set(day(2026, time.January, 10, 9))
-	s, _ := summariseTestStore(t, clock, StoreOptions{Months: 1})
+	s, _ := summarizeTestStore(t, clock, StoreOptions{Months: 1})
 	on(t, s)
 	for d := 1; d <= 3; d++ {
 		if err := s.AppendRequest(request(day(2025, time.January, d, 9), "org/a")); err != nil {
@@ -528,7 +528,7 @@ func days(sums []Summary) []string {
 func TestTheSummaryCountsTowardTheRoomTheStoreUses(t *testing.T) {
 	clock := &testClock{}
 	clock.set(day(2026, time.January, 10, 9))
-	s, dir := summariseTestStore(t, clock, StoreOptions{Months: 1})
+	s, dir := summarizeTestStore(t, clock, StoreOptions{Months: 1})
 	on(t, s)
 	if err := s.AppendRequest(request(day(2025, time.January, 10, 9), "org/a")); err != nil {
 		t.Fatal(err)
@@ -598,7 +598,7 @@ func TestStoreFieldsNamesTheSummarysFieldsToo(t *testing.T) {
 func TestTheIndexCannotAimTheStartupPassAtAnotherFile(t *testing.T) {
 	clock := &testClock{}
 	clock.set(day(2026, time.January, 10, 9))
-	s, dir := summariseTestStore(t, clock, StoreOptions{Months: 1})
+	s, dir := summarizeTestStore(t, clock, StoreOptions{Months: 1})
 	on(t, s)
 	if err := s.AppendRequest(request(day(2026, time.January, 10, 9), "org/a")); err != nil {
 		t.Fatal(err)

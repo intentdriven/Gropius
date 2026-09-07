@@ -1182,13 +1182,13 @@ func (w *storeWriter) prune() error {
 	}
 }
 
-// pruneOnce is one pass of retention: it decides which files go, summarises
+// pruneOnce is one pass of retention: it decides which files go, summarizes
 // them, and removes them. It reports how many it removed.
 func (w *storeWriter) pruneOnce() (int, error) {
 	months, maxBytes := w.limits()
 	total := w.totalBytes()
 	// Which files go is decided before any of them is removed, because what is
-	// about to be dropped has to be summarised first and a summary written a
+	// about to be dropped has to be summarized first and a summary written a
 	// file at a time would rewrite the summary once per file.
 	doomed := 0
 	// Room for the file about to be opened, not just for what is already
