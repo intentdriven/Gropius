@@ -123,6 +123,55 @@ tolerate, in which case grace only delays the same swaps.
 <!-- abcd-review: OWED receipt=rcp-5c77e5d702ce -->
 Fidelity review OWED (receipt rcp-5c77e5d702ce).
 
+2026-09-07 — Acceptance criterion 3 shipped narrower than it is written here,
+and the criterion is left as written because a shipped record is not rewritten.
+The wait is reported in the two response headers, as the resolved Open Question
+says — but only on an install that has an API key configured. An adversarial
+security review found that they are residency facts: `warm` attests that the
+model was in memory with a free concurrency slot, and `waited` on a model the
+same client has just seen warm is that model's in-flight count at its batch
+ceiling, which is other clients using it at that moment. `/v1/models` withholds
+exactly that from an unauthenticated server (the decision of 2026-09-06 on
+residency fields), and the argument that blesses leaking bare residency — a
+client can already learn it by timing — does not reach it: in total latency the
+wait is inseparable from generation time, while the header separates it to the
+millisecond on every request, for free. On the shipping default, which has no
+key, Carol's answer therefore reports nothing, and the press release's promise
+that "the answer she gets back tells her she waited and for how long" holds only
+once Bob sets a key. Scope condition cond-2609061822386054 conditions this
+record on grace being switched on and says nothing about a key, so it is
+narrowed the same way. **The fidelity audit should record criterion 3 as
+diverged, for the maintainer to adopt or reject.** The alternative the review
+offered — keep the headers open and record the widened disclosure — was
+rejected: a decision to tell an open network who is busy is not one this record
+should take on the residency record's behalf. Held by
+`gateway.TestTheWaitHeadersFollowTheResidencyRule`, whose first case asserts
+that an unkeyed install tells a network client nothing.
+
+2026-09-07 — Acceptance criterion 6 also shipped narrower, and is also left as
+written. Past the load-waiter cap a request is refused immediately, as the
+criterion says, *unless it needs nothing unloaded* — its model is already in
+memory, or it fits in memory nobody is using — in which case it is served. The
+first cut refused it, and the same security review showed what that meant: a
+bound on how many requests may *wait* had become a bound on how many may be
+*served*, so eight connections denied model loading to every other client on the
+network, including requests that would have cost the machine nothing. The
+concession is exactly one thing and no more: such a caller may take free memory
+and may not take a victim, because the waiter at the head is parked precisely
+because that free memory is not enough for it. **The fidelity audit should
+record criterion 6 as diverged, for the maintainer to adopt or reject.** Held by
+`runtime.TestAFullQueueDoesNotRefuseALoadThatNeedsNoEviction` and
+`runtime.TestAQueueFullArrivalTakesNoVictimAndCostsNoSyscall`.
+
+2026-09-07 — Acceptance criterion 7 is met, with a qualification worth recording
+because the wording invites a stronger reading. A budget raise wakes every
+waiting request, and every one the raise fits is served on it without anything
+having to finish — no model unloads, no request ends. They are served in queue
+order rather than at once: the oldest loads, and leaving the queue wakes the
+next, which is then the oldest. Held by
+`runtime.TestRaisingTheMemoryBudgetServesEveryWaiterItFits`, which parks four
+and is mutation-checked against a build where the cascade does not happen.
+
 ## Grounds
 
 - pursued: we expect a shared Mac to serve several agents without their models evicting each other once the operator can pin, budget and grace, and once keyed clients can see what is warm; we are wrong if model swaps stay as frequent with those controls set as they were without them, measured by the statistics store
