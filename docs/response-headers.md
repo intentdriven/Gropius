@@ -5,17 +5,29 @@ Gropius adds two headers to the answers it gives a completion request, on
 request spent getting to a model server, which the OpenAI response body has no
 field for.
 
-Both appear on a successful answer, streamed or not, and on the 503 that a
-request gets when this Mac has no memory for its model. They carry no model
-name and no count of anything: what they say is that this machine was busy and
-for how long, which is what a client with a stopwatch already knows.
+They appear only on an install that has an API key configured, which is the
+rule [the models list](models-list.md) applies to residency and is here for the
+same reason: `warm` says the model was in memory with a free slot, and `waited`
+on a model you have just seen warm says other clients are using it right now.
+An open server tells a network client neither. The condition is the install's,
+not the request's, so a client on the Mac itself sees what the control panel
+does.
 
-They are absent from every other answer: a request refused before a model was
-chosen at all (400, 401, 404), the 503 for a model that is already serving as
-many requests as it will take, and the 503 for a model server that could not be
-started. None of those spent time getting to a model server, so there is
-nothing for the headers to say — read their absence as "this did not wait",
-not as "this waited an unknown amount".
+On such an install both appear on a successful answer, streamed or not, and on
+the 503 a request gets when this Mac has no memory for its model. They carry no
+model name and no count of anything.
+
+They are absent from every other answer: every answer at all on an install
+with no API key set, a request refused before a model was chosen (400, 401,
+404), the 503 for a model that is already serving as many requests as it will
+take, and the 503 for a model server that could not be started. None of the
+latter spent time getting to a model server, so there is nothing for the
+headers to say.
+
+A 503 saying `warm` and `0` is a request that was refused without waiting —
+the memory was spoken for the moment it arrived, or as many requests were
+already waiting as the queue allows. A 503 saying `waited` is one that held on
+for the figure it gives and was refused at the end of it.
 
 ```
 HTTP/1.1 200 OK

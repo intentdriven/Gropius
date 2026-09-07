@@ -23,7 +23,11 @@ fit unloads a model at once, exactly as it always has.
    a pause while somebody reads an answer.
 4. Set **Wait at most** — the longest a request will wait for room before it is
    refused. The default is 300 seconds. Keep it under the timeout your clients
-   use, or they give up first and see their own error instead of Gropius's.
+   use, or they give up first and see their own error instead of Gropius's, and
+   at or above the protection above: a maximum shorter than the protection is
+   refused, because it would refuse a waiting request before its own wait could
+   override that protection, which is the starvation this feature exists to
+   prevent.
 5. **Save settings**.
 
 It applies at once — no restart. A model already in memory is protected from
@@ -63,9 +67,12 @@ Three things end a wait early:
 
 - A request that could never fit — the pinned models plus what it needs are
   more than the whole budget — is refused straight away.
-- A request that arrives when the queue is already full is refused straight
-  away too. The queue is deliberately short: it drains only when a model is
-  unloaded, and every waiting request holds its whole body in memory meanwhile.
+- A request that arrives when the queue is already full and needs a model
+  unloaded is refused straight away too. The queue is deliberately short: it
+  drains only when a model is unloaded, and every waiting request holds its
+  whole body in memory meanwhile. One that needs nothing unloaded — its model
+  is in memory already, or it fits in memory nobody is using — is served
+  whatever the queue is doing.
 - Models loaded at start-up by **Preload**, which load one after another and
   would otherwise wait for each other. They are not held behind the queue
   either.
@@ -85,11 +92,12 @@ shortened to the idle timeout instead, and the start-up log says so.
 
 ## What a client sees
 
-An answer that came from a model server carries two headers saying whether the
-request waited and for how long: `X-Gropius-State` and `X-Gropius-Queue-Time`.
-The 503 a request refused for want of memory gets carries them too. See
-[the response header reference](response-headers.md), which says which answers
-do not carry them.
+On an install with an API key set, an answer that came from a model server
+carries two headers saying whether the request waited and for how long:
+`X-Gropius-State` and `X-Gropius-Queue-Time`. The 503 a request refused for
+want of memory gets carries them too. An open server sends them to nobody, the
+same rule [the models list](models-list.md) applies to residency. See
+[the response header reference](response-headers.md).
 
 A client that would rather not wait at all can read residency from
 [the models list](models-list.md) and ask for a model that is already loaded.
@@ -116,9 +124,10 @@ Requests for models already in memory are unaffected throughout. On a Mac whose
 endpoint is open to the network, that is worth weighing against a shorter
 maximum wait.
 
-Keep the maximum wait at least as long as the protection. A maximum shorter
-than the protection is accepted, but it means a request can only ever be served
-by a model that was already idle when it arrived.
+A maximum wait shorter than the protection is refused, and a settings file
+carrying one is raised to the protection with a line in the start-up log: it
+would refuse a waiting request before its own wait could override a model's
+protection, which puts back the starvation this feature exists to prevent.
 
 The control panel's **My Models** tab says how many requests are waiting for
 memory, so a queue that is not draining is visible rather than inferred.

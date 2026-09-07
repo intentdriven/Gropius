@@ -89,3 +89,33 @@ func attr(tag, name string) string {
 	}
 	return m[1]
 }
+
+// The panel offers the two intervals side by side, so it is where a maximum
+// wait below the grace is easiest to type. The server refuses that pair, and a
+// form that let it be posted would answer a save with an error the operator
+// has to decode; say it beside the field instead.
+func TestThePanelWarnsWhenTheMaximumWaitIsBelowTheGrace(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		grace, maxWait string
+		want           string
+	}{
+		{"a maximum wait below the grace", "300", "60", "shorter"},
+		{"a maximum wait equal to the grace", "300", "300", ""},
+		{"a maximum wait above the grace", "60", "300", ""},
+		{"both left to the defaults", "", "", ""},
+		{"a blank maximum wait against a grace above the default", "600", "", "shorter"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := evalPanel(t,
+				fmt.Sprintf("graceWaitHint(%q, %q)", tc.grace, tc.maxWait), "graceWaitHint")
+			if tc.want == "" && got != "" {
+				t.Errorf("graceWaitHint(%q, %q) = %q, want nothing", tc.grace, tc.maxWait, got)
+			}
+			if tc.want != "" && !strings.Contains(got, tc.want) {
+				t.Errorf("graceWaitHint(%q, %q) = %q, want it to mention %q",
+					tc.grace, tc.maxWait, got, tc.want)
+			}
+		})
+	}
+}

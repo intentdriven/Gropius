@@ -393,14 +393,19 @@ func (p *Pool) EvictionGrace() (grace, maxWait time.Duration) {
 
 // normalizeGrace resolves the two intervals the one way, so that a pool built
 // with PoolOptions and a pool told to change while it runs cannot disagree
-// about what a zero means. A negative grace is no grace; a maximum wait of
-// zero beside a real grace is the grace itself, since a wait shorter than the
-// protection could only ever be served by a model that was already idle.
+// about them. A negative grace is no grace, and a maximum wait shorter than
+// the grace — zero included — is raised to the grace.
 func normalizeGrace(grace, maxWait time.Duration) (time.Duration, time.Duration) {
 	if grace < 0 {
 		grace = 0
 	}
-	if maxWait <= 0 {
+	// A maximum wait below the grace makes the waiter-age clause in
+	// graceElapsedLocked unreachable — a waiter would be refused before its
+	// own wait could ever override a model's protection — which is the
+	// indefinite starvation this whole mechanism exists to prevent.
+	// internal/config refuses such a pair at a save and repairs one in a file;
+	// this is the pool refusing to be configured into the hole by any caller.
+	if maxWait < grace {
 		maxWait = grace
 	}
 	return grace, maxWait
@@ -556,15 +561,15 @@ func (p *Pool) acquire(ctx context.Context, repoID string, mayWait bool) (*Upstr
 		// else's wait would leave the model cold for the rest of the session —
 		// which is what the no-wait path exists to prevent.
 		age := p.waitedBy(w)
-		mayEvict := p.mayEvictLocked(w)
+		adm := p.admissionLocked(w)
 		if !mayWait {
-			age, mayEvict = p.grace, true
+			age, adm = p.grace, admitEvict
 		}
 
 		var err error
-		if p.worthTryingLocked(w, age, mayEvict) {
+		if p.worthTryingLocked(w, age, adm) {
 			var started *entry
-			started, err = p.startLocked(repoID, age, mayEvict)
+			started, err = p.startLocked(repoID, age, adm)
 			if err == nil {
 				e = started
 				// Somebody may have been queued for this very model; it has an
@@ -736,10 +741,10 @@ func (p *Pool) acquire(ctx context.Context, repoID string, mayWait bool) (*Upstr
 // startLocked launches a model server. Callers must hold p.mu.
 //
 // waited is how long the caller has already been queued for room, which is
-// what bounds the protection an eviction grace gives; mayEvict is false for a
-// caller that is not at the head of that queue, and is what keeps the queue
+// what bounds the protection an eviction grace gives; adm is what this caller
+// is allowed to do to the models in memory, and is what keeps the queue
 // first-in, first-out.
-func (p *Pool) startLocked(repoID string, waited time.Duration, mayEvict bool) (*entry, error) {
+func (p *Pool) startLocked(repoID string, waited time.Duration, adm admission) (*entry, error) {
 	path, size, err := p.opts.Models.Resolve(repoID)
 	if err != nil {
 		return nil, err
@@ -751,6 +756,16 @@ func (p *Pool) startLocked(repoID string, waited time.Duration, mayEvict bool) (
 			"%s needs about %s of memory but the limit is %s — raise the memory budget or choose a smaller quantization",
 			repoID, HumanBytes(need), HumanBytes(p.maxResident))
 	}
+	// Plan the eviction before the precheck, and refuse from the plan alone.
+	// Precheck stats the launcher's files, and this runs under p.mu — the
+	// pool's one lock, which every Acquire, release, Resident, Unload and
+	// control-panel snapshot takes — so a refusal that did it would let a
+	// client set the rate at which this machine does filesystem work under
+	// that lock, simply by asking for loads that cannot be served.
+	victims, enough := p.evictionPlanLocked(need, waited)
+	if p.grace > 0 && (!enough || !allows(adm, victims)) {
+		return nil, p.noRoomLocked(need)
+	}
 	// Check cheap launch preconditions before evicting anything. Eviction is not
 	// reversible (stopEntryLocked's Stop cannot be undone), so if we evicted
 	// first and Launch failed moments later — a missing venv, or this repoID's
@@ -759,8 +774,15 @@ func (p *Pool) startLocked(repoID string, waited time.Duration, mayEvict bool) (
 	if err := p.opts.Launcher.Precheck(Spec{RepoID: repoID, ModelPath: path}); err != nil {
 		return nil, fmt.Errorf("start model server for %s: %w", repoID, &LaunchError{Err: err})
 	}
-	if err := p.evictForLocked(need, waited, mayEvict); err != nil {
-		return nil, err
+	for _, v := range victims {
+		p.stopEntryLocked(v, StopEvicted)
+	}
+	// With grace off the pool has always freed what it could and then refused,
+	// and that is what the off path still does: the plan above is executed
+	// whole before this, and only the on path returns before touching
+	// anything.
+	if !enough {
+		return nil, p.noRoomLocked(need)
 	}
 
 	port, err := freePort()
@@ -922,35 +944,23 @@ func (p *Pool) probeReady(ctx context.Context, e *entry) error {
 	}
 }
 
-// evictForLocked frees enough budget for need bytes. Callers must hold p.mu.
+// allows reports whether a caller with this admission may take this plan.
 //
-// With grace off it evicts as it goes, which is what it has always done: every
-// candidate is taken, in least-recently-used order, and if that is still not
-// enough the load is refused having freed what it could.
-//
-// With grace on the whole set is planned first and taken only if the plan
-// works. A request that is about to join the queue must not have torn a model
-// down on its way there — it would be waiting for room it had already spent
-// somebody else's warm model to fail to make.
-//
-// mayEvict is false for anyone but the oldest waiter, and it refuses the load
-// whether or not the plan needs a victim. Gating only the eviction would let a
-// stream of small requests take the room as it appears while the waiter at the
-// head, needing more of it than any single release frees, never fits — which
-// is the "smallest first starves a large model" failure the queue exists to
-// prevent, reached by the other door.
-func (p *Pool) evictForLocked(need int64, waited time.Duration, mayEvict bool) error {
-	victims, enough := p.evictionPlanLocked(need, waited)
-	if p.grace > 0 && (!enough || !mayEvict) {
-		return p.noRoomLocked(need)
+// admitFreeRoom is the narrow one: a caller that could not join the queue
+// because it was full may still load into memory nothing is using, but may not
+// take a victim. Refusing it would be a denial of service over a place to
+// wait that it does not need, and it takes nothing from the waiter at the head
+// — that waiter is parked precisely because the free room is not enough for
+// it.
+func allows(adm admission, victims []*entry) bool {
+	switch adm {
+	case admitEvict:
+		return true
+	case admitFreeRoom:
+		return len(victims) == 0
+	default:
+		return false
 	}
-	for _, v := range victims {
-		p.stopEntryLocked(v, StopEvicted)
-	}
-	if !enough {
-		return p.noRoomLocked(need)
-	}
-	return nil
 }
 
 // evictionPlanLocked names the models that would have to go for need bytes to
@@ -1103,7 +1113,7 @@ func (p *Pool) waitVerdictLocked(mayWait bool, w *loadWaiter, err error) waitVer
 // waiter and startLocked resolves the model and stats two files before it
 // reaches the eviction plan — filesystem work under the pool's one lock, at
 // whatever rate the machine completes requests.
-func (p *Pool) worthTryingLocked(w *loadWaiter, age time.Duration, mayEvict bool) bool {
+func (p *Pool) worthTryingLocked(w *loadWaiter, age time.Duration, adm admission) bool {
 	// A caller that has not queued always asks, and so does every caller once
 	// grace is off: the off path evicts what it can before it refuses, and
 	// skipping the attempt would refuse a request that a swap would have
@@ -1111,7 +1121,7 @@ func (p *Pool) worthTryingLocked(w *loadWaiter, age time.Duration, mayEvict bool
 	if w == nil || p.grace <= 0 {
 		return true
 	}
-	if !mayEvict {
+	if adm == admitNothing {
 		return false
 	}
 	_, enough := p.evictionPlanLocked(w.need, age)
@@ -1130,23 +1140,43 @@ func (p *Pool) canEverFitLocked(need int64) bool {
 	return protected+need <= p.maxResident
 }
 
-// mayEvictLocked reports whether this caller is allowed to load at all while
-// others are queued. Callers must hold p.mu.
+// admission says what a caller may do to the models in memory to make room for
+// its own. It is the whole of the queue's fairness rule.
+type admission int
+
+const (
+	// admitEvict: take victims. The oldest waiter, anyone at all when nobody
+	// is waiting, and any caller once grace is off.
+	admitEvict admission = iota
+	// admitFreeRoom: load into memory nothing is using, but evict nothing. A
+	// caller that cannot join the queue because it is full — refusing it would
+	// deny service over a place to wait it does not need, and the request at
+	// the head is not waiting for that memory, or the free room would have
+	// served it already.
+	admitFreeRoom
+	// admitNothing: wait your turn.
+	admitNothing
+)
+
+// admissionLocked places this caller against the queue. Callers must hold
+// p.mu.
 //
-// Only the oldest waiter may, which is the whole of the fairness rule — and it
-// applies to a request that has not queued at all, or a new arrival would step
-// over everyone already waiting. It gates the load and not merely the
-// eviction: free room is as much the head waiter's as a victim is.
-func (p *Pool) mayEvictLocked(w *loadWaiter) bool {
-	// With grace off there is no queue to be fair to. Whatever is parked is
-	// being drained — the operator has just said "swap now" — and every one of
-	// them takes the ordinary path, which evicts. Holding all but the head
-	// back here would turn the off switch into a refusal for every client
-	// already waiting.
+// Only the oldest waiter may evict, which is the whole of the fairness rule —
+// and it binds a request that has not queued at all, or a new arrival would
+// step over everyone already waiting. With grace off there is no queue to be
+// fair to: whatever is parked is being drained, the operator having just said
+// "swap now", so every caller takes the ordinary path.
+func (p *Pool) admissionLocked(w *loadWaiter) admission {
 	if p.grace <= 0 {
-		return true
+		return admitEvict
 	}
-	return len(p.waiters) == 0 || p.waiters[0] == w
+	if len(p.waiters) == 0 || (w != nil && p.waiters[0] == w) {
+		return admitEvict
+	}
+	if w == nil && len(p.waiters) >= p.opts.MaxLoadWaiters {
+		return admitFreeRoom
+	}
+	return admitNothing
 }
 
 // waitedBy is how long a waiter has been parked; zero for a caller that has

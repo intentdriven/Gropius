@@ -744,6 +744,20 @@ func (c Config) validateGrace() error {
 				"or the idle timeout unloads the model the wait is protecting",
 			c.GraceSeconds(), c.IdleTimeoutSec)
 	}
+	// A maximum wait below the grace does not shorten the wait, it silently
+	// disables the rule that stops one client starving another: a waiting
+	// request may override a model's protection once its own age reaches the
+	// grace, and it is refused once its age reaches the maximum, so with the
+	// maximum the smaller of the two the first can never happen. Refused
+	// rather than raised at a save because the two are one pair, edited
+	// together in one fieldset, and telling the operator is better than
+	// quietly serving them a different figure.
+	if c.EvictionGrace && c.MaxWaitSeconds() < c.GraceSeconds() {
+		return fmt.Errorf(
+			"the maximum wait (%d s) must not be shorter than the eviction grace (%d s), "+
+				"or a waiting request is refused before its own wait can override the grace",
+			c.MaxWaitSeconds(), c.GraceSeconds())
+	}
 	return nil
 }
 
@@ -787,6 +801,13 @@ func (c *Config) sanitizeGrace() []string {
 	if c.EvictionGrace && c.IdleTimeoutSec > 0 && c.GraceSeconds() > c.IdleTimeoutSec {
 		repaired = append(repaired, "eviction_grace_sec="+strconv.Itoa(c.GraceSeconds()))
 		c.EvictionGraceSec = c.IdleTimeoutSec
+	}
+	// Raised rather than refused on this path, and raised after the clamp
+	// above so it is measured against the grace that survives it. A file is
+	// repaired; a save is told (see validateGrace).
+	if c.EvictionGrace && c.MaxWaitSeconds() < c.GraceSeconds() {
+		repaired = append(repaired, "eviction_max_wait_sec="+strconv.Itoa(c.MaxWaitSeconds()))
+		c.EvictionMaxWaitSec = c.GraceSeconds()
 	}
 	return repaired
 }

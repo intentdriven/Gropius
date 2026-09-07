@@ -175,3 +175,69 @@ func TestAClearedIntervalMeansTheDefaultRatherThanARefusal(t *testing.T) {
 		t.Error("Validate accepted a cleared grace that resolves to more than the idle timeout")
 	}
 }
+
+// A maximum wait below the grace does not make the wait shorter, it makes the
+// anti-starvation clause unreachable: a waiter may override a model's
+// protection once its own age passes the grace, and it is refused once its age
+// passes the maximum, so with the maximum the smaller of the two the first can
+// never happen. That is the indefinite starvation grace exists to prevent,
+// restored by a pair of numbers the Settings form offers side by side.
+func TestValidateRefusesAMaximumWaitBelowTheGrace(t *testing.T) {
+	c := Default()
+	c.EvictionGrace = true
+	c.EvictionGraceSec = 300
+	c.EvictionMaxWaitSec = 60
+
+	err := c.Validate()
+	if err == nil {
+		t.Fatal("Validate accepted a maximum wait shorter than the grace")
+	}
+	for _, want := range []string{"300", "60"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the refusal %q does not name %s", err, want)
+		}
+	}
+
+	// Equal is fine: a waiter is served the instant its own age reaches the
+	// grace, which is the same instant its maximum runs out.
+	c.EvictionMaxWaitSec = 300
+	if err := c.Validate(); err != nil {
+		t.Errorf("Validate refused a maximum wait equal to the grace: %v", err)
+	}
+	// And with the switch off the pair decides nothing.
+	c.EvictionGrace = false
+	c.EvictionMaxWaitSec = 60
+	if err := c.Validate(); err != nil {
+		t.Errorf("Validate refused an inert pair: %v", err)
+	}
+}
+
+// A hand-edited file is raised rather than refused, for the reason every other
+// repair here has.
+func TestLoadRaisesAMaximumWaitBelowTheGrace(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	raw := `{"host":"0.0.0.0","port":11535,"api_key":"secret","decode_concurrency":4,
+		"eviction_grace":true,"eviction_grace_sec":300,"eviction_max_wait_sec":60,
+		"stats_months":6,"stats_max_bytes":209715200}`
+	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	got, dropped, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load refused a file it could repair: %v", err)
+	}
+	if got.APIKey != "secret" {
+		t.Errorf("api_key = %q; the rest of the file must survive the repair", got.APIKey)
+	}
+	if got.EvictionMaxWaitSec != 300 {
+		t.Errorf("EvictionMaxWaitSec = %d, want it raised to the grace (300)", got.EvictionMaxWaitSec)
+	}
+	if !strings.Contains(strings.Join(dropped, " "), "eviction_max_wait_sec") {
+		t.Errorf("Load repaired the maximum wait without saying so: %v", dropped)
+	}
+	if err := got.Validate(); err != nil {
+		t.Errorf("the repaired config does not validate: %v", err)
+	}
+}

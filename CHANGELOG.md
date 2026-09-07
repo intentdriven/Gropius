@@ -29,8 +29,11 @@ GitHub release notes.
   including one there is room for, since free memory belongs to whoever has
   waited longest. Raising the memory budget, or removing a pin, wakes them at
   once rather than leaving them to wait for something to finish. A request that could never fit, one that arrives when the short queue
-  is already full, and the models loaded at start-up by Preload never wait at
-  all. If nothing frees up within the maximum wait, the request gets the same
+  is already full and needs a model unloaded, and the models loaded at start-up
+  by Preload never wait at all; a request that needs nothing unloaded is served
+  whatever the queue is doing. The maximum wait may not be shorter than the
+  protection, which would refuse a waiting request before its own wait could
+  override a model's protection. If nothing frees up within the maximum wait, the request gets the same
   refusal it would have had immediately, now saying how long it waited. The
   protection may not be longer than the idle timeout when one is set, since the
   idle timeout would otherwise unload the very model a request is waiting on; a
@@ -39,12 +42,14 @@ GitHub release notes.
   120 seconds of protection and a 300 second maximum, and both apply the moment
   they are saved. My Models says how many requests are waiting for memory. See
   [Give a busy model a moment before it is evicted](docs/eviction-grace.md).
-- **Two response headers on every completion**, `X-Gropius-State` (`warm` or
+- **Two response headers on completions**, `X-Gropius-State` (`warm` or
   `waited`) and `X-Gropius-Queue-Time` (whole milliseconds), on the answer and
   on the 503 a request gets when this Mac has no memory for its model. They
   count the wait for room, the wait for a cold model to load and the wait for a
-  slot on a busy one, and stop where generation begins. See
-  [the response header reference](docs/response-headers.md).
+  slot on a busy one, and stop where generation begins. Served only on an
+  install with an API key set, the same rule the models list applies to
+  residency: an open server tells a network client neither what is warm nor who
+  is busy. See [the response header reference](docs/response-headers.md).
 - **A memory budget you set**, in Settings, beside the idle timeout and decode
   concurrency. How much of this Mac Gropius fills with loaded models was fixed
   at 60% of its memory with no field to change it, so a Mac that does nothing

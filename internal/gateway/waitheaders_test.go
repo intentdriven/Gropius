@@ -19,6 +19,16 @@ import (
 	"github.com/intentdriven/Gropius/internal/runtime"
 )
 
+// keyedConfig is an install with an API key set, which is the condition the
+// wait headers are written under. A loopback client is exempt from presenting
+// the key — the httptest server is loopback — so this changes what the answer
+// carries without changing who may ask.
+func keyedConfig() config.Config {
+	cfg := config.Default()
+	cfg.APIKey = "s3cret"
+	return cfg
+}
+
 // postRaw sends one completion request body as it is written, so a test can
 // say "stream" without building a map for it.
 func postRaw(t *testing.T, srv *httptest.Server, body string) *http.Response {
@@ -39,7 +49,7 @@ func postRaw(t *testing.T, srv *httptest.Server, body string) *http.Response {
 // Two values and one number: "waited" is exactly "the queue time is not zero",
 // so a client never has to reconcile them.
 func TestAWarmCompletionSaysItDidNotWait(t *testing.T) {
-	srv, _, _ := newTestGateway(t, config.Default())
+	srv, _, _ := newTestGateway(t, keyedConfig())
 
 	resp := postRaw(t, srv, `{"model":"mlx-community/Qwen3-8B-4bit","messages":[{"role":"user","content":"hi"}]}`)
 	defer resp.Body.Close()
@@ -55,7 +65,7 @@ func TestAWarmCompletionSaysItDidNotWait(t *testing.T) {
 // The streamed path specifically: the headers must be on the wire before the
 // first event, which is the case the non-streamed path cannot prove.
 func TestAStreamedCompletionReportsTheWaitItPaid(t *testing.T) {
-	srv, pool, _ := newTestGateway(t, config.Default())
+	srv, pool, _ := newTestGateway(t, keyedConfig())
 	pool.waits = runtime.AcquireStats{QueueWait: 1500 * time.Millisecond}
 
 	resp := postRaw(t, srv,
@@ -83,7 +93,7 @@ func TestAStreamedCompletionReportsTheWaitItPaid(t *testing.T) {
 // way as one that queued for room, because from where it sits they are the
 // same fact: this took longer than a warm model would have.
 func TestALoadWaitIsReportedAsAWait(t *testing.T) {
-	srv, pool, _ := newTestGateway(t, config.Default())
+	srv, pool, _ := newTestGateway(t, keyedConfig())
 	pool.waits = runtime.AcquireStats{LoadWait: 4 * time.Second}
 
 	resp := postRaw(t, srv, `{"model":"mlx-community/Qwen3-8B-4bit","messages":[{"role":"user","content":"hi"}]}`)
@@ -100,7 +110,7 @@ func TestALoadWaitIsReportedAsAWait(t *testing.T) {
 // The refusal path carries them too: a client that held a connection open for
 // minutes and then got a 503 is the one that most needs to be told it waited.
 func TestARefusalAfterAWaitCarriesTheWaitHeaders(t *testing.T) {
-	srv, pool, _ := newTestGateway(t, config.Default())
+	srv, pool, _ := newTestGateway(t, keyedConfig())
 	pool.acquireErr = &runtime.NoRoomError{
 		Limit:  8 << 30,
 		Waited: 300 * time.Second,
@@ -153,7 +163,7 @@ func TestAModelServerCannotAddASecondValueToTheWaitHeaders(t *testing.T) {
 		"Content-Type":         []string{"application/json"},
 	}
 	out := http.Header{}
-	setWaitHeaders(out, 1500*time.Millisecond)
+	setWaitHeaders(out, true, 1500*time.Millisecond)
 	copyResponseHeaders(out, upstream)
 
 	for header, want := range map[string]string{
@@ -233,7 +243,7 @@ func TestARequestThatReallyWaitedSaysSoOnTheWire(t *testing.T) {
 	release()
 
 	srv := httptest.NewServer(New(Options{
-		Config: config.Default(), Pool: pool, Models: reg,
+		Config: keyedConfig(), Pool: pool, Models: reg,
 	}).Handler())
 	defer srv.Close()
 
@@ -254,4 +264,59 @@ func TestARequestThatReallyWaitedSaysSoOnTheWire(t *testing.T) {
 	if want := (grace / 2).Milliseconds(); ms < want {
 		t.Errorf("X-Gropius-Queue-Time = %d ms, want at least %d — it waited out a grace", ms, want)
 	}
+}
+
+// The wait headers follow the models list's rule, not their own. The state and
+// the millisecond figure are residency facts: "warm" says the model was in
+// memory with a free slot, and "waited" on a model the same client just saw
+// warm says other clients are using it right now — which is the in-flight fact
+// the listing withholds from an open server. A stopwatch does not give that
+// away: in total latency the slot wait is inseparable from generation.
+func TestTheWaitHeadersFollowTheResidencyRule(t *testing.T) {
+	t.Run("an open server tells a network client nothing", func(t *testing.T) {
+		srv, _, _ := newTestGateway(t, config.Default())
+
+		resp := postRaw(t, srv, `{"model":"`+testModelID+`","messages":[{"role":"user","content":"hi"}]}`)
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("status = %d, want 200", resp.StatusCode)
+		}
+		for _, header := range []string{"X-Gropius-State", "X-Gropius-Queue-Time"} {
+			if got := resp.Header.Get(header); got != "" {
+				t.Errorf("an unkeyed install answered a network client with %s: %q — "+
+					"the models list withholds the same fact", header, got)
+			}
+		}
+	})
+
+	t.Run("a keyed install tells a client it admitted", func(t *testing.T) {
+		srv, _, _ := newTestGateway(t, keyedConfig())
+
+		resp := postRaw(t, srv,
+			`{"model":"`+testModelID+`","messages":[{"role":"user","content":"hi"}]}`)
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("status = %d, want 200", resp.StatusCode)
+		}
+		if got := resp.Header.Get("X-Gropius-State"); got != "warm" {
+			t.Errorf("X-Gropius-State = %q on a keyed install, want warm", got)
+		}
+		if got := resp.Header.Get("X-Gropius-Queue-Time"); got != "0" {
+			t.Errorf("X-Gropius-Queue-Time = %q on a keyed install, want 0", got)
+		}
+	})
+
+	t.Run("and the refusal is gated the same way", func(t *testing.T) {
+		srv, pool, _ := newTestGateway(t, config.Default())
+		pool.acquireErr = &runtime.NoRoomError{Limit: 8 << 30, Waited: 300 * time.Second}
+
+		resp := postRaw(t, srv, `{"model":"`+testModelID+`","messages":[{"role":"user","content":"hi"}]}`)
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusServiceUnavailable {
+			t.Fatalf("status = %d, want 503", resp.StatusCode)
+		}
+		if got := resp.Header.Get("X-Gropius-Queue-Time"); got != "" {
+			t.Errorf("an unkeyed install told a network client it waited %q ms", got)
+		}
+	})
 }

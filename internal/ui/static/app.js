@@ -155,6 +155,30 @@ function renderSetup() {
 }
 
 // ── my models ────────────────────────────────────────────
+// graceWaitHint says when the two eviction-grace intervals contradict each
+// other. A maximum wait below the grace does not shorten the wait, it disables
+// the rule that stops one client starving another — a waiting request would be
+// refused before its own wait could override a model's protection — so the
+// server refuses the pair. Saying it beside the fields is better than answering
+// the save with an error the operator has to decode.
+//
+// Blank means the default, which is what the server reads it as, so the
+// comparison is on the resolved figures.
+function graceWaitHint(graceValue, maxWaitValue) {
+  const grace = parseInt(graceValue, 10) || 120;
+  const maxWait = parseInt(maxWaitValue, 10) || 300;
+  if (maxWait >= grace) return '';
+  return `A maximum wait of ${maxWait} s is shorter than the ${grace} s protection, `
+    + 'which would refuse a waiting request before its own wait could override that '
+    + 'protection. Raise the maximum to at least the protection.';
+}
+
+function updateGraceHint() {
+  const hint = graceWaitHint($('setGraceSec').value, $('setGraceWait').value);
+  $('graceHint').textContent = hint;
+  $('graceHint').hidden = hint === '';
+}
+
 // waitingLine says how many requests are queued for memory, and nothing at all
 // when none are. A waiting request holds no model, so it appears on no card;
 // without this the panel looks identical whether nothing is happening or four
@@ -475,6 +499,7 @@ function renderSettings() {
   // "the default", and the placeholder gives the figure that stands for.
   $('setGraceSec').value = c.eviction_grace_sec || '';
   $('setGraceWait').value = c.eviction_max_wait_sec || '';
+  updateGraceHint();
   $('setStats').checked = !!c.statistics;
   $('setStatsMonths').value = c.stats_months;
   // Typed in megabytes and stored in bytes, which is how every other size in
@@ -841,6 +866,8 @@ $('ovApply').addEventListener('click', () => {
 
 $('setStats').addEventListener('change', () => { settingsTouched = true; });
 $('setGrace').addEventListener('change', () => { settingsTouched = true; });
+$('setGraceSec').addEventListener('input', updateGraceHint);
+$('setGraceWait').addEventListener('input', updateGraceHint);
 $('setBudget').addEventListener('input', updateBudgetHint);
 
 // Clear is not part of saving the form: it throws away what was recorded, so

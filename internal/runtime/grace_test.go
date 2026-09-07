@@ -473,21 +473,31 @@ func TestSwitchingGraceOffReleasesEveryWaitingRequest(t *testing.T) {
 	}
 }
 
-// The wait is bounded. A model that is never free long enough leaves the
-// waiting request with the refusal it would have had at once without grace,
-// and the refusal says how long it waited.
+// The wait is bounded. A model that is never free leaves the waiting request
+// with the refusal it would have had at once without grace, and the refusal
+// says how long it waited.
+//
+// The model is held open rather than merely protected, because a maximum wait
+// shorter than the grace is no longer a thing that can be configured — it
+// would make the waiter-age clause unreachable — so the case that reaches the
+// maximum is a model that is never a candidate at all.
 func TestAWaitingRequestGivesUpAfterTheMaximumWait(t *testing.T) {
 	l := newFakeLauncher()
+	const bound = 250 * time.Millisecond
 	p := newTestPool(t, l, graceModels(), PoolOptions{
 		MaxResidentBytes: graceBudget,
-		EvictionGrace:    30 * time.Second,
-		MaxEvictionWait:  250 * time.Millisecond,
+		EvictionGrace:    bound,
+		MaxEvictionWait:  bound,
 	})
 
-	warm(t, p, "org/a")
+	_, hold, err := p.Acquire(context.Background(), "org/a")
+	if err != nil {
+		t.Fatalf("Acquire(org/a): %v", err)
+	}
+	defer hold()
 
 	start := time.Now()
-	_, _, err := p.Acquire(context.Background(), "org/b")
+	_, _, err = p.Acquire(context.Background(), "org/b")
 	took := time.Since(start)
 	if err == nil {
 		t.Fatal("the request was served although nothing ever fell idle")
@@ -495,11 +505,11 @@ func TestAWaitingRequestGivesUpAfterTheMaximumWait(t *testing.T) {
 	if !errors.Is(err, ErrBusy) {
 		t.Errorf("err = %v, want it to wrap ErrBusy", err)
 	}
-	if took < 200*time.Millisecond {
-		t.Errorf("the request gave up after %s, before the maximum wait", took)
+	if took < bound-50*time.Millisecond {
+		t.Errorf("the request gave up after %s, before the maximum wait of %s", took, bound)
 	}
 	if took > 5*time.Second {
-		t.Errorf("the request waited %s, past the maximum wait", took)
+		t.Errorf("the request waited %s, past the maximum wait of %s", took, bound)
 	}
 	if !strings.Contains(err.Error(), "waiting") {
 		t.Errorf("the refusal %q does not say that the request waited", err)
@@ -973,4 +983,128 @@ func (b *safeBuffer) String() string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.buf.String()
+}
+
+// queueVictimModels: one small model to keep warm, one big one for the waiter
+// at the head, and a second small one for the request that arrives with the
+// queue full. Against a 1000-byte budget the smalls are charged 240 and the
+// big one 960.
+func queueVictimModels() *fakeSource {
+	return &fakeSource{models: map[string]int64{
+		"org/warm": 200, "org/warm2": 200, "org/held": 200,
+		"org/big": 800, "org/small": 200, "org/mid": 400,
+	}}
+}
+
+// A full queue is a bound on how many requests may *wait*. It must not become
+// a bound on how many may be served: a request whose model is already in
+// memory, and one that fits in memory nobody is using, take nothing from the
+// queue and nothing from the request at its head — which is waiting precisely
+// because the free room is not enough for it.
+//
+// Refusing them is a denial of service that costs an attacker eight
+// connections, and it is not the fairness rule: the queue those requests
+// cannot join is not waiting for what they need.
+func TestAFullQueueDoesNotRefuseALoadThatNeedsNoEviction(t *testing.T) {
+	l := newFakeLauncher()
+	p := newTestPool(t, l, queueVictimModels(), PoolOptions{
+		MaxResidentBytes: 1000,
+		EvictionGrace:    30 * time.Second,
+		MaxEvictionWait:  30 * time.Second,
+		MaxLoadWaiters:   1,
+	})
+
+	// Resident, idle and protected, leaving 760 bytes free: room for the small
+	// model, not for the big one.
+	warm(t, p, "org/warm")
+
+	head, cancelHead := context.WithCancel(context.Background())
+	defer cancelHead()
+	go func() {
+		if _, rel, err := p.Acquire(head, "org/big"); err == nil {
+			rel()
+		}
+	}()
+	waitUntil(t, 2*time.Second, func() bool { return p.Waiting() == 1 },
+		"the big model's request never joined the queue")
+
+	t.Run("a model already in memory", func(t *testing.T) {
+		_, release, err := p.Acquire(context.Background(), "org/warm")
+		if err != nil {
+			t.Fatalf("a request for a resident model was refused with the queue full: %v", err)
+		}
+		release()
+	})
+
+	t.Run("a model that fits in memory nobody is using", func(t *testing.T) {
+		before := l.precheckCount()
+		_, release, err := p.Acquire(context.Background(), "org/small")
+		if err != nil {
+			t.Fatalf("a request needing no eviction was refused with the queue full: %v", err)
+		}
+		defer release()
+		if ids := residentIDs(p); !slices.Contains(ids, "org/small") {
+			t.Errorf("resident = %v, want the model that fitted without evicting anything", ids)
+		}
+		if got := l.precheckCount() - before; got != 1 {
+			t.Errorf("the load ran %d launch prechecks, want exactly the one it needed", got)
+		}
+	})
+}
+
+// The concession a full queue makes is exactly one: load into memory nothing
+// is using. It is not permission to take a victim — that would step over the
+// waiter at the head, which is the fairness rule the queue exists for — and
+// the refusal it does hand out must be cheap. Every arrival past the cap used
+// to run the launcher's preconditions, two filesystem calls in production,
+// under the pool's one lock, at whatever rate a client can send.
+func TestAQueueFullArrivalTakesNoVictimAndCostsNoSyscall(t *testing.T) {
+	l := newFakeLauncher()
+	const grace = 100 * time.Millisecond
+	p := newTestPool(t, l, queueVictimModels(), PoolOptions{
+		MaxResidentBytes: 1000,
+		EvictionGrace:    grace,
+		MaxEvictionWait:  20 * time.Second,
+		MaxLoadWaiters:   1,
+	})
+
+	// Two idle models past their grace — so they are eviction candidates — and
+	// one held open, which never is. 720 bytes of the budget are spoken for.
+	warm(t, p, "org/warm")
+	warm(t, p, "org/warm2")
+	_, hold, err := p.Acquire(context.Background(), "org/held")
+	if err != nil {
+		t.Fatalf("Acquire(org/held): %v", err)
+	}
+	defer hold()
+	time.Sleep(3 * grace)
+
+	// The big model needs more than both candidates together, so it parks and
+	// stays parked.
+	head, cancelHead := context.WithCancel(context.Background())
+	defer cancelHead()
+	go func() {
+		if _, rel, err := p.Acquire(head, "org/big"); err == nil {
+			rel()
+		}
+	}()
+	waitUntil(t, 2*time.Second, func() bool { return p.Waiting() == 1 },
+		"the big model's request never joined the queue")
+
+	// This one could be served by evicting a candidate, and must not be: the
+	// queue it cannot join is waiting for that memory.
+	before := l.precheckCount()
+	for range 20 {
+		if _, release, err := p.Acquire(context.Background(), "org/mid"); err == nil {
+			release()
+			t.Fatal("a request past the queue cap took a victim the waiter at the head was owed")
+		}
+	}
+	if ids := residentIDs(p); !slices.Contains(ids, "org/warm") || !slices.Contains(ids, "org/warm2") {
+		t.Errorf("resident = %v, want both candidates still in memory", ids)
+	}
+	if got := l.precheckCount() - before; got != 0 {
+		t.Errorf("20 refusals past the queue cap cost %d launch prechecks under the "+
+			"pool's lock, want none", got)
+	}
 }
