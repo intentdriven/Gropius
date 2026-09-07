@@ -164,6 +164,11 @@ type History struct {
 	// Hours is always the whole 24, in order, so the table has its rows
 	// whether or not anything happened in them.
 	Hours []HourCounts `json:"hours"`
+	// FirstTokenBucketEdgesMS are the histogram's own edges, sent with the
+	// counts so the table's column headings are drawn from the figures rather
+	// than from a copy of the edges kept in the panel that could drift from
+	// them.
+	FirstTokenBucketEdgesMS []int64 `json:"first_token_bucket_edges_ms"`
 
 	// Records is how many records the pass read, in the range or out of it.
 	Records int `json:"records"`
@@ -208,10 +213,11 @@ func Aggregate(src RecordSource, from, to time.Time, loc *time.Location) (Histor
 		loc = time.UTC
 	}
 	h := History{
-		Zone:       loc.String(),
-		Hours:      make([]HourCounts, 24),
-		MaxRecords: MaxHistoryRecords,
-		MaxDays:    MaxHistoryDays,
+		Zone:                    loc.String(),
+		Hours:                   make([]HourCounts, 24),
+		FirstTokenBucketEdgesMS: FirstTokenBucketEdgesMS,
+		MaxRecords:              MaxHistoryRecords,
+		MaxDays:                 MaxHistoryDays,
 	}
 	for i := range h.Hours {
 		h.Hours[i].Hour = i

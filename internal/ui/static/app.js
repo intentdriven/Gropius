@@ -940,6 +940,11 @@ function watchStats(visible) {
   if (statsTimer) { clearInterval(statsTimer); statsTimer = null; }
   if (!visible) return;
   refreshStats();
+  // The historical tables are fetched when the view opens and when the range
+  // changes, and never on this tick: they are a pass over months of records,
+  // and asking for one every two seconds would spend the Mac's afternoon
+  // redrawing a table nobody is watching change.
+  refreshHistory();
   statsTimer = setInterval(refreshStats, 2000);
 }
 
@@ -1090,6 +1095,161 @@ function generationRate(r) {
 // they are small enough to matter, seconds once they are not.
 function millis(ms) {
   return ms < 1000 ? `${ms} ms` : `${(ms / 1000).toFixed(1)} s`;
+}
+
+// ── the historical views ─────────────────────────────────
+// Three tables over a chosen range, read from the records kept on this Mac:
+// tokens per day by model with each model's share, how long requests took,
+// and when models were evicted and started. Everything shown is a sum, a
+// count or the id of a model this Mac holds — the browser is handed the
+// aggregate, never the records it was worked out from.
+
+// historyDays is the chosen range; 0 means everything the store still keeps,
+// which the server narrows to the widest range one view covers.
+let historyDays = 30;
+
+$('statsRange').addEventListener('change', () => {
+  historyDays = parseInt($('statsRange').value, 10) || 0;
+  refreshHistory();
+});
+
+async function refreshHistory() {
+  const to = Math.floor(Date.now() / 1000);
+  const from = historyDays > 0 ? to - historyDays * 86400 : 0;
+  try {
+    renderHistory(await api(`/api/stats/history?from=${from}&to=${to}`));
+  } catch {
+    // A panel that cannot reach its own server already says "disconnected" at
+    // the top; a second alert about it would be noise.
+  }
+}
+
+function renderHistory(h) {
+  if (!h) return;
+  const days = h.days || [];
+  $('statsHistoryBody').hidden = days.length === 0;
+  $('statsHistoryEmpty').hidden = days.length !== 0;
+  $('statsHistoryBounds').textContent = historyBoundsLine(h);
+
+  // The share is the model's over the whole range, so it is looked up per row
+  // rather than worked out from the day the row is on.
+  const share = {};
+  (h.models || []).forEach((m) => { share[m.model] = m.share; });
+  $('statsDaysRows').innerHTML = days.map((d) => dayRowHtml(d, share[d.model])).join('');
+
+  const latency = h.latency || [];
+  $('statsLatencyRows').innerHTML = latency.map(latencyRowHtml).join('');
+  const heads = bucketLabels(h.first_token_bucket_edges_ms || [])
+    .map((l) => `<th>${escapeHtml(l)}</th>`).join('');
+  $('statsSpreadHead').innerHTML = `<tr><th>Model</th>${heads}</tr>`;
+  $('statsSpreadRows').innerHTML = latency.map(spreadRowHtml).join('');
+
+  $('statsHoursRows').innerHTML = (h.hours || []).map(hourRowHtml).join('');
+}
+
+// historyBoundsLine says what the figures cover and what they were held to,
+// because a table that quietly stopped short is worse than one that says it
+// did: a reader would take a bounded month for a quiet one.
+function historyBoundsLine(h) {
+  const day = (secs) => new Date(secs * 1000).toLocaleDateString();
+  const parts = [`${day(h.from)} to ${day(h.to)}, by this Mac's own days and hours`];
+  if (h.narrowed) {
+    parts.push(`narrowed to the ${h.max_days} days one view covers`);
+  }
+  if (h.truncated) {
+    parts.push(`the newest ${h.max_records} records only, which is as far as one pass reads`);
+  }
+  if (h.skipped) {
+    parts.push(`${h.skipped} lines could not be read`);
+  }
+  parts.push('nothing recorded while the switch was off appears here');
+  return parts.join(' · ');
+}
+
+// dayRowHtml is one model's day: its own tokens, and its share of the whole
+// range beside them, which is the figure that answers "which model does the
+// work".
+function dayRowHtml(d, share) {
+  const total = (d.prompt_tokens || 0) + (d.completion_tokens || 0);
+  // A day whose own records the retention has dropped keeps only the coarse
+  // daily total, and a table that mixed the two without saying so would be
+  // read as exact throughout.
+  const coarse = d.summary_only ? ' <span class="pill">daily total only</span>' : '';
+  return `<tr>
+      <td>${escapeHtml(d.day)}</td>
+      <td>${escapeHtml(d.model || '—')}${coarse}</td>
+      <td class="figure">${d.requests}</td>
+      <td class="figure">${d.prompt_tokens}</td>
+      <td class="figure">${d.completion_tokens}</td>
+      <td class="figure">${total}</td>
+      <td class="figure">${sharePercent(share)}</td>
+    </tr>`;
+}
+
+// latencyRowHtml is one model's distribution: the middle request, the slow
+// one, and the slowest but one.
+function latencyRowHtml(l) {
+  const first = l.first_token_ms || {};
+  const rate = l.rate || {};
+  return `<tr>
+      <td>${escapeHtml(l.model || '—')}</td>
+      <td class="figure">${l.requests}</td>
+      <td class="figure">${msFigure(first.p50)}</td>
+      <td class="figure">${msFigure(first.p90)}</td>
+      <td class="figure">${msFigure(first.p99)}</td>
+      <td class="figure">${rateFigure(rate.p50)}</td>
+      <td class="figure">${rateFigure(rate.p90)}</td>
+      <td class="figure">${rateFigure(rate.p99)}</td>
+    </tr>`;
+}
+
+// spreadRowHtml is the histogram as a row of counts, which is what a table can
+// show of a distribution without drawing anything.
+function spreadRowHtml(l) {
+  const cells = (l.first_token_buckets || [])
+    .map((n) => `<td class="figure">${n}</td>`).join('');
+  return `<tr><td>${escapeHtml(l.model || '—')}</td>${cells}</tr>`;
+}
+
+// hourRowHtml is one hour of the Mac's own day.
+function hourRowHtml(h) {
+  const hour = String(h.hour).padStart(2, '0');
+  return `<tr><td>${hour}:00</td><td class="figure">${h.evictions}</td>` +
+    `<td class="figure">${h.loads}</td></tr>`;
+}
+
+// bucketLabels turns the histogram's edges into its column headings. The
+// edges come from the server with the counts, so the headings cannot drift
+// from the buckets they sit over.
+function bucketLabels(edges) {
+  if (!edges.length) return [];
+  const label = (ms) => (ms < 1000 ? `${ms} ms` : `${ms / 1000} s`);
+  const out = [`under ${label(edges[0])}`];
+  for (let i = 1; i < edges.length; i += 1) {
+    out.push(`${label(edges[i - 1])}–${label(edges[i])}`);
+  }
+  out.push(`${label(edges[edges.length - 1])} and over`);
+  return out;
+}
+
+// sharePercent is a fraction as the panel shows it. The server sends the
+// fraction rather than the percentage, so the rounding happens once, here.
+function sharePercent(share) {
+  if (!(share > 0)) return '—';
+  return `${(share * 100).toFixed(1)}%`;
+}
+
+// msFigure and rateFigure are a percentile as a reader reads one. A model with
+// nothing to distribute has no figure rather than a zero, which would read as
+// "instant".
+function msFigure(ms) {
+  if (!(ms > 0)) return '—';
+  return millis(Math.round(ms));
+}
+
+function rateFigure(rate) {
+  if (!(rate > 0)) return '—';
+  return `${rate.toFixed(1)} tok/s`;
 }
 
 // ── misc ─────────────────────────────────────────────────

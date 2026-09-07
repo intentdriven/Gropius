@@ -93,6 +93,59 @@
     </div>
     <p class="hint">Newest first. Times are this Mac's. No message text and no client
       address is recorded, so none can be shown.</p>
+
+    <h2>Over time</h2>
+    <p class="figures">
+      <label for="statsRange">Range</label>
+      <select id="statsRange">
+        <option value="7">Last 7 days</option>
+        <option value="30" selected>Last 30 days</option>
+        <option value="90">Last 90 days</option>
+        <option value="0">Everything kept</option>
+      </select>
+    </p>
+    <p class="hint" id="statsHistoryBounds"></p>
+    <div id="statsHistoryEmpty" class="empty" hidden>
+      <p>Nothing was recorded in this range.</p>
+    </div>
+    <div id="statsHistoryBody" hidden>
+      <h3>Tokens per day</h3>
+      <div class="scroll">
+        <table id="statsDaysTable">
+          <thead>
+            <tr><th>Day</th><th>Model</th><th>Requests</th><th>Tokens in</th>
+              <th>Tokens out</th><th>Total</th><th>Share of range</th></tr>
+          </thead>
+          <tbody id="statsDaysRows"></tbody>
+        </table>
+      </div>
+      <h3>How long requests took</h3>
+      <div class="scroll">
+        <table id="statsLatencyTable">
+          <thead>
+            <tr><th>Model</th><th>Answers timed</th><th>First token, median</th>
+              <th>90th</th><th>99th</th><th>Rate, median</th><th>90th</th><th>99th</th></tr>
+          </thead>
+          <tbody id="statsLatencyRows"></tbody>
+        </table>
+      </div>
+      <h3>Time to first token, spread</h3>
+      <div class="scroll">
+        <table id="statsSpreadTable">
+          <thead id="statsSpreadHead"></thead>
+          <tbody id="statsSpreadRows"></tbody>
+        </table>
+      </div>
+      <h3>Evictions and reloads by hour</h3>
+      <div class="scroll">
+        <table id="statsHoursTable">
+          <thead>
+            <tr><th>Hour</th><th>Evicted to make room</th><th>Model servers started</th></tr>
+          </thead>
+          <tbody id="statsHoursRows"></tbody>
+        </table>
+      </div>
+    </div>
   </div>
 </section>
 
