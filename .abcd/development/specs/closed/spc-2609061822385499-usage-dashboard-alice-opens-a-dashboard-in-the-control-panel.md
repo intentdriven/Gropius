@@ -174,3 +174,44 @@ correctness tests over a fixture.
 - The latency histogram's bucket edges, and whether the rate percentiles are
   weighted by completion tokens.
 - Whether the per-file aggregate cache is bounded, and by what.
+
+## As built
+
+Four departures from the Approach above, each recorded with its reason in the
+2026-09-07 line of `.abcd/work/DECISIONS.md`, because a reader reconciling this
+closed spec against the code would otherwise find them unexplained.
+
+1. **No per-file aggregate cache.** It does not compose with the latency view
+   the maintainer put in the same cut: exact percentiles cannot be merged from
+   per-file aggregates without holding every sample, so a cache that kept them
+   would hold the whole store in memory, and one that kept histograms instead
+   would give up the exact figures the criteria are written against. The
+   measurement makes it unnecessary — a store of 881,521 records in 209,723,172
+   bytes aggregates in 1.4 s on an Apple M4 Max.
+2. **The bound is a test as well as a benchmark**, at ten seconds and outside
+   the race build. See the intent's Audit Notes.
+3. **A free function over a reader, not a method on the store.**
+   `stats.Aggregate(src RecordSource, from, to time.Time, loc *time.Location)
+   (History, error)`, so a Mac that has never had recording on passes nil and
+   gets an empty view, and the arithmetic depends on the reading rather than on
+   the file store.
+4. **A new endpoint, `GET /api/stats/history`, rather than an extension of
+   `/api/stats`.** Extending it would have put a pass over months of records on
+   the panel's two-second tick.
+
+The open design points are settled: the default range is 30 days with a
+selector of 7, 30, 90 and everything kept; the first-token histogram's edges
+are 100, 250, 500, 1,000, 2,500, 5,000 and 10,000 ms; the rate percentiles are
+unweighted; there is no cache to bound. Two bounds are stated in the body and
+rendered by the panel: at most 366 days in one view, at most 1,000,000 records
+in one reading.
+
+The tests that satisfy each criterion, in order:
+`stats.TestTokensPerDayAndShareAreTheFixturesOwnSums` (the first two),
+`stats.TestTheLatencyDistributionIsTheFixturesOwn`,
+`stats.TestEvictionsAndReloadsAreCountedByTheLocalHour`,
+`gateway.TestTheHistoryEndpointSaysNothingIsRecordedWithTheSwitchOff` with
+`ui.TestTheHistoricalTablesLiveInTheStatisticsViewAndAreFetchedOnce`,
+`gateway.TestTheHistoryEndpointIsRefusedFromAnywhereButThisMac` with
+`gateway.TestTheHistoryBodyCarriesNoRecords`, and the four documentation tests
+in `internal/archtest/dashboard_docs_test.go`.

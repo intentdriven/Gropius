@@ -106,7 +106,31 @@ Silicon.
 
 ## Audit Notes
 
-_Empty. Populated by intent-auditor when intent moves to shipped/._
+<!-- abcd-review: OWED receipt=rcp-7d79f2254a0d -->
+Fidelity review OWED (receipt rcp-7d79f2254a0d). The audit compares this
+promise against what was delivered, so it runs after the branch merges; the
+receipt's request lives in the per-machine tier and does not travel, so whoever
+runs it re-emits the request with `abcd intent audit`.
+
+Every criterion above is met by a test named in the spec's "As built" section.
+What shipped diverges from the spec's Approach in four places, each with its
+reason, recorded there and in the 2026-09-07 line in `.abcd/work/DECISIONS.md`.
+None of the four is one of the criteria above.
+
+**Deferred, as this intent says.** The two-second bound is a benchmark checked
+by hand at release. It is also a test, which the spec deliberately declined:
+`TestAStoreAtTheSizeCapAggregatesWithinTheBound` asserts ten seconds — seven
+times the 1.4 s measured over a store at the default size cap — outside the race
+build. The reason the spec gave for declining one was that a two-second
+assertion on a shared build machine flakes; a bound with that much headroom
+catches an order-of-magnitude regression instead, and the benchmark still
+carries the figure.
+
+**Not shipped, as this intent says.** No correlation with a change of memory
+budget, which needs itd-2609061441261073; no per-session breakdown; no chart of
+any kind, and no charting library, so no dependency sign-off is asked for. The
+summary-only days itd-2609061602043757 will supply have their field and their
+label in the panel, and are absent until that intent ships.
 
 ## Grounds
 
