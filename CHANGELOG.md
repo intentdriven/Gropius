@@ -9,7 +9,7 @@ reviewed pull request; on merge, the release workflow tags that commit and
 publishes the build. Releases before this file existed are listed with their
 GitHub release notes.
 
-## [Unreleased]
+## Unreleased
 
 ### Added
 
@@ -245,7 +245,7 @@ GitHub release notes.
   the same figure on each model card, and
   [docs/models-list.md](docs/models-list.md) is a new reference page for every
   field the models list serves.
-- A public page at <https://intentdriven.sh/Gropius>, carrying the download of
+- A public page at https://intentdriven.sh/Gropius, carrying the download of
   the current release, the one-line installer and a link to the repository. Its
   title, tagline and pitch render from the project's canonical identity block
   and the rest of its copy from README.md and the getting-started guide, so the
@@ -309,7 +309,7 @@ GitHub release notes.
   before it downloads anything, and the bundles declare the same minimum, so
   macOS refuses to launch them there.
 
-## [0.1.2] - 2026-09-06
+## 0.1.2 - 2026-09-06
 
 ### Security
 
@@ -350,15 +350,11 @@ the key, closing a DNS-rebinding read of the model list.
 - Releases are cut from this file: the newest dated heading is tagged and
   published on merge.
 
-## [0.1.1] - 2026-07-29
+## 0.1.1 - 2026-07-29
 
-See the [v0.1.1 release](https://github.com/intentdriven/Gropius/releases/tag/v0.1.1).
+See the v0.1.1 release.
 
-## [0.1.0] - 2026-07-29
+## 0.1.0 - 2026-07-29
 
-See the [v0.1.0 release](https://github.com/intentdriven/Gropius/releases/tag/v0.1.0).
+See the v0.1.0 release.
 
-[Unreleased]: https://github.com/intentdriven/Gropius/compare/v0.1.2...HEAD
-[0.1.2]: https://github.com/intentdriven/Gropius/compare/v0.1.1...v0.1.2
-[0.1.1]: https://github.com/intentdriven/Gropius/compare/v0.1.0...v0.1.1
-[0.1.0]: https://github.com/intentdriven/Gropius/releases/tag/v0.1.0

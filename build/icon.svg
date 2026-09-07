@@ -1,5 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
-  <!-- Gropius: the four primary forms on a dark tile. macOS applies its own
+  <!-- The four primary forms on a dark tile. macOS applies its own
        corner mask, so the tile is full-bleed. Cells are 340px on a 2x2 grid
        with a 132px margin and a 80px gutter. -->
   <rect width="1024" height="1024" fill="#17181d"/>
