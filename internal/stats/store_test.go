@@ -18,7 +18,10 @@ func newTestStore(t *testing.T, opts StoreOptions) (*FileStore, string) {
 	t.Helper()
 	dir := filepath.Join(t.TempDir(), "stats")
 	if opts.Months == 0 {
-		opts.Months = 6
+		// A century, so that a test which is not about the horizon can stamp
+		// its records with whatever number reads clearly and still find them
+		// afterwards. A test about the horizon sets its own figure.
+		opts.Months = 1200
 	}
 	if opts.MaxBytes == 0 {
 		opts.MaxBytes = 1 << 20
@@ -87,7 +90,7 @@ func TestTheRecordsAreStillThereAfterARestart(t *testing.T) {
 	}
 
 	// A second process, opening the same directory.
-	again := NewStore(dir, StoreOptions{Months: 6, MaxBytes: 1 << 20, RotateBytes: 64 << 10})
+	again := NewStore(dir, StoreOptions{Months: 1200, MaxBytes: 1 << 20, RotateBytes: 64 << 10})
 	defer again.Close()
 	on(t, again)
 
@@ -410,7 +413,7 @@ func TestATornLastLineCostsOnlyThatLine(t *testing.T) {
 	}
 	f.Close()
 
-	again := NewStore(dir, StoreOptions{})
+	again := NewStore(dir, StoreOptions{Months: 1200})
 	defer again.Close()
 	on(t, again)
 	got := read(t, again, 0)
@@ -451,7 +454,7 @@ func TestUnknownFieldsAreIgnoredAndRubbishIsSkipped(t *testing.T) {
 	f.WriteString("\n")
 	f.Close()
 
-	again := NewStore(dir, StoreOptions{})
+	again := NewStore(dir, StoreOptions{Months: 1200})
 	defer again.Close()
 	on(t, again)
 	got := read(t, again, 0)
@@ -919,5 +922,100 @@ func TestClearWorksWithTheSwitchOff(t *testing.T) {
 	}
 	if s.Enabled() {
 		t.Error("Clear switched recording back on")
+	}
+}
+
+// The horizon is a promise about how far back the records reach, so it holds
+// on a Mac that never writes enough to rotate a file: at a few dozen requests
+// a day the first file takes years to fill, and "keep records for one month"
+// would otherwise mean "keep them until something else happens".
+func TestTheHorizonIsAppliedWithoutAnyRotation(t *testing.T) {
+	now := time.Date(2028, 3, 1, 12, 0, 0, 0, time.UTC)
+	clock := func() time.Time { return now }
+
+	t.Run("when recording starts", func(t *testing.T) {
+		s, dir := newTestStore(t, StoreOptions{Months: 1, Now: clock})
+		on(t, s)
+		if err := s.AppendRequest(Record{Model: "org/a", At: now.AddDate(-2, 0, 0).Unix(), Class: ClassOK}); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.SetEnabled(false); err != nil {
+			t.Fatal(err)
+		}
+		if len(names(t, dir)) == 0 {
+			t.Fatal("nothing was written, so this test proves nothing")
+		}
+		on(t, s)
+		if got := names(t, dir); len(got) != 0 {
+			t.Errorf("a record two years past a one-month horizon is still held: %v", got)
+		}
+		if got := s.Status().Oldest; got != 0 {
+			t.Errorf("the store still reports records from %s", time.Unix(got, 0).UTC().Format(time.DateOnly))
+		}
+	})
+
+	t.Run("while it is running", func(t *testing.T) {
+		s, dir := newTestStore(t, StoreOptions{Months: 1, Now: clock, PruneEvery: 5 * time.Millisecond})
+		on(t, s)
+		if err := s.AppendRequest(Record{Model: "org/a", At: now.AddDate(-2, 0, 0).Unix(), Class: ClassOK}); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.Flush(); err != nil {
+			t.Fatal(err)
+		}
+		if len(names(t, dir)) == 0 {
+			t.Fatal("nothing was written, so this test proves nothing")
+		}
+		deadline := time.Now().Add(5 * time.Second)
+		for {
+			if len(names(t, dir)) == 0 {
+				return
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("a record two years past a one-month horizon is still held: %v", names(t, dir))
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+	})
+}
+
+// Lowering either limit takes effect when it is saved, not at some later
+// moment the operator cannot see: the panel says the size limit always wins,
+// and a store that stays 195 MB over it for weeks says otherwise.
+func TestLoweringTheSizeCapPrunesAtOnce(t *testing.T) {
+	s, dir := newTestStore(t, StoreOptions{MaxBytes: 1 << 20, RotateBytes: 512})
+	on(t, s)
+	for i := range 200 {
+		if err := s.AppendRequest(Record{Model: "org/a", At: int64(1788696030 + i), Class: ClassOK}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	if len(names(t, dir)) < 4 {
+		t.Fatalf("the store holds %v, too few files for this test", names(t, dir))
+	}
+
+	const lowered = 2 << 10
+	s.SetRetention(6, lowered)
+	// A flush rides the same queue, so it answers only once the pruning the
+	// setter asked for has been done.
+	if err := s.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	var total int64
+	for _, name := range names(t, dir) {
+		fi, err := os.Stat(filepath.Join(dir, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		total += fi.Size()
+	}
+	if total > lowered {
+		t.Errorf("the store holds %d bytes, over the %d-byte limit it was just given", total, lowered)
+	}
+	if total == 0 {
+		t.Error("the whole store went; lowering the limit must keep what fits under it")
 	}
 }

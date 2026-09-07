@@ -82,9 +82,16 @@ cat ~/Library/Application\ Support/Gropius/stats/*.jsonl | jq -r 'select(.kind =
 
 Each line carries `v`, the version of the format it was written under, so a
 later Gropius can still read an older file. A reader should ignore a field it
-does not know and skip a line that does not parse: if the Mac loses power
-mid-write, the line being written at that moment is left half-finished, and
-that line is the whole of what is lost.
+does not know and skip a line that does not parse.
+
+Records are written a couple of seconds behind the requests they describe, and
+Gropius never asks the disk to make sure they are really on it — forcing a
+write on every request would be a slow disk in the path of every answer, to
+protect figures that are worth less than the answer is. So a crash or a power
+cut costs the last few seconds of records, and the line being written at that
+moment is left half-finished. Everything before that is there, and the
+half-finished line costs itself alone: the next start closes it off before
+appending, and any reader that skips a line it cannot parse is unaffected.
 
 There are four kinds of line, told apart by `kind`:
 
@@ -112,10 +119,16 @@ Two limits, both in **Settings → Request statistics**:
   wins: while the records take more room than this, the oldest file goes,
   whatever the months figure says.
 
+Both limits are applied as records arrive, at least once an hour while Gropius
+is running, when recording starts, and the moment you change either figure —
+so a limit you lower takes effect when you save it rather than at some later
+moment.
+
 Records are removed a whole file at a time, oldest first, so the store loses
 its past rather than its present; a file that was being written across the
-horizon is kept until its own newest record falls beyond it. A record is about
-150 bytes, so 200 MB is over four months of ten thousand requests a day.
+horizon is kept until its own newest record falls beyond it, and then it goes
+too. A record is about 150 bytes, so 200 MB is over four months of ten
+thousand requests a day.
 
 Beside the two limits, Settings shows the date the records reach back to, how
 much room they use, and — if the disk could not keep up with a burst — how

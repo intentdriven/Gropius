@@ -75,8 +75,11 @@ GitHub release notes.
   cover every request that server handled, under that account's opt-in. A
   request never waits on the disk: records are queued and written by one
   goroutine, and a burst the disk cannot keep up with is counted and shown
-  rather than allowed to slow an answer. A crash costs at most the few seconds
-  not yet written and the single line it was in the middle of. The format, the
+  rather than allowed to slow an answer. A crash or a power cut costs the last few
+  seconds of records and leaves the line being written half-finished; nothing
+  forces a write to the disk, because a disk in the path of every answer costs
+  more than the figures are worth, and the next start closes the half-finished
+  line off before appending to it. The format, the
   retention rule and the location are
   [an architecture decision](.abcd/development/decisions/adrs/2609061610107154-statistics-store-format-json-lines-size-rotated-per-account.md).
 - **Merge system messages**, a per-model setting in Settings that is off until

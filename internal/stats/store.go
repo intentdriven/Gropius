@@ -143,6 +143,11 @@ type StoreOptions struct {
 	// FlushEvery is how often the writer flushes what it has buffered, which
 	// is therefore how much a crash can cost.
 	FlushEvery time.Duration
+	// PruneEvery is how often retention is applied to a store that is simply
+	// sitting there. Both bounds are also applied when a file rotates, when
+	// recording starts and when either figure is changed; this is what makes
+	// the horizon hold on a Mac quiet enough that none of those happen.
+	PruneEvery time.Duration
 	// QueueSize is how many records may be waiting to be written before
 	// further ones are dropped rather than made to wait.
 	QueueSize int
@@ -163,6 +168,7 @@ type StoreOptions struct {
 const (
 	defaultRotateBytes = 5 << 20
 	defaultFlushEvery  = 2 * time.Second
+	defaultPruneEvery  = time.Hour
 	defaultQueueSize   = 1024
 	defaultMonths      = 6
 	defaultMaxBytes    = 200 << 20
@@ -253,6 +259,9 @@ func NewStore(dir string, opts StoreOptions) *FileStore {
 	if opts.FlushEvery <= 0 {
 		opts.FlushEvery = defaultFlushEvery
 	}
+	if opts.PruneEvery <= 0 {
+		opts.PruneEvery = defaultPruneEvery
+	}
 	if opts.QueueSize <= 0 {
 		opts.QueueSize = defaultQueueSize
 	}
@@ -266,9 +275,12 @@ func NewStore(dir string, opts StoreOptions) *FileStore {
 		months: opts.Months, maxBytes: opts.MaxBytes}
 }
 
-// SetRetention changes the two bounds. They are applied the next time the
-// store rotates or is opened, which is where retention is enforced; nothing is
-// deleted at the moment a figure is typed.
+// SetRetention changes the two bounds and applies them at once.
+//
+// At once, because a figure the operator has just lowered is a figure they
+// expect to see honoured: a store that stayed months over a limit until
+// something else happened to it would make the panel's own words false. The
+// pruning itself runs on the writer's goroutine, off the request path.
 func (s *FileStore) SetRetention(months int, maxBytes int64) {
 	if s == nil {
 		return
@@ -280,8 +292,23 @@ func (s *FileStore) SetRetention(months int, maxBytes int64) {
 		maxBytes = defaultMaxBytes
 	}
 	s.statusMu.Lock()
+	changed := months != s.months || maxBytes != s.maxBytes
 	s.months, s.maxBytes = months, maxBytes
 	s.statusMu.Unlock()
+	if !changed {
+		return
+	}
+	// Applied now, on the writer's own goroutine. A queue too full to carry
+	// the request is a busy store, which is a store about to rotate and prune
+	// anyway, and the periodic pass would catch it in any case.
+	s.mu.Lock()
+	if s.enabled {
+		select {
+		case s.ch <- storeEntry{prune: true}:
+		default:
+		}
+	}
+	s.mu.Unlock()
 }
 
 // limits is what the writer prunes against.
@@ -348,6 +375,10 @@ func (s *FileStore) setEnabled(on bool) error {
 	s.done = make(chan struct{})
 	go s.run(s.ch, s.quit, s.done, w)
 	s.mu.Unlock()
+	// What opening found, including whatever retention removed on the way in:
+	// the panel must not go on showing figures from before the store was
+	// pruned.
+	s.publish(w)
 	return nil
 }
 
@@ -589,6 +620,11 @@ func (s *FileStore) Clear() error {
 type storeEntry struct {
 	line []byte
 	ack  chan error
+	// prune asks for retention to be applied now, which is what a lowered
+	// limit means: the operator typed a smaller number and expects the store
+	// to be smaller, not to become smaller the next time something else
+	// happens.
+	prune bool
 }
 
 // run is the writer. It owns the open file for as long as the store is on, and
@@ -597,6 +633,8 @@ func (s *FileStore) run(ch chan storeEntry, quit chan struct{}, done chan struct
 	defer close(done)
 	t := time.NewTicker(w.opts.FlushEvery)
 	defer t.Stop()
+	p := time.NewTicker(w.opts.PruneEvery)
+	defer p.Stop()
 	for {
 		select {
 		case e := <-ch:
@@ -604,6 +642,15 @@ func (s *FileStore) run(ch chan storeEntry, quit chan struct{}, done chan struct
 		case <-t.C:
 			if err := w.flush(); err != nil {
 				s.log.Warn("the statistics store could not be flushed", "err", err)
+			}
+			s.publish(w)
+		case <-p.C:
+			// Retention on a store nothing is happening to. Without this the
+			// horizon would only ever be applied when a file rotated, so a Mac
+			// serving a few dozen requests a day would keep records for years
+			// against a figure that says months.
+			if err := s.retain(w); err != nil {
+				s.log.Warn("the statistics store could not apply its retention limits", "err", err)
 			}
 			s.publish(w)
 		case <-quit:
@@ -629,6 +676,13 @@ func (s *FileStore) run(ch chan storeEntry, quit chan struct{}, done chan struct
 // apply does one thing the writer was asked for: append a line, or answer a
 // flush.
 func (s *FileStore) apply(w *storeWriter, e storeEntry) {
+	if e.prune {
+		if err := s.retain(w); err != nil {
+			s.log.Warn("the statistics store could not apply its retention limits", "err", err)
+		}
+		s.publish(w)
+		return
+	}
 	if e.ack != nil {
 		err := w.flush()
 		s.publish(w)
@@ -645,6 +699,15 @@ func (s *FileStore) apply(w *storeWriter, e storeEntry) {
 		s.log.Warn("a request statistics record could not be written", "err", err)
 	}
 	s.publish(w)
+}
+
+// retain applies both bounds to a store that is sitting still, flushing first
+// so that what is on disk is what the horizon is judged against.
+func (s *FileStore) retain(w *storeWriter) error {
+	if err := w.flush(); err != nil {
+		return err
+	}
+	return w.prune()
 }
 
 // publish copies the writer's own view of the store into the figures the panel
@@ -674,7 +737,13 @@ type storeWriter struct {
 	// the writer is running.
 	limits func() (int, int64)
 
-	files  []storeFile // oldest first, including the open one
+	files []storeFile // oldest first, including the open one
+	// day and n are the last file name used, so a counter never goes backwards
+	// within a run: retention can empty the directory, and a new file taking a
+	// removed file's name would make two different files share one name in a
+	// reader's notes.
+	day    int
+	n      int
 	f      *os.File
 	buf    *bufio.Writer
 	cur    int64 // bytes in the open file, buffered ones included
@@ -856,9 +925,12 @@ func (w *storeWriter) open(fresh bool) error {
 				next = f.n + 1
 			}
 		}
+		if w.day == dayNum && w.n >= next {
+			next = w.n + 1
+		}
 		name = fmt.Sprintf("stats-%s-%03d.jsonl", day, next)
 		w.cur = 0
-		w.files = append(w.files, storeFile{name: name, day: dayNum, n: next})
+		w.day, w.n = dayNum, next
 	}
 	f, err := w.root.OpenFile(name, fileFlags, 0o600)
 	if err != nil {
@@ -872,6 +944,11 @@ func (w *storeWriter) open(fresh bool) error {
 	if !info.Mode().IsRegular() {
 		f.Close()
 		return fmt.Errorf("%s is not a regular file", name)
+	}
+	if len(w.files) == 0 || w.files[len(w.files)-1].name != name {
+		// Recorded only once the file is really open: a failed open must not
+		// leave a name in the list for the panel to count.
+		w.files = append(w.files, storeFile{name: name, day: dayNum, n: numOf(name)})
 	}
 	w.f, w.buf = f, bufio.NewWriterSize(f, 32<<10)
 	// A file that does not end in a newline was torn by a crash part-way
@@ -887,6 +964,16 @@ func (w *storeWriter) open(fresh bool) error {
 		}
 	}
 	return nil
+}
+
+// numOf reads a store file's counter back out of its name.
+func numOf(name string) int {
+	m := storeFilePattern.FindStringSubmatch(name)
+	if m == nil {
+		return 0
+	}
+	n, _ := strconv.Atoi(m[2])
+	return n
 }
 
 // endsInNewline reports whether a file's last byte is a newline.
@@ -987,16 +1074,25 @@ func (w *storeWriter) prune() error {
 	}
 
 	cutoff := w.now().UTC().AddDate(0, -months, 0).Unix()
-	for len(w.files) > 1 {
+	for len(w.files) > 0 {
 		newest := w.newestRecordIn(w.files[0].name)
 		if newest == 0 || newest >= cutoff {
 			break
+		}
+		// The file being written can fall off the horizon too, on a Mac quiet
+		// enough that it never fills: close it first, and the next record
+		// starts a new one.
+		if len(w.files) == 1 && w.f != nil {
+			if err := w.closeFile(); err != nil {
+				return err
+			}
 		}
 		if err := w.root.Remove(w.files[0].name); err != nil && !errors.Is(err, fs.ErrNotExist) {
 			return err
 		}
 		w.files = w.files[1:]
 	}
+	w.oldest = w.oldestRecord()
 	return nil
 }
 
