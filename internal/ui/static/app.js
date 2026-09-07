@@ -568,7 +568,12 @@ function pinnedCharge(models, pinned) {
 function budgetBytes(text) {
   const gb = parseFloat(text);
   if (!isFinite(gb) || gb <= 0) return 0;
-  return Math.round(gb * 1024 * 1024 * 1024);
+  const bytes = Math.round(gb * 1024 * 1024 * 1024);
+  // A figure no byte count can hold is not a budget. Left as Infinity it
+  // serialises as null, which the server reads as "the field was not sent" and
+  // answers by keeping what it had — a save that silently does nothing.
+  if (!isFinite(bytes) || bytes > Number.MAX_SAFE_INTEGER) return 0;
+  return bytes;
 }
 
 // budgetFieldValue is what the field shows: blank while the budget is the
@@ -577,10 +582,16 @@ function budgetBytes(text) {
 function budgetFieldValue(machine) {
   const m = machine || {};
   if (!m.budget || m.budget_is_default) return '';
-  // Enough decimals that posting back what is shown returns the same figure:
-  // a budget set through the API is not always a round number of gigabytes,
-  // and rounding it here would rewrite it on the next unrelated save.
-  return String(Math.round((m.budget / (1024 * 1024 * 1024)) * 1e6) / 1e6);
+  // Unrounded, so that what is shown posts back as the figure it came from, to
+  // the byte: a budget set through the API is not always a round number of
+  // gigabytes, and rounding it here would rewrite it on the next unrelated
+  // save. Dividing by a power of two is exact, and JavaScript renders a number
+  // as the shortest text that reads back as the same number, so the round trip
+  // through budgetBytes is exact for any byte count a budget can hold. The
+  // field is step="any" for the same reason: a stepped field refuses the whole
+  // form for a value it does not land on, and the form holds every other
+  // setting there is.
+  return String(m.budget / (1024 * 1024 * 1024));
 }
 
 // budgetHint is the line beside the field: what the budget is, what share of
@@ -595,7 +606,7 @@ function budgetHint(machine) {
   const resident = m.resident_bytes || 0;
   const share = m.total_ram
     ? ` (${Math.round((budget * 100) / m.total_ram)}% of this Mac's ${size(m.total_ram)})`
-    : '';
+    : ', because this Mac\'s memory could not be read';
   const parts = [`${m.budget_is_default ? 'The default budget is' : 'The budget is'} ${size(budget)}${share}.`];
   if (m.over_budget) {
     parts.push(`The models in memory use ${size(resident)}, over the budget: a lower budget applies to the next load, and nothing is unloaded on your behalf.`);

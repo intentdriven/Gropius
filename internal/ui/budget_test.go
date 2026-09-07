@@ -1,9 +1,23 @@
 package ui
 
 import (
+	"fmt"
+	"regexp"
 	"strings"
 	"testing"
 )
+
+// inputWithID returns the whole <input> tag with the given id, so a test can
+// assert on the attributes the browser enforces before any script runs.
+func inputWithID(t *testing.T, page, id string) string {
+	t.Helper()
+	re := regexp.MustCompile(`<input[^>]*id="` + regexp.QuoteMeta(id) + `"[^>]*>`)
+	m := re.FindString(page)
+	if m == "" {
+		t.Fatalf("no input with id %q in the panel", id)
+	}
+	return m
+}
 
 const gb = float64(1 << 30)
 
@@ -162,5 +176,66 @@ func TestSettingsFormHasTheBudgetControl(t *testing.T) {
 	}
 	if !strings.Contains(string(script), "max_resident_bytes") {
 		t.Error("app.js never posts max_resident_bytes, so the budget cannot be saved")
+	}
+}
+
+// The field has to accept every figure the panel itself writes into it. A
+// stored budget is not always a round number of gigabytes — another client, a
+// hand edit, a file from another Mac — and a step the value does not land on
+// makes the browser refuse the whole form: the submit listener never runs, so
+// the API key that closes an open endpoint cannot be saved either.
+func TestTheBudgetFieldAcceptsAnyFigureThePanelWritesIntoIt(t *testing.T) {
+	page, err := assets.ReadFile("static/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	field := inputWithID(t, string(page), "setBudget")
+	if !strings.Contains(field, `step="any"`) {
+		t.Errorf("the budget field is %q, want step=\"any\" — a stepped number field refuses the whole form for a value it does not land on", field)
+	}
+}
+
+// What the field shows must post back as the figure it came from, to the byte.
+// Anything else rewrites a budget the operator did not touch on the next save.
+func TestTheBudgetFieldRoundTripsAnyStoredFigure(t *testing.T) {
+	for _, want := range []int64{
+		1,
+		537,
+		10_000_000_000,
+		10_000_000_001,
+		103079215104,         // 96 GB
+		137438953471,         // one byte under 128 GB
+		9007199254740992 / 2, // large, still exact in a double
+	} {
+		expr := fmt.Sprintf(`budgetBytes(budgetFieldValue({"budget":%d,"budget_is_default":false}))`, want)
+		if got := evalPanelNumber(t, expr, "budgetBytes", "budgetFieldValue"); int64(got) != want {
+			t.Errorf("a stored budget of %d came back as %.0f", want, got)
+		}
+	}
+}
+
+// A figure too large to be a byte count must not reach the save as null, which
+// the server reads as "field omitted" and answers by keeping what it had —
+// while the panel showed something else entirely.
+func TestAnImpossibleBudgetFigureIsNotPosted(t *testing.T) {
+	// Asserted on the JSON text, not a decoded number: JSON.stringify turns
+	// Infinity into null, which decodes as zero and would pass a test that
+	// only looked at the value — while the save posts null and the server
+	// keeps whatever it had.
+	for _, expr := range []string{`budgetBytes("1e300")`, `budgetBytes("1e999")`} {
+		if got := evalPanelExpr(t, expr, "budgetBytes"); got != "0" {
+			t.Errorf("%s = %s, want 0 — the default, not a figure no byte count can hold", expr, got)
+		}
+	}
+}
+
+// A Mac whose memory could not be read is on a conservative default, and the
+// figure looks like a bad guess unless the panel says why.
+func TestTheBudgetLineSaysWhyAnUnmeasuredMacIsOnItsDefault(t *testing.T) {
+	line := evalPanel(t, `budgetHint({"total_ram":0,"budget":8589934592,"default_budget":8589934592,`+
+		`"budget_is_default":true,"warn_above":0,"resident_bytes":0,"over_budget":false})`,
+		"bytes", "size", "budgetHint")
+	if !strings.Contains(line, "could not be read") {
+		t.Errorf("budgetHint = %q, want it to say this Mac's memory could not be read", line)
 	}
 }
