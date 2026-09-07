@@ -23,9 +23,10 @@ before turning it on if other people log into this Mac.
 It applies to the next request; there is nothing to restart. Open the
 **Statistics** tab to see the figures.
 
-Clear the box and save to switch it off again. That stops recording *and*
-empties what is held, so the Statistics tab goes back to showing nothing and
-the Mac is in the state it was in before you ever turned it on.
+Clear the box and save to switch it off again. That stops recording and
+empties the Statistics tab, so nothing worked out from a request is shown any
+more. The records already written to this Mac stay where they are until you
+remove them; [What removes the records](#what-removes-the-records) says how.
 
 ## What is recorded
 
@@ -57,10 +58,89 @@ load took, how many times it was evicted to make room for another, and the
 last request's own timings. It also keeps a per-minute total of requests and
 tokens for the last day.
 
-Everything held is in memory, and a restart empties it. The Statistics tab
-shows the most recent thousand requests one by one, and the totals for the
-last hour and the last day, which reach back further than a thousand rows do
-on a busy Mac.
+The Statistics tab shows the most recent thousand requests one by one, and the
+totals for the last hour and the last day, which reach back further than a
+thousand rows do on a busy Mac. Those live figures are held in memory and a
+restart empties them; the records themselves are kept on disk and outlive the
+process, which is what the rest of this page is about.
+
+## Where the records are kept
+
+In a `stats` folder inside your own Gropius data folder — the same folder the
+models and the settings live in, `~/Library/Application Support/Gropius`,
+unless you moved it. Settings shows the exact location beside the two limits.
+The folder is yours alone (mode `0700`) and so is every file in it (`0600`),
+and Gropius refuses to write records into a folder any other account on this
+Mac could write to. If it has to refuse, it says so in its log and keeps the
+figures in memory instead.
+
+Files are named `stats-YYYYMMDD-NNN.jsonl`, dated in UTC, and hold one JSON
+object per line — the format every tool already reads:
+
+```sh
+cat ~/Library/Application\ Support/Gropius/stats/*.jsonl | jq -r 'select(.kind == "request") | [.model, .class, .completion_tokens] | @tsv'
+```
+
+Each line carries `v`, the version of the format it was written under, so a
+later Gropius can still read an older file. A reader should ignore a field it
+does not know and skip a line that does not parse: if the Mac loses power
+mid-write, the line being written at that moment is left half-finished, and
+that line is the whole of what is lost.
+
+There are four kinds of line, told apart by `kind`:
+
+- `request` — one request, carrying the fields listed above.
+- `load` — a model server became ready, or failed to. `duration_ms` is how
+  long it took and `failed` says which of the two happened.
+- `removed` — a model server left memory, with `reason`: `evicted` to make
+  room for another, `idle` after a spell with no requests, `unloaded` because
+  you asked, `crashed`, `shutdown`, `abandoned` or `load_failed`. Only
+  `evicted` is an eviction; counting the others as one would make the figures
+  disagree with what happened.
+- `settings` — written each time recording starts and whenever one of these
+  changes, so you can tell a change in the figures from a change in the
+  settings that produced them: `budget_bytes`, `decode_concurrency`,
+  `idle_timeout_sec`, `stats_months` and `stats_max_bytes`. These are the
+  values in force, not the ones saved: the first three take a restart.
+
+## How much is kept
+
+Two limits, both in **Settings → Request statistics**:
+
+- **Keep records for (months)** — six by default. A file whose newest record
+  is older than this is removed even when there is room for it.
+- **Never use more than (MB)** — 200 by default. This is the limit that always
+  wins: while the records take more room than this, the oldest file goes,
+  whatever the months figure says.
+
+Records are removed a whole file at a time, oldest first, so the store loses
+its past rather than its present; a file that was being written across the
+horizon is kept until its own newest record falls beyond it. A record is about
+150 bytes, so 200 MB is over four months of ten thousand requests a day.
+
+Beside the two limits, Settings shows the date the records reach back to, how
+much room they use, and — if the disk could not keep up with a burst — how
+many records were dropped rather than made to hold up an answer.
+
+## What removes the records
+
+- **Clear records**, the button under the two limits, removes every record
+  file and empties the Statistics tab. It leaves recording on.
+- **Deleting the Gropius data folder** removes them with everything else, as
+  [Uninstalling](getting-started.md#uninstalling) describes.
+
+Switching recording off does neither: it stops new records and leaves the ones
+already written where they are.
+
+## On a Mac several people share
+
+With the shared model cache, whoever launches Gropius first runs the server
+and everyone else's menu-bar app points at it, so one process serves every
+account. The records are that account's: they are kept in the serving
+account's own folder, under that account's opt-in, and they cover every
+request the server handled — including requests from other accounts on this
+Mac. The records still say nothing about who sent a request, because no client
+address is recorded.
 
 ## Who can see it
 

@@ -54,7 +54,8 @@ Cross-machine LAN use works; TLS and notarized distribution are not yet included
   sets its own value still wins.
 - **Request statistics, opt-in** — off until you turn it on: a content-free
   record of each request's model, token counts and timings, shown per model in
-  the control panel and kept on this Mac
+  the control panel and kept on this Mac. The records are plain text, one line
+  of JSON each, kept for as many months and as many megabytes as you say
   ([how to switch it on](docs/request-statistics.md)).
 - **Network-shared** — bind the LAN, discoverable over Bonjour, optional API key.
 - **Multi-account** — other user accounts on the same Mac share one copy of each

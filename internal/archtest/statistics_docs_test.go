@@ -50,8 +50,16 @@ func TestTheStatisticsPageNamesEveryFieldThatIsRecorded(t *testing.T) {
 	}
 }
 
+// recorded reports whether a name is a field that is written down somewhere:
+// on a row of the live view, or on a line of the store. The page describes
+// both, so both are the page's to name.
 func recorded(field string) bool {
 	for _, f := range stats.RecordFields() {
+		if f == field {
+			return true
+		}
+	}
+	for _, f := range stats.StoreFields() {
 		if f == field {
 			return true
 		}
@@ -59,13 +67,48 @@ func recorded(field string) bool {
 	return false
 }
 
+// The same rule for the durable store: every field a line can carry is
+// described on the page, and no field the page describes has gone. A store's
+// files outlive the build that wrote them and are read with other people's
+// tools, so an undocumented field is worse here than anywhere else.
+func TestTheStatisticsPageNamesEveryFieldTheStoreWrites(t *testing.T) {
+	page := readDoc(t, "request-statistics.md")
+	for _, field := range stats.StoreFields() {
+		if !strings.Contains(page, "`"+field+"`") {
+			t.Errorf("the page does not name %q, which a line of the store can carry", field)
+		}
+	}
+	for _, reason := range stats.RemovalReasons() {
+		if !strings.Contains(page, "`"+reason+"`") {
+			t.Errorf("the page does not name %q, which a removal line can carry as its reason", reason)
+		}
+	}
+	// And the file naming and the two limits, which are the rest of what
+	// someone pointing their own tools at the files has to know.
+	for _, phrase := range []string{
+		"stats-YYYYMMDD-NNN.jsonl",
+		"one JSON object per line",
+		"the oldest file goes",
+	} {
+		if !containsAll(page, phrase) {
+			t.Errorf("the page does not say %q", phrase)
+		}
+	}
+}
+
 // knownOther are the backticked names on the page that are not record fields:
-// the settings file's own key for the switch, and the request field the
-// gateway sets on a streamed request.
+// the settings file's own key for the switch, the request field the gateway
+// sets on a streamed request, and the reasons a model server can leave memory,
+// which are values of a field rather than fields.
 func knownOther(name string) bool {
 	switch name {
 	case "stream_options", "include_usage", "config_json":
 		return true
+	}
+	for _, reason := range stats.RemovalReasons() {
+		if reason == name {
+			return true
+		}
 	}
 	return false
 }

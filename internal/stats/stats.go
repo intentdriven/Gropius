@@ -85,6 +85,16 @@ const (
 	ReasonShutdown   = "shutdown"
 )
 
+// RemovalReasons lists every reason an entry leaves the pool, so the
+// documentation's list of them is held to this one rather than to someone's
+// memory: a reason added here without a word about it fails the build.
+func RemovalReasons() []string {
+	return []string{
+		ReasonEvicted, ReasonIdle, ReasonUnloaded, ReasonAbandoned,
+		ReasonLoadFailed, ReasonCrashed, ReasonShutdown,
+	}
+}
+
 // Record is one request, as counts and timings.
 //
 // Every field is a number, a fixed class name, or the repo id of a model this
