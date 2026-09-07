@@ -111,7 +111,8 @@ on Apple Silicon.
 
 ## Audit Notes
 
-_Empty. Populated by intent-auditor when intent moves to shipped/._
+<!-- abcd-review: OWED receipt=rcp-799061841f58 -->
+Fidelity review OWED (receipt rcp-799061841f58).
 
 ## Grounds
 
