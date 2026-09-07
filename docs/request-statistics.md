@@ -87,7 +87,16 @@ an answer, if the disk could not keep up with a burst; and, if Gropius could not
 open the store at all, that the figures are being kept in memory and nothing is
 on disk.
 
-The exact rules — when the limits are applied, and what is removed — are on the
+What is dropped is counted before it goes. For every model and every day among
+the records being removed, Gropius keeps one short line: how many requests that
+model served, how many tokens went in and out, how long they took in total, how
+they ended, and how often the model was loaded or left memory. It holds no
+figure for any single request, it takes a thousandth of the room the records
+did, and it stays long after them — so a year on you can still see which models
+last spring's work ran on, even though no request from that spring survives.
+
+The exact rules — when the limits are applied, what is removed, and what the
+summary holds — are on the
 [reference page](statistics-store-reference.md#retention).
 
 ## What removes the records

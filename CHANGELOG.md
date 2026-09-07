@@ -91,10 +91,12 @@ GitHub release notes.
   JSON Lines, one object per line, rotated into dated files, every line
   stamped with the version of the format it was written under so a later
   Gropius still reads an older file. Any tool reads it — `jq`, a spreadsheet,
-  a script. There are four kinds of line: a request, a model server becoming
+  a script. There are four kinds of record line: a request, a model server
+  becoming
   ready, a model server leaving memory with the reason it left, and a record
   of the settings in force so a change in the figures can be told from a
-  change in the settings that produced them. Settings gains two limits — how
+  change in the settings that produced them; two further kinds belong to the
+  summary described below. Settings gains two limits — how
   many months to keep and how many megabytes the records may use, the size
   limit always winning — and shows beside them the date the records reach back
   to and the room they use. **Clear records** removes them; switching
@@ -145,6 +147,24 @@ GitHub release notes.
   above the tables says when the records do not reach back as far as the range
   does.
   See [Understanding the historical views](docs/statistics-explained.md).
+- **A summary of what the store drops.** Before either retention limit removes
+  a file of records, Gropius folds that file into a coarse summary and keeps
+  it: one line per model per day, holding how many requests that model served,
+  how many tokens went in and out, the day's totals for each of the four
+  timings, how the requests ended, and how often the model was loaded or left
+  memory. It carries no figure for any single request and nothing the detailed
+  records did not, it lives beside them in the same folder under the same
+  switch and the same owner-only permissions, and it takes about a thousandth
+  of the room the detail did — so the long view the records were turned on for
+  survives the records themselves. A day already summarised is extended rather
+  than written again. The summary is the one thing Gropius forces to the disk,
+  and it does so before the records it counts are removed, so a power cut in
+  the middle of a drop can leave the records and their summary both and never
+  neither. The months limit does not remove summaries; what bounds them is a
+  twentieth of the size limit, with the oldest days going first, which at the
+  200 MB default is decades of them. **Clear records** removes them with
+  everything else. See
+  [Retention](docs/statistics-store-reference.md#retention).
 - **Merge system messages**, a per-model setting in Settings that is off until
   it is switched on. Some models refuse a conversation whose instructions are
   not all at the top, which breaks any assistant that repeats its instructions
