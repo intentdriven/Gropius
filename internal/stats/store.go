@@ -3,6 +3,7 @@ package stats
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -1305,70 +1306,164 @@ func (s *FileStore) Files() ([]string, error) {
 	return out, nil
 }
 
-// Latest reads the store newest record first, calling fn with each until it
-// returns false or limit records have been given; a limit of zero or less
-// means every record.
+// ReadOptions bounds one read through the store.
+//
+// The bounds are on the reading, not on what the reading yields, because those
+// are different quantities the moment a line does not parse: a store written by
+// a newer Gropius, or one a crash tore, hands back nothing while costing every
+// byte of itself. A caller that bounded only the records it accepted would have
+// bounded nothing at all.
+type ReadOptions struct {
+	// Limit is the most records handed to fn. Zero or less means every record
+	// the other bounds allow.
+	Limit int
+	// MaxLines is the most lines read, whether or not they parse. Zero or less
+	// means every line the byte budget allows.
+	MaxLines int
+	// MaxBytes is the most file content read. Zero or less means the store's
+	// own ceiling, which is comfortably past the largest store Settings can be
+	// asked for.
+	MaxBytes int64
+}
+
+// ReadStats is what one read through the store cost and what it met.
+//
+// It is returned rather than published on the store, because two readings at
+// once would otherwise each report the other's figures, and a reader shown "so
+// many lines could not be read" deserves the number from the reading in front
+// of them.
+type ReadStats struct {
+	// Lines is how many lines were read, parsed or not; Records how many were
+	// handed to fn; Skipped how many could not be used.
+	Lines   int64
+	Records int
+	Skipped int64
+	// Bytes is how much file content was read.
+	Bytes int64
+	// Bounded reports a read that a bound stopped rather than one that reached
+	// the end of the store or was stopped by fn; BoundedBy names which of them
+	// did it — "records", "lines" or "bytes" — so a caller reporting the stop
+	// to a reader can name the figure that actually applied rather than the
+	// one it happens to know.
+	Bounded   bool
+	BoundedBy string
+}
+
+// Read walks the store newest record first, calling fn with each record until
+// it returns false or a bound is reached.
+//
+// It is the store's read primitive: every bounded, cancellable reading goes
+// through here, and a new reader — the per-model per-day summaries of
+// itd-2609061602043757 among them — should take this rather than Latest.
 //
 // Newest first and bounded, because that is how every reader of this store
 // wants it: the panel wants the last hour, and the dashboard
-// (itd-2609061521159233) walks back until it has the range it is drawing. A
-// line that does not parse is skipped, so a file torn by a crash costs the
-// line it was torn in and nothing else.
-func (s *FileStore) Latest(limit int, fn func(Line) bool) error {
+// (itd-2609061521159233) walks the range it is drawing. A line that does not
+// parse is skipped, so a file torn by a crash costs the line it was torn in and
+// nothing else — and is counted, both in what is returned and in the store's
+// own status, so a great many of them cannot pass for a quiet store.
+//
+// The context is checked as lines are read rather than as records are accepted,
+// for the same reason the bounds are: a caller cannot be left waiting on a
+// store this build cannot read a single line of.
+func (s *FileStore) Read(ctx context.Context, opts ReadOptions, fn func(Line) bool) (ReadStats, error) {
+	var got ReadStats
 	if s == nil {
-		return nil
+		return got, nil
 	}
 	if err := s.Flush(); err != nil {
-		return err
+		return got, err
 	}
 	root, err := openStoreRoot(s.dir)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			return nil
+			return got, nil
 		}
-		return err
+		return got, err
 	}
 	defer root.Close()
 	files, err := listStoreFiles(root)
 	if err != nil {
-		return err
+		return got, err
 	}
-	given, skipped := 0, int64(0)
-	budget := int64(maxLatestBytes)
+	budget := opts.MaxBytes
+	if budget <= 0 {
+		budget = maxLatestBytes
+	}
+	// seen counts everything the split produced, lines and blanks alike, and
+	// is only ever used to decide when to ask whether the caller is still
+	// there.
+	var seen int64
 	defer func() {
 		s.statusMu.Lock()
-		s.status.Skipped = skipped
+		s.status.Skipped = got.Skipped
 		s.statusMu.Unlock()
 	}()
 	for i := len(files) - 1; i >= 0; i-- {
-		if budget <= 0 {
+		if got.Bytes >= budget {
+			got.Bounded, got.BoundedBy = true, "bytes"
 			break
 		}
 		lines, err := readRawLines(root, files[i].name)
 		if err != nil {
-			return err
+			return got, err
 		}
-		budget -= files[i].size
+		got.Bytes += files[i].size
 		// Backwards, parsing one line at a time: a bound of ten must cost ten
 		// records decoded, not a whole file of them thrown away.
 		for j := len(lines) - 1; j >= 0; j-- {
-			l, ok := parseLine(lines[j])
-			if !ok {
-				if len(bytes.TrimSpace(lines[j])) > 0 {
-					skipped++
+			// Asked now and then rather than per line, and counted separately
+			// from the lines: the answer is a channel read, and a caller who
+			// has gone away must be let go of even over a file that is nothing
+			// but newlines, which yields no line to count.
+			seen++
+			if seen%4096 == 0 && ctx != nil {
+				if err := ctx.Err(); err != nil {
+					return got, err
 				}
+			}
+			// A file ends in a newline, so splitting it leaves a last element
+			// that is not a line at all. It is neither counted nor bounded
+			// against, or a bound of four would cost a caller one of its four.
+			raw := bytes.TrimSpace(lines[j])
+			if len(raw) == 0 {
+				continue
+			}
+			if opts.MaxLines > 0 && got.Lines >= int64(opts.MaxLines) {
+				got.Bounded, got.BoundedBy = true, "lines"
+				return got, nil
+			}
+			got.Lines++
+			l, ok := parseLine(raw)
+			if !ok {
+				got.Skipped++
 				continue
 			}
 			if !fn(l) {
-				return nil
+				return got, nil
 			}
-			given++
-			if limit > 0 && given >= limit {
-				return nil
+			got.Records++
+			if opts.Limit > 0 && got.Records >= opts.Limit {
+				got.Bounded, got.BoundedBy = true, "records"
+				return got, nil
 			}
 		}
 	}
-	return nil
+	return got, nil
+}
+
+// Latest is a thin wrapper over Read for a caller that wants records and has
+// nothing to say about the cost: every record, newest first, up to limit.
+//
+// It is deliberately the weaker of the two. It passes no context and no line
+// bound, so a store this build cannot read a line of costs it every byte and no
+// caller can stop it — which is exactly the shape the dashboard's own read had
+// before it was fixed. It suits a test and a one-off, and it does not suit
+// anything on a request path: a new reader takes Read, with a line bound and
+// the caller's context.
+func (s *FileStore) Latest(limit int, fn func(Line) bool) error {
+	_, err := s.Read(context.Background(), ReadOptions{Limit: limit}, fn)
+	return err
 }
 
 // readRawLines reads one whole file and splits it into lines, oldest first,

@@ -174,3 +174,68 @@ correctness tests over a fixture.
 - The latency histogram's bucket edges, and whether the rate percentiles are
   weighted by completion tokens.
 - Whether the per-file aggregate cache is bounded, and by what.
+
+## As built
+
+Four departures from the Approach above, each recorded with its reason in the
+2026-09-07 line of `.abcd/work/DECISIONS.md`, because a reader reconciling this
+closed spec against the code would otherwise find them unexplained.
+
+1. **No per-file aggregate cache.** It does not compose with the latency view
+   the maintainer put in the same cut: exact percentiles cannot be merged from
+   per-file aggregates without holding every sample, so a cache that kept them
+   would hold the whole store in memory, and one that kept histograms instead
+   would give up the exact figures the criteria are written against. The
+   measurement makes it unnecessary — a store of 881,521 records in 209,723,172
+   bytes aggregates in 1.4 s on an Apple M4 Max.
+2. **The bound is a test as well as a benchmark**, at ten seconds and outside
+   the race build. See the intent's Audit Notes.
+3. **A free function over a reader, not a method on the store.**
+   `stats.Aggregate(src RecordSource, from, to time.Time, loc *time.Location)
+   (History, error)`, so a Mac that has never had recording on passes nil and
+   gets an empty view, and the arithmetic depends on the reading rather than on
+   the file store.
+4. **A new endpoint, `GET /api/stats/history`, rather than an extension of
+   `/api/stats`.** Extending it would have put a pass over months of records on
+   the panel's two-second tick.
+
+5. **The spread is a view of its own, so four tables ship where this spec says
+   three.** The Approach put the histogram "beside" the percentiles in the
+   latency table. Beside them it is eight more columns on a row that already
+   carries seven, which is a table nobody reads across; as its own table, with
+   the bucket edges as its headings, it answers the question the percentiles
+   cannot — whether a model is evenly slow or quick most of the time and
+   occasionally not. It is the same figures either way and no view was added to
+   the cut the maintainer settled: all three of those ship, and the second of
+   them is drawn as two tables. The panel, the CHANGELOG, the explanation page
+   and the architecture test that binds them all say four.
+
+A sixth departure, from "Dependencies and sequencing" rather than from the
+Approach: **the gate before implementation did not run.** One month of the
+maintainer's own records, hand-aggregated, was to be the fixture for the
+tokens-per-day and share criteria and the cheaper test of the intent's
+conjecture. The store it would read shipped days before this, so the month does
+not exist; the fixtures are synthetic and hand-computed, every criterion is met
+against them, and the conjecture itself is untested. It is the maintainer's to
+run after adoption, and it is recorded in the intent's Audit Notes so the
+fidelity review sees it.
+
+The open design points are settled: the default range is 30 days with a
+selector of 7, 30, 90 and everything kept; the first-token histogram's edges
+are 100, 250, 500, 1,000, 2,500, 5,000 and 10,000 ms; the rate percentiles are
+unweighted; there is no cache to bound. Two bounds are stated in the body and
+rendered by the panel: at most 366 days in one view, at most 1,000,000 records
+in one reading.
+
+The tests that satisfy each criterion, in order:
+`stats.TestTokensPerDayAndShareAreTheFixturesOwnSums` (the first two),
+`stats.TestTheLatencyDistributionIsTheFixturesOwn`,
+`stats.TestEvictionsAndReloadsAreCountedByTheLocalHour`,
+`gateway.TestTheHistoryEndpointSaysNothingIsRecordedWithTheSwitchOff` with
+`ui.TestTheOffStateDrawsNoFigureAndNoRange` — which runs the renderer against a
+document stub and asserts the sentence a reader is shown and the absence of any
+figure, where `ui.TestTheHistoricalTablesLiveInTheStatisticsViewAndAreFetchedOnce`
+beside it only holds the view's wiring —
+`gateway.TestTheHistoryEndpointIsRefusedFromAnywhereButThisMac` with
+`gateway.TestTheHistoryBodyCarriesNoRecords`, and the five documentation tests
+in `internal/archtest/dashboard_docs_test.go`.
