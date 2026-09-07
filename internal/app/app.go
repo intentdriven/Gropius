@@ -179,7 +179,7 @@ func New(opts Options) (*App, error) {
 		// Resolved here rather than left to the pool, so that the budget the
 		// pool enforces, the ceiling a save is checked against and the share
 		// Settings shows are all worked out from one reading of this machine.
-		MaxResidentBytes:  a.effectiveBudget(opts.Config.MaxResidentBytes),
+		MaxResidentBytes:  a.enforcedBudget(opts.Config.MaxResidentBytes),
 		DecodeConcurrency: opts.Config.DecodeConcurrency,
 		// Read live, at the moment a model server starts, so a default saved in
 		// Settings applies the next time each model loads.
@@ -208,12 +208,13 @@ func New(opts Options) (*App, error) {
 	budget := a.Pool.MemoryBudget()
 	_ = a.checkPinnedFit(a.cfg.Pinned, a.cfg.Pinned, budget, budget)
 
-	// The ceiling cannot refuse a file either, and the pool is enforcing this
-	// figure from the first request, so the operator is told here — the one
-	// place a headless install says anything at all. Passing the budget as its
-	// own current value is what says "nothing was raised here".
-	if err := a.checkBudgetFitsTheMachine(budget, 0); err != nil {
-		a.Log.Warn("the memory budget is larger than this Mac", "err", err)
+	// The ceiling cannot refuse a file, so a budget larger than this Mac is
+	// applied and said out loud — the one place a headless install says
+	// anything at all. Passing the stored figure as its own current value is
+	// what says "nothing was raised here"; what the pool got is the clamp.
+	if err := a.checkBudgetFitsTheMachine(a.effectiveBudget(a.cfg.MaxResidentBytes), 0); err != nil {
+		a.Log.Warn("the memory budget is larger than this Mac; models are held to what it has",
+			"err", err, "enforced", runtime.HumanBytes(budget))
 	}
 
 	if len(opts.Config.Preload) > 0 {
@@ -274,10 +275,14 @@ func (a *App) SetConfig(c config.Config) error {
 	}
 	c.PerModel = perModel
 	c.Pinned = a.canonicalPinned(c.Pinned)
-	budget := a.effectiveBudget(c.MaxResidentBytes)
-	if err := a.checkBudgetFitsTheMachine(budget, a.Pool.MemoryBudget()); err != nil {
+	// Judged on what the operator asked for, applied as what this Mac can hold:
+	// the checks are about their figure, the pool is bounded by the machine.
+	asked := a.effectiveBudget(c.MaxResidentBytes)
+	inForce := a.effectiveBudget(a.Config().MaxResidentBytes)
+	if err := a.checkBudgetFitsTheMachine(asked, inForce); err != nil {
 		return err
 	}
+	budget := a.enforcedBudget(c.MaxResidentBytes)
 	if err := a.checkPinnedFit(c.Pinned, a.Config().Pinned, budget, a.Pool.MemoryBudget()); err != nil {
 		return err
 	}
@@ -329,6 +334,28 @@ func (a *App) effectiveBudget(stored int64) int64 {
 	return capability.DefaultBudget(a.machineRAM)
 }
 
+// enforcedBudget is what the pool is given: the resolved budget, held down to
+// the memory this Mac actually has.
+//
+// The stored figure is not rewritten and the save path judges the operator's
+// own number — this bounds what gets *enforced*. A budget above physical memory
+// is not satisfiable anyway, so nothing legitimate is lost, and without the
+// bound a figure planted in a settings file another local account can write
+// (the shared install) would have the pool admitting every model a client names
+// until the machine swaps, across restarts, and a panel whose own save cannot
+// replace that account's file could not clear it.
+//
+// A Mac whose memory could not be read has nothing to hold the figure down to;
+// that residual is what the conservative unmeasured default and the panel
+// warning are for.
+func (a *App) enforcedBudget(stored int64) int64 {
+	budget := a.effectiveBudget(stored)
+	if a.machineRAM > 0 && budget > a.machineRAM {
+		return a.machineRAM
+	}
+	return budget
+}
+
 // checkBudgetFitsTheMachine refuses a save that raises the budget above this
 // Mac's memory.
 //
@@ -369,15 +396,21 @@ func (a *App) BudgetWarnAbove() int64 {
 	return a.machineRAM * warnAbovePercent / 100
 }
 
-// MemoryBudgetWarning is what the control panel says when the budget claims
-// most of this Mac, and "" when it does not.
+// MemoryBudgetWarning is what the control panel says about a budget at either
+// end of its range, and "" for one in the middle.
 //
-// A warning rather than a refusal, because what a Mac can carry is not a
-// figure Gropius knows: a loaded model is charged its weights and a fifth, and
-// not the cache a long conversation adds (iss-3), so a machine that is fully
+// Advice rather than a refusal at both ends. At the top, what a Mac can carry
+// is not a figure Gropius knows: a loaded model is charged its weights and a
+// fifth, and not the cache a long conversation adds (iss-3), so a machine fully
 // committed on paper can still run out under load — and equally, a Mac that
-// runs nothing else can carry more than the default share.
+// runs nothing else can carry more than the default share. At the bottom, a
+// budget under the smallest model's charge refuses every request and hides
+// every model from the search tab, and the operator should hear that from the
+// panel rather than from the first client to be turned away.
 func (a *App) MemoryBudgetWarning() string {
+	if w := a.tooSmallWarning(); w != "" {
+		return w
+	}
 	above := a.BudgetWarnAbove()
 	if above <= 0 {
 		return ""
@@ -389,6 +422,48 @@ func (a *App) MemoryBudgetWarning() string {
 	return fmt.Sprintf(
 		"The memory budget (%s) is most of this Mac's memory (%s). macOS and everything else running share it, and a model is charged what it loads rather than what a long conversation adds to it, so requests can still run the machine out of memory.",
 		runtime.HumanBytes(budget), runtime.HumanBytes(a.machineRAM))
+}
+
+// tooSmallWarning is the bottom end of that range: a budget that cannot hold
+// the smallest model on this Mac.
+//
+// A warning rather than a floor — refusing the save is the wedge this setting
+// has been through twice — and a Mac with no models on it yet has no figure to
+// judge against, so it says nothing.
+func (a *App) tooSmallWarning() string {
+	smallest, id := a.smallestChargeableModel()
+	if smallest <= 0 {
+		return ""
+	}
+	budget := a.Pool.MemoryBudget()
+	if budget >= smallest {
+		return ""
+	}
+	return fmt.Sprintf(
+		"The memory budget (%s) is smaller than the smallest model on this Mac (%s needs about %s), so every request is refused until it is raised.",
+		runtime.HumanBytes(budget), id, runtime.HumanBytes(smallest))
+}
+
+// smallestChargeableModel is the least a model on this Mac would cost the
+// budget, and which model that is. It walks the registry the way pinnedCharge
+// does, charges what the pool charges, and counts only a model the pool could
+// actually load.
+func (a *App) smallestChargeableModel() (int64, string) {
+	var smallest int64
+	var id string
+	for _, m := range a.Registry.List() {
+		if !chargeable(m) {
+			continue
+		}
+		size := chargedSize(m)
+		if size <= 0 {
+			continue
+		}
+		if cost := runtime.LoadCost(size); smallest == 0 || cost < smallest {
+			smallest, id = cost, m.RepoID
+		}
+	}
+	return smallest, id
 }
 
 // canonicalPinned rewrites each pinned id to the registry's spelling of the

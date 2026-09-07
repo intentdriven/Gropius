@@ -431,7 +431,7 @@ func (c *Control) handleSearch(w http.ResponseWriter, r *http.Request) {
 	// search, so a figure the operator changes in Settings changes what this
 	// tab shows without a restart and without a second answer to the question
 	// of what fits.
-	machine := capability.Assess(c.App.Paths.Models, c.App.Pool.MemoryBudget())
+	machine := capability.Assess(c.App.Paths.Models, c.App.MachineRAM(), c.App.Pool.MemoryBudget())
 
 	// The search payload carries no file sizes, so fetch each repo's download
 	// size concurrently (one tree request each, bounded).

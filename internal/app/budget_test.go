@@ -301,10 +301,13 @@ func TestStartupWarnsWhenTheBudgetIsLargerThanTheMachine(t *testing.T) {
 	if !strings.Contains(logged.String(), "memory budget") {
 		t.Errorf("startup logged %q, want a warning that the budget is larger than this Mac", logged.String())
 	}
-	// Warned, not clamped: the figure is the operator's, and clamping it would
-	// silently rewrite a setting they can still see and change.
-	if got := a.Pool.MemoryBudget(); got != 128*gb {
-		t.Errorf("the pool holds %d, want the stored budget applied anyway", got)
+	// The stored figure is the operator's and is left alone; what the pool is
+	// allowed to fill is bounded by the memory that exists.
+	if got := a.Config().MaxResidentBytes; got != 128*gb {
+		t.Errorf("MaxResidentBytes = %d, want the stored figure left alone", got)
+	}
+	if got := a.Pool.MemoryBudget(); got != 16*gb {
+		t.Errorf("the pool holds %d, want models held to this Mac's %d", got, 16*gb)
 	}
 }
 
@@ -351,5 +354,85 @@ func TestAnUnmeasurablePinDoesNotBlockALowerBudget(t *testing.T) {
 	lower.MaxResidentBytes = 32 * gb
 	if err := b.SetConfig(lower); err != nil {
 		t.Errorf("a budget change was refused over a pin this Mac cannot measure: %v", err)
+	}
+}
+
+// A budget larger than the Mac is kept as the operator's figure and warned
+// about — but what the pool is allowed to fill is bounded by what exists.
+// Under the shared install another account can write the settings file, and a
+// planted figure would otherwise admit every model a LAN client names until
+// the machine swaps, restart after restart, with no way to clear it from a
+// panel whose own save cannot replace that account's file.
+func TestAPlantedBudgetIsEnforcedNoHigherThanTheMachine(t *testing.T) {
+	var logged bytes.Buffer
+	a, err := New(Options{
+		Paths: config.NewPaths(t.TempDir()),
+		Config: config.Config{
+			Host: "127.0.0.1", Port: 11535, DecodeConcurrency: 4,
+			MaxResidentBytes: 1 << 62,
+		},
+		PhysicalMemory: func() int64 { return 16 * gb },
+		Log:            slog.New(slog.NewTextHandler(&logged, nil)),
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	t.Cleanup(func() { a.Close() })
+
+	if got := a.Pool.MemoryBudget(); got > 16*gb {
+		t.Errorf("the pool is holding models to %d, want no more than this Mac's %d", got, 16*gb)
+	}
+	if !strings.Contains(logged.String(), "memory budget") {
+		t.Errorf("startup logged %q, want a warning about the budget", logged.String())
+	}
+	// The stored figure is the operator's and is not rewritten behind them.
+	if got := a.Config().MaxResidentBytes; got != 1<<62 {
+		t.Errorf("MaxResidentBytes = %d, want the stored figure left alone", got)
+	}
+	// And the save path still judges what they asked for, not the clamp: an
+	// unrelated save goes through, a raise does not.
+	c := a.Config()
+	c.APIKey = "bh_unrelated"
+	if err := a.SetConfig(c); err != nil {
+		t.Errorf("an unrelated save was refused over a planted budget: %v", err)
+	}
+	raise := a.Config()
+	raise.MaxResidentBytes = 1 << 63 >> 1 // one step further than the planted figure
+	if raise.MaxResidentBytes > 1<<62 {
+		if err := a.SetConfig(raise); err == nil {
+			t.Error("SetConfig accepted a save raising the budget further above this Mac")
+		}
+	}
+}
+
+// The budget has advice at the top of its range; it needs the same at the
+// bottom, where a figure too small to hold anything refuses every request with
+// nothing on the panel to say why.
+func TestABudgetTooSmallForAnyModelIsWarnedAbout(t *testing.T) {
+	a := newBudgetApp(t, 128*gb, config.Default())
+	putReady(t, a, "org/small", 2*gb)
+	putReady(t, a, "org/large", 40*gb)
+
+	c := a.Config()
+	c.MaxResidentBytes = 1 << 20
+	if err := a.SetConfig(c); err != nil {
+		t.Fatalf("SetConfig refused a small budget rather than warning: %v", err)
+	}
+	w := a.MemoryBudgetWarning()
+	if w == "" {
+		t.Fatal("a budget too small to hold any model on this Mac draws no warning")
+	}
+	if !strings.Contains(w, runtime.HumanBytes(runtime.LoadCost(2*gb))) {
+		t.Errorf("warning = %q, want it to name what the smallest model on this Mac costs", w)
+	}
+
+	// A budget that holds the smallest model is not warned about, even though
+	// it cannot hold the largest: what to keep is the operator's business.
+	c.MaxResidentBytes = runtime.LoadCost(2 * gb)
+	if err := a.SetConfig(c); err != nil {
+		t.Fatal(err)
+	}
+	if w := a.MemoryBudgetWarning(); w != "" {
+		t.Errorf("MemoryBudgetWarning() = %q, want none for a budget that holds a model", w)
 	}
 }
