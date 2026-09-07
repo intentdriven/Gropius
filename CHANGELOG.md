@@ -9,9 +9,16 @@ reviewed pull request; on merge, the release workflow tags that commit and
 publishes the build. Releases before this file existed are listed with their
 GitHub release notes.
 
-## Unreleased
+## [Unreleased]
+
+## [0.2.0] - 2026-09-07
 
 ### Added
+
+- **The application is renamed.** The server is Gropius and the chat client is
+  GropiusChat. The bundle identifiers, the Bonjour service, the environment
+  variable, the module path and the released asset names all follow.
+
 
 - **Eviction grace**, in Settings, off until you turn it on. Gropius unloads the
   least recently used idle model to make room for a new one, and that rule
@@ -304,12 +311,19 @@ GitHub release notes.
 
 ### Removed
 
+- **Breaking:** an existing install does not find its own data after the
+  rename. Before first launch, rename the support directory under
+  `~/Library/Application Support` to `Gropius`, and rename the install marker
+  inside its `venv` directory to match, so the private Python and MLX runtime
+  is not rebuilt. Without both, the app starts empty and downloads its models
+  again.
+
 - **Breaking:** support for every macOS below 26. Gropius and the GropiusChat
   client both require macOS 26; the one-line installer refuses an older Mac
   before it downloads anything, and the bundles declare the same minimum, so
   macOS refuses to launch them there.
 
-## 0.1.2 - 2026-09-06
+## [0.1.2] - 2026-09-06
 
 ### Security
 
@@ -350,11 +364,11 @@ the key, closing a DNS-rebinding read of the model list.
 - Releases are cut from this file: the newest dated heading is tagged and
   published on merge.
 
-## 0.1.1 - 2026-07-29
+## [0.1.1] - 2026-07-29
 
 See the v0.1.1 release.
 
-## 0.1.0 - 2026-07-29
+## [0.1.0] - 2026-07-29
 
 See the v0.1.0 release.
 
