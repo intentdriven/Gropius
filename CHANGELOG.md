@@ -13,6 +13,33 @@ GitHub release notes.
 
 ### Added
 
+- **A memory budget you set**, in Settings, beside the idle timeout and decode
+  concurrency. How much of this Mac Gropius fills with loaded models was fixed
+  at 60% of its memory with no field to change it, so a Mac that does nothing
+  but serve models and a laptop someone also works on got the same answer — and
+  a 45 GB coder and a 29 GB reviewer, charged about 89 GB together, would not
+  sit in memory together on a 128 GB machine that had the room. Type a figure in
+  gigabytes and it applies at once, with no restart: the next model to load is
+  measured against it, and the Search tab immediately hides the models that no
+  longer fit and shows the ones that now do. The panel shows what share of this
+  Mac the budget is and what the models in memory are using of it. Leave the
+  field blank and the default stands, worked out on the Mac that is running, so
+  a settings file copied to a smaller Mac gets that Mac's default rather than
+  the first one's figure. Lowering the budget unloads nothing — no model is
+  taken away at the moment you press Save — and the panel says the machine is
+  over its budget until those models go. What a save refuses is a change that
+  makes matters worse: one that raises the budget past what this Mac has, naming
+  what it has, and one that lowers it under what the pinned models need, naming
+  their sum. A figure that arrives already over the machine — a settings file
+  carried from a larger Mac — is applied and reported instead, so it never
+  stands between you and saving an unrelated setting, and models are held to the
+  memory that exists whatever it says. A budget claiming most of the machine is
+  saved with a warning rather than refused: a model is charged the weights it
+  loads and not the cache a long prompt adds, so a Mac committed in full on
+  paper can still run out under load. One too small to hold any model on this
+  Mac is reported too. See
+  [Set how much memory models may use](docs/memory-budget.md) and
+  [Why there is a memory budget](docs/memory-budget-explained.md).
 - **Request statistics**, a switch in Settings that is off until it is turned
   on. While it is on, Gropius records one content-free row per request it
   serves — the model, when the request arrived, how it ended, whether it

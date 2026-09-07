@@ -86,8 +86,13 @@ type Resident struct {
 type PoolOptions struct {
 	Launcher Launcher
 	Models   ModelSource
-	// MaxResidentBytes caps the total on-disk size of simultaneously loaded
-	// models. Zero means "60% of physical RAM".
+	// MaxResidentBytes is the pool's memory budget as it starts: the ceiling on
+	// the total charged size (LoadCost, 1.2x the size on disk) of the models
+	// held at once. Zero or less means the default share of this Mac's memory.
+	//
+	// The starting value only. SetMemoryBudget replaces it, and the figure the
+	// pool enforces after that is the one it holds under p.mu — this field is
+	// not updated and must not be read as the budget in force.
 	MaxResidentBytes int64
 	// IdleTimeout unloads a model after this long without a request. Zero keeps
 	// models resident indefinitely.
@@ -145,6 +150,11 @@ type Pool struct {
 	mu      sync.Mutex
 	entries map[string]*entry
 	closed  bool
+	// maxResident is the ceiling on the total charged size of the models in
+	// memory. It lives here rather than in opts because it is a setting the
+	// operator can change while the pool is running, and every path that reads
+	// it — both eviction paths — already holds mu.
+	maxResident int64
 	// pinned is the protected set: folded repo id -> the spelling it was given
 	// under, so the pool can both match a pin and report one. Guarded by mu,
 	// the same lock the eviction paths that read it already hold.
@@ -192,7 +202,7 @@ func NewPool(opts PoolOptions) *Pool {
 	if opts.now == nil {
 		opts.now = time.Now
 	}
-	if opts.MaxResidentBytes == 0 {
+	if opts.MaxResidentBytes <= 0 {
 		opts.MaxResidentBytes = defaultResidentBudget()
 	}
 	if opts.ReadyTimeout == 0 {
@@ -209,11 +219,12 @@ func NewPool(opts PoolOptions) *Pool {
 	}
 
 	p := &Pool{
-		opts:     opts,
-		entries:  map[string]*entry{},
-		pinned:   pinnedSet(opts.Pinned),
-		stopIdle: make(chan struct{}),
-		idleDone: make(chan struct{}),
+		opts:        opts,
+		entries:     map[string]*entry{},
+		maxResident: opts.MaxResidentBytes,
+		pinned:      pinnedSet(opts.Pinned),
+		stopIdle:    make(chan struct{}),
+		idleDone:    make(chan struct{}),
 	}
 	go p.reapIdle()
 	return p
@@ -233,12 +244,38 @@ func (p *Pool) SetPinned(ids []string) {
 	p.pinned = set
 }
 
+// SetMemoryBudget replaces the ceiling on the total charged size of resident
+// models. It is the seam a settings save uses, so a budget the operator
+// changes governs the next load rather than the next restart.
+//
+// It unloads nothing. Both eviction paths read the figure under p.mu, the lock
+// this takes, so the next load is measured against the new budget while the
+// models already in memory are left alone — the machine sits over a lowered
+// budget until they unload by the usual rules. Evicting here would pull a
+// model out from under the operator at the moment they pressed Save, which is
+// the one moment they were not asking for it.
+//
+// Zero means the default share of this Mac's memory, the same as it does in
+// PoolOptions, so that a budget cleared in Settings needs no second spelling.
+func (p *Pool) SetMemoryBudget(n int64) {
+	if n <= 0 {
+		n = defaultResidentBudget()
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.maxResident = n
+}
+
 // MemoryBudget is the ceiling on the total charged size of resident models.
 //
 // It is read rather than a value the caller already has because the pool is
 // where the default (a share of physical RAM) is resolved, and the check that
 // a pinned set fits has to be against the figure eviction actually uses.
-func (p *Pool) MemoryBudget() int64 { return p.opts.MaxResidentBytes }
+func (p *Pool) MemoryBudget() int64 {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.maxResident
+}
 
 // Pinned lists the protected models, in the spelling they were pinned under.
 //
@@ -405,10 +442,10 @@ func (p *Pool) startLocked(repoID string) (*entry, error) {
 	}
 
 	need := LoadCost(size)
-	if need > p.opts.MaxResidentBytes {
+	if need > p.maxResident {
 		return nil, fmt.Errorf(
 			"%s needs about %s of memory but the limit is %s — raise the memory budget or choose a smaller quantization",
-			repoID, HumanBytes(need), HumanBytes(p.opts.MaxResidentBytes))
+			repoID, HumanBytes(need), HumanBytes(p.maxResident))
 	}
 	// Check cheap launch preconditions before evicting anything. Eviction is not
 	// reversible (stopEntryLocked's Stop cannot be undone), so if we evicted
@@ -586,7 +623,7 @@ func (p *Pool) evictForLocked(need int64) error {
 		for _, e := range p.entries {
 			used += LoadCost(e.bytes)
 		}
-		if used+need <= p.opts.MaxResidentBytes {
+		if used+need <= p.maxResident {
 			return nil
 		}
 
@@ -614,7 +651,7 @@ func (p *Pool) evictForLocked(need int64) error {
 		}
 		if victim == nil {
 			return &NoRoomError{
-				Limit:     p.opts.MaxResidentBytes,
+				Limit:     p.maxResident,
 				Protected: p.pinnedResidentLocked(),
 			}
 		}

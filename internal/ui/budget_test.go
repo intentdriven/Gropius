@@ -1,0 +1,241 @@
+package ui
+
+import (
+	"fmt"
+	"regexp"
+	"strings"
+	"testing"
+)
+
+// inputWithID returns the whole <input> tag with the given id, so a test can
+// assert on the attributes the browser enforces before any script runs.
+func inputWithID(t *testing.T, page, id string) string {
+	t.Helper()
+	re := regexp.MustCompile(`<input[^>]*id="` + regexp.QuoteMeta(id) + `"[^>]*>`)
+	m := re.FindString(page)
+	if m == "" {
+		t.Fatalf("no input with id %q in the panel", id)
+	}
+	return m
+}
+
+const gb = float64(1 << 30)
+
+// The operator types gigabytes and the file stores bytes: one unit to reason
+// in, one unit to store. A blank field means the default, which is how the
+// stored settings stay free of a figure nobody chose.
+func TestSettingsFormPostsTheBudgetInBytes(t *testing.T) {
+	cases := []struct {
+		expr string
+		want float64
+	}{
+		{`budgetBytes("96")`, 96 * gb},
+		{`budgetBytes("7.5")`, 7.5 * gb},
+		{`budgetBytes("")`, 0},
+		{`budgetBytes("   ")`, 0},
+		{`budgetBytes("0")`, 0},
+		{`budgetBytes("-4")`, 0},
+		{`budgetBytes("nonsense")`, 0},
+	}
+	for _, c := range cases {
+		if got := evalPanelNumber(t, c.expr, "budgetBytes"); got != c.want {
+			t.Errorf("%s = %v, want %v", c.expr, got, c.want)
+		}
+	}
+}
+
+// The field shows what is in force: blank while the budget is the default, so
+// that saving an unrelated setting does not turn the default into a figure of
+// the operator's own.
+func TestSettingsFormLeavesADefaultBudgetFieldBlank(t *testing.T) {
+	blank := evalPanel(t, `budgetFieldValue({"budget":82463372083,"budget_is_default":true})`, "budgetFieldValue")
+	if blank != "" {
+		t.Errorf("budgetFieldValue = %q for the default, want a blank field", blank)
+	}
+	set := evalPanel(t, `budgetFieldValue({"budget":103079215104,"budget_is_default":false})`, "budgetFieldValue")
+	if set != "96" {
+		t.Errorf("budgetFieldValue = %q, want the saved budget in gigabytes", set)
+	}
+}
+
+// Beside the field: what the budget is, what share of this Mac that is, and
+// what the models in memory are using of it.
+func TestSettingsFormShowsTheBudgetAsAShareOfThisMac(t *testing.T) {
+	line := evalPanel(t, `budgetHint({"total_ram":137438953472,"budget":82463372083,`+
+		`"budget_is_default":true,"warn_above":116824368742,"resident_bytes":0,"over_budget":false})`,
+		"bytes", "size", "budgetHint")
+	if !strings.Contains(line, "60%") {
+		t.Errorf("budgetHint = %q, want the share of this Mac's memory", line)
+	}
+	if !strings.Contains(line, "default") {
+		t.Errorf("budgetHint = %q, want it to say the figure is the default", line)
+	}
+}
+
+// A Mac whose memory cannot be read has no share to state, so the line states
+// the budget alone rather than a percentage of nothing.
+func TestSettingsFormOmitsTheShareOfAMachineItCannotMeasure(t *testing.T) {
+	line := evalPanel(t, `budgetHint({"total_ram":0,"budget":8589934592,`+
+		`"budget_is_default":true,"warn_above":0,"resident_bytes":0,"over_budget":false})`,
+		"bytes", "size", "budgetHint")
+	if strings.Contains(line, "%") {
+		t.Errorf("budgetHint = %q, want no percentage when this Mac cannot be measured", line)
+	}
+	if !strings.Contains(line, "8.0 GB") {
+		t.Errorf("budgetHint = %q, want the budget itself", line)
+	}
+}
+
+// Lowering the budget under what is loaded unloads nothing, so the panel has
+// to say the machine is over its budget until those models go.
+func TestSettingsFormSaysWhenTheMachineIsOverItsBudget(t *testing.T) {
+	line := evalPanel(t, `budgetHint({"total_ram":137438953472,"budget":4294967296,`+
+		`"budget_is_default":false,"warn_above":116824368742,"resident_bytes":10307921510,"over_budget":true})`,
+		"bytes", "size", "budgetHint")
+	if !strings.Contains(line, "over") {
+		t.Errorf("budgetHint = %q, want it to say the machine is over its budget", line)
+	}
+	if !strings.Contains(line, "unload") {
+		t.Errorf("budgetHint = %q, want it to say nothing is unloaded on the operator's behalf", line)
+	}
+}
+
+// A budget claiming most of the Mac is advice, and the panel gives it while
+// the figure is being chosen rather than only after it is saved.
+func TestSettingsFormWarnsAboutABudgetThatClaimsMostOfTheMac(t *testing.T) {
+	line := evalPanel(t, `budgetHint({"total_ram":137438953472,"budget":133143986176,`+
+		`"budget_is_default":false,"warn_above":116824368742,"resident_bytes":0,"over_budget":false})`,
+		"bytes", "size", "budgetHint")
+	if !strings.Contains(line, "share") && !strings.Contains(line, "everything else") {
+		t.Errorf("budgetHint = %q, want it to say macOS and everything else share this memory", line)
+	}
+}
+
+// The panel reads the budget the pool is enforcing, through the machine object
+// on the snapshot, rather than the stored setting — which is blank while the
+// default is in force and says nothing about what is actually being enforced.
+func TestThePanelReadsTheBudgetTheMachineObjectCarries(t *testing.T) {
+	src := readPanelSource(t)
+	if !strings.Contains(src, "state.machine") {
+		t.Error("the panel never reads state.machine, so it cannot say what budget is in force")
+	}
+	if strings.Contains(src, "state.config.max_resident_bytes") {
+		t.Error("the panel reads the stored budget; what is enforced is what the machine object carries")
+	}
+}
+
+// The line is written from the figure being typed, and a cleared field means
+// the default — so it has to show the default, not the figure it replaces.
+func TestSettingsFormShowsTheDefaultWhenTheFieldIsCleared(t *testing.T) {
+	machine := `{"total_ram":137438953472,"budget":103079215104,"default_budget":82463372083,` +
+		`"budget_is_default":false,"warn_above":116824368742,"resident_bytes":0,"over_budget":false}`
+
+	cleared := evalPanelValue(t, `budgetShown(`+machine+`, 0)`, "budgetShown")
+	if got := cleared["budget"]; got != float64(82463372083) {
+		t.Errorf("budgetShown with a cleared field = %v, want the default budget", got)
+	}
+	if cleared["budget_is_default"] != true {
+		t.Error("budgetShown with a cleared field does not say the figure is the default")
+	}
+
+	typed := evalPanelValue(t, `budgetShown(`+machine+`, 68719476736)`, "budgetShown")
+	if got := typed["budget"]; got != float64(68719476736) {
+		t.Errorf("budgetShown = %v, want the figure being typed", got)
+	}
+	if typed["budget_is_default"] != false {
+		t.Error("a typed figure is reported as the default")
+	}
+}
+
+// Typing a figure under what is already loaded says so before the save, not
+// after it.
+func TestSettingsFormSaysAFigureBeingTypedIsUnderWhatIsLoaded(t *testing.T) {
+	machine := `{"total_ram":137438953472,"budget":103079215104,"default_budget":82463372083,` +
+		`"budget_is_default":false,"warn_above":116824368742,"resident_bytes":10307921510,"over_budget":false}`
+	shown := evalPanelValue(t, `budgetShown(`+machine+`, 4294967296)`, "budgetShown")
+	if shown["over_budget"] != true {
+		t.Error("a figure typed under what is already in memory is not reported as over budget")
+	}
+}
+
+// The field and the line it writes have to exist in the page, or the panel
+// throws on load and every tab goes with it.
+func TestSettingsFormHasTheBudgetControl(t *testing.T) {
+	page, err := assets.ReadFile("static/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"setBudget", "budgetHint"} {
+		if !strings.Contains(string(page), `id="`+id+`"`) {
+			t.Errorf("the settings form has no element with id %q, which app.js addresses on load", id)
+		}
+	}
+	script, err := assets.ReadFile("static/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(script), "max_resident_bytes") {
+		t.Error("app.js never posts max_resident_bytes, so the budget cannot be saved")
+	}
+}
+
+// The field has to accept every figure the panel itself writes into it. A
+// stored budget is not always a round number of gigabytes — another client, a
+// hand edit, a file from another Mac — and a step the value does not land on
+// makes the browser refuse the whole form: the submit listener never runs, so
+// the API key that closes an open endpoint cannot be saved either.
+func TestTheBudgetFieldAcceptsAnyFigureThePanelWritesIntoIt(t *testing.T) {
+	page, err := assets.ReadFile("static/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	field := inputWithID(t, string(page), "setBudget")
+	if !strings.Contains(field, `step="any"`) {
+		t.Errorf("the budget field is %q, want step=\"any\" — a stepped number field refuses the whole form for a value it does not land on", field)
+	}
+}
+
+// What the field shows must post back as the figure it came from, to the byte.
+// Anything else rewrites a budget the operator did not touch on the next save.
+func TestTheBudgetFieldRoundTripsAnyStoredFigure(t *testing.T) {
+	for _, want := range []int64{
+		1,
+		537,
+		10_000_000_000,
+		10_000_000_001,
+		103079215104,         // 96 GB
+		137438953471,         // one byte under 128 GB
+		9007199254740992 / 2, // large, still exact in a double
+	} {
+		expr := fmt.Sprintf(`budgetBytes(budgetFieldValue({"budget":%d,"budget_is_default":false}))`, want)
+		if got := evalPanelNumber(t, expr, "budgetBytes", "budgetFieldValue"); int64(got) != want {
+			t.Errorf("a stored budget of %d came back as %.0f", want, got)
+		}
+	}
+}
+
+// A figure too large to be a byte count must not reach the save as null, which
+// the server reads as "field omitted" and answers by keeping what it had —
+// while the panel showed something else entirely.
+func TestAnImpossibleBudgetFigureIsNotPosted(t *testing.T) {
+	// Asserted on the JSON text, not a decoded number: JSON.stringify turns
+	// Infinity into null, which decodes as zero and would pass a test that
+	// only looked at the value — while the save posts null and the server
+	// keeps whatever it had.
+	for _, expr := range []string{`budgetBytes("1e300")`, `budgetBytes("1e999")`} {
+		if got := evalPanelExpr(t, expr, "budgetBytes"); got != "0" {
+			t.Errorf("%s = %s, want 0 — the default, not a figure no byte count can hold", expr, got)
+		}
+	}
+}
+
+// A Mac whose memory could not be read is on a conservative default, and the
+// figure looks like a bad guess unless the panel says why.
+func TestTheBudgetLineSaysWhyAnUnmeasuredMacIsOnItsDefault(t *testing.T) {
+	line := evalPanel(t, `budgetHint({"total_ram":0,"budget":8589934592,"default_budget":8589934592,`+
+		`"budget_is_default":true,"warn_above":0,"resident_bytes":0,"over_budget":false})`,
+		"bytes", "size", "budgetHint")
+	if !strings.Contains(line, "could not be read") {
+		t.Errorf("budgetHint = %q, want it to say this Mac's memory could not be read", line)
+	}
+}

@@ -50,8 +50,9 @@ never told which models are protected, or what this Mac is running.
 
 ## Choose how much to pin
 
-Every model in memory is charged its size plus a fifth, and the budget is 60%
-of this Mac's physical RAM. The figure beside the boxes is that sum for the
+Every model in memory is charged its size plus a fifth, and the budget is what
+**Settings → Memory for loaded models** holds — 60% of this Mac's physical RAM
+until you set your own figure. The figure beside the boxes is that sum for the
 models you have ticked. A model that is still downloading is charged the size
 it declares, so pinning one before it lands is measured on the same terms as
 pinning one already on disk.
@@ -66,7 +67,8 @@ occasionally.
 ## When a pinned set stops fitting
 
 The check runs when Settings is saved, and it refuses a save that makes the set
-worse — one that pins another model. A set that arrives already too large is
+worse — one that pins another model, or one that lowers the memory budget under
+a pinned set the budget in force can hold. A set that arrives already too large is
 applied and reported rather than refused, so that a `config.json` carried from
 a Mac with more memory never stands between you and saving an API key.
 

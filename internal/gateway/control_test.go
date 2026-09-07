@@ -607,9 +607,9 @@ func TestStateCarriesThePinnedSetAndTheMemoryBudget(t *testing.T) {
 	if !reflect.DeepEqual(st.Pinned, []string{"org/keeper"}) {
 		t.Errorf("state.pinned = %v, want the pinned model — the panel draws every pin from this", st.Pinned)
 	}
-	if st.MemoryBudget <= 0 {
-		t.Errorf("state.memory_budget = %d, want the pool's budget — the panel cannot say what a pin leaves without it",
-			st.MemoryBudget)
+	if st.Machine.Budget <= 0 {
+		t.Errorf("state.machine.budget = %d, want the pool's budget — the panel cannot say what a pin leaves without it",
+			st.Machine.Budget)
 	}
 	// Read from the pool, not the stored settings: the two agree except in the
 	// moment a pin is reconciled with a model that has just arrived, and this

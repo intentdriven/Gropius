@@ -135,6 +135,11 @@
       <input id="setIdle" type="number" min="0">
     </label>
     <label>
+      <span>Memory for loaded models (GB, blank for the default)</span>
+      <input id="setBudget" type="number" step="any" min="0" placeholder="the default share of this Mac's memory">
+    </label>
+    <p id="budgetHint" class="hint"></p>
+    <label>
       <span>Batched requests (decode concurrency)</span>
       <input id="setConc" type="number" min="1" max="64">
     </label>
