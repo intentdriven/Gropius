@@ -21,4 +21,5 @@ Resolution (2026-09-07): resolved by the rename. The module path is now
 `github.com/intentdriven/Gropius`, matching the repository exactly, and every
 import was rewritten mechanically in the same pass. The question the capture
 said it could not answer, which name is canonical, was settled by the
-maintainer: the product is Gropius and the repository is Gropius.
+maintainer: both the product and the repository are named Gropius, so the
+module path, the repository and the application now agree.
