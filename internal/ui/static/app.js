@@ -450,6 +450,11 @@ function renderSettings() {
   $('setConc').value = c.decode_concurrency;
   $('setHF').value   = c.hf_token || '';
   $('setStats').checked = !!c.statistics;
+  $('setStatsMonths').value = c.stats_months;
+  // Typed in megabytes and stored in bytes, which is how every other size in
+  // this panel is shown.
+  $('setStatsMB').value = Math.round((c.stats_max_bytes || 0) / (1024 * 1024));
+  renderStatsStore();
   writeSampling('input', c.sampling);
   overrides = { ...(c.model_sampling || {}) };
   renderOverrides();
@@ -726,6 +731,54 @@ $('ovApply').addEventListener('click', () => {
 
 $('setStats').addEventListener('change', () => { settingsTouched = true; });
 
+// Clear is not part of saving the form: it throws away what was recorded, so
+// it happens when it is pressed and says what it did.
+$('statsClear').addEventListener('click', async () => {
+  if (!confirm('Remove every request record kept on this Mac? This cannot be undone. The recording switch is left as it is.')) return;
+  try {
+    await api('/api/stats/clear', { method: 'POST' });
+    // Say so at once rather than at the next snapshot, so the button visibly
+    // did something.
+    if (state) state.stats_store = null;
+    renderStatsStore();
+    refreshStats();
+  } catch (err) {
+    $('settingsMsg').className = 'msg err';
+    $('settingsMsg').textContent = err.message;
+  }
+});
+
+// renderStatsStore says what is actually kept on disk, which is what makes the
+// two figures above it mean something: a limit in megabytes says nothing about
+// whether the store holds a week or a year.
+function renderStatsStore() {
+  const line = $('statsStoreLine');
+  const store = state && state.stats_store;
+  if (!store) {
+    line.textContent = '';
+    return;
+  }
+  if (store.refused) {
+    line.textContent = 'Gropius could not open the store where records are kept, so the figures ' +
+      'above are being held in memory only and nothing is on disk. Its own log says why.';
+    return;
+  }
+  const parts = [];
+  if (store.oldest) {
+    parts.push(`Records from ${new Date(store.oldest * 1000).toLocaleDateString()} onwards`);
+  } else {
+    parts.push('No records kept yet');
+  }
+  parts.push(`${(store.bytes / (1024 * 1024)).toFixed(1)} MB in ${store.files} file${store.files === 1 ? '' : 's'}`);
+  if (store.dropped) {
+    parts.push(`${store.dropped} not written — the disk could not keep up`);
+  }
+  if (store.skipped) {
+    parts.push(`${store.skipped} unreadable lines`);
+  }
+  line.textContent = `${parts.join(' · ')}.`;
+}
+
 $('genKey').addEventListener('click', () => {
   const b = new Uint8Array(24);
   crypto.getRandomValues(b);
@@ -751,6 +804,8 @@ $('settingsForm').addEventListener('submit', async (e) => {
     decode_concurrency: parseInt($('setConc').value, 10) || 1,
     hf_token:           $('setHF').value,
     statistics:         $('setStats').checked,
+    stats_months:       parseInt($('setStatsMonths').value, 10) || 6,
+    stats_max_bytes:    (parseInt($('setStatsMB').value, 10) || 200) * 1024 * 1024,
     // A blank sampling field is sent as null, not as zero: the model server is
     // handed a flag only for a parameter that has a value.
     sampling:           readSampling('input'),

@@ -24,8 +24,9 @@ GitHub release notes.
   answer, an API key or the address of the client: the part of Gropius that
   keeps the figures is never handed a request, its headers or its connection,
   and the only text it can be given is the id of a model already on this Mac.
-  Everything is held in memory, a restart empties it, and turning the switch
-  off empties it at once. The boundary is the Mac rather than one account: the
+  The live figures are held in memory, a restart empties them, and turning the
+  switch off empties them at once; the records themselves are kept on this Mac
+  in files that outlive the process (see the entry below). The boundary is the Mac rather than one account: the
   control panel asks for no password and answers every account on this Mac by
   design, so where several people log in, any of them can turn the switch on
   and read what it holds — and the panel says **Recording** beside the server
@@ -55,6 +56,37 @@ GitHub release notes.
   Unload still works on a pinned model, and the pin stays. On an install with
   an API key, the models list carries a `pinned` field beside the residency
   ones. See [Pin a model so it stays in memory](docs/pinning-models.md).
+- **A durable store for those records.** With recording on, each record is
+  also written to a `stats` folder inside your own account's Gropius data
+  folder — the one place that does not move to the shared folder when the
+  model cache is shared, because a shared folder is writable by every account
+  on the Mac: append-only
+  JSON Lines, one object per line, rotated into dated files, every line
+  stamped with the version of the format it was written under so a later
+  Gropius still reads an older file. Any tool reads it — `jq`, a spreadsheet,
+  a script. There are four kinds of line: a request, a model server becoming
+  ready, a model server leaving memory with the reason it left, and a record
+  of the settings in force so a change in the figures can be told from a
+  change in the settings that produced them. Settings gains two limits — how
+  many months to keep and how many megabytes the records may use, the size
+  limit always winning — and shows beside them the date the records reach back
+  to and the room they use. **Clear records** removes them; switching
+  recording off does not. The folder and its files are the account's own, and
+  Gropius refuses to write records into a folder any other account on this Mac
+  could write to. On a Mac with the shared model cache, one process serves
+  every account, so the records belong to the account running the server and
+  cover every request that server handled, under that account's opt-in. A
+  request never waits on the disk: records are queued and written by one
+  goroutine, and a burst the disk cannot keep up with is counted and shown
+  rather than allowed to slow an answer. A crash or a power cut costs the last few
+  seconds of records and leaves the line being written half-finished; nothing
+  forces a write to the disk, because a disk in the path of every answer costs
+  more than the figures are worth, and the next start closes the half-finished
+  line off before appending to it. The format, the
+  retention rule and the location are
+  [an architecture decision](.abcd/development/decisions/adrs/2609061610107154-statistics-store-format-json-lines-size-rotated-per-account.md),
+  and every field is described in
+  [Reference: the request statistics store](docs/statistics-store-reference.md).
 - **Merge system messages**, a per-model setting in Settings that is off until
   it is switched on. Some models refuse a conversation whose instructions are
   not all at the top, which breaks any assistant that repeats its instructions

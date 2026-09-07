@@ -144,7 +144,9 @@ Gropius keeps no record of the requests it serves unless you ask it to.
 request — the model, the token counts and the timings — shown per model on the
 **Statistics** tab, so two quantisations of the same model can be compared by
 their numbers. It never records a prompt, an answer, an API key or the address
-of the client, and nothing recorded leaves this Mac. See
+of the client, and nothing recorded leaves this Mac. The records are kept in a
+`stats` folder inside the Gropius data folder, one line of JSON each, for as
+many months and as many megabytes as you say in Settings. See
 [Record request statistics on this Mac](request-statistics.md).
 
 ## 9. Sharing across user accounts (optional)
@@ -157,6 +159,11 @@ make install-shared     # creates /Users/Shared/Gropius, needs your password
 
 After that, whoever launches Gropius first runs the server; everyone else's
 menu-bar app just points at it. One copy on disk, one on the GPU.
+
+Request statistics stay with the account that runs the server: if that account
+has recording on, its records cover every request the server handled, from any
+account on this Mac, and they are kept in that account's own folder rather
+than the shared one.
 
 Gropius only uses `/Users/Shared/Gropius` when the installer created it: the
 directory must be owned by the administrator account (`root`), which is what
@@ -226,9 +233,10 @@ Quit from the menu, drag `Gropius.app` to the Trash, and remove its data:
 rm -rf ~/Library/Application\ Support/Gropius
 ```
 
-That directory holds the private Python runtime and your downloaded models —
-deleting it removes every trace. If you set up the shared cache (step 8), the
-data lives in `/Users/Shared/Gropius` instead; remove that too:
+That directory holds the private Python runtime, your downloaded models and
+any request statistics you recorded — deleting it removes every trace. If you
+set up the shared cache (step 9), the models live in `/Users/Shared/Gropius`
+instead; remove that too:
 
 ```sh
 sudo rm -rf /Users/Shared/Gropius

@@ -188,11 +188,11 @@ func TestTheStatisticsEndpointIsLoopbackOnly(t *testing.T) {
 	}
 }
 
-// Recording lives in memory and writes nothing. Keeping records across a
-// restart is the next intent's (itd-2609061521102742), under its own decision
-// record, and until it exists a reader of this build should be able to see for
-// themselves that turning the switch on puts nothing on their disk.
-func TestRecordingWritesNoFile(t *testing.T) {
+// Recording writes to the store and to nowhere else. Everything else under
+// the data root — the registry, the settings, the model directories, the
+// per-model logs — is untouched by it, which is what keeps "turn statistics
+// on" from being a change to anything but statistics.
+func TestRecordingWritesOnlyToTheStore(t *testing.T) {
 	root := t.TempDir()
 	paths := config.NewPaths(root)
 	a, err := app.New(app.Options{Paths: paths, Config: config.Default()})
@@ -220,10 +220,38 @@ func TestRecordingWritesNoFile(t *testing.T) {
 	a.Stats.LoadFinished("org/a", 0, nil)
 	a.Stats.Removed("org/a", stats.ReasonEvicted)
 	getJSON(t, srv, "/api/stats")
-
-	if after := treeOf(t, root); !slices.Equal(before, after) {
-		t.Errorf("recording wrote to the data root.\nbefore: %v\nafter:  %v", before, after)
+	if err := a.StatsStore.Flush(); err != nil {
+		t.Fatal(err)
 	}
+
+	rel, err := filepath.Rel(root, paths.Stats)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range added(before, treeOf(t, root)) {
+		if !strings.HasPrefix(path, rel+string(filepath.Separator)) && path != rel {
+			t.Errorf("recording wrote %s, which is not in the store", path)
+		}
+	}
+	if len(added(before, treeOf(t, root))) == 0 {
+		t.Error("recording wrote nothing at all, so this test proves nothing")
+	}
+}
+
+// added returns the paths present after that were not present before, with the
+// size each entry is described by stripped off.
+func added(before, after []string) []string {
+	was := map[string]bool{}
+	for _, e := range before {
+		was[e] = true
+	}
+	var out []string
+	for _, e := range after {
+		if !was[e] {
+			out = append(out, strings.Fields(e)[0])
+		}
+	}
+	return out
 }
 
 // treeOf lists every path under root, relative to it, with each file's size,
