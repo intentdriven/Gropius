@@ -667,3 +667,86 @@ func TestAFullPinnedListStillFitsTheConfigFile(t *testing.T) {
 		t.Errorf("loaded %d pins, want %d", len(loaded.Pinned), MaxPinned)
 	}
 }
+
+// The budget is typed in gigabytes and stored in bytes: one unit in the file,
+// whatever the panel puts in front of the operator.
+func TestSaveLoadRoundTripKeepsTheMemoryBudget(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	c := Default()
+	c.MaxResidentBytes = 96 << 30
+	if err := Save(path, c); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	got, _, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got.MaxResidentBytes != c.MaxResidentBytes {
+		t.Errorf("MaxResidentBytes = %d, want %d", got.MaxResidentBytes, c.MaxResidentBytes)
+	}
+}
+
+// A fresh install stores no explicit budget: zero means "the default share of
+// this Mac's memory", and omitempty keeps the key out of the file, so a config
+// written on one Mac does not carry another one's figure.
+func TestADefaultConfigStoresNoMemoryBudget(t *testing.T) {
+	if got := Default().MaxResidentBytes; got != 0 {
+		t.Errorf("Default().MaxResidentBytes = %d, want 0 — the default is resolved, not stored", got)
+	}
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := Save(path, Default()); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(b), "max_resident_bytes") {
+		t.Errorf("a default config wrote a memory budget:\n%s", b)
+	}
+}
+
+// Validate is the settings path, where a human is waiting for an answer. It
+// stays machine-independent — the ceiling is checked where the machine's size
+// is known — so the only rule here is the one that holds on every Mac.
+func TestValidateRefusesANegativeMemoryBudget(t *testing.T) {
+	c := Default()
+	c.MaxResidentBytes = -1
+	if err := c.Validate(); err == nil {
+		t.Fatal("Validate accepted a negative memory budget")
+	}
+	c.MaxResidentBytes = 64 << 30
+	if err := c.Validate(); err != nil {
+		t.Errorf("Validate refused a budget larger than this Mac's memory: %v", err)
+	}
+}
+
+// A hand-edited file with an unusable budget must still load. Refusing it
+// sends main into its fail-closed loopback-only branch, so the API key and the
+// bind address a user set go unused over one number that can simply fall back
+// to the default.
+func TestLoadDropsAnUnusableMemoryBudget(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	body := `{"port":11535,"host":"0.0.0.0","decode_concurrency":4,` +
+		`"api_key":"bh_keep","max_resident_bytes":-5}`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, dropped, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.MaxResidentBytes != 0 {
+		t.Errorf("MaxResidentBytes = %d, want 0 — an unusable figure falls back to the default",
+			cfg.MaxResidentBytes)
+	}
+	if cfg.APIKey != "bh_keep" {
+		t.Errorf("APIKey = %q, want the file's key — one bad figure must not reset the install", cfg.APIKey)
+	}
+	if len(dropped) != 1 || !strings.Contains(dropped[0], "max_resident_bytes") {
+		t.Errorf("dropped = %v, want the memory budget named", dropped)
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("the loaded config does not validate: %v", err)
+	}
+}

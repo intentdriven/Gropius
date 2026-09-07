@@ -388,6 +388,21 @@ type Config struct {
 	// and protected from then on.
 	Pinned []string `json:"pinned,omitempty"`
 
+	// MaxResidentBytes caps the total charged size of the models that may be
+	// in memory at once. Zero — the default, and what a fresh install stores —
+	// means a share of this Mac's physical memory, resolved where that size is
+	// known; it is not a second representation of the same figure.
+	//
+	// Bytes, because that is what the pool's own messages already speak in and
+	// what a load is measured against; the panel types gigabytes and converts.
+	// Validate keeps to the one rule that holds on every Mac — the figure must
+	// not be negative — since a ceiling checked here would make a config.json
+	// written on a large Mac invalid on a smaller one, and an invalid config
+	// takes the whole install down to loopback with the shipping defaults.
+	// The ceiling belongs where the machine's size is known, at a settings
+	// save.
+	MaxResidentBytes int64 `json:"max_resident_bytes,omitempty"`
+
 	// Sampling holds the machine-wide sampling defaults every model server is
 	// launched with, so a request that omits a parameter is served with them.
 	Sampling Sampling `json:"sampling,omitzero"`
@@ -597,6 +612,22 @@ func (c *Config) sanitizePinned() []string {
 	return dropped
 }
 
+// sanitizeBudget drops a memory budget this build cannot use and names what it
+// dropped, so a hand-edited file still loads.
+//
+// Falling back to the default is the whole point: refusing the file would send
+// main into its fail-closed loopback-only branch, so the API key and the bind
+// address the operator set would go unused over one figure that has a perfectly
+// good default sitting behind it.
+func (c *Config) sanitizeBudget() []string {
+	if c.MaxResidentBytes >= 0 {
+		return nil
+	}
+	dropped := []string{"max_resident_bytes[" + strconv.FormatInt(c.MaxResidentBytes, 10) + "]"}
+	c.MaxResidentBytes = 0
+	return dropped
+}
+
 // Clone returns a copy that shares no slice, map or pointer with the original.
 //
 // The settings endpoint decodes a posted body into a copy of the live config
@@ -709,6 +740,9 @@ func (c Config) Validate() error {
 		return fmt.Errorf("the statistics store's limit must be between %d and %d bytes, got %d",
 			MinStatsMaxBytes, MaxStatsMaxBytes, c.StatsMaxBytes)
 	}
+	if c.MaxResidentBytes < 0 {
+		return fmt.Errorf("max_resident_bytes must not be negative, got %d", c.MaxResidentBytes)
+	}
 	// A sampling default becomes a launch flag on every model server, and the
 	// model server validates the effective value of every request against it:
 	// a value it rejects turns one save into a 400 on every request that omits
@@ -770,6 +804,7 @@ func Load(path string) (Config, []string, error) {
 	dropped := append(cfg.sanitizeSampling(), cfg.sanitizePerModel()...)
 	dropped = append(dropped, cfg.sanitizePinned()...)
 	dropped = append(dropped, cfg.sanitizeStats()...)
+	dropped = append(dropped, cfg.sanitizeBudget()...)
 	if err := cfg.Validate(); err != nil {
 		return Default(), nil, fmt.Errorf("invalid config %s: %w", path, err)
 	}
