@@ -159,7 +159,9 @@ their numbers. It never records a prompt, an answer, an API key or the address
 of the client, and nothing recorded leaves this Mac. The records are kept in a
 `stats` folder inside the Gropius data folder, one line of JSON each, for as
 many months and as many megabytes as you say in Settings. See
-[Record request statistics on this Mac](request-statistics.md).
+[Record request statistics on this Mac](request-statistics.md), and
+[Understanding the historical views](statistics-explained.md) for what the
+tab's tables over days and months mean.
 
 ## 9. Sharing across user accounts (optional)
 

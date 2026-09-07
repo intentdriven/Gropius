@@ -58,7 +58,10 @@ Cross-machine LAN use works; TLS and notarized distribution are not yet included
   record of each request's model, token counts and timings, shown per model in
   the control panel and kept on this Mac. The records are plain text, one line
   of JSON each, kept for as many months and as many megabytes as you say
-  ([how to switch it on](docs/request-statistics.md)).
+  ([how to switch it on](docs/request-statistics.md)). The Statistics tab also
+  reads those records back as history: tokens per day by model with each
+  model's share, how long requests took, and when models were evicted and
+  reloaded ([what the views mean](docs/statistics-explained.md)).
 - **Network-shared** — bind the LAN, discoverable over Bonjour, optional API key.
 - **Multi-account** — other user accounts on the same Mac share one copy of each
   model on disk and on the GPU.

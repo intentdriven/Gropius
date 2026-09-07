@@ -114,6 +114,26 @@ GitHub release notes.
   [an architecture decision](.abcd/development/decisions/adrs/2609061610107154-statistics-store-format-json-lines-size-rotated-per-account.md),
   and every field is described in
   [Reference: the request statistics store](docs/statistics-store-reference.md).
+- **The Statistics tab reads those records back**, over a range you choose —
+  seven, thirty or ninety days, or everything still kept — as four tables under
+  the live view: tokens per day for each model with that model's share of every
+  token in the range, how long each model's answers took as the median,
+  ninetieth and ninety-ninth percentile of both the time to the first token and
+  the rate afterwards, the same times to first token counted into buckets so a
+  model that is quick most of the time and slow the rest can be told from one
+  that is evenly slow, and the local day hour by hour with the models evicted to
+  make room for another and the model servers started. Tables, not charts: the
+  figures are exact and the panel carries no charting library. The reading and
+  the arithmetic happen in Gropius, on the control plane that answers this Mac
+  and nothing else, so the browser is handed sums and counts and never a
+  request's own row. Days and hours are this Mac's own, and only a removal that
+  was an eviction is counted as one — an idle reap, an unload, a crash and a
+  shutdown are removals. The line above the tables says what the figures cover
+  and what bounded them: the range, whether it was narrowed to the widest one
+  view covers, whether the reading stopped at its record bound, how many lines
+  could not be read, and that nothing recorded while the switch was off appears.
+  With recording off the tab says so and shows no figure, as it already does.
+  See [Understanding the historical views](docs/statistics-explained.md).
 - **Merge system messages**, a per-model setting in Settings that is off until
   it is switched on. Some models refuse a conversation whose instructions are
   not all at the top, which breaks any assistant that repeats its instructions
