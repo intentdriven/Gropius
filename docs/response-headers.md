@@ -17,12 +17,16 @@ On such an install both appear on a successful answer, streamed or not, and on
 the 503 a request gets when this Mac has no memory for its model. They carry no
 model name and no count of anything.
 
-They are absent from every other answer: every answer at all on an install
-with no API key set, a request refused before a model was chosen (400, 401,
-404), the 503 for a model that is already serving as many requests as it will
-take, and the 503 for a model server that could not be started. None of the
-latter spent time getting to a model server, so there is nothing for the
-headers to say.
+They are written the moment a model server has been secured, so every answer
+from that point on carries them — including the failures that come after: the
+502 when the model server does not respond, and the 500 when the request or the
+response cannot be re-encoded. A request that paid a wait and then met one of
+those is still owed the figure.
+
+They are absent from every answer that never got that far: every answer at all
+on an install with no API key set, a request refused before a model was chosen
+(400, 401, 404), the 503 for a model that is already serving as many requests
+as it will take, and the 503 for a model server that could not be started.
 
 A 503 saying `warm` and `0` is a request that was refused without waiting —
 the memory was spoken for the moment it arrived, or as many requests were

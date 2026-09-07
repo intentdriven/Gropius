@@ -27,21 +27,28 @@ GitHub release notes.
   requests are served oldest first, and once anything is waiting, every request
   for a model that is not already in memory joins the queue behind it —
   including one there is room for, since free memory belongs to whoever has
-  waited longest. Raising the memory budget, or removing a pin, wakes them at
-  once rather than leaving them to wait for something to finish. A request that could never fit, one that arrives when the short queue
-  is already full and needs a model unloaded, and the models loaded at start-up
-  by Preload never wait at all; a request that needs nothing unloaded is served
-  whatever the queue is doing. The maximum wait may not be shorter than the
-  protection, which would refuse a waiting request before its own wait could
-  override a model's protection. If nothing frees up within the maximum wait, the request gets the same
-  refusal it would have had immediately, now saying how long it waited. The
-  protection may not be longer than the idle timeout when one is set, since the
-  idle timeout would otherwise unload the very model a request is waiting on; a
-  save that breaks that is refused naming both figures, and a settings file
-  edited by hand is shortened to the timeout rather than refused. Defaults are
+  waited longest. Raising the memory budget, or removing a pin, wakes them:
+  every request the raise fits is served on it, oldest first, without any model
+  unloading or any request ending. A request that could never fit, one that
+  arrives when the short queue is already full and needs a model unloaded, and
+  the models loaded at start-up by Preload never wait at all; one that arrives
+  at a full queue and needs nothing unloaded is served rather than refused,
+  since the queue it cannot join is not waiting for what it needs. The maximum
+  wait may not be shorter than the protection, which would refuse a waiting
+  request before its own wait could override that protection. If nothing frees
+  up within the maximum wait, the request gets the same refusal it would have
+  had immediately, now saying how long it waited. The protection may not be
+  longer than the idle timeout when one is set, since the idle timeout would
+  otherwise unload the very model a request is waiting on. A save that breaks
+  that is refused naming both figures; a settings file edited by hand is
+  shortened to the timeout rather than refused; and because a raised idle
+  timeout only takes effect at a restart while a protection takes effect at
+  once, a protection saved beside a raised timeout runs at the timeout still in
+  force until you restart. Defaults are
   120 seconds of protection and a 300 second maximum, and both apply the moment
   they are saved. My Models says how many requests are waiting for memory. See
-  [Give a busy model a moment before it is evicted](docs/eviction-grace.md).
+  [Give a busy model a moment before it is evicted](docs/eviction-grace.md) and
+  [Why a request waits instead of taking the memory](docs/eviction-grace-explained.md).
 - **Two response headers on completions**, `X-Gropius-State` (`warm` or
   `waited`) and `X-Gropius-Queue-Time` (whole milliseconds), on the answer and
   on the 503 a request gets when this Mac has no memory for its model. They

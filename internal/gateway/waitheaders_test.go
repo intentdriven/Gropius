@@ -320,3 +320,29 @@ func TestTheWaitHeadersFollowTheResidencyRule(t *testing.T) {
 		}
 	})
 }
+
+// The reference page's enumeration of where the headers appear is the content
+// of a reference page, and a client acts on it. Two of the answers it lists as
+// carrying them come from failure paths that run after the headers are
+// written, which a substring check on the header names cannot see.
+func TestTheResponseHeaderReferenceGetsTheFailurePathsRight(t *testing.T) {
+	page, err := os.ReadFile("../../docs/response-headers.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(page)
+	// setWaitHeaders runs immediately after Acquire, before the rewrite and the
+	// relay, so every failure after that point carries them.
+	for _, want := range []string{"502", "500"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("the reference does not say that a %s after the model server was "+
+				"secured carries the headers; setWaitHeaders runs before the relay", want)
+		}
+	}
+	// And it must still name the ones that do not.
+	for _, want := range []string{"400", "401", "404", "503"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("the reference does not mention %s at all", want)
+		}
+	}
+}

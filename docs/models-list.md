@@ -208,11 +208,14 @@ rules.
   happens. With it on, a model is protected for a set interval after it
   finishes a request, and a request that needs its memory waits for another
   model to fall idle rather than taking it — bounded by a maximum wait, past
-  which it gets the same refusal. Every answer says whether it waited, in the
-  headers [the response header reference](response-headers.md) describes.
+  which it gets the same refusal. On an install with an API key set, an answer
+  that reached a model server also says whether it waited, in the headers
+  [the response header reference](response-headers.md) describes; an open
+  server sends those to nobody, for the reason it withholds `state` here.
   Reading `state` from this listing before choosing a model is how a client
   avoids the wait rather than only being told about it. See
-  [Give a busy model a moment before it is evicted](eviction-grace.md).
+  [Give a busy model a moment before it is evicted](eviction-grace.md) and
+  [Why a request waits instead of taking the memory](eviction-grace-explained.md).
 - A model larger than the whole budget is refused outright: no eviction helps.
 - **Idle timeout** (**Settings**, off by default) unloads a model that has gone
   that long without a request, whether or not anything needs the room.

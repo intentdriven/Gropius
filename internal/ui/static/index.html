@@ -221,10 +221,15 @@
         waits instead: for a model to have been idle for the protection below, or for its
         own wait to have passed that long, whichever comes first. If nothing frees up
         within the maximum, the request gets the same refusal it would have had at once,
-        now saying how long it waited. Every answer says whether it waited and for how
-        long, in the <code>X-Gropius-State</code> and <code>X-Gropius-Queue-Time</code>
-        headers. The protection may not be longer than the idle timeout above when one is
-        set, or the idle timeout would unload the very model a wait is protecting.</p>
+        now saying how long it waited. With an API key set above, every answer that
+        reached a model server also says whether it waited and for how long, in the
+        <code>X-Gropius-State</code> and <code>X-Gropius-Queue-Time</code> headers; a
+        server with no key sends them to nobody, the same rule the models list applies
+        to which models are loaded. The protection may not be longer than the idle
+        timeout above when one is set, or the idle timeout would unload the very model
+        a wait is protecting — and because that timeout only changes at a restart, a
+        longer protection saved beside a raised timeout is held to the timeout still in
+        force until you restart.</p>
       <label>
         <span>Protect a model that just finished for (seconds)</span>
         <input id="setGraceSec" type="number" step="1" min="0" max="3600" placeholder="120">

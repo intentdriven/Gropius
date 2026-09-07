@@ -95,9 +95,12 @@ once — even one that answered a moment ago. Turn it on and that request waits
 instead: for a model to have been idle for the interval you set, or for its own
 wait to have passed that long, up to a maximum you also set. If nothing frees
 up in time it gets the same refusal it would have had immediately, now saying
-how long it waited, and every answer carries two headers saying whether it
-waited. The interval may not be longer than the idle timeout above when one is
-set. See [Give a busy model a moment before it is evicted](eviction-grace.md).
+how long it waited. With an API key set, every answer that reached a model
+server also carries two headers saying whether it waited and for how long; an
+open server sends them to nobody, the same rule the models list applies to
+residency. The interval may not be longer than the idle timeout above when one
+is set. See [Give a busy model a moment before it is evicted](eviction-grace.md)
+and [the response header reference](response-headers.md).
 
 ## 5. Talk to it — from another machine
 

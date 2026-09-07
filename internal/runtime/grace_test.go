@@ -797,7 +797,7 @@ func TestTheEvictionPlanTakesTheLeastRecentlyUsedFirst(t *testing.T) {
 // could before it is refused. That is what the pool has always done and the
 // record says the off path is unchanged, so it is pinned here rather than left
 // to be rediscovered — it is also why the off path keeps the incremental
-// behaviour the on path deliberately does not have.
+// behavior the on path deliberately does not have.
 func TestWithGraceOffALoadThatCannotFitStillFreesWhatItCan(t *testing.T) {
 	l := newFakeLauncher()
 	p := newTestPool(t, l, fairnessModels(), PoolOptions{MaxResidentBytes: fairnessBudget})
@@ -1106,5 +1106,64 @@ func TestAQueueFullArrivalTakesNoVictimAndCostsNoSyscall(t *testing.T) {
 	if got := l.precheckCount() - before; got != 0 {
 		t.Errorf("20 refusals past the queue cap cost %d launch prechecks under the "+
 			"pool's lock, want none", got)
+	}
+}
+
+// Criterion 7 with more than one waiter. A budget raise makes room without
+// anything having to finish, and every request the raise fits must be served
+// on it — in queue order, but without waiting for a model to fall idle or a
+// request to end, which is what the criterion rules out.
+func TestRaisingTheMemoryBudgetServesEveryWaiterItFits(t *testing.T) {
+	l := newFakeLauncher()
+	models := map[string]int64{"org/warm": 200}
+	for i := range 4 {
+		models[fmt.Sprintf("org/w%d", i)] = 200 // charged 240 each
+	}
+	p := newTestPool(t, l, &fakeSource{models: models}, PoolOptions{
+		MaxResidentBytes: 250, // one model
+		EvictionGrace:    30 * time.Second,
+		MaxEvictionWait:  30 * time.Second,
+	})
+
+	warm(t, p, "org/warm")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	errs := make(chan error, 4)
+	held := make(chan func(), 4)
+	for i := range 4 {
+		go func(i int) {
+			up, release, err := p.Acquire(ctx, fmt.Sprintf("org/w%d", i))
+			if err == nil {
+				// Held, not released: a waiter that let go at once would free
+				// the room the next one needs, and then this would pass on a
+				// build that served them one model at a time.
+				held <- release
+				_ = up
+			}
+			errs <- err
+		}(i)
+	}
+	waitUntil(t, 5*time.Second, func() bool { return p.Waiting() == 4 },
+		"the requests never all joined the queue")
+
+	// Room for the resident model and all four waiters at once.
+	p.SetMemoryBudget(5000)
+
+	for i := range 4 {
+		select {
+		case err := <-errs:
+			if err != nil {
+				t.Fatalf("a waiting request was not served by a budget raise that fits it: %v", err)
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatalf("only %d of the 4 waiting requests were served by the budget raise", i)
+		}
+	}
+	for range 4 {
+		(<-held)()
+	}
+	if ids := residentIDs(p); len(ids) != 5 {
+		t.Errorf("resident = %v, want the warm model and all four that were waiting", ids)
 	}
 }

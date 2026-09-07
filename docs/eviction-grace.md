@@ -1,14 +1,11 @@
 # Give a busy model a moment before it is evicted
 
-Gropius unloads the least recently used idle model to make room for a new one.
-That rule treats a model idle for one second the same as one idle for an hour,
-and an agent is idle between turns — so on a Mac two people share, their models
-take turns evicting each other in the pauses, and each pays a reload of seconds
-to minutes on its next turn.
-
 Eviction grace protects a model for a short while after it finishes work. A
 request that needs that model's memory waits for it rather than taking it, and
-the answer says that it waited.
+the answer says that it waited. It is what stops two people's models evicting
+each other in the pauses between turns;
+[Why a request waits instead of taking the memory](eviction-grace-explained.md)
+says why that happens and what the wait costs.
 
 Off unless you turn it on. Leave it off and a request for a model that does not
 fit unloads a model at once, exactly as it always has.
@@ -54,10 +51,11 @@ protected forever. Waiting requests are served oldest first.
 
 Three things end a wait early:
 
-- **The memory budget goes up** so that the model now fits. The request
-  proceeds without waiting for anything to finish. Removing a pin wakes it
-  too, though a model that has just been unpinned is still inside its own
-  protection until that runs out.
+- **The memory budget goes up** so that the model now fits. Every waiting
+  request the raise fits is served on it, oldest first, without any model
+  unloading or any request ending. Removing a pin wakes them too, though a
+  model that has just been unpinned is still inside its own protection until
+  that runs out.
 - **A pin is added** that makes the request impossible. It is refused at once
   rather than waiting out the maximum.
 - **The maximum wait runs out.** The request gets the same refusal it would
@@ -70,9 +68,11 @@ Three things end a wait early:
 - A request that arrives when the queue is already full and needs a model
   unloaded is refused straight away too. The queue is deliberately short: it
   drains only when a model is unloaded, and every waiting request holds its
-  whole body in memory meanwhile. One that needs nothing unloaded — its model
-  is in memory already, or it fits in memory nobody is using — is served
-  whatever the queue is doing.
+  whole body in memory meanwhile. One that arrives at that point and needs
+  nothing unloaded — its model is in memory already, or it fits in memory
+  nobody is using — is served rather than refused, since the queue it cannot
+  join is not waiting for what it needs. Below the cap it queues like anything
+  else.
 - Models loaded at start-up by **Preload**, which load one after another and
   would otherwise wait for each other. They are not held behind the queue
   either.
@@ -83,12 +83,17 @@ Three things end a wait early:
 
 The protection may not be longer than **Unload models after idle** when that is
 set. The idle timeout would otherwise unload the very model a request is
-waiting on, and the wait would be for nothing. A save that breaks the rule is
-refused, naming both figures.
+waiting on, and the wait would be for nothing. Three things enforce it.
 
-A settings file edited by hand that breaks it is not refused — that would take
-the whole install down to its defaults over one number. The protection is
-shortened to the idle timeout instead, and the start-up log says so.
+- **A save that breaks it is refused**, naming both figures.
+- **A settings file edited by hand is not** — that would take the whole install
+  down to its defaults over one number. The protection is shortened to the idle
+  timeout instead, and the start-up log says so.
+- **A raised idle timeout does not take effect until you restart**, but a
+  protection does. So a single save that raises the timeout to 900 seconds and
+  sets a 600 second protection is accepted and stored, and until you restart the
+  protection runs at the timeout still in force. The start-up log and the save's
+  own log line say so. Restart and you get the pair you asked for.
 
 ## What a client sees
 
@@ -102,32 +107,12 @@ same rule [the models list](models-list.md) applies to residency. See
 A client that would rather not wait at all can read residency from
 [the models list](models-list.md) and ask for a model that is already loaded.
 
-## What it costs
+## What this costs you
 
 Switching this on means a request that used to be served immediately, by
-evicting somebody else's model, may now wait instead. That is the trade: the
-model in memory keeps it, and the request that wanted the room pays. On a Mac
-with one user and models that all fit the budget, nothing ever waits and
-nothing changes.
-
-A waiting request holds its connection open, so the maximum wait is also how
-long a client can occupy one. The queue's own length is the second bound, and
-it is short for that reason.
-
-The case that reaches the maximum most easily is not a protected model but a
-busy one. A model with a request still running is never an eviction candidate
-at all, so one long generation turns every request for another model into a
-wait rather than an instant refusal, for as long as it runs — and because the
-queue is one queue for the whole machine, a request stuck at its head holds up
-every load behind it, from every client, until its own maximum runs out.
-Requests for models already in memory are unaffected throughout. On a Mac whose
-endpoint is open to the network, that is worth weighing against a shorter
-maximum wait.
-
-A maximum wait shorter than the protection is refused, and a settings file
-carrying one is raised to the protection with a line in the start-up log: it
-would refuse a waiting request before its own wait could override a model's
-protection, which puts back the starvation this feature exists to prevent.
-
-The control panel's **My Models** tab says how many requests are waiting for
-memory, so a queue that is not draining is visible rather than inferred.
+evicting somebody else's model, may now wait instead. The control panel's
+**My Models** tab says how many requests are waiting for memory, so a queue
+that is not draining is visible rather than inferred. See
+[Why a request waits instead of taking the memory](eviction-grace-explained.md)
+for the trade in full, including the case that reaches the maximum wait most
+easily.
