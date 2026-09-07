@@ -46,6 +46,8 @@ Cross-machine LAN use works; TLS and notarized distribution are not yet included
   ([reference](docs/models-list.md)).
 - **Runs many models** — one process per model, with an LRU memory budget so a
   request for a second model evicts an idle one instead of OOMing the machine.
+  The budget is yours to set: give a dedicated Mac most of itself, or a shared
+  laptop less ([how to](docs/memory-budget.md)).
 - **Pinned models** — the models you rely on stay in memory: never evicted to
   make room, never reaped by the idle timeout
   ([how to](docs/pinning-models.md)).

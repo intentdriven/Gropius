@@ -65,6 +65,16 @@ context so a client can size its prompts before sending. With an API key set it
 also says which models are loaded. The [models list reference](models-list.md)
 describes every field, including what those values do and do not promise.
 
+### Set how much memory models may use
+
+**Settings → Memory for loaded models** is how much of this Mac Gropius fills
+with loaded models: 60% of its memory until you type a figure of your own, in
+gigabytes, with the share of the machine shown beside it. Raise it on a Mac that
+serves models and does nothing else, and two large models sit in memory together
+rather than taking turns. A change applies to the next load, with no restart,
+and nothing is unloaded to fit a lowered figure. See
+[Set how much memory models may use](memory-budget.md).
+
 ### Keep a model in memory
 
 **Settings → Pinned models** protects the models you rely on. A pinned model is
