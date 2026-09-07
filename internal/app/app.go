@@ -156,8 +156,8 @@ func New(opts Options) (*App, error) {
 		// them while recording is off. Adapting here keeps internal/stats a
 		// leaf package that imports nothing of ours.
 		Observer: poolObserver{rec: a.Stats, log: opts.Log},
-		Pinned: a.cfg.Pinned,
-		Log:    opts.Log,
+		Pinned:   a.cfg.Pinned,
+		Log:      opts.Log,
 	})
 	a.Stats.SetEnabled(opts.Config.Statistics)
 
