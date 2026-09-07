@@ -358,3 +358,50 @@ confirmed every fix above by mutation and found one thing they had introduced.
   loopback (iss-2609070252378091). Both are bounded and behind a switch that is
   off; a per-source cap is a design decision this record does not settle. The
   first is stated in `docs/eviction-grace.md`'s "What it costs".
+
+## As built, third addendum (2026-09-07, after the design review)
+
+A design and correctness review against this record and the intent found one
+blocking defect and three that shipped differently from what the record says.
+
+- **Switching grace off released only the waiter at the head.** The Approach
+  makes the off switch the operator saying "swap now", and three comments and
+  the how-to promise that every parked request takes its victim. What shipped
+  refused every waiter that reached the pool's lock while somebody else was
+  still at the head: the fairness gate said it could not evict, so it never
+  attempted, and the queue check then refused it because grace was off. With
+  grace off there is no queue to be fair to — `mayEvictLocked` and
+  `worthTryingLocked` both admit every caller — and each takes the ordinary
+  path, which evicts what it can before refusing anything. Held by
+  `TestSwitchingGraceOffReleasesEveryWaitingRequest`, which parks seven: with
+  one waiter, which is what the first cut's test parked, the failing moment
+  does not exist.
+- **The grace/idle invariant was judged on the wrong figure.** `config.Validate`
+  compares the grace with the idle timeout in the settings file, but the pool
+  reaps on the one it was built with, and the idle timeout only reaches it at a
+  restart while the grace is applied live. One save that raised the timeout and
+  set a longer grace therefore left the reaper unloading the very model a
+  request was waiting on — the one state this record wrote a refusal for.
+  `App.enforcedGrace` now holds what the pool is given down to the idle timeout
+  in force, following `enforcedBudget`: the operator's figures stay stored, the
+  clamp is logged, and a restart gives them what they asked for. Refusing the
+  save instead would have been the wedge this repository has now built three
+  times. Held by
+  `TestTheEnforcedGraceIsNeverLongerThanTheIdleTimeoutInForce`.
+- **A refusal after a wait recorded `queue_wait_ms` 0** while reporting the wait
+  in its header, so the statistics store — the surface an operator would use to
+  ask what grace is costing — was blind to the outcome grace produces when it
+  fails. `handleCompletions` now calls the observer on that path. Held by
+  `TestARefusalAfterAWaitIsRecordedWithTheWaitItPaid`.
+- **`stats.Record.QueueWaitMS`'s own comment** still described a slot on a
+  loaded model. The as-built decision above rests on that definition, so the
+  definition is corrected where it lives and not only on the reference page.
+- Smaller, from the same review: `graceElapsedLocked` enforces its own
+  in-flight premise rather than borrowing its caller's; a refusal because the
+  queue is full says so in this Mac's log instead of reading like a machine
+  whose memory is all spoken for (`waitVerdict`); `docs/response-headers.md`
+  says which answers do *not* carry the two headers, since the overload and
+  launch-failure 503s do not; and
+  `TestARequestThatReallyWaitedSaysSoOnTheWire` drives a real parked waiter
+  through the gateway to the header, which is the seam the stub-pool tests
+  cannot hold.
