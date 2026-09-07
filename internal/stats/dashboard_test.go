@@ -351,16 +351,20 @@ func TestARecordThatArrivedInRangeButFinishedLateIsStillCounted(t *testing.T) {
 	}
 }
 
-// And it does stop: a record older than the margin means everything left to
-// read finished earlier still, so there is nothing in the range behind it.
-func TestThePassStopsOnceItIsPastTheMargin(t *testing.T) {
+// However far out of order a record is, it is still found. There is no early
+// stop to pass it over, which is the whole of why: the store is in completion
+// order and the scan is against arrival times, so any margin would be a guess,
+// and the failure a wrong guess buys is a month silently drawn short.
+func TestAStragglerFarOlderThanTheRangeDoesNotEndThePass(t *testing.T) {
 	s := fixtureStore(t)
 	from := at(east, 2026, 9, 10, 0, 0)
-	old := from - int64(historyStopSlack/time.Second) - 3600
+	// Written in completion order. The middle line is stamped a fortnight
+	// before the range — a clock stepped backwards, or a generation that ran
+	// for days — and the line after it is inside the range.
 	for _, r := range []Record{
-		{Model: "org/alpha", At: old - 60, Class: ClassOK, PromptTokens: 5, CompletionTokens: 5},
-		{Model: "org/alpha", At: old, Class: ClassOK, PromptTokens: 5, CompletionTokens: 5},
 		{Model: "org/alpha", At: from + 60, Class: ClassOK, PromptTokens: 1, CompletionTokens: 1},
+		{Model: "org/alpha", At: from - 14*24*3600, Class: ClassOK, PromptTokens: 5, CompletionTokens: 5},
+		{Model: "org/alpha", At: from + 120, Class: ClassOK, PromptTokens: 2, CompletionTokens: 2},
 	} {
 		if err := s.AppendRequest(r); err != nil {
 			t.Fatal(err)
@@ -370,13 +374,41 @@ func TestThePassStopsOnceItIsPastTheMargin(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// The in-range record and the first record past the margin are read; the
-	// one behind that is not, which is the whole point of stopping.
-	if h.Records != 2 {
-		t.Errorf("the pass read %d records, want it to stop at the first one past the margin", h.Records)
+	if h.Records != 3 {
+		t.Errorf("the pass read %d of the fixture's 3 records", h.Records)
 	}
-	if len(h.Days) != 1 || h.Days[0].CompletionTokens != 1 {
-		t.Errorf("the range's own record was not the only one counted: %#v", h.Days)
+	// Both in-range records, not just the one before the straggler.
+	if len(h.Days) != 1 || h.Days[0].CompletionTokens != 3 || h.Days[0].Requests != 2 {
+		t.Errorf("a record behind the straggler was passed over: %#v", h.Days)
+	}
+	// And the pass says it got back past the range's start, which is what the
+	// panel needs to tell a covered range from one the store does not reach.
+	if !h.ReachedStart {
+		t.Error("the pass read past the range's start and does not say so")
+	}
+	if h.Truncated {
+		t.Error("a three-record fixture is reported as stopped by a bound")
+	}
+}
+
+// A store that does not reach back as far as the range says so, and says it
+// differently from a pass a bound stopped: one is a quiet history, the other is
+// a figure drawn short.
+func TestAStoreThatDoesNotReachTheRangesStartSaysSo(t *testing.T) {
+	s := fixtureStore(t)
+	from := at(east, 2026, 9, 10, 0, 0)
+	if err := s.AppendRequest(Record{Model: "org/alpha", At: from + 60, Class: ClassOK}); err != nil {
+		t.Fatal(err)
+	}
+	h, err := Aggregate(t.Context(), s, time.Unix(from, 0), time.Unix(from+7200, 0), east)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h.ReachedStart {
+		t.Error("a store holding nothing older than the range claims to have read past its start")
+	}
+	if h.Truncated {
+		t.Error("running out of store is reported as a bound stopping the pass")
 	}
 }
 
@@ -466,5 +498,128 @@ func TestTheBucketEdgesHandedOutAreACopy(t *testing.T) {
 	h.FirstTokenBucketEdgesMS[0] = 999999
 	if FirstTokenBucketEdgesMS[0] == 999999 {
 		t.Error("the aggregate handed out the package's own slice")
+	}
+}
+
+// A pass stopped by the row bound says so too. The record bound caps the
+// timings; this one caps the tables, which are a row per day per model and are
+// what a store full of unrecognisable model ids would grow without bound.
+func TestAPassThatStopsAtTheRowBoundSaysSo(t *testing.T) {
+	s := fixtureStore(t)
+	day := at(east, 2026, 9, 1, 12, 0)
+	for i := range 8 {
+		if err := s.AppendRequest(Record{
+			Model:        "org/model-" + string(rune('a'+i)),
+			At:           day + int64(i),
+			Class:        ClassOK,
+			PromptTokens: 1, CompletionTokens: 1,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	was := historyRowBound
+	historyRowBound = 3
+	t.Cleanup(func() { historyRowBound = was })
+
+	h, err := Aggregate(t.Context(), s, time.Unix(day-3600, 0), time.Unix(day+3600, 0), east)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !h.Truncated {
+		t.Error("the pass stopped at its row bound and does not say so")
+	}
+	if len(h.Days) > historyRowBound {
+		t.Errorf("the table has %d rows under a bound of %d", len(h.Days), historyRowBound)
+	}
+}
+
+// A range that starts part-way through a day — which is every range the panel
+// sends — has an oldest day holding only the part of it inside the range. That
+// row says so, because drawn beside whole days it reads as a quiet one.
+func TestTheRangesOldestDayIsMarkedWhenTheRangeClipsIt(t *testing.T) {
+	s := fixtureStore(t)
+	for _, r := range []Record{
+		// Before the range starts on the 1st: never counted.
+		{Model: "org/alpha", At: at(east, 2026, 9, 1, 9, 0), Class: ClassOK, PromptTokens: 500, CompletionTokens: 500},
+		// After it, on the same day: counted, and the row is short by the above.
+		{Model: "org/alpha", At: at(east, 2026, 9, 1, 18, 0), Class: ClassOK, PromptTokens: 10, CompletionTokens: 20},
+		// A whole day inside the range.
+		{Model: "org/alpha", At: at(east, 2026, 9, 2, 12, 0), Class: ClassOK, PromptTokens: 1, CompletionTokens: 2},
+	} {
+		if err := s.AppendRequest(r); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	h, err := Aggregate(t.Context(), s,
+		time.Unix(at(east, 2026, 9, 1, 16, 0), 0), time.Unix(at(east, 2026, 9, 3, 0, 0), 0), east)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(h.Days) != 2 {
+		t.Fatalf("the range covers %d day rows, want 2: %#v", len(h.Days), h.Days)
+	}
+	whole, clipped := h.Days[0], h.Days[1]
+	if whole.Day != "2026-09-02" || whole.Partial {
+		t.Errorf("the whole day is %#v, want the 2nd unmarked", whole)
+	}
+	if clipped.Day != "2026-09-01" || !clipped.Partial {
+		t.Errorf("the clipped day is %#v, want the 1st marked partial", clipped)
+	}
+	// And the mark is about the clipping, not about the figures: the row still
+	// holds exactly what fell inside the range.
+	if clipped.CompletionTokens != 20 {
+		t.Errorf("the clipped row holds %d completion tokens, want the 20 inside the range", clipped.CompletionTokens)
+	}
+
+	// A range that starts at a local midnight clips nothing, and nothing is
+	// marked.
+	aligned, err := Aggregate(t.Context(), s,
+		time.Unix(at(east, 2026, 9, 1, 0, 0), 0), time.Unix(at(east, 2026, 9, 3, 0, 0), 0), east)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, d := range aligned.Days {
+		if d.Partial {
+			t.Errorf("a day-aligned range marks %s partial", d.Day)
+		}
+	}
+}
+
+// The fold the per-model per-day summaries will arrive through, exercised on
+// its own: the seam is what itd-2609061602043757 plugs into, and a fold with a
+// stated correctness property and no test is a property nobody is holding.
+func TestTheSummaryFoldAddsToTheDayAndMarksIt(t *testing.T) {
+	a := newHistoryAgg(t.Context(), 0, 1<<40, time.UTC)
+	// A day's surviving records, then the summary of the ones retention took.
+	a.addTokens("2026-09-01", "org/alpha", 2, 10, 20, false)
+	a.addTokens("2026-09-01", "org/alpha", 8, 100, 200, true)
+	// And a day whose records have gone entirely.
+	a.addTokens("2026-08-01", "org/alpha", 40, 400, 800, true)
+
+	var h History
+	a.fill(&h)
+	if len(h.Days) != 2 {
+		t.Fatalf("the fold made %d rows, want 2: %#v", len(h.Days), h.Days)
+	}
+	boundary, gone := h.Days[0], h.Days[1]
+	// Additive, never subtracting: the boundary day carries both halves.
+	if boundary.Day != "2026-09-01" || boundary.Requests != 10 ||
+		boundary.PromptTokens != 110 || boundary.CompletionTokens != 220 {
+		t.Errorf("the boundary day is %#v, want the records and the summary added", boundary)
+	}
+	if !boundary.FromSummary {
+		t.Error("the boundary day carries summary figures and is not marked")
+	}
+	if gone.Day != "2026-08-01" || !gone.FromSummary || gone.Requests != 40 {
+		t.Errorf("the summary-only day is %#v", gone)
+	}
+	// The range's total, which the share column divides by, takes the summary
+	// figures too — a share drawn over the records alone would not add to one.
+	if len(h.Models) != 1 || h.Models[0].Tokens != 110+220+400+800 {
+		t.Errorf("the range's total is %#v, want every folded token", h.Models)
+	}
+	if h.Models[0].Share != 1 {
+		t.Errorf("the only model's share is %v, want 1", h.Models[0].Share)
 	}
 }

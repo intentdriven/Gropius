@@ -71,6 +71,14 @@ func TestAStoreAtTheSizeCapAggregatesWithinTheBound(t *testing.T) {
 // is being measured is the reading, and driving a million records through a
 // buffered channel to measure a read would spend most of the test on the half
 // that is not under test.
+//
+// The shape it makes is not quite a store's. Arrival times descend as each file
+// grows while the file names ascend, so the whole fixture reads back oldest
+// first and spans about ten days rather than the thirty the range asks for.
+// That is the worst case for the timing — every record is decoded and every one
+// of them is folded in — which is what this is here to measure; the ordering
+// itself is asserted by the tests in dashboard_test.go, against fixtures
+// written through the store.
 func writeCapSizedStore(t *testing.T, dir string, end time.Time) int {
 	t.Helper()
 	models := []string{

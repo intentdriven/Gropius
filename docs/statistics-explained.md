@@ -41,12 +41,27 @@ still keeps. Days and hours are this Mac's own, not UTC: "most evictions fall
 between six and seven in the evening" is a claim about the hours you keep, and
 a day boundary drawn in UTC would put a late-evening request on tomorrow.
 
+A range ends now, so its newest day is today up to this moment, and it begins
+at the moment you picked it rather than at a midnight: pick "the last thirty
+days" at four in the afternoon and the oldest day holds only the traffic after
+four. That row is marked **part of the day**, because beside whole days a third
+of a day reads as a quiet one.
+
 The line above the tables says which range the figures cover and what bounded
 them. One view covers at most 366 days, and one reading covers at most
 1,000,000 records — a store at its default size limit holds rather fewer than
-that, so the record bound only bites on a store whose limit has been raised. If
-either bound applies, the line says so, because a table that quietly stopped
-short reads exactly like a quiet month.
+that, so the record bound only bites on a store whose limit has been raised. The
+line also says when the records do not reach as far back as the range does,
+which is the ordinary case on a Mac that has been recording for a week. A table
+that quietly stopped short reads exactly like a quiet month, so none of this is
+left to be inferred.
+
+Two readings of the records run at once and no more. One reading of a full store
+is a second or two of work, and the panel is reachable by everyone on this Mac,
+so a third is refused rather than queued; the panel says the records are already
+being read and how long to wait. Ordinary use never meets it — the tables are
+fetched when the tab opens and when you change the range, and never on the
+timer the live view above them uses.
 
 ## Tokens per day
 

@@ -304,6 +304,19 @@ const DefaultHistoryDays = 30
 // full-store passes is not something it can recover from.
 var historyPasses = make(chan struct{}, 2)
 
+// historyRetryAfter is what the refusal tells a caller to wait, in seconds. One
+// pass over a store at its size cap is under two seconds, so a reader refused
+// while two are running has an answer by the time they ask again.
+const historyRetryAfter = "2"
+
+// historySource is where the aggregates are read from.
+//
+// It is a variable for the reason stats.historyRecordBound is: the refusal
+// above only happens while two passes are actually in flight, and a test that
+// could not hold a pass still could not watch the third caller be refused. The
+// production value is the app's own store and nothing else sets it.
+var historySource = func(a *app.App) stats.RecordSource { return a.StatsStore }
+
 // handleStatsHistory serves the dashboard's four historical tables: tokens
 // per day by model with each model's share, request latency by model, and
 // evictions and reloads by hour of the local day (itd-2609061521159233).
@@ -346,6 +359,10 @@ func (c *Control) handleStatsHistory(w http.ResponseWriter, r *http.Request) {
 	case historyPasses <- struct{}{}:
 		defer func() { <-historyPasses }()
 	default:
+		// A header rather than only a sentence, so the panel can say how long
+		// to wait rather than guessing, and so anything else that asks is told
+		// in the ordinary way.
+		w.Header().Set("Retry-After", historyRetryAfter)
 		writeError(w, http.StatusServiceUnavailable,
 			"the records are already being read; try again in a moment")
 		return
@@ -353,7 +370,7 @@ func (c *Control) handleStatsHistory(w http.ResponseWriter, r *http.Request) {
 
 	// The request's own context, so a reader who closes the panel part-way
 	// through a pass over months of records stops being paid for.
-	history, err := stats.Aggregate(r.Context(), c.App.StatsStore, from, to, time.Local)
+	history, err := stats.Aggregate(r.Context(), historySource(c.App), from, to, time.Local)
 	if err != nil {
 		// The reason is logged, not returned: these errors name the store's
 		// directory, and the control plane answers every account on this Mac.

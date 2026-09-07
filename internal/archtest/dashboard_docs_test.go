@@ -57,6 +57,11 @@ func TestThePageSaysWhatTheViewsCannotShow(t *testing.T) {
 		"the model server's own",
 		// Sums by model and by period, never by person.
 		"never says who",
+		// The oldest day of any range the panel sends is a clipped day, and
+		// the table marks it.
+		"part of the day",
+		// A reading is refused rather than queued, and the reader is told.
+		"already being read",
 	} {
 		if !containsAll(page, phrase) {
 			t.Errorf("the page does not say %q", phrase)

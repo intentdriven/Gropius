@@ -59,25 +59,32 @@ var historyRecordBound = MaxHistoryRecords
 // days against fifty-odd models is comfortably inside this.
 const MaxHistoryRows = 20_000
 
-// historyStopSlack is how far past the start of the range the pass reads
-// before it stops.
+// historyRowBound is the row bound the pass actually applies, a variable for
+// the same reason historyRecordBound is one: a test that had to reach twenty
+// thousand distinct models to watch the bound work would be a test of the
+// fixture rather than of the bound.
+var historyRowBound = MaxHistoryRows
+
+// There is deliberately no early stop.
 //
-// It exists because the store's order is not the order this pass reads by. A
-// record is appended when its request finishes and stamped with when the
-// request arrived, so the file is in completion order and the timestamps being
-// scanned are arrival times; a request that waited for a model to load is
-// appended after requests that arrived later than it did.
+// A pass that gave up on meeting a record older than the range would be
+// reading by an order the store does not have: a record is appended when its
+// request finishes and stamped with when it arrived, so the file is in
+// completion order and the scan is against arrival times. Bounding the skew
+// needs a longest-request figure, and the gateway has none to offer — the read
+// deadline is cleared before the model request, so a generation is unbounded by
+// construction (internal/gateway/gateway.go), and a clock stepped backwards by
+// sleep or by NTP puts a record days in the past whatever the timeouts say.
+// Every margin that could be chosen is a guess, and the failure it buys is the
+// silent one this design spends most of its care avoiding: a month drawn short
+// at whichever record happened to be odd, reading exactly like a quiet month.
 //
-// The slack makes stopping provable rather than likely. Reading newest first
-// is reading in reverse completion order, so on meeting a record whose arrival
-// is more than the slack before the range, every record still to be read
-// finished earlier than it. If one of those had arrived inside the range, it
-// would have both arrived at or after the range's start and finished before a
-// record that finished after the range's start — which means the record just
-// met took longer than the slack to answer. Two days is far past anything the
-// gateway's own timeouts allow, so the case cannot arise, and no record inside
-// the range is ever passed over.
-const historyStopSlack = 48 * time.Hour
+// So the pass reads to the end of what the bounds allow, and the bounds are
+// what hold the cost: at most historyRecordBound records and historyRowBound
+// rows, with at most two passes at a time (internal/gateway). One pass over a
+// store at its size cap is 1.4 s, which is the whole of the range every time
+// rather than only when the range is wide — the price of an answer that is
+// either complete or says it is not.
 
 // FirstTokenBucketEdgesMS are the boundaries of the time-to-first-token
 // histogram, in milliseconds. There is a bucket below the first edge and one
@@ -110,6 +117,15 @@ type DayTokens struct {
 	// could not say which of its rows are partly coarse would quietly mix the
 	// two.
 	FromSummary bool `json:"from_summary,omitempty"`
+	// Partial marks the range's oldest day, when the range starts part-way
+	// through it. A reader picks "the last thirty days" at four in the
+	// afternoon, so the oldest day holds only the traffic after four — a third
+	// of it, drawn beside whole days as though it were one, and read as a quiet
+	// day. It is the row's own figure that is short, and the row says so.
+	//
+	// The newest day is short in the same arithmetic and not marked: it is
+	// today, up to now, which is what a reader already takes it for.
+	Partial bool `json:"partial,omitempty"`
 }
 
 // Tokens is the day's whole traffic for that model, in and out.
@@ -213,13 +229,26 @@ type History struct {
 
 	// Records is how many records the pass read, in the range or out of it.
 	Records int `json:"records"`
-	// Skipped is how many lines it could not use — one is the ordinary cost of
+	// Skipped is how many lines could not be used — one is the ordinary cost of
 	// a crash, a great many mean the figures rest on a fraction of what was
 	// recorded.
+	//
+	// It is the store's own count from the last read through it rather than
+	// this pass's, because the store is what does the skipping. Two readings at
+	// once can therefore report each other's figure. That is worth less than
+	// the figure is: what a reader does with it is notice that a number of
+	// lines are unreadable at all, which is true of the store either way.
 	Skipped int64 `json:"skipped"`
-	// Truncated reports a pass that stopped at MaxRecords, so the figures
-	// cover the newest records rather than the whole range.
+	// Truncated reports a pass that a bound stopped: the record bound or the
+	// row bound. On its own it does not mean the figures are short of the
+	// range — a pass reading back past the range's start can meet a bound
+	// afterwards — which is what ReachedStart is for.
 	Truncated bool `json:"truncated"`
+	// ReachedStart reports a pass that read a record older than the range, and
+	// so covered the whole of it. False means the store simply does not go back
+	// that far, or that a bound stopped the pass before it got there; the two
+	// are told apart by Truncated, and only the second is a figure drawn short.
+	ReachedStart bool `json:"reached_start"`
 	// Narrowed reports a range that was wider than MaxDays and was cut to it.
 	Narrowed bool `json:"narrowed"`
 	// MaxRecords and MaxDays are the bounds themselves, so the panel says what
@@ -285,11 +314,12 @@ func Aggregate(ctx context.Context, src RecordSource, from, to time.Time, loc *t
 	}
 
 	a := newHistoryAgg(ctx, h.From, h.To, loc)
+	a.partialDay = clippedDay(from, loc)
 	err := src.Latest(0, a.take)
 	if a.err != nil {
 		return h, a.err
 	}
-	h.Records, h.Truncated = a.read, a.truncated
+	h.Records, h.Truncated, h.ReachedStart = a.read, a.truncated, a.reachedStart
 	h.Skipped = src.Status().Skipped
 	if err != nil {
 		return h, err
@@ -322,9 +352,13 @@ type historyAgg struct {
 	ctx      context.Context
 	from, to int64
 	loc      *time.Location
-	// stopAt is the arrival time past which nothing inside the range can
-	// still be found; see historyStopSlack.
-	stopAt int64
+	// partialDay is the local day the range starts part-way through, or empty
+	// when it starts at a midnight.
+	partialDay string
+	// reachedStart records that a record older than the range has been read,
+	// which is how the pass knows it has covered the whole of it rather than
+	// run out of store.
+	reachedStart bool
 
 	read      int
 	truncated bool
@@ -343,7 +377,6 @@ type historyAgg struct {
 func newHistoryAgg(ctx context.Context, from, to int64, loc *time.Location) *historyAgg {
 	a := &historyAgg{
 		ctx: ctx, from: from, to: to, loc: loc,
-		stopAt:  from - int64(historyStopSlack/time.Second),
 		days:    map[dayKey]*DayTokens{},
 		models:  map[string]*ModelShare{},
 		latency: map[string]*latencySamples{},
@@ -354,7 +387,7 @@ func newHistoryAgg(ctx context.Context, from, to int64, loc *time.Location) *his
 
 // take folds one line in, reporting whether the pass should carry on.
 func (a *historyAgg) take(l Line) bool {
-	if a.read >= historyRecordBound || len(a.days) >= MaxHistoryRows {
+	if a.read >= historyRecordBound || len(a.days) >= historyRowBound {
 		a.truncated = true
 		return false
 	}
@@ -374,10 +407,11 @@ func (a *historyAgg) take(l Line) bool {
 		// about how far back the pass has walked.
 		return true
 	}
-	if l.At < a.stopAt {
-		return false
-	}
 	if l.At < a.from {
+		// Older than the range, and read rather than stopped at: see the note
+		// above about why there is no early stop. Meeting one does say the
+		// walk has got back past the range's start.
+		a.reachedStart = true
 		return true
 	}
 
@@ -405,13 +439,24 @@ func (a *historyAgg) take(l Line) bool {
 //
 // That second source is the coarse per-model per-day summary the store writes
 // before retention drops a day's records (itd-2609061602043757). When its
-// reader exists, walking it newest day first and calling this with
-// fromSummary true is the whole of the change: a day held only as a summary
-// gains its row, and the one day that has both gains the summary's figures on
-// top of the records still held, which is the fold that reader's contract
-// asks for. Nothing else moves, and the latency table is deliberately not fed
-// from it — a summary carries mergeable sums and counts, and a percentile
-// cannot be recovered from those.
+// reader exists, walking it newest day first and calling this with fromSummary
+// true is the whole of the change: a day held only as a summary gains its row,
+// and the row is marked so a reader is never shown a coarse figure as an exact
+// one.
+//
+// The condition the fold rests on, stated because adding is only right under
+// it: a summary covers the records that have gone and no others. Retention
+// removes a file rather than a day, so the day where the store's oldest file
+// ended has some of its records still held and the rest dropped; a summary
+// written over that whole day, rather than over the part of it that was
+// dropped, would be added to records this pass has already counted and the day
+// would read double — and so would every share, since the range's total takes
+// the same figures. That is the summary writer's contract to keep, and this is
+// where a change to it would land.
+//
+// The latency table is deliberately not fed from summaries at all: a summary
+// carries mergeable sums and counts, and a percentile cannot be recovered from
+// those.
 func (a *historyAgg) addTokens(day, model string, requests int, in, out int64, fromSummary bool) {
 	key := dayKey{day: day, model: model}
 	d, ok := a.days[key]
@@ -465,7 +510,9 @@ func (a *historyAgg) fill(h *History) {
 
 	h.Days = make([]DayTokens, 0, len(a.dayOrder))
 	for _, k := range a.dayOrder {
-		h.Days = append(h.Days, *a.days[k])
+		d := *a.days[k]
+		d.Partial = d.Day == a.partialDay
+		h.Days = append(h.Days, d)
 	}
 	// Newest day first, and the day's biggest model first: the order a reader
 	// asking "which model does the work" reads down.
@@ -514,6 +561,17 @@ func (a *historyAgg) fill(h *History) {
 		}
 		return h.Latency[i].Model < h.Latency[j].Model
 	})
+}
+
+// clippedDay names the local day a range starts part-way through, or is empty
+// when the range starts at a local midnight and every day it covers is whole.
+func clippedDay(from time.Time, loc *time.Location) string {
+	f := from.In(loc)
+	midnight := time.Date(f.Year(), f.Month(), f.Day(), 0, 0, 0, 0, loc)
+	if f.Equal(midnight) {
+		return ""
+	}
+	return f.Format("2006-01-02")
 }
 
 // bucketOf is which histogram column a time to first token falls in: the first

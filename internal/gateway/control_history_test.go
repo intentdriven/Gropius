@@ -295,3 +295,92 @@ func TestTheHistoryEndpointRefusesARangeOutsideTheHorizon(t *testing.T) {
 		t.Errorf("the range was answered as ending at %v, want it brought back to now:\n%s", int64(to), raw)
 	}
 }
+
+// blockingSource is a store whose reading can be held still, so the refusal
+// that happens only while passes are in flight can be watched happening.
+type blockingSource struct {
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (b *blockingSource) Latest(_ int, _ func(stats.Line) bool) error {
+	// Signalled without waiting to be heard, and held for a bounded time: a cap
+	// that let a third reading through must make the assertion below fail,
+	// never hang the suite on a reading nobody is going to release.
+	select {
+	case b.entered <- struct{}{}:
+	default:
+	}
+	select {
+	case <-b.release:
+	case <-time.After(5 * time.Second):
+	}
+	return nil
+}
+
+func (b *blockingSource) Status() stats.StoreStatus { return stats.StoreStatus{} }
+
+// One pass over a store at its size cap is a second of work and several hundred
+// megabytes, and this endpoint answers every account on this Mac and a blind
+// cross-origin GET besides. Two readings run at once; the next is refused, and
+// told when to come back rather than left to guess.
+func TestAThirdReadingOfTheRecordsIsRefusedRatherThanRun(t *testing.T) {
+	_, srv, _ := recordingServer(t)
+	block := &blockingSource{entered: make(chan struct{}, 8), release: make(chan struct{})}
+	was := historySource
+	historySource = func(*app.App) stats.RecordSource { return block }
+	t.Cleanup(func() { historySource = was })
+	// Released however the test leaves, so a failure does not hang the suite
+	// on two goroutines waiting forever.
+	t.Cleanup(func() { close(block.release) })
+
+	now := time.Now()
+	path := historyPath(now.AddDate(0, 0, -7), now)
+	for range 2 {
+		go func() {
+			resp, err := srv.Client().Get(srv.URL + path)
+			if err == nil {
+				resp.Body.Close()
+			}
+		}()
+	}
+	// Both are inside the aggregation before the third asks, so what the third
+	// meets is the cap rather than a race with it.
+	for range 2 {
+		select {
+		case <-block.entered:
+		case <-time.After(5 * time.Second):
+			t.Fatal("a reading never reached the store")
+		}
+	}
+
+	resp, err := srv.Client().Get(srv.URL + path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Errorf("a third reading returned %d, want 503 — two are already running", resp.StatusCode)
+	}
+	if got := resp.Header.Get("Retry-After"); got == "" {
+		t.Error("the refusal does not say when to come back")
+	}
+}
+
+// And a reading that has finished gives its place up, so the cap is a cap on
+// what runs at once rather than on how many readings a panel may ever make.
+func TestAFinishedReadingGivesUpItsPlace(t *testing.T) {
+	_, srv, _ := recordingServer(t)
+	now := time.Now()
+	path := historyPath(now.AddDate(0, 0, -7), now)
+	for i := range 4 {
+		resp, err := srv.Client().Get(srv.URL + path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("reading %d one after another returned %d, want 200", i+1, resp.StatusCode)
+		}
+	}
+}

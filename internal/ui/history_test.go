@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -16,7 +17,7 @@ func TestTheTokensPerDayRowShowsTheDaysFiguresAndTheRangesShare(t *testing.T) {
 	got := evalPanel(t,
 		`dayRowHtml({"day":"2026-09-01","model":"org/alpha","requests":2,`+
 			`"prompt_tokens":150,"completion_tokens":225}, 0.2013)`,
-		"dayRowHtml", "sharePercent")
+		"dayRowHtml", "sharePercent", "figure")
 	for _, want := range []string{"2026-09-01", "esc(org/alpha)", ">2<", ">150<", ">225<", ">375<", ">20.1%<"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("the day row does not show %q:\n%s", want, got)
@@ -29,7 +30,7 @@ func TestTheTokensPerDayRowShowsTheDaysFiguresAndTheRangesShare(t *testing.T) {
 	coarse := evalPanel(t,
 		`dayRowHtml({"day":"2026-06-01","model":"org/alpha","requests":9,`+
 			`"prompt_tokens":1,"completion_tokens":2,"from_summary":true}, 0.5)`,
-		"dayRowHtml", "sharePercent")
+		"dayRowHtml", "sharePercent", "figure")
 	if !strings.Contains(coarse, "from daily totals") {
 		t.Errorf("a summary-only day is drawn as an exact one:\n%s", coarse)
 	}
@@ -42,7 +43,7 @@ func TestTheLatencyRowShowsThePercentiles(t *testing.T) {
 		`latencyRowHtml({"model":"org/alpha","requests":10,"rate_requests":7,`+
 			`"first_token_ms":{"p50":500,"p90":900,"p99":1000},`+
 			`"rate":{"p50":100,"p90":42.25,"p99":0}})`,
-		"latencyRowHtml", "msFigure", "rateFigure", "millis")
+		"latencyRowHtml", "msFigure", "rateFigure", "millis", "figure")
 	// The rate figures rest on seven of the ten answers, and the table says so
 	// rather than putting one count over two populations.
 	for _, want := range []string{"esc(org/alpha)", ">10<", ">7<", ">500 ms<", ">900 ms<", ">1.0 s<", ">100.0 tok/s<", ">42.3 tok/s<"} {
@@ -76,7 +77,7 @@ func TestTheSpreadRowAndItsHeadingsCoverTheSameBuckets(t *testing.T) {
 
 	row := evalPanel(t,
 		`spreadRowHtml({"model":"org/alpha","first_token_buckets":[0,2,2,5,1,0,0,0]})`,
-		"spreadRowHtml")
+		"spreadRowHtml", "figure")
 	if n := strings.Count(row, "<td"); n != len(want)+1 {
 		t.Errorf("the spread row has %d cells for %d headings plus the model:\n%s", n, len(want), row)
 	}
@@ -84,7 +85,7 @@ func TestTheSpreadRowAndItsHeadingsCoverTheSameBuckets(t *testing.T) {
 
 // The eviction table is the local day, hour by hour.
 func TestTheHourRowShowsTheLocalHourAndItsCounts(t *testing.T) {
-	got := evalPanel(t, `hourRowHtml({"hour":3,"evictions":7,"loads":2})`, "hourRowHtml")
+	got := evalPanel(t, `hourRowHtml({"hour":3,"evictions":7,"loads":2})`, "hourRowHtml", "figure")
 	for _, want := range []string{">03:00<", ">7<", ">2<"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("the hour row does not show %q:\n%s", want, got)
@@ -103,11 +104,11 @@ func TestEveryHistoricalTableEscapesTheModelId(t *testing.T) {
 		functions []string
 	}{
 		{"tokens per day", `dayRowHtml({"day":"2026-09-01","model":"` + nasty + `","requests":1,"prompt_tokens":1,"completion_tokens":1}, 1)`,
-			[]string{"dayRowHtml", "sharePercent"}},
+			[]string{"dayRowHtml", "sharePercent", "figure"}},
 		{"latency", `latencyRowHtml({"model":"` + nasty + `","requests":1,"rate_requests":1,"first_token_ms":{"p50":1},"rate":{"p50":1}})`,
-			[]string{"latencyRowHtml", "msFigure", "rateFigure", "millis"}},
+			[]string{"latencyRowHtml", "msFigure", "rateFigure", "millis", "figure"}},
 		{"spread", `spreadRowHtml({"model":"` + nasty + `","first_token_buckets":[1]})`,
-			[]string{"spreadRowHtml"}},
+			[]string{"spreadRowHtml", "figure"}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			got := evalPanel(t, c.expr, c.functions...)
@@ -201,5 +202,165 @@ func TestTheEmptyStateIsJudgedOnEveryTable(t *testing.T) {
 		if strings.Contains(body, wrong) {
 			t.Errorf("the empty state is keyed on the day rows alone (%q)", wrong)
 		}
+	}
+}
+
+// historyFunctions are everything renderHistory reaches for, so a test can run
+// the renderer itself rather than grep its source for the name of an element.
+var historyFunctions = []string{
+	"renderHistory", "historyBoundsLine", "dayRowHtml", "latencyRowHtml",
+	"spreadRowHtml", "hourRowHtml", "bucketLabels", "sharePercent",
+	"msFigure", "rateFigure", "millis", "figure", "showHistoryBusy", "busyLine",
+}
+
+// evalPanelDOM runs one statement against the named functions and a stand-in
+// for the document, and returns what the panel put into each element it
+// touched. The panel's own $ is a one-line getElementById, so a map of stubs is
+// the whole of the DOM these renderers need — and it is the difference between
+// asserting that a renderer names an element and asserting what a reader sees
+// in it.
+func evalPanelDOM(t *testing.T, statement string, functions ...string) map[string]map[string]any {
+	t.Helper()
+	src := readPanelSource(t)
+	var b strings.Builder
+	b.WriteString("const doc = {};\n")
+	b.WriteString("function $(id) { if (!doc[id]) doc[id] = {hidden: null, textContent: null, innerHTML: null}; return doc[id]; }\n")
+	b.WriteString("const escapeHtml = (s) => `esc(${s})`;\n")
+	for _, name := range functions {
+		b.WriteString(extractFunction(t, src, name))
+		b.WriteString("\n")
+	}
+	b.WriteString(statement)
+	b.WriteString("\nprocess.stdout.write(JSON.stringify(doc));")
+
+	out := evalJS(t, b.String())
+	var doc map[string]map[string]any
+	if err := json.Unmarshal([]byte(out), &doc); err != nil {
+		t.Fatalf("the panel returned %q, which is not a document: %v", out, err)
+	}
+	return doc
+}
+
+// With recording off the endpoint answers an empty view, and this is what the
+// reader is shown for it: no tables, no figures, and no claim about a range.
+// The whole section is inside a block the switch already hides, so this is
+// about what would be there if it were not — an empty payload rendered as a
+// day in 1970 is one hidden ancestor away from being on the screen.
+func TestTheOffStateDrawsNoFigureAndNoRange(t *testing.T) {
+	doc := evalPanelDOM(t, "renderHistory({});", historyFunctions...)
+
+	if hidden, _ := doc["statsHistoryBody"]["hidden"].(bool); !hidden {
+		t.Error("the tables are shown for an empty view")
+	}
+	if hidden, _ := doc["statsHistoryEmpty"]["hidden"].(bool); hidden {
+		t.Error("an empty view draws no empty state")
+	}
+	bounds, _ := doc["statsHistoryBounds"]["textContent"].(string)
+	if !strings.Contains(bounds, "Nothing is recorded") {
+		t.Errorf("the line above the tables reads %q, want it to say nothing is recorded", bounds)
+	}
+	// The 1970 an empty payload's zero timestamps render as.
+	if strings.Contains(bounds, "1970") {
+		t.Errorf("an empty view is drawn as a range in 1970: %q", bounds)
+	}
+	for _, rows := range []string{"statsDaysRows", "statsLatencyRows", "statsSpreadRows"} {
+		if html, _ := doc[rows]["innerHTML"].(string); html != "" {
+			t.Errorf("%s holds %q for an empty view", rows, html)
+		}
+	}
+}
+
+// A refusal is not a disconnection: two readings of the records run at once and
+// the third is told so, rather than being left with the previous range's tables
+// under the new selector value.
+func TestARefusedReadingSaysSoRatherThanLeavingStaleTables(t *testing.T) {
+	doc := evalPanelDOM(t, `showHistoryBusy("2");`, "showHistoryBusy", "busyLine")
+	if hidden, _ := doc["statsHistoryBody"]["hidden"].(bool); !hidden {
+		t.Error("a refused reading leaves the previous range's tables on the screen")
+	}
+	if hidden, _ := doc["statsHistoryBusy"]["hidden"].(bool); hidden {
+		t.Error("a refused reading says nothing")
+	}
+	said, _ := doc["statsHistoryBusy"]["textContent"].(string)
+	for _, want := range []string{"already being read", "2 seconds"} {
+		if !strings.Contains(said, want) {
+			t.Errorf("the refusal reads %q, want it to say %q", said, want)
+		}
+	}
+	// The wait comes from the server's own header, so a server that sends none
+	// is not made to have sent one.
+	none := evalPanel(t, `busyLine(null)`, "busyLine")
+	if strings.Contains(none, "Try again in") {
+		t.Errorf("a refusal with no Retry-After invents a wait: %q", none)
+	}
+}
+
+// The line above the tables reports what actually happened. A reading that met
+// a bound after it had already read past the start of the range covered the
+// range; only a reading that stopped short of it is a figure drawn short.
+func TestTheBoundsLineTellsACoveredRangeFromOneDrawnShort(t *testing.T) {
+	covered := evalPanel(t,
+		`historyBoundsLine({"from":1788696030,"to":1788796030,"truncated":true,"reached_start":true,`+
+			`"max_days":366,"max_records":1000000})`, "historyBoundsLine")
+	if strings.Contains(covered, "short of the start") || strings.Contains(covered, "do not reach") {
+		t.Errorf("a range the reading covered is reported as drawn short: %q", covered)
+	}
+
+	short := evalPanel(t,
+		`historyBoundsLine({"from":1788696030,"to":1788796030,"truncated":true,"reached_start":false,`+
+			`"max_days":366,"max_records":1000000})`, "historyBoundsLine")
+	if !strings.Contains(short, "short of the start of this range") {
+		t.Errorf("a reading that stopped before the range's start does not say so: %q", short)
+	}
+
+	// And a store that simply does not go back that far is a different thing
+	// from a reading a bound stopped.
+	young := evalPanel(t,
+		`historyBoundsLine({"from":1788696030,"to":1788796030,"truncated":false,"reached_start":false,`+
+			`"max_days":366,"max_records":1000000})`, "historyBoundsLine")
+	if !strings.Contains(young, "records do not reach the start of this range") {
+		t.Errorf("a store younger than the range does not say so: %q", young)
+	}
+	if strings.Contains(young, "short of the start") {
+		t.Errorf("a young store is reported as a reading stopped by a bound: %q", young)
+	}
+}
+
+// The oldest row of a range that starts part-way through a day says so, because
+// beside whole days it reads as a quiet one.
+func TestTheClippedDayRowSaysItIsPartOfTheDay(t *testing.T) {
+	got := evalPanel(t,
+		`dayRowHtml({"day":"2026-09-01","model":"org/alpha","requests":2,`+
+			`"prompt_tokens":10,"completion_tokens":20,"partial":true}, 0.5)`,
+		"dayRowHtml", "sharePercent", "figure")
+	if !strings.Contains(got, "part of the day") {
+		t.Errorf("a clipped day is drawn as a whole one:\n%s", got)
+	}
+	whole := evalPanel(t,
+		`dayRowHtml({"day":"2026-09-01","model":"org/alpha","requests":2,`+
+			`"prompt_tokens":10,"completion_tokens":20}, 0.5)`,
+		"dayRowHtml", "sharePercent", "figure")
+	if strings.Contains(whole, "part of the day") {
+		t.Errorf("a whole day is marked as clipped:\n%s", whole)
+	}
+}
+
+// "Everything kept" asks for the widest range one reading covers, not for the
+// epoch: asking for the epoch made the answer report that it had narrowed a
+// range nobody meant to be wider, on the one option a reader picks when they
+// want the lot.
+func TestEverythingKeptAsksForTheWidestRangeRatherThanTheEpoch(t *testing.T) {
+	src := readPanelSource(t)
+	body := extractFunction(t, src, "refreshHistory")
+	if strings.Contains(body, "from=0") || strings.Contains(body, "? to -") {
+		t.Errorf("the range is still asked for from the epoch:\n%s", body)
+	}
+	if !strings.Contains(body, "maxHistoryDays") {
+		t.Error("Everything kept does not ask for the widest range one reading covers")
+	}
+	// And the figure it sends is the server's own bound rather than a
+	// different number that would drift from it.
+	if !strings.Contains(src, "const maxHistoryDays = 366") {
+		t.Error("the panel's widest range is not the 366 days the server bounds a view to")
 	}
 }

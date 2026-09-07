@@ -1108,6 +1108,17 @@ function millis(ms) {
 // which the server narrows to the widest range one view covers.
 let historyDays = 30;
 
+// historyAsked counts the readings asked for, so a slow answer to a range the
+// reader has already moved on from is dropped rather than drawn under the new
+// selector value. There is no debounce: flipping the selector is meant to be
+// quick, and three flips are three readings, of which only the last is drawn.
+let historyAsked = 0;
+
+// maxHistoryDays is the widest range one reading covers, which is what
+// "Everything kept" asks for. Sending it rather than the epoch is what keeps
+// the answer from reporting that it narrowed a range nobody meant to be wider.
+const maxHistoryDays = 366;
+
 $('statsRange').addEventListener('change', () => {
   historyDays = parseInt($('statsRange').value, 10) || 0;
   refreshHistory();
@@ -1115,13 +1126,44 @@ $('statsRange').addEventListener('change', () => {
 
 async function refreshHistory() {
   const to = Math.floor(Date.now() / 1000);
-  const from = historyDays > 0 ? to - historyDays * 86400 : 0;
+  const days = historyDays > 0 ? historyDays : maxHistoryDays;
+  const asked = ++historyAsked;
+  let res;
   try {
-    renderHistory(await api(`/api/stats/history?from=${from}&to=${to}`));
+    res = await fetch(`/api/stats/history?from=${to - days * 86400}&to=${to}`);
   } catch {
     // A panel that cannot reach its own server already says "disconnected" at
     // the top; a second alert about it would be noise.
+    return;
   }
+  if (asked !== historyAsked) return;
+  // Two readings of the records run at once and no more, so a third is
+  // refused. That is not a disconnection and the panel must not draw the
+  // previous range's tables under the new selector value as though it were.
+  if (res.status === 503) {
+    showHistoryBusy(res.headers.get('Retry-After'));
+    return;
+  }
+  let body = null;
+  try { body = JSON.parse(await res.text()); } catch { /* not json */ }
+  if (!res.ok || asked !== historyAsked) return;
+  renderHistory(body);
+}
+
+// showHistoryBusy says why there are no tables, and for how long.
+function showHistoryBusy(retryAfter) {
+  $('statsHistoryBody').hidden = true;
+  $('statsHistoryEmpty').hidden = true;
+  $('statsHistoryBusy').hidden = false;
+  $('statsHistoryBusy').textContent = busyLine(retryAfter);
+}
+
+// busyLine is what the reader is told when a reading is refused. The wait comes
+// from the server's own Retry-After rather than from a guess repeated here.
+function busyLine(retryAfter) {
+  const secs = parseInt(retryAfter, 10);
+  const wait = secs > 0 ? ` Try again in about ${secs} second${secs === 1 ? '' : 's'}.` : '';
+  return `The records are already being read.${wait}`;
 }
 
 function renderHistory(h) {
@@ -1133,6 +1175,7 @@ function renderHistory(h) {
   // records it is drawn from.
   const anything = days.length > 0 || (h.latency || []).length > 0
     || (h.hours || []).some((x) => x.evictions || x.loads);
+  $('statsHistoryBusy').hidden = true;
   $('statsHistoryBody').hidden = !anything;
   $('statsHistoryEmpty').hidden = anything;
   $('statsHistoryBounds').textContent = historyBoundsLine(h);
@@ -1157,14 +1200,22 @@ function renderHistory(h) {
 // because a table that quietly stopped short is worse than one that says it
 // did: a reader would take a bounded month for a quiet one.
 function historyBoundsLine(h) {
+  // With recording off the answer is an empty one, and a range of 1 January
+  // 1970 to 1 January 1970 is not a fact about anything.
+  if (!h || !h.from || !h.to) return 'Nothing is recorded, so there is nothing to show over time.';
   const day = (secs) => new Date(secs * 1000).toLocaleDateString();
   const zone = h.zone ? ` (${h.zone})` : '';
   const parts = [`${day(h.from)} to ${day(h.to)}, by this Mac's own days and hours${zone}`];
   if (h.narrowed) {
     parts.push(`narrowed to the ${h.max_days} days one view covers`);
   }
-  if (h.truncated) {
-    parts.push(`the newest ${h.max_records} records only, which is as far as one pass reads`);
+  // A reading that met a bound after it had already read past the start of the
+  // range covered the range: the bound stopped the walk beyond it, not the
+  // figures. Only the other case is a figure drawn short.
+  if (h.truncated && !h.reached_start) {
+    parts.push(`stopped after ${h.max_records} records, short of the start of this range`);
+  } else if (!h.reached_start) {
+    parts.push('the records do not reach the start of this range');
   }
   if (h.skipped) {
     parts.push(`${h.skipped} lines could not be read`);
@@ -1182,13 +1233,17 @@ function dayRowHtml(d, share) {
   // daily total, and a table that mixed the two without saying so would be
   // read as exact throughout.
   const coarse = d.from_summary ? ' <span class="pill">from daily totals</span>' : '';
+  // The oldest day of a range that starts at four in the afternoon holds only
+  // the traffic after four. Drawn beside whole days it reads as a quiet one, so
+  // it says what it is.
+  const clipped = d.partial ? ' <span class="pill">part of the day</span>' : '';
   return `<tr>
       <td>${escapeHtml(d.day)}</td>
-      <td>${escapeHtml(d.model || '—')}${coarse}</td>
-      <td class="figure">${d.requests}</td>
-      <td class="figure">${d.prompt_tokens}</td>
-      <td class="figure">${d.completion_tokens}</td>
-      <td class="figure">${total}</td>
+      <td>${escapeHtml(d.model || '—')}${coarse}${clipped}</td>
+      <td class="figure">${figure(d.requests)}</td>
+      <td class="figure">${figure(d.prompt_tokens)}</td>
+      <td class="figure">${figure(d.completion_tokens)}</td>
+      <td class="figure">${figure(total)}</td>
       <td class="figure">${sharePercent(share)}</td>
     </tr>`;
 }
@@ -1200,11 +1255,11 @@ function latencyRowHtml(l) {
   const rate = l.rate || {};
   return `<tr>
       <td>${escapeHtml(l.model || '—')}</td>
-      <td class="figure">${l.requests}</td>
+      <td class="figure">${figure(l.requests)}</td>
       <td class="figure">${msFigure(first.p50)}</td>
       <td class="figure">${msFigure(first.p90)}</td>
       <td class="figure">${msFigure(first.p99)}</td>
-      <td class="figure">${l.rate_requests}</td>
+      <td class="figure">${figure(l.rate_requests)}</td>
       <td class="figure">${rateFigure(rate.p50)}</td>
       <td class="figure">${rateFigure(rate.p90)}</td>
       <td class="figure">${rateFigure(rate.p99)}</td>
@@ -1215,15 +1270,15 @@ function latencyRowHtml(l) {
 // show of a distribution without drawing anything.
 function spreadRowHtml(l) {
   const cells = (l.first_token_buckets || [])
-    .map((n) => `<td class="figure">${n}</td>`).join('');
+    .map((n) => `<td class="figure">${figure(n)}</td>`).join('');
   return `<tr><td>${escapeHtml(l.model || '—')}</td>${cells}</tr>`;
 }
 
 // hourRowHtml is one hour of the Mac's own day.
 function hourRowHtml(h) {
   const hour = String(h.hour).padStart(2, '0');
-  return `<tr><td>${hour}:00</td><td class="figure">${h.evictions}</td>` +
-    `<td class="figure">${h.loads}</td></tr>`;
+  return `<tr><td>${hour}:00</td><td class="figure">${figure(h.evictions)}</td>` +
+    `<td class="figure">${figure(h.loads)}</td></tr>`;
 }
 
 // bucketLabels turns the histogram's edges into its column headings. The
@@ -1247,16 +1302,24 @@ function sharePercent(share) {
   return `${(share * 100).toFixed(1)}%`;
 }
 
+// figure is a count on its way into a cell. Every one of these is a number the
+// server marshalled from a typed field, so nothing here can be markup — and
+// this is the one place that has to stay true of, rather than a rule each cell
+// is trusted to keep.
+function figure(n) {
+  return Number.isFinite(n) ? String(n) : '—';
+}
+
 // msFigure and rateFigure are a percentile as a reader reads one. A model with
-// nothing to distribute has no figure rather than a zero, which would read as
-// "instant".
+// nothing to distribute has no figure at all; a model whose median first token
+// really is under half a millisecond has a zero, and zero is a figure.
 function msFigure(ms) {
-  if (!(ms > 0)) return '—';
+  if (!Number.isFinite(ms) || ms < 0) return '—';
   return millis(Math.round(ms));
 }
 
 function rateFigure(rate) {
-  if (!(rate > 0)) return '—';
+  if (!Number.isFinite(rate) || rate <= 0) return '—';
   return `${rate.toFixed(1)} tok/s`;
 }
 

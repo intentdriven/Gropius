@@ -139,8 +139,12 @@ GitHub release notes.
   could not be read, and that nothing recorded while the switch was off appears.
   With recording off the tab says so and shows no figure, as it already does. A
   reading covers at most a year and at most a million records, at most two run
-  at once, and a reader who closes the panel part-way through one stops being
-  paid for.
+  at once — a third is refused and the panel says how long to wait — and a
+  reader who closes the panel part-way through one stops being paid for. The
+  oldest row of a range is marked **part of the day**, since a range picked at
+  four in the afternoon begins at four rather than at a midnight, and the line
+  above the tables says when the records do not reach back as far as the range
+  does.
   See [Understanding the historical views](docs/statistics-explained.md).
 - **Merge system messages**, a per-model setting in Settings that is off until
   it is switched on. Some models refuse a conversation whose instructions are
