@@ -49,6 +49,12 @@ totals for the last hour and the last day, which reach back further than a
 thousand rows do on a busy Mac. Those live figures are held in memory and a
 restart empties them.
 
+Under them the same tab reads the records back over a range you choose — four
+tables: tokens per day by model with each model's share, how long requests
+took, the spread of those times, and when models were evicted and reloaded.
+[Understanding the historical views](statistics-explained.md) says what each of
+those tables means and what none of them can show.
+
 The records themselves are written to a folder of plain text files that
 outlives the process — one line of JSON each, which any tool can read. Where
 they are, what every line holds and what removes them is the
@@ -118,6 +124,14 @@ records. What they would see is which of your models served each request, when
 it arrived, how many tokens it cost and how long it took: an activity
 timeline, and the shape of your prompts by size. They would not see a prompt,
 an answer, a key or an address, because none of those is ever recorded.
+
+That reaches as far back as the records do, not merely as far as the live view.
+The records themselves are files only your account can open, but the Statistics
+tab reads them back and shows the totals to whoever has the panel open, so what
+another account can see is months of which models served what, when in the day,
+and how fast — not the last thousand requests alone.
+[Understanding the historical views](statistics-explained.md) is what those
+tables are.
 
 Any of them can also press **Clear records** and remove what is kept, which
 Gropius notes in its own log without being able to say who did it — the

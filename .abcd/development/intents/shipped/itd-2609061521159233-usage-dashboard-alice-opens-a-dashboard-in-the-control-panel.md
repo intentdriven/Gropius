@@ -106,7 +106,63 @@ Silicon.
 
 ## Audit Notes
 
-_Empty. Populated by intent-auditor when intent moves to shipped/._
+<!-- abcd-review: OWED receipt=rcp-7d79f2254a0d -->
+Fidelity review OWED (receipt rcp-7d79f2254a0d). The audit compares this
+promise against what was delivered, so it runs after the branch merges; the
+receipt's request lives in the per-machine tier and does not travel, so whoever
+runs it re-emits the request with `abcd intent audit`.
+
+Every criterion above is met by a test named in the spec's "As built" section.
+What shipped diverges from the spec's Approach in four places, each with its
+reason, recorded there and in the 2026-09-07 line in `.abcd/work/DECISIONS.md`.
+None of the four is one of the criteria above.
+
+**Deferred, as this intent says.** The two-second bound is a benchmark checked
+by hand at release. It is also a test, which the spec deliberately declined:
+`TestAStoreAtTheSizeCapAggregatesWithinTheBound` asserts ten seconds — seven
+times the 1.4 s measured over a store at the default size cap — outside the race
+build. The reason the spec gave for declining one was that a two-second
+assertion on a shared build machine flakes; a bound with that much headroom
+catches an order-of-magnitude regression instead, and the benchmark still
+carries the figure.
+
+**Three views, drawn as four tables (2026-09-07).** The press release above
+promises three tables and the panel draws four: the spread of the times to
+first token is its own table rather than eight more columns on the latency row,
+which is a row nobody reads across. It is the same figures and the same three
+views the maintainer settled — tokens per day with model share, latency
+distributions, and the eviction and reload timeline — with the second drawn as
+two tables. The press release is left as it was written; the spec's "As built"
+carries it as a departure, and the panel, the changelog, the explanation page
+and an architecture test all say four.
+
+**The read side the next reader should take (2026-09-07).** The store's bounded,
+cancellable read is `stats.FileStore.Read(ctx, ReadOptions, fn) (ReadStats,
+error)`, and `stats.RecordSource` is the interface this intent depends on.
+`Latest` remains as a thin wrapper that passes no context and no line bound, and
+is documented as unsuitable for a request path. The per-model per-day summary
+reader of itd-2609061602043757 is the next reader of this store and should align
+with `Read`/`ReadOptions` rather than adding a third shape.
+
+**The spec's pre-implementation gate did not run (2026-09-07).**
+spc-2609061822385499 asked for one month of the maintainer's own store records
+aggregated by hand with a command-line tool, and named that output as the
+fixture for the tokens-per-day and share criteria: the cheaper test of this
+intent's own conjecture, run first. It could not be: the store it would read
+(itd-2609061521102742) shipped days before this, so no such month exists
+anywhere, and the live server on this Mac was out of bounds to the session that
+built this. The fixtures are synthetic and hand-computed instead, which
+satisfies every criterion as written. What is therefore still untested is the
+conjecture the gate was the cheap test of — that a month of records reveals a
+usage or eviction pattern that changes a model, quantisation or budget decision
+— and the Grounds above stand unexamined until the maintainer runs the hand
+aggregation against their own records after adopting this.
+
+**Not shipped, as this intent says.** No correlation with a change of memory
+budget, which needs itd-2609061441261073; no per-session breakdown; no chart of
+any kind, and no charting library, so no dependency sign-off is asked for. The
+summary-only days itd-2609061602043757 will supply have their field and their
+label in the panel, and are absent until that intent ships.
 
 ## Grounds
 

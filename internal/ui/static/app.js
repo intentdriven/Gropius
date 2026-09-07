@@ -940,6 +940,11 @@ function watchStats(visible) {
   if (statsTimer) { clearInterval(statsTimer); statsTimer = null; }
   if (!visible) return;
   refreshStats();
+  // The historical tables are fetched when the view opens and when the range
+  // changes, and never on this tick: they are a pass over months of records,
+  // and asking for one every two seconds would spend the Mac's afternoon
+  // redrawing a table nobody is watching change.
+  refreshHistory();
   statsTimer = setInterval(refreshStats, 2000);
 }
 
@@ -1090,6 +1095,246 @@ function generationRate(r) {
 // they are small enough to matter, seconds once they are not.
 function millis(ms) {
   return ms < 1000 ? `${ms} ms` : `${(ms / 1000).toFixed(1)} s`;
+}
+
+// ── the historical views ─────────────────────────────────
+// Four tables over a chosen range, read from the records kept on this Mac:
+// tokens per day by model with each model's share, how long requests took,
+// the spread of those times, and when models were evicted and started. Everything shown is a sum, a
+// count or the id of a model this Mac holds — the browser is handed the
+// aggregate, never the records it was worked out from.
+
+// historyDays is the chosen range; 0 means everything the store still keeps,
+// which the server narrows to the widest range one view covers.
+let historyDays = 30;
+
+// historyAsked counts the readings asked for, so a slow answer to a range the
+// reader has already moved on from is dropped rather than drawn under the new
+// selector value. There is no debounce: flipping the selector is meant to be
+// quick, and three flips are three readings, of which only the last is drawn.
+let historyAsked = 0;
+
+// maxHistoryDays is the widest range one reading covers, which is what
+// "Everything kept" asks for. Sending it rather than the epoch is what keeps
+// the answer from reporting that it narrowed a range nobody meant to be wider.
+const maxHistoryDays = 366;
+
+$('statsRange').addEventListener('change', () => {
+  historyDays = parseInt($('statsRange').value, 10) || 0;
+  refreshHistory();
+});
+
+async function refreshHistory() {
+  const to = Math.floor(Date.now() / 1000);
+  const days = historyDays > 0 ? historyDays : maxHistoryDays;
+  const asked = ++historyAsked;
+  let res;
+  try {
+    res = await fetch(`/api/stats/history?from=${to - days * 86400}&to=${to}`);
+  } catch {
+    // A panel that cannot reach its own server already says "disconnected" at
+    // the top; a second alert about it would be noise.
+    return;
+  }
+  if (asked !== historyAsked) return;
+  // Two readings of the records run at once and no more, so a third is
+  // refused. That is not a disconnection and the panel must not draw the
+  // previous range's tables under the new selector value as though it were.
+  if (res.status === 503) {
+    showHistoryBusy(res.headers.get('Retry-After'));
+    return;
+  }
+  let body = null;
+  try { body = JSON.parse(await res.text()); } catch { /* not json */ }
+  if (!res.ok || asked !== historyAsked) return;
+  renderHistory(body);
+}
+
+// showHistoryBusy says why there are no tables, and for how long.
+function showHistoryBusy(retryAfter) {
+  $('statsHistoryBody').hidden = true;
+  $('statsHistoryEmpty').hidden = true;
+  $('statsHistoryBusy').hidden = false;
+  $('statsHistoryBusy').textContent = busyLine(retryAfter);
+}
+
+// busyLine is what the reader is told when a reading is refused. The wait comes
+// from the server's own Retry-After rather than from a guess repeated here.
+function busyLine(retryAfter) {
+  const secs = parseInt(retryAfter, 10);
+  const wait = secs > 0 ? ` Try again in about ${secs} second${secs === 1 ? '' : 's'}.` : '';
+  return `The records are already being read.${wait}`;
+}
+
+function renderHistory(h) {
+  if (!h) return;
+  const days = h.days || [];
+  // Emptiness is judged on every table, not on the requests alone: a range
+  // that holds only loads and evictions has an hourly table with figures in
+  // it, and saying "nothing was recorded" over the top of it would deny the
+  // records it is drawn from.
+  const anything = days.length > 0 || (h.latency || []).length > 0
+    || (h.hours || []).some((x) => x.evictions || x.loads);
+  $('statsHistoryBusy').hidden = true;
+  $('statsHistoryBody').hidden = !anything;
+  $('statsHistoryEmpty').hidden = anything;
+  $('statsHistoryBounds').textContent = historyBoundsLine(h);
+
+  // The share is the model's over the whole range, so it is looked up per row
+  // rather than worked out from the day the row is on.
+  const share = {};
+  (h.models || []).forEach((m) => { share[m.model] = m.share; });
+  $('statsDaysRows').innerHTML = days.map((d) => dayRowHtml(d, share[d.model])).join('');
+
+  const latency = h.latency || [];
+  $('statsLatencyRows').innerHTML = latency.map(latencyRowHtml).join('');
+  const heads = bucketLabels(h.first_token_bucket_edges_ms || [])
+    .map((l) => `<th>${escapeHtml(l)}</th>`).join('');
+  $('statsSpreadHead').innerHTML = `<tr><th>Model</th>${heads}</tr>`;
+  $('statsSpreadRows').innerHTML = latency.map(spreadRowHtml).join('');
+
+  $('statsHoursRows').innerHTML = (h.hours || []).map(hourRowHtml).join('');
+}
+
+// historyBoundsLine says what the figures cover and what they were held to,
+// because a table that quietly stopped short is worse than one that says it
+// did: a reader would take a bounded month for a quiet one.
+function historyBoundsLine(h) {
+  // With recording off the answer is an empty one, and a range of 1 January
+  // 1970 to 1 January 1970 is not a fact about anything.
+  if (!h || !h.from || !h.to) return 'Nothing is recorded, so there is nothing to show over time.';
+  const day = (secs) => new Date(secs * 1000).toLocaleDateString();
+  const zone = h.zone ? ` (${h.zone})` : '';
+  const parts = [`${day(h.from)} to ${day(h.to)}, by this Mac's own days and hours${zone}`];
+  if (h.narrowed) {
+    parts.push(`narrowed to the ${h.max_days} days one view covers`);
+  }
+  // A reading that met a bound after it had already read past the start of the
+  // range covered the range: the bound stopped the walk beyond it, not the
+  // figures. Only the other case is a figure drawn short.
+  if (h.truncated && !h.reached_start) {
+    parts.push(`${stopReason(h)}, short of the start of this range`);
+  } else if (!h.reached_start) {
+    parts.push('the records do not reach the start of this range');
+  }
+  if (h.skipped) {
+    parts.push(`${h.skipped} lines could not be read`);
+  }
+  parts.push('nothing recorded while the switch was off appears here');
+  return parts.join(' · ');
+}
+
+// stopReason names the bound that actually stopped the reading, with its own
+// figure. Saying "a million records" when what stopped it was twenty thousand
+// day rows is two orders of magnitude wrong in the one line whose purpose is
+// that a table which stopped short does not read as a quiet month.
+function stopReason(h) {
+  switch (h.stopped_by) {
+    case 'rows':    return `stopped after ${h.max_rows} rows of the table`;
+    case 'bytes':   return `stopped after reading ${Math.round(h.max_bytes / (1024 * 1024))} MB of records`;
+    case 'lines':   return `stopped after ${h.max_records} lines of the records`;
+    case 'records': return `stopped after ${h.max_records} records`;
+    default:        return 'stopped before the whole range was read';
+  }
+}
+
+// dayRowHtml is one model's day: its own tokens, and its share of the whole
+// range beside them, which is the figure that answers "which model does the
+// work".
+function dayRowHtml(d, share) {
+  const total = (d.prompt_tokens || 0) + (d.completion_tokens || 0);
+  // A day whose own records the retention has dropped keeps only the coarse
+  // daily total, and a table that mixed the two without saying so would be
+  // read as exact throughout.
+  const coarse = d.from_summary ? ' <span class="pill">from daily totals</span>' : '';
+  // The oldest day of a range that starts at four in the afternoon holds only
+  // the traffic after four. Drawn beside whole days it reads as a quiet one, so
+  // it says what it is.
+  const clipped = d.partial ? ' <span class="pill">part of the day</span>' : '';
+  return `<tr>
+      <td>${escapeHtml(d.day)}</td>
+      <td>${escapeHtml(d.model || '—')}${coarse}${clipped}</td>
+      <td class="figure">${figure(d.requests)}</td>
+      <td class="figure">${figure(d.prompt_tokens)}</td>
+      <td class="figure">${figure(d.completion_tokens)}</td>
+      <td class="figure">${figure(total)}</td>
+      <td class="figure">${sharePercent(share)}</td>
+    </tr>`;
+}
+
+// latencyRowHtml is one model's distribution: the middle request, the slow
+// one, and the slowest but one.
+function latencyRowHtml(l) {
+  const first = l.first_token_ms || {};
+  const rate = l.rate || {};
+  return `<tr>
+      <td>${escapeHtml(l.model || '—')}</td>
+      <td class="figure">${figure(l.requests)}</td>
+      <td class="figure">${msFigure(first.p50)}</td>
+      <td class="figure">${msFigure(first.p90)}</td>
+      <td class="figure">${msFigure(first.p99)}</td>
+      <td class="figure">${figure(l.rate_requests)}</td>
+      <td class="figure">${rateFigure(rate.p50)}</td>
+      <td class="figure">${rateFigure(rate.p90)}</td>
+      <td class="figure">${rateFigure(rate.p99)}</td>
+    </tr>`;
+}
+
+// spreadRowHtml is the histogram as a row of counts, which is what a table can
+// show of a distribution without drawing anything.
+function spreadRowHtml(l) {
+  const cells = (l.first_token_buckets || [])
+    .map((n) => `<td class="figure">${figure(n)}</td>`).join('');
+  return `<tr><td>${escapeHtml(l.model || '—')}</td>${cells}</tr>`;
+}
+
+// hourRowHtml is one hour of the Mac's own day.
+function hourRowHtml(h) {
+  const hour = String(h.hour).padStart(2, '0');
+  return `<tr><td>${hour}:00</td><td class="figure">${figure(h.evictions)}</td>` +
+    `<td class="figure">${figure(h.loads)}</td></tr>`;
+}
+
+// bucketLabels turns the histogram's edges into its column headings. The
+// edges come from the server with the counts, so the headings cannot drift
+// from the buckets they sit over.
+function bucketLabels(edges) {
+  if (!edges.length) return [];
+  const label = (ms) => (ms < 1000 ? `${ms} ms` : `${ms / 1000} s`);
+  const out = [`under ${label(edges[0])}`];
+  for (let i = 1; i < edges.length; i += 1) {
+    out.push(`${label(edges[i - 1])}–${label(edges[i])}`);
+  }
+  out.push(`${label(edges[edges.length - 1])} and over`);
+  return out;
+}
+
+// sharePercent is a fraction as the panel shows it. The server sends the
+// fraction rather than the percentage, so the rounding happens once, here.
+function sharePercent(share) {
+  if (!(share > 0)) return '—';
+  return `${(share * 100).toFixed(1)}%`;
+}
+
+// figure is a count on its way into a cell. Every one of these is a number the
+// server marshalled from a typed field, so nothing here can be markup — and
+// this is the one place that has to stay true of, rather than a rule each cell
+// is trusted to keep.
+function figure(n) {
+  return Number.isFinite(n) ? String(n) : '—';
+}
+
+// msFigure and rateFigure are a percentile as a reader reads one. A model with
+// nothing to distribute has no figure at all; a model whose median first token
+// really is under half a millisecond has a zero, and zero is a figure.
+function msFigure(ms) {
+  if (!Number.isFinite(ms) || ms < 0) return '—';
+  return millis(Math.round(ms));
+}
+
+function rateFigure(rate) {
+  if (!Number.isFinite(rate) || rate <= 0) return '—';
+  return `${rate.toFixed(1)} tok/s`;
 }
 
 // ── misc ─────────────────────────────────────────────────

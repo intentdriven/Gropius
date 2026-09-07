@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -62,6 +63,7 @@ func (c *Control) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/settings", c.handleGetSettings)
 	mux.HandleFunc("POST /api/settings", c.handleSetSettings)
 	mux.HandleFunc("GET /api/stats", c.handleStats)
+	mux.HandleFunc("GET /api/stats/history", c.handleStatsHistory)
 	mux.HandleFunc("POST /api/stats/clear", c.handleClearStats)
 	mux.HandleFunc("GET /api/events", c.handleEvents)
 	mux.HandleFunc("GET /api/instance", c.handleInstance)
@@ -282,6 +284,165 @@ func (c *Control) handleStats(w http.ResponseWriter, r *http.Request) {
 		view.Store = &status
 	}
 	writeJSON(w, http.StatusOK, view)
+}
+
+// DefaultHistoryDays is how far back the dashboard looks when a request names
+// no range: the last month, which is the span the store's default retention
+// comfortably covers and the one a reader asking "which model does the work"
+// means.
+const DefaultHistoryDays = 30
+
+// historyPasses bounds how many readings of the store run at once.
+//
+// One pass over a store at its size cap is a second or more of work and
+// several hundred megabytes of allocation, and this endpoint is reachable even
+// from a blind, Origin-less cross-origin GET (e.g. <img src>) — the same reason
+// maxSearchLimit exists — as well as from every other account on this Mac.
+// Without a bound, a handful of requests is a way to make the Mac unusable
+// from an account that has no other power over it. Two, so that a reader who
+// reloads the panel is not refused for having been quick, and no more; a
+// refusal is a status the panel can retry, where an unbounded fan-out of
+// full-store passes is not something it can recover from.
+var historyPasses = make(chan struct{}, 2)
+
+// historyRetryAfter is what the refusal tells a caller to wait, in seconds. One
+// pass over a store at its size cap is under two seconds, so a reader refused
+// while two are running has an answer by the time they ask again.
+const historyRetryAfter = "2"
+
+// historySource is where the aggregates are read from.
+//
+// It is a variable for the reason stats.historyRecordBound is: the refusal
+// above only happens while two passes are actually in flight, and a test that
+// could not hold a pass still could not watch the third caller be refused. The
+// production value is the app's own store and nothing else sets it.
+var historySource = func(a *app.App) stats.RecordSource { return a.StatsStore }
+
+// handleStatsHistory serves the dashboard's four historical tables: tokens
+// per day by model with each model's share, request latency by model, and
+// evictions and reloads by hour of the local day (itd-2609061521159233).
+//
+// It takes a range and nothing else — two whole UTC seconds — and answers with
+// aggregates: sums, counts, buckets and the repo ids of models this Mac holds.
+// No record reaches the browser, so the panel is never in a position to add up
+// requests itself, and there is no path, file name or model filter in the
+// request that could be turned into one.
+//
+// It is on the control plane and so behind the loopback guard, for the reason
+// /api/stats is: these figures are the operator's and the machine is the
+// boundary (adr-2609061503319212). With recording off it answers with an empty
+// view, which is what the panel says "nothing is recorded" from — the same
+// contract /api/stats has, so the panel needs no separate way of asking.
+func (c *Control) handleStatsHistory(w http.ResponseWriter, r *http.Request) {
+	now := time.Now()
+	to, ok := historyTime(r, "to", now)
+	if !ok {
+		writeError(w, http.StatusBadRequest, "the range's end is not a time in whole seconds")
+		return
+	}
+	from, ok := historyTime(r, "from", to.AddDate(0, 0, -DefaultHistoryDays))
+	if !ok {
+		writeError(w, http.StatusBadRequest, "the range's start is not a time in whole seconds")
+		return
+	}
+	from, to, ok = historyRange(from, to, now)
+	if !ok {
+		writeError(w, http.StatusBadRequest,
+			"the range must end no later than now, no further back than the records reach, and after it starts")
+		return
+	}
+	if !c.App.Stats.Enabled() {
+		writeJSON(w, http.StatusOK, stats.History{})
+		return
+	}
+
+	select {
+	case historyPasses <- struct{}{}:
+		defer func() { <-historyPasses }()
+	default:
+		// A header rather than only a sentence, so the panel can say how long
+		// to wait rather than guessing, and so anything else that asks is told
+		// in the ordinary way.
+		w.Header().Set("Retry-After", historyRetryAfter)
+		writeError(w, http.StatusServiceUnavailable,
+			"the records are already being read; try again in a moment")
+		return
+	}
+
+	// The request's own context, so a reader who closes the panel part-way
+	// through a pass over months of records stops being paid for.
+	history, err := stats.Aggregate(r.Context(), historySource(c.App), from, to, time.Local)
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		// The reader went away, which is the pass working as it should rather
+		// than the store failing. There is no socket left to answer and there
+		// is nothing to say: logging it at Warn would let anyone who can open
+		// this endpoint write an unbounded run of store-failure lines into the
+		// operator's log by opening and abandoning it, which is the very thing
+		// the writer logs once per spell to avoid.
+		c.App.Log.Debug("a reading of the request statistics was abandoned", "err", err)
+		return
+	}
+	if err != nil {
+		// The reason is logged, not returned: these errors name the store's
+		// directory, and the control plane answers every account on this Mac.
+		c.App.Log.Warn("the request statistics could not be aggregated", "err", err)
+		writeError(w, http.StatusInternalServerError, "the records could not be read")
+		return
+	}
+	history.Enabled = true
+	writeJSON(w, http.StatusOK, history)
+}
+
+// historyTime reads one end of the range out of the query, falling back to a
+// default when it is absent. A value that is not a whole non-negative number
+// of seconds is a refusal rather than a silent fallback: a panel sending a
+// broken range should hear about it, and so should anything else that asks.
+func historyTime(r *http.Request, name string, fallback time.Time) (time.Time, bool) {
+	raw := r.URL.Query().Get(name)
+	if raw == "" {
+		return fallback, true
+	}
+	secs, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || secs < 0 {
+		return time.Time{}, false
+	}
+	return time.Unix(secs, 0), true
+}
+
+// historyRange holds the range to one the store can answer for, reporting
+// whether anything is left of it.
+//
+// One rule, applied once, after the defaults have been filled in: the range
+// ends no later than now, and it has to have something in it. Clamping the end
+// is what keeps a caller from naming a time so far ahead that the aggregation's
+// own narrowing has nothing to narrow, and it makes the range the panel draws
+// the range it asked for. The start is left alone, because narrowing it is the
+// aggregation's to do and to report — a range cut to the widest one view covers
+// must say so, and a handler that had quietly cut it first would leave nothing
+// to say.
+//
+// The end is also held to the horizon, and that one is a refusal rather than a
+// clamp. The store is read newest first, so a range ending long ago is a walk
+// back over everything newer than it before the figures even begin; a range
+// ending further back than a view can reach has nothing to show for that walk,
+// and answering it would be a full pass over the store that any caller could
+// ask for by naming a date near the epoch.
+//
+// What none of this does is make every range cheap. A range that ends within
+// the horizon but well before now still costs the walk back to it; that walk is
+// bounded by the aggregation's record bound and by historyPasses, which is what
+// holds the cost, rather than the shape of the range.
+func historyRange(from, to, now time.Time) (time.Time, time.Time, bool) {
+	if to.After(now) {
+		to = now
+	}
+	if to.Before(now.AddDate(0, 0, -stats.MaxHistoryDays)) {
+		return time.Time{}, time.Time{}, false
+	}
+	if !from.Before(to) {
+		return time.Time{}, time.Time{}, false
+	}
+	return from, to, true
 }
 
 // handleClearStats throws away everything recording has produced: the files
