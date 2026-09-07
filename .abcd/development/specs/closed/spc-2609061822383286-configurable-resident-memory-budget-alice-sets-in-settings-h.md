@@ -289,3 +289,58 @@ rather than rewritten.
   `SetMemoryBudget` does. `iss-2609062318532053` is amended, since this change
   fixes the direction its remedy must take, and `iss-2609070042568257` is filed
   for the low side of the range, which this record settles no floor for.
+
+## As built, addendum (2026-09-07, second review round)
+
+The sections above were written before the design and record reviews of the
+branch. They stand as written; this addendum is appended rather than folded into
+them, and governs where they differ.
+
+- **Point 7 above is superseded.** The field ships `step="any"`, not
+  `step="0.1"`. A stepped number field refuses the whole settings form for any
+  value that does not land on the step, and the panel writes the stored budget
+  into that field in gigabytes — so a figure written by anything but the panel
+  (another client, a hand edit, a file from a larger Mac, every case this record
+  goes out of its way to tolerate) made the browser refuse every save there is,
+  the API key included, before the submit listener ran. The rendering is
+  unrounded for the same reason: what the field shows posts back as the figure
+  it came from, to the byte. Held by
+  `ui.TestTheBudgetFieldAcceptsAnyFigureThePanelWritesIntoIt` and
+  `ui.TestTheBudgetFieldRoundTripsAnyStoredFigure`.
+- **What the pool is given is bounded by physical memory.** The Approach and the
+  trust-boundary notes above describe the stored figure reaching the pool with
+  the save-time ceiling as its only guard. As built, `App.enforcedBudget` hands
+  the pool `min(effectiveBudget, machineRAM)` when the machine's size is known.
+  The stored value and the save-path checks are untouched — an inherited figure
+  is still applied and warned about rather than rewritten — but a figure planted
+  in a settings file another local account can write under the shared install no
+  longer has the pool admitting models on the strength of memory that does not
+  exist. A Mac whose memory cannot be read has nothing to bound the figure to;
+  that residual is recorded. Held by
+  `app.TestAPlantedBudgetIsEnforcedNoHigherThanTheMachine`.
+- **The budget answers both ends of its range.** `App.MemoryBudgetWarning` also
+  reports a budget below the smallest model on this Mac, naming what that model
+  needs — a new control-plane warning and a new `warning` field on the settings
+  response. A warning, not a floor: refusing the save is the wedge, and the floor
+  question stays open as `iss-2609070042568257`. Held by
+  `app.TestABudgetTooSmallForAnyModelIsWarnedAbout`.
+- **`capability.Assess` takes the machine as well as the budget** —
+  `Assess(modelsDir string, totalRAM, budget int64)` — and `handleSearch` passes
+  `App.MachineRAM()`. The Approach named `Assess(modelsDir, budget)`, which left
+  the filter taking its own `sysctl` reading per search: on the Mac the
+  unmeasured branch exists for, the Search tab printed a machine size the
+  Settings tab said could not be read. Held by
+  `gateway.TestSearchAndStateAgreeAboutTheMachine`.
+- **`capability.Machine`'s budget is served as `budget`, not `ram_budget`.** Two
+  objects called `machine` reach one panel, and point 2 above removed
+  `State.MemoryBudget` for exactly this reason. Held by
+  `gateway.TestTheMachineObjectsSpellTheBudgetOneWay`.
+- **The trust-boundary list gains `internal/capability`.** The Trust-boundary
+  review notes above name `internal/config`, `internal/runtime` and
+  `internal/gateway`; `internal/capability` now executes `/usr/sbin/sysctl` on
+  behalf of the pool and the app and owns the default share, so AGENTS.md names
+  it too.
+- **Acceptance criterion 4 shipped narrower**, alongside the criterion-3
+  divergence already recorded: a save that lowers the budget under the pinned
+  sum is refused only when the budget in force could hold that set
+  (`lowersUnderAFittingSet`). See the intent's Audit Notes.

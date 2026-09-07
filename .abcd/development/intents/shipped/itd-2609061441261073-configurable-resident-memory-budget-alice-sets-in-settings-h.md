@@ -114,8 +114,8 @@ credits memory before the victim exits (iss-6).
 <!-- abcd-review: OWED receipt=rcp-0b2669b3be31 -->
 Fidelity review OWED (receipt rcp-0b2669b3be31).
 
-Acceptance criterion 3 is **diverged**, not met, and the divergence is
-deliberate. As built, a save is refused when it raises the budget above this
+2026-09-07 — Acceptance criterion 3 is **diverged**, not met, and the divergence
+is deliberate. As built, a save is refused when it raises the budget above this
 Mac's memory; a budget that is merely inherited — a settings file carried from a
 larger Mac, or one written during a start where the machine could not be
 measured — is applied, warned about at start-up and on the control panel, and
@@ -127,6 +127,26 @@ independent reviews of the branch demonstrated it end to end. This is the same
 anti-wedge principle criterion 5 of itd-2609061441241254 was adopted as diverged
 under on 2026-09-07; the criterion and the principle could not both stand, and
 the principle won again.
+
+2026-09-07 — Acceptance criterion 4 shipped **narrower** than it is written, for
+the same reason, and the maintainer should adopt or reject it as such. The
+criterion refuses, unconditionally, a save that lowers the budget below the sum
+of the pinned models' charged sizes. As built, that refusal applies only when the
+budget in force could hold the set (`App.lowersUnderAFittingSet`): where the
+pinned set already does not fit — an inherited `config.json`, or a start where
+this Mac's memory could not be read and the conservative default applied — a save
+that lowers the budget further is accepted and warned about instead. Two things
+forced the narrowing. The panel renders gigabytes, so a save that posts back what
+it shows can carry a figure a few bytes under the one in force, which on the
+unconditional rule read as "lowering" and refused every settings change over a
+set the operator never chose here; and a pin whose model this Mac cannot measure
+blocked every budget change with no way out but unpinning. The sibling intent's
+own audit note asks this record to read the pinned sum as advisory for an
+inherited set, which is what this is. Held by
+`app.TestARoundedBudgetDoesNotTurnAWarningIntoARefusal` and
+`app.TestAnUnmeasurablePinDoesNotBlockALowerBudget`, with
+`app.TestSetConfigRefusesABudgetBelowThePinnedSum` holding the criterion's own
+case.
 
 ## Grounds
 
