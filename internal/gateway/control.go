@@ -62,6 +62,7 @@ func (c *Control) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/settings", c.handleGetSettings)
 	mux.HandleFunc("POST /api/settings", c.handleSetSettings)
 	mux.HandleFunc("GET /api/stats", c.handleStats)
+	mux.HandleFunc("POST /api/stats/clear", c.handleClearStats)
 	mux.HandleFunc("GET /api/events", c.handleEvents)
 	mux.HandleFunc("GET /api/instance", c.handleInstance)
 	if c.UI != nil {
@@ -162,6 +163,11 @@ type State struct {
 	// panel more than the figures are worth. They come from /api/stats
 	// instead, fetched while the Statistics view is open.
 	Stats []stats.ModelCounters `json:"stats,omitempty"`
+	// StatsStore says how far back the records on disk reach and how much room
+	// they take, and is present under the same condition: the Settings page
+	// draws the two retention figures from this snapshot, and a cap in
+	// megabytes means nothing without the date beside it.
+	StatsStore *stats.StoreStatus `json:"stats_store,omitempty"`
 }
 
 // snapshot builds the state the UI renders.
@@ -194,6 +200,10 @@ func (c *Control) snapshot() State {
 			"The MLX runtime is not installed yet — models cannot be served until setup finishes.")
 	}
 	st.Stats = c.App.Stats.Summary()
+	if c.App.Stats.Enabled() {
+		status := c.App.StatsStore.Status()
+		st.StatsStore = &status
+	}
 	return st
 }
 
@@ -209,7 +219,28 @@ func (c *Control) snapshot() State {
 // by anyone logged into it. That is what the panel's recording indicator and
 // the documentation's "Who can see it" section exist to say out loud.
 func (c *Control) handleStats(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, c.App.Stats.View())
+	view := c.App.Stats.View()
+	if view.Enabled {
+		status := c.App.StatsStore.Status()
+		view.Store = &status
+	}
+	writeJSON(w, http.StatusOK, view)
+}
+
+// handleClearStats throws away everything recording has produced: the files
+// and the live view both. It is the only thing that removes a record —
+// switching recording off stops new ones and leaves the old ones alone — and
+// it takes no path from the request: it acts on the store's resolved
+// directory, and only on the file names the store itself writes.
+func (c *Control) handleClearStats(w http.ResponseWriter, r *http.Request) {
+	if err := c.App.ClearStats(); err != nil {
+		// The reason is logged, not returned: these errors name the store's
+		// directory, and the control plane answers every account on this Mac.
+		c.App.Log.Warn("the request statistics could not be cleared", "err", err)
+		writeError(w, http.StatusInternalServerError, "the records could not be cleared")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"status": "cleared"})
 }
 
 func (c *Control) handleState(w http.ResponseWriter, r *http.Request) {

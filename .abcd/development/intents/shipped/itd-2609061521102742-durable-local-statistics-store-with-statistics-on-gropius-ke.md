@@ -111,7 +111,33 @@ on Apple Silicon.
 
 ## Audit Notes
 
-_Empty. Populated by intent-auditor when intent moves to shipped/._
+<!-- abcd-review: OWED receipt=rcp-799061841f58 -->
+Fidelity review OWED (receipt rcp-799061841f58). The audit compares this
+promise against what was delivered, so it runs after the branch merges; the
+receipt's request lives in the per-machine tier and does not travel, so
+whoever runs it re-emits the request with `abcd intent audit`.
+
+What shipped diverges from the spec's Approach in six places, each with its
+reason: see the spec's "As built" section and the 2026-09-07 lines in
+`.abcd/work/DECISIONS.md`. None of them is one of the criteria above.
+
+**Diverged, at the level of this intent and of adr-2609061610107154.** Both say
+the record kinds include "load and eviction events **each carrying their
+reason**". A removal carries its reason, one of seven. A load does not:
+nothing in Gropius knows why a model was loaded beyond something having asked
+for it, so a `reason` on a load could only have been invented. What a load
+does carry is `duration_ms` and `failed`, which is what the pool actually
+knows. Flagged here rather than quietly closed, because the promise is the
+maintainer's to release.
+
+**Also refuted by this intent's own measurement.** The Mechanism claim reasons
+from "about 150 bytes" a record; the committed benchmark measures about 230,
+because a JSON Lines record carries its field names on every line. The claim's
+conclusion — that a size-capped JSON Lines store holds months of local use on
+one Mac without a database — survives: 200 MB is roughly three months of ten
+thousand requests a day rather than over four, and a single pass over a full
+store answers the dashboard's aggregates in 1.4 s. The arithmetic is corrected
+in the 2026-09-07 ledger lines and in the documentation.
 
 ## Grounds
 

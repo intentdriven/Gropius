@@ -43,6 +43,11 @@ func (s refusingStore) AppendEvent(Event) error {
 	return nil
 }
 
+func (s refusingStore) AppendSettings(Settings) error {
+	s.t.Error("the recorder wrote the settings to the store while statistics were off")
+	return nil
+}
+
 func newTestRecorder(t *testing.T) (*Recorder, *clock) {
 	t.Helper()
 	c := &clock{now: time.Date(2026, 9, 6, 12, 0, 30, 0, time.UTC)}
@@ -303,8 +308,9 @@ type funcStore struct {
 	event   func(Event) error
 }
 
-func (s funcStore) AppendRequest(r Record) error { return s.request(r) }
-func (s funcStore) AppendEvent(e Event) error    { return s.event(e) }
+func (s funcStore) AppendRequest(r Record) error  { return s.request(r) }
+func (s funcStore) AppendEvent(e Event) error     { return s.event(e) }
+func (s funcStore) AppendSettings(Settings) error { return nil }
 
 // A record is a fixed set of counted and timed fields. The panel, the
 // documentation and the durable store all read this list, and the field table
@@ -377,5 +383,58 @@ func TestOffHoldsNoRing(t *testing.T) {
 	r.SetEnabled(false)
 	if r.ring != nil {
 		t.Error("switching off left the ring allocated")
+	}
+}
+
+// The settings record is not the recorder's own, but it goes through the
+// recorder's switch like everything else: one switch decides whether anything
+// at all is written down, which is the whole of what the opt-in promises.
+func TestTheSettingsRecordGoesThroughTheSwitch(t *testing.T) {
+	var got []Settings
+	store := settingsStore{seen: &got}
+	r := New(Options{Store: store})
+
+	r.RecordSettings(Settings{At: 1, DecodeConcurrency: 4})
+	if len(got) != 0 {
+		t.Errorf("the settings were written with recording off: %+v", got)
+	}
+
+	r.SetEnabled(true)
+	r.RecordSettings(Settings{At: 2, DecodeConcurrency: 4})
+	if len(got) != 1 || got[0].At != 2 {
+		t.Errorf("the store was handed %+v, want the one settings record", got)
+	}
+}
+
+type settingsStore struct{ seen *[]Settings }
+
+func (s settingsStore) AppendRequest(Record) error { return nil }
+func (s settingsStore) AppendEvent(Event) error    { return nil }
+func (s settingsStore) AppendSettings(set Settings) error {
+	*s.seen = append(*s.seen, set)
+	return nil
+}
+
+// Clear empties the live view and leaves recording on, which is what the
+// panel's button does: the operator is throwing away what was recorded, not
+// changing their mind about recording.
+func TestClearEmptiesTheViewAndKeepsRecording(t *testing.T) {
+	r, _ := newTestRecorder(t)
+	r.SetEnabled(true)
+	r.Add(okRecord("org/a"))
+	r.Clear()
+
+	v := r.View()
+	if !v.Enabled {
+		t.Error("Clear switched recording off")
+	}
+	if len(v.Requests) != 0 || len(v.Models) != 0 || len(v.Rollups) != 0 {
+		t.Errorf("the view still holds %d requests, %d models and %d buckets after Clear",
+			len(v.Requests), len(v.Models), len(v.Rollups))
+	}
+
+	r.Add(okRecord("org/b"))
+	if v := r.View(); len(v.Requests) != 1 {
+		t.Errorf("after Clear the recorder holds %d requests, want the one recorded since", len(v.Requests))
 	}
 }

@@ -31,7 +31,11 @@ type App struct {
 	// Stats holds the live view of what this Mac has served, and holds nothing
 	// at all until the operator turns recording on (adr-2609061503319212).
 	Stats *stats.Recorder
-	Log   *slog.Logger
+	// StatsStore is where those records outlive the process. It is under the
+	// same switch as the live view and no other, and it creates nothing —
+	// not a file, not its own directory — until that switch is on.
+	StatsStore *stats.FileStore
+	Log        *slog.Logger
 
 	// saveMu serialises whole settings saves. cfgMu guards the value; this
 	// guards the sequence — write the file, swap the value, tell the pool —
@@ -111,12 +115,18 @@ func New(opts Options) (*App, error) {
 	hc := hub.New()
 	hc.Token = opts.Config.HFToken
 
+	store := stats.NewStore(opts.Paths.Stats, stats.StoreOptions{
+		Months:   opts.Config.StatsMonths,
+		MaxBytes: opts.Config.StatsMaxBytes,
+		Log:      opts.Log,
+	})
 	a := &App{
 		Paths:       opts.Paths,
 		Hub:         hc,
 		Registry:    reg,
 		Provisioner: runtime.NewProvisioner(opts.Paths),
-		Stats:       stats.New(stats.Options{}),
+		Stats:       stats.New(stats.Options{Store: store}),
+		StatsStore:  store,
 		Log:         opts.Log,
 		cfg:         opts.Config,
 		downloads:   map[string]*download{},
@@ -159,7 +169,7 @@ func New(opts Options) (*App, error) {
 		Pinned:   a.cfg.Pinned,
 		Log:      opts.Log,
 	})
-	a.Stats.SetEnabled(opts.Config.Statistics)
+	a.applyStatistics(opts.Config)
 
 	// Settings read from disk have not been through SetConfig's checks: the
 	// file can be hand-edited, restored from a backup, or written by another
@@ -242,9 +252,11 @@ func (a *App) SetConfig(c config.Config) error {
 	a.cfgMu.Unlock()
 
 	// The switch applies to the next request, not to the next start. Turning
-	// it off also empties what was recorded, which is what makes "off" the
-	// same state as a fresh start rather than a hidden one.
-	a.Stats.SetEnabled(c.Statistics)
+	// it off also empties what was recorded in memory, which is what makes
+	// "off" the same state as a fresh start rather than a hidden one; the
+	// records already on disk stay where they are, because switching recording
+	// off is asking for it to stop, not for a history to be destroyed.
+	a.applyStatistics(c)
 
 	a.Hub.Token = c.HFToken
 	// Applied live, so a model already in memory is protected from the next
@@ -362,6 +374,58 @@ func (a *App) pinnedFitProblem(pinned []string) error {
 			runtime.HumanBytes(sum), runtime.HumanBytes(budget))
 	}
 	return nil
+}
+
+// applyStatistics puts the switch and the two retention figures into effect,
+// on the live view and on the store together.
+//
+// One function, called from the composition root and from every save, because
+// the recorder and the store must never disagree about whether recording is
+// on: two switches kept in step by hand is exactly how a store comes to hold
+// records made after someone switched recording off.
+func (a *App) applyStatistics(c config.Config) {
+	a.StatsStore.SetRetention(c.StatsMonths, c.StatsMaxBytes)
+	if !c.Statistics {
+		a.Stats.SetEnabled(false)
+		_ = a.StatsStore.SetEnabled(false)
+		return
+	}
+	// A store that cannot be opened is not a reason to stop serving, or even
+	// to stop recording: the figures stay in memory, where they were before
+	// there was a store at all. It says so once, in SetEnabled.
+	_ = a.StatsStore.SetEnabled(true)
+	a.Stats.SetEnabled(true)
+	a.Stats.RecordSettings(a.effectiveSettings(c))
+}
+
+// effectiveSettings is what Gropius is actually serving under, which is not
+// always what is saved: the memory budget, decode concurrency and the idle
+// timeout are read once when the pool is built and a change to any of them
+// takes a restart. Recording a saved value that is not yet in force would put
+// a reader's "before and after I changed this" line in the wrong place.
+func (a *App) effectiveSettings(c config.Config) stats.Settings {
+	return stats.Settings{
+		At:                time.Now().UTC().Unix(),
+		BudgetBytes:       a.Pool.MemoryBudget(),
+		DecodeConcurrency: a.Pool.DecodeConcurrency(),
+		IdleTimeoutSec:    int(a.Pool.IdleTimeout() / time.Second),
+		Months:            c.StatsMonths,
+		MaxBytes:          c.StatsMaxBytes,
+	}
+}
+
+// ClearStats throws away everything recording has produced: the files and the
+// live view both. It is the only thing that removes a record, and it leaves
+// recording on — a person clearing the figures is discarding what was
+// collected, not changing their mind about collecting it.
+func (a *App) ClearStats() error {
+	// Said out loud in the log. On a Mac several people log into, the control
+	// plane asks nobody for a password, so the person who cleared the records
+	// is not necessarily the person who recorded them — and a destructive
+	// action nothing anywhere notes is one nobody can ask about afterwards.
+	a.Log.Info("clearing the request statistics kept on this Mac")
+	a.Stats.Clear()
+	return a.StatsStore.Clear()
 }
 
 // poolObserver adapts the pool's reports onto the recorder. The pool names its
@@ -938,5 +1002,13 @@ func (a *App) Close() error {
 	a.dlMu.Unlock()
 
 	a.dlWG.Wait()
-	return a.Pool.Close()
+	// The pool first: shutting it down produces a removal record for every
+	// model still resident, and closing the store before that would throw
+	// those away. Closing the store then flushes whatever the last few seconds
+	// of requests recorded.
+	err := a.Pool.Close()
+	if cerr := a.StatsStore.Close(); err == nil {
+		err = cerr
+	}
+	return err
 }

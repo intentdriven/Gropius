@@ -213,13 +213,31 @@
         streamed, how many tokens went in and came out, how long the first token took, how
         long the whole request took, and how long it waited for the model. It never records
         a prompt, an answer, an API key or the address of the client that sent it, and
-        nothing recorded leaves this Mac. Turning it off again empties what is held.
+        nothing recorded leaves this Mac. Turning it off again empties the live view and stops
+        new records; the records already kept on this Mac stay until you clear them.
         Everyone who can open this panel can turn it on and read it, which on a Mac that
         several people log into means every account on it — so on a shared Mac this is a
         decision for all of them, and while it is on <strong>Recording</strong> appears
         beside the server status at the top of this page. The
-        <a href="https://github.com/intentdriven/Gropius/blob/main/docs/request-statistics.md">what
+        <a href="https://github.com/intentdriven/Gropius/blob/main/docs/statistics-store-reference.md">what
         is recorded page</a> says all of this field by field.</p>
+      <label>
+        <span>Keep records for (months)</span>
+        <input id="setStatsMonths" type="number" step="1" min="1" max="120">
+      </label>
+      <label>
+        <span>Never use more than (MB)</span>
+        <input id="setStatsMB" type="number" step="1" min="10" max="10240">
+      </label>
+      <p class="hint">Records are kept in plain text files, one line of JSON each, under your
+        own Gropius data folder. The size limit is the one that always wins, and the months
+        figure clears out what fits within it. Whole files are removed at a time, oldest
+        first, as records arrive and whenever you change either figure, so a limit you
+        lower here takes effect when you save it. Switching recording off stops new records
+        and leaves these ones where they are; <strong>Clear records</strong> is what removes
+        them.</p>
+      <p id="statsStoreLine" class="hint"></p>
+      <button type="button" id="statsClear" class="ghost">Clear records</button>
     </fieldset>
 
     <fieldset class="group">
