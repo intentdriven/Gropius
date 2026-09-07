@@ -405,3 +405,50 @@ blocking defect and three that shipped differently from what the record says.
   `TestARequestThatReallyWaitedSaysSoOnTheWire` drives a real parked waiter
   through the gateway to the header, which is the seam the stub-pool tests
   cannot hold.
+
+## As built, fourth addendum (2026-09-07, after the adversarial security review)
+
+An independent adversarial security review returned BLOCK with three
+SHOULD-FIX findings. All three are applied.
+
+- **The two wait headers follow the models list's rule.** The Approach names
+  them without saying who may read them, and what shipped served them to
+  anyone. They are residency facts: `warm` is a server-attested statement that
+  the model was in memory with a free slot, and `waited` on a model the same
+  client has just seen warm is that model's in-flight count at its batch
+  ceiling — other clients are using it, right now. `handleListModels`
+  deliberately withholds exactly that from an open server, and the argument
+  that blesses leaking bare residency ("a client can already learn it by
+  timing") does not reach it: in total latency the wait is inseparable from
+  generation, while the header separates it to the millisecond on every
+  request. `setWaitHeaders` now takes `withAuth`'s own admission bit and writes
+  nothing without it. Held by `TestTheWaitHeadersFollowTheResidencyRule`, three
+  cases; the old header tests move to a keyed install.
+- **A maximum wait shorter than the grace is refused.** The record settles the
+  two intervals independently and the first cut range-checked them that way,
+  which let the panel offer a pair that silently disables the anti-starvation
+  clause: a waiter may override a model's protection once its own age reaches
+  the grace and is refused once it reaches the maximum, so with the maximum the
+  smaller the override never happens. The review measured 33 refusals in two
+  seconds under a trickle — the starvation this record exists to prevent.
+  `validateGrace` refuses the pair naming both figures, `sanitizeGrace` raises
+  it in a file, `normalizeGrace` raises it in the pool so no caller can
+  configure the hole, and the panel says so beside the fields. The earlier
+  as-built note that this pair is "a deliberate and documented choice" is
+  therefore withdrawn.
+- **A full queue no longer refuses a load that needs nothing unloaded.** The
+  first addendum's fairness gate covered admission, which was right for a
+  caller that can queue and wrong for one that cannot: a bound on how many
+  requests may wait had become a bound on how many may be served, at the cost
+  of eight connections. `admission` replaces the `mayEvict` boolean —
+  `admitEvict`, `admitFreeRoom` (a caller with nowhere to queue may take free
+  memory but no victim) and `admitNothing`. And the refusal is cheap now: the
+  eviction plan is consulted before `Launcher.Precheck`, so a refused arrival
+  no longer stats the filesystem under `p.mu` at whatever rate a client can
+  send. Held by `TestAFullQueueDoesNotRefuseALoadThatNeedsNoEviction` and
+  `TestAQueueFullArrivalTakesNoVictimAndCostsNoSyscall`.
+- `iss-2609070252377294` is amended with the two measurements and **raised from
+  minor to major**; the design point it names — the queue is global and counts
+  requests, not sources — stays open. `iss-2609070654589719` captures the
+  review's note that the never-fits fast path is a timing oracle for the
+  aggregate charged size of the pinned set.
