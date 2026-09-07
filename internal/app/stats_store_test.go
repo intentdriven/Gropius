@@ -230,4 +230,10 @@ func TestAStoreThatCannotBeCreatedLeavesTheServerServing(t *testing.T) {
 	if _, err := os.Stat(paths.Stats); !os.IsNotExist(err) {
 		t.Errorf("the store created its directory in a place it refused (%v)", err)
 	}
+	// And the panel is told, rather than being shown an empty store: an
+	// operator who believes records are accumulating finds out otherwise only
+	// when they go looking for them.
+	if st := a.StatsStore.Status(); !st.Refused {
+		t.Errorf("the store reports itself as %+v, not as refused", st)
+	}
 }

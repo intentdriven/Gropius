@@ -194,6 +194,18 @@ type StoreStatus struct {
 	// rather than logged: a figure that is quietly missing is worse than one
 	// that says it is missing.
 	Dropped int64 `json:"dropped"`
+	// Skipped counts lines the last read through the store could not use: a
+	// line torn by a crash, one a newer Gropius wrote, one a full disk cut in
+	// half. One is the ordinary cost of a crash; a great many mean an
+	// aggregate drawn over a fraction of the records, and the same reasoning
+	// applies as to Dropped — a figure that is quietly missing is worse than
+	// one that says it is missing.
+	Skipped int64 `json:"skipped"`
+	// Refused reports a store that could not be opened where it must live, so
+	// the figures are being kept in memory and nothing is on disk. The reason
+	// is in the log; it names the directory, which is not the panel's to
+	// publish.
+	Refused bool `json:"refused"`
 }
 
 // FileStore writes the recorder's records to disk and reads them back.
@@ -366,6 +378,13 @@ func (s *FileStore) setEnabled(on bool) error {
 	w, err := s.openWriter()
 	if err != nil {
 		s.log.Warn("request statistics stay in memory: the store cannot be opened", "dir", s.dir, "err", err)
+		// Said on the panel as well as in the log. A refused store that
+		// reported itself as an empty one would have the operator believing
+		// records were accumulating for as long as it took them to look for
+		// them.
+		s.statusMu.Lock()
+		s.status = StoreStatus{Refused: true}
+		s.statusMu.Unlock()
 		return err
 	}
 	s.mu.Lock()
@@ -375,6 +394,9 @@ func (s *FileStore) setEnabled(on bool) error {
 	s.done = make(chan struct{})
 	go s.run(s.ch, s.quit, s.done, w)
 	s.mu.Unlock()
+	s.statusMu.Lock()
+	s.status.Refused = false
+	s.statusMu.Unlock()
 	// What opening found, including whatever retention removed on the way in:
 	// the panel must not go on showing figures from before the store was
 	// pruned.
@@ -644,7 +666,7 @@ func (s *FileStore) run(ch chan storeEntry, quit chan struct{}, done chan struct
 			s.apply(w, e)
 		case <-t.C:
 			if err := w.flush(); err != nil {
-				s.log.Warn("the statistics store could not be flushed", "err", err)
+				s.writeFailed(w, err)
 			}
 			s.publish(w)
 		case <-p.C:
@@ -696,12 +718,34 @@ func (s *FileStore) apply(w *storeWriter, e storeEntry) {
 		w.opts.beforeWrite()
 	}
 	if err := w.write(e.line); err != nil {
-		// A store that cannot be written is not a request that failed. It is
-		// logged and the records go on being counted in memory, which is where
-		// they were before any of this existed.
-		s.log.Warn("a request statistics record could not be written", "err", err)
+		s.writeFailed(w, err)
+	} else {
+		w.failing = false
 	}
 	s.publish(w)
+}
+
+// writeFailed is what a store that cannot be written costs: the record, and
+// nothing else.
+//
+// The record is counted as lost, because a figure that is quietly missing is
+// worse than one that says it is missing. The open file is dropped without
+// being flushed — a bufio.Writer keeps its first error forever, so a single
+// full disk would otherwise mean nothing is ever written again, however much
+// room is freed afterwards; dropping it makes the next record open the file
+// again. And it is logged once for the spell rather than once per request,
+// which is the reason the recorder gives for logging nothing at all: a line
+// per failed write would be a second unbounded record of the traffic the first
+// one is meant to bound.
+func (s *FileStore) writeFailed(w *storeWriter, err error) {
+	s.statusMu.Lock()
+	s.status.Dropped++
+	s.statusMu.Unlock()
+	if !w.failing {
+		w.failing = true
+		s.log.Warn("a request statistics record could not be written; the figures stay in memory", "err", err)
+	}
+	w.discardFile()
 }
 
 // retain applies both bounds to a store that is sitting still, flushing first
@@ -719,6 +763,7 @@ func (s *FileStore) publish(w *storeWriter) {
 	files, bytes, oldest := w.summary()
 	s.statusMu.Lock()
 	s.status.Files, s.status.Bytes, s.status.Oldest = files, bytes, oldest
+	s.status.Refused = false
 	s.statusMu.Unlock()
 }
 
@@ -745,12 +790,15 @@ type storeWriter struct {
 	// within a run: retention can empty the directory, and a new file taking a
 	// removed file's name would make two different files share one name in a
 	// reader's notes.
-	day    int
-	n      int
-	f      *os.File
-	buf    *bufio.Writer
-	cur    int64 // bytes in the open file, buffered ones included
-	oldest int64 // the oldest record still held, or 0
+	day int
+	n   int
+	f   *os.File
+	buf *bufio.Writer
+	// failing says the last write or flush did not work, so that a spell of
+	// failure costs one line in the log rather than one per request.
+	failing bool
+	cur     int64 // bytes in the open file, buffered ones included
+	oldest  int64 // the oldest record still held, or 0
 }
 
 // openWriter checks the store's directory, creates it if it is not there, and
@@ -792,7 +840,18 @@ func (s *FileStore) openWriter() (*storeWriter, error) {
 // internal/runtime/launcher.go applies to a model server's log, applied to the
 // directory as well, because here it is the directory that is created.
 func ensureStoreDir(dir string) error {
-	if err := checkAncestors(filepath.Dir(dir)); err != nil {
+	parent := filepath.Dir(dir)
+	// The account's own data folder may not exist at all. In shared-cache mode
+	// the layout is created under the shared root, and this store is the one
+	// thing Gropius keeps under the account's own — so for an account that has
+	// never run Gropius per-user there is nothing above the store yet. Created
+	// owner-only, and then held to the same rule as any other ancestor.
+	if _, err := os.Stat(parent); errors.Is(err, fs.ErrNotExist) {
+		if err := os.MkdirAll(parent, 0o700); err != nil {
+			return err
+		}
+	}
+	if err := checkAncestors(parent); err != nil {
 		return err
 	}
 	fi, err := os.Lstat(dir)
@@ -1118,6 +1177,17 @@ func (w *storeWriter) closeFile() error {
 	return err
 }
 
+// discardFile lets go of the open file without trying to write what is
+// buffered, which is the only way past a write error a bufio.Writer will
+// otherwise repeat forever.
+func (w *storeWriter) discardFile() {
+	if w.f == nil {
+		return
+	}
+	_ = w.f.Close()
+	w.f, w.buf, w.cur = nil, nil, 0
+}
+
 func (w *storeWriter) close() error {
 	err := w.closeFile()
 	if cerr := w.root.Close(); err == nil {
@@ -1151,17 +1221,20 @@ func (w *storeWriter) oldestRecord() int64 {
 // bound is what stops a hand-placed file of any size being read into memory.
 const maxStoreFileBytes = 64 << 20
 
+// maxLatestBytes bounds one read through the store, so a caller that asks for
+// everything is bounded in bytes as well as in records. It is comfortably over
+// the largest cap a person can set, and is here for the store a hand-edit or
+// another build left larger than this one would write.
+const maxLatestBytes = 16 << 30
+
 // firstRecordIn returns the timestamp of the first record in a file, or zero.
 func (w *storeWriter) firstRecordIn(name string) int64 {
-	f, err := w.root.Open(name)
+	lines, err := readRawLines(w.root, name)
 	if err != nil {
 		return 0
 	}
-	defer f.Close()
-	sc := bufio.NewScanner(io.LimitReader(f, maxStoreFileBytes))
-	sc.Buffer(make([]byte, 0, 64<<10), 1<<20)
-	for sc.Scan() {
-		if l, ok := parseLine(sc.Bytes()); ok {
+	for _, b := range lines {
+		if l, ok := parseLine(b); ok {
 			return l.At
 		}
 	}
@@ -1176,16 +1249,17 @@ func (w *storeWriter) newestRecordIn(name string) int64 {
 	if err != nil {
 		return 0
 	}
-	defer f.Close()
-	var newest int64
-	sc := bufio.NewScanner(io.LimitReader(f, maxStoreFileBytes))
-	sc.Buffer(make([]byte, 0, 64<<10), 1<<20)
-	for sc.Scan() {
-		if l, ok := parseLine(sc.Bytes()); ok {
-			newest = l.At
+	_ = f.Close()
+	lines, err := readRawLines(w.root, name)
+	if err != nil {
+		return 0
+	}
+	for i := len(lines) - 1; i >= 0; i-- {
+		if l, ok := parseLine(lines[i]); ok {
+			return l.At
 		}
 	}
-	return newest
+	return 0
 }
 
 // Files lists the store's own files, oldest first. It is the reader's way in
@@ -1241,14 +1315,33 @@ func (s *FileStore) Latest(limit int, fn func(Line) bool) error {
 	if err != nil {
 		return err
 	}
-	given := 0
+	given, skipped := 0, int64(0)
+	budget := int64(maxLatestBytes)
+	defer func() {
+		s.statusMu.Lock()
+		s.status.Skipped = skipped
+		s.statusMu.Unlock()
+	}()
 	for i := len(files) - 1; i >= 0; i-- {
-		lines, err := readLines(root, files[i].name)
+		if budget <= 0 {
+			break
+		}
+		lines, err := readRawLines(root, files[i].name)
 		if err != nil {
 			return err
 		}
+		budget -= files[i].size
+		// Backwards, parsing one line at a time: a bound of ten must cost ten
+		// records decoded, not a whole file of them thrown away.
 		for j := len(lines) - 1; j >= 0; j-- {
-			if !fn(lines[j]) {
+			l, ok := parseLine(lines[j])
+			if !ok {
+				if len(bytes.TrimSpace(lines[j])) > 0 {
+					skipped++
+				}
+				continue
+			}
+			if !fn(l) {
 				return nil
 			}
 			given++
@@ -1260,12 +1353,14 @@ func (s *FileStore) Latest(limit int, fn func(Line) bool) error {
 	return nil
 }
 
-// readLines reads one whole file into records, oldest first.
+// readRawLines reads one whole file and splits it into lines, oldest first,
+// without parsing any of them.
 //
 // Whole, because a file is bounded by rotation and because reading it
 // backwards line by line would mean seeking about inside a file another
-// process may be appending to.
-func readLines(root *os.Root, name string) ([]Line, error) {
+// goroutine may be appending to. Splitting is cheap; it is decoding that is
+// not, which is why the caller decides how many lines to decode.
+func readRawLines(root *os.Root, name string) ([][]byte, error) {
 	f, err := root.Open(name)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
@@ -1278,13 +1373,7 @@ func readLines(root *os.Root, name string) ([]Line, error) {
 	if err != nil {
 		return nil, err
 	}
-	var out []Line
-	for _, b := range bytes.Split(raw, []byte{'\n'}) {
-		if l, ok := parseLine(b); ok {
-			out = append(out, l)
-		}
-	}
-	return out, nil
+	return bytes.Split(raw, []byte{'\n'}), nil
 }
 
 // parseLine turns one line into a record, reporting whether it was one.
@@ -1304,6 +1393,14 @@ func parseLine(b []byte) (Line, bool) {
 		At   int64  `json:"at"`
 	}
 	if err := json.Unmarshal(b, &head); err != nil {
+		return Line{}, false
+	}
+	// A version this build does not know is a line it must not read: the
+	// version is bumped only for a change an older reader could not survive,
+	// so decoding it with these field names would be reading a shape that is
+	// no longer this one. Skipped and counted, like any other line that cannot
+	// be used.
+	if head.V > SchemaVersion {
 		return Line{}, false
 	}
 	l := Line{V: head.V, Kind: head.Kind, At: head.At}

@@ -130,9 +130,12 @@ horizon is kept until its own newest record falls beyond it, and then it goes
 too. A record is about 150 bytes, so 200 MB is over four months of ten
 thousand requests a day.
 
-Beside the two limits, Settings shows the date the records reach back to, how
-much room they use, and — if the disk could not keep up with a burst — how
-many records were dropped rather than made to hold up an answer.
+Beside the two limits, Settings shows the date the records reach back to and
+how much room they use. It also says when something went wrong: how many
+records were dropped rather than made to hold up an answer, if the disk could
+not keep up with a burst; how many lines could not be read back, if a file was
+damaged; and, if Gropius could not open the store at all, that the figures are
+being kept in memory and nothing is on disk.
 
 ## What removes the records
 

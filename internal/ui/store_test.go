@@ -37,12 +37,17 @@ func TestSettingsOffersTheRetentionFiguresAndClear(t *testing.T) {
 // not keep up with.
 func TestThePanelSaysHowFarBackTheStoreReaches(t *testing.T) {
 	src := readPanelSource(t)
-	for _, field := range []string{"stats_store", "oldest", "dropped", "bytes"} {
+	for _, field := range []string{"stats_store", "oldest", "dropped", "bytes", "skipped", "refused"} {
 		if !strings.Contains(src, field) {
 			t.Errorf("the panel never reads %q, which the store reports — a figure nobody can see", field)
 		}
 	}
 	if !strings.Contains(src, "statsStoreLine") {
 		t.Error("the panel never fills in the line that says what the store holds")
+	}
+	// A store that could not be opened must not look like an empty one: the
+	// operator would believe records were accumulating.
+	if !strings.Contains(src, "could not open the store") {
+		t.Error("the panel reports a refused store as an empty one")
 	}
 }

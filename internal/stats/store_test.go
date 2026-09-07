@@ -1,8 +1,10 @@
 package stats
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"slices"
@@ -433,12 +435,15 @@ func TestATornLastLineCostsOnlyThatLine(t *testing.T) {
 	}
 }
 
-// A line from a build that knew more fields than this one still reads, and a
-// line that is not JSON at all costs itself alone.
-func TestUnknownFieldsAreIgnoredAndRubbishIsSkipped(t *testing.T) {
+// A line from a build that knew more fields than this one still reads; a line
+// from a build that changed the shape does not, because that is the whole of
+// what the version is for; and a line that is not JSON at all costs itself
+// alone. Each one that cannot be used is counted, so an aggregate drawn over
+// half a file is not drawn silently.
+func TestUnknownFieldsAreIgnoredAndUnreadableLinesAreCounted(t *testing.T) {
 	s, dir := newTestStore(t, StoreOptions{})
 	on(t, s)
-	if err := s.AppendRequest(Record{Model: "org/a", At: 1, Class: ClassOK}); err != nil {
+	if err := s.AppendRequest(Record{Model: "org/a", At: 1788696030, Class: ClassOK}); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.Close(); err != nil {
@@ -449,7 +454,11 @@ func TestUnknownFieldsAreIgnoredAndRubbishIsSkipped(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	f.WriteString(`{"v":2,"kind":"request","model":"org/b","at":2,"class":"ok","session":"whatever"}` + "\n")
+	// A field this build does not know, under a version it does: read, with
+	// the field ignored.
+	f.WriteString(`{"v":1,"kind":"request","model":"org/b","at":1788696031,"class":"ok","session":"whatever"}` + "\n")
+	// A version this build does not know: skipped, whatever it says.
+	f.WriteString(`{"v":2,"kind":"request","model":"org/c","at":1788696032,"class":"ok"}` + "\n")
 	f.WriteString("not json at all\n")
 	f.WriteString("\n")
 	f.Close()
@@ -459,10 +468,59 @@ func TestUnknownFieldsAreIgnoredAndRubbishIsSkipped(t *testing.T) {
 	on(t, again)
 	got := read(t, again, 0)
 	if len(got) != 2 {
-		t.Fatalf("read %d records, want the 2 that parse", len(got))
+		t.Fatalf("read %d records, want the 2 this build can use: %+v", len(got), got)
 	}
-	if got[0].Request.Model != "org/b" || got[0].V != 2 {
-		t.Errorf("the newer line came back as %+v", got[0])
+	for _, l := range got {
+		if l.Request.Model == "org/c" {
+			t.Error("a line written under a later version of the format was read with this version's field names")
+		}
+	}
+	if got[0].Request.Model != "org/b" {
+		t.Errorf("the newest usable line came back as %+v", got[0])
+	}
+	if n := again.Status().Skipped; n != 2 {
+		t.Errorf("the read reported %d unreadable lines, want the later version and the rubbish", n)
+	}
+}
+
+// A bound is a bound on the work as well as on the answer: asking for the last
+// record must not decode every record in the newest file.
+func TestABoundStopsTheReadRatherThanTheAnswer(t *testing.T) {
+	s, dir := newTestStore(t, StoreOptions{})
+	on(t, s)
+	if err := s.AppendRequest(Record{Model: "org/a", At: 1788696030, Class: ClassOK}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	// Rubbish at the front of the file, and a good record after it. A read
+	// bounded at one record must never reach the rubbish, and so must not
+	// count it.
+	files, _ := s.Files()
+	path := filepath.Join(dir, files[0])
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, append([]byte("not json at all\n"), raw...), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	again := NewStore(dir, StoreOptions{Months: 1200})
+	defer again.Close()
+	on(t, again)
+	if got := read(t, again, 1); len(got) != 1 {
+		t.Fatalf("a bound of 1 returned %d records", len(got))
+	}
+	if n := again.Status().Skipped; n != 0 {
+		t.Errorf("a read bounded at one record still worked through %d unreadable lines before it", n)
+	}
+	if got := read(t, again, 0); len(got) != 1 {
+		t.Fatalf("an unbounded read returned %d records", len(got))
+	}
+	if n := again.Status().Skipped; n != 1 {
+		t.Errorf("an unbounded read reported %d unreadable lines, want the one at the front", n)
 	}
 }
 
@@ -1017,5 +1075,134 @@ func TestLoweringTheSizeCapPrunesAtOnce(t *testing.T) {
 	}
 	if total == 0 {
 		t.Error("the whole store went; lowering the limit must keep what fits under it")
+	}
+}
+
+// A link planted under a record file's own name is refused, not followed. The
+// name is predictable, so this is the half of the file discipline O_NOFOLLOW
+// exists for — and it must hold whatever the directory handle happens to do.
+func TestALinkPlantedUnderARecordFileNameIsRefused(t *testing.T) {
+	s, dir := newTestStore(t, StoreOptions{Now: func() time.Time {
+		return time.Date(2026, 9, 7, 12, 0, 0, 0, time.UTC)
+	}})
+	victim := filepath.Join(t.TempDir(), "victim")
+	if err := os.WriteFile(victim, []byte("someone else's file"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(victim, filepath.Join(dir, "stats-20260907-001.jsonl")); err != nil {
+		t.Fatal(err)
+	}
+
+	on(t, s)
+	if err := s.AppendRequest(Record{Model: "org/a", At: 1788696030, Class: ClassOK}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Flush(); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := os.ReadFile(victim)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "someone else's file" {
+		t.Errorf("the record was written through the link: the file now reads %q", got)
+	}
+	fi, err := os.Lstat(filepath.Join(dir, "stats-20260907-001.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Mode()&os.ModeSymlink == 0 {
+		t.Error("the link was replaced by a real file, so something wrote through the name")
+	}
+	if files, err := s.Files(); err != nil {
+		t.Fatal(err)
+	} else if slices.Contains(files, "stats-20260907-001.jsonl") {
+		t.Error("the store lists a link as one of its own files")
+	}
+	if n := s.Status().Dropped; n == 0 {
+		t.Error("the record that could not be written was not counted as lost")
+	}
+}
+
+// A disk that was full for a moment must not stop the store for good. A
+// bufio.Writer keeps its first error forever, so without dropping the buffer
+// one failed write would mean nothing is ever written again — however much
+// room is freed afterwards — and the panel would go on saying nothing is
+// wrong.
+func TestAWriteThatFailedOnceRecoversWhenItCan(t *testing.T) {
+	var logged bytes.Buffer
+	s, dir := newTestStore(t, StoreOptions{Log: slog.New(slog.NewTextHandler(&logged, nil))})
+	on(t, s)
+
+	// A directory nothing can be created in, which is how a full disk looks
+	// from here: every attempt to write a record fails.
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	for range 5 {
+		if err := s.AppendRequest(Record{Model: "org/a", At: 1788696030, Class: ClassOK}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	if n := s.Status().Dropped; n != 5 {
+		t.Errorf("%d records were counted as lost, want the 5 that could not be written", n)
+	}
+	if n := strings.Count(logged.String(), "could not be written"); n != 1 {
+		t.Errorf("the failure was logged %d times; a spell of failure is worth one line, not one per request", n)
+	}
+
+	// The room comes back, as it does when a disk is emptied.
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.AppendRequest(Record{Model: "org/b", At: 1788696040, Class: ClassOK}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	got := read(t, s, 0)
+	if len(got) != 1 || got[0].Request.Model != "org/b" {
+		t.Errorf("the store holds %d records, want the one written after the disk came back", len(got))
+	}
+}
+
+// In shared-cache mode the layout is created under the shared root, and this
+// store is the one thing that stays under the account's own — which for an
+// account that has never run Gropius per-user does not exist yet. It is
+// created, owner-only, rather than the store refusing to open.
+func TestTheAccountsOwnFolderIsCreatedWhenItIsNotThereYet(t *testing.T) {
+	base := t.TempDir()
+	dir := filepath.Join(base, "Library", "Application Support", "Gropius", "stats")
+	s := NewStore(dir, StoreOptions{Months: 1200})
+	t.Cleanup(func() { s.Close() })
+
+	if err := s.SetEnabled(true); err != nil {
+		t.Fatalf("the store refused to open under a folder that does not exist yet: %v", err)
+	}
+	if err := s.AppendRequest(Record{Model: "org/a", At: 1788696030, Class: ClassOK}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	if got := read(t, s, 0); len(got) != 1 {
+		t.Errorf("the store holds %d records, want the one written", len(got))
+	}
+	for p := dir; p != base; p = filepath.Dir(p) {
+		fi, err := os.Lstat(p)
+		if err != nil {
+			t.Fatalf("%s was not created: %v", p, err)
+		}
+		if fi.Mode().Perm()&0o077 != 0 {
+			t.Errorf("%s is %04o, want it owner-only", p, fi.Mode().Perm())
+		}
 	}
 }

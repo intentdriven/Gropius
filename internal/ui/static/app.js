@@ -758,6 +758,11 @@ function renderStatsStore() {
     line.textContent = '';
     return;
   }
+  if (store.refused) {
+    line.textContent = 'Gropius could not open the store where records are kept, so the figures ' +
+      'above are being held in memory only and nothing is on disk. Its own log says why.';
+    return;
+  }
   const parts = [];
   if (store.oldest) {
     parts.push(`Records from ${new Date(store.oldest * 1000).toLocaleDateString()} onwards`);
@@ -767,6 +772,9 @@ function renderStatsStore() {
   parts.push(`${(store.bytes / (1024 * 1024)).toFixed(1)} MB in ${store.files} file${store.files === 1 ? '' : 's'}`);
   if (store.dropped) {
     parts.push(`${store.dropped} not written — the disk could not keep up`);
+  }
+  if (store.skipped) {
+    parts.push(`${store.skipped} unreadable lines`);
   }
   line.textContent = `${parts.join(' · ')}.`;
 }
