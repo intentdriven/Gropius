@@ -384,6 +384,19 @@ func (p *Pool) SetEvictionGrace(grace, maxWait time.Duration) {
 	p.wakeWaitersLocked()
 }
 
+// EvictionGrace is the pair of intervals in force: how long a model is
+// protected after it finishes work, and the longest a request will wait for
+// one to fall past that. A zero grace is the mechanism switched off.
+//
+// It is read from the pool rather than from the stored settings for the reason
+// Pinned is: this is what is actually being enforced, and a save reaches the
+// two by different paths.
+func (p *Pool) EvictionGrace() (grace, maxWait time.Duration) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.grace, p.maxWait
+}
+
 // Waiting is how many requests are parked for want of room right now.
 //
 // It reports the queue rather than the entries, which is what Resident cannot:

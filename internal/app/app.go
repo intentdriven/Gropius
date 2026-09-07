@@ -193,6 +193,11 @@ func New(opts Options) (*App, error) {
 		Pinned:   a.cfg.Pinned,
 		Log:      opts.Log,
 	})
+	// Applied after the pool exists rather than through PoolOptions, so that
+	// the switch and the two intervals are resolved in exactly one place —
+	// here and at every save — and cannot drift into two answers to "is grace
+	// on".
+	a.applyEvictionGrace(opts.Config)
 	a.applyStatistics(opts.Config)
 
 	// Settings read from disk have not been through SetConfig's checks: the
@@ -238,7 +243,11 @@ func (a *App) preload(ids []string) {
 			continue
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), runtime.ProbeTimeout)
-		_, release, err := a.Pool.Acquire(ctx, id)
+		// AcquireNow, not Acquire: this loop is sequential, so a preload list
+		// of models that cannot all fit would stall the start by one maximum
+		// wait per model — and at start-up there is nobody to protect, since
+		// no client has been served yet.
+		_, release, err := a.Pool.AcquireNow(ctx, id)
 		if err != nil {
 			a.Log.Warn("preload failed", "model", id, "err", err)
 			cancel()
@@ -309,7 +318,30 @@ func (a *App) SetConfig(c config.Config) error {
 	// budget governs the next load, so no model is pulled out from under the
 	// operator at the moment they pressed Save.
 	a.Pool.SetMemoryBudget(budget)
+	// Applied live for the same reason again: switching grace on protects the
+	// models already in memory, and switching it off releases the requests
+	// already waiting rather than leaving them to sit out a grace nobody wants
+	// any more.
+	a.applyEvictionGrace(c)
 	return nil
+}
+
+// applyEvictionGrace hands the pool the two intervals, or none at all while
+// the switch is off.
+//
+// Off is a grace of zero rather than a flag of its own: the pool has one
+// question to answer on the path of every load, and "is the grace non-zero" is
+// that question. The two figures are still stored while the switch is off, so
+// turning it back on restores what the operator chose.
+func (a *App) applyEvictionGrace(c config.Config) {
+	if !c.EvictionGrace {
+		a.Pool.SetEvictionGrace(0, 0)
+		return
+	}
+	a.Pool.SetEvictionGrace(
+		time.Duration(c.GraceSeconds())*time.Second,
+		time.Duration(c.MaxWaitSeconds())*time.Second,
+	)
 }
 
 // MachineRAM is how much memory this Mac has, or 0 when that cannot be read.

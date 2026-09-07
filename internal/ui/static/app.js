@@ -155,8 +155,24 @@ function renderSetup() {
 }
 
 // ── my models ────────────────────────────────────────────
+// waitingLine says how many requests are queued for memory, and nothing at all
+// when none are. A waiting request holds no model, so it appears on no card;
+// without this the panel looks identical whether nothing is happening or four
+// clients are queued behind a model that will not fall idle.
+function waitingLine(waiting) {
+  if (!waiting) return '';
+  return waiting === 1
+    ? '1 request is waiting for memory to free up.'
+    : `${waiting} requests are waiting for memory to free up.`;
+}
+
 function renderModels() {
   const list = $('modelList');
+  // Live state, drawn here rather than in Settings, which stops redrawing
+  // while the form is being edited.
+  const queue = waitingLine(state.waiting || 0);
+  $('graceQueue').textContent = queue;
+  $('graceQueue').hidden = queue === '';
   const models = state.models || [];
   const resident = new Set((state.resident || []).map((r) => r.repo_id));
   // The set the pool is actually enforcing, not the stored settings: those two
@@ -454,6 +470,11 @@ function renderSettings() {
   $('setBudget').value = budgetFieldValue(state.machine);
   updateBudgetHint();
   $('setHF').value   = c.hf_token || '';
+  $('setGrace').checked = !!c.eviction_grace;
+  // Blank rather than zero for an unset interval: blank is how this form says
+  // "the default", and the placeholder gives the figure that stands for.
+  $('setGraceSec').value = c.eviction_grace_sec || '';
+  $('setGraceWait').value = c.eviction_max_wait_sec || '';
   $('setStats').checked = !!c.statistics;
   $('setStatsMonths').value = c.stats_months;
   // Typed in megabytes and stored in bytes, which is how every other size in
@@ -819,6 +840,7 @@ $('ovApply').addEventListener('click', () => {
 });
 
 $('setStats').addEventListener('change', () => { settingsTouched = true; });
+$('setGrace').addEventListener('change', () => { settingsTouched = true; });
 $('setBudget').addEventListener('input', updateBudgetHint);
 
 // Clear is not part of saving the form: it throws away what was recorded, so
@@ -901,6 +923,12 @@ $('settingsForm').addEventListener('submit', async (e) => {
     decode_concurrency: parseInt($('setConc').value, 10) || 1,
     hf_token:           $('setHF').value,
     max_resident_bytes: budgetBytes($('setBudget').value),
+    eviction_grace:        $('setGrace').checked,
+    // Zero is what the server reads as "the default", which is what a cleared
+    // field means here, so an unparseable or empty box posts zero rather than
+    // a figure nobody typed.
+    eviction_grace_sec:    parseInt($('setGraceSec').value, 10) || 0,
+    eviction_max_wait_sec: parseInt($('setGraceWait').value, 10) || 0,
     statistics:         $('setStats').checked,
     stats_months:       parseInt($('setStatsMonths').value, 10) || 6,
     stats_max_bytes:    (parseInt($('setStatsMB').value, 10) || 200) * 1024 * 1024,

@@ -148,6 +148,13 @@ type State struct {
 	// actually refuses an eviction, and a pin reconciled with its model after a
 	// download reaches the pool before it reaches the stored settings.
 	Pinned []string `json:"pinned"`
+	// Waiting is how many requests are parked for want of memory under an
+	// eviction grace. It is the one thing about that queue nothing else on
+	// this snapshot can show: a waiting request holds no model, so it appears
+	// nowhere in Resident, and a Mac with nothing loading and nothing being
+	// refused looks identical to one with six clients queued behind a model
+	// that will not fall idle.
+	Waiting int `json:"waiting"`
 	// Machine is this Mac's memory, the budget loaded models are held to, and
 	// what they are using of it — everything Settings says about the budget,
 	// as figures rather than as UI text that nothing can check.
@@ -219,6 +226,7 @@ func (c *Control) snapshot() State {
 		Setup:     c.App.Provisioner.Status(),
 		Config:    redactConfig(cfg),
 		Pinned:    c.App.Pool.Pinned(),
+		Waiting:   c.App.Pool.Waiting(),
 		Endpoints: Endpoints(cfg),
 		Hostname:  hostname(),
 	}
