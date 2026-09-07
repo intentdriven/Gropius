@@ -38,7 +38,8 @@ GitHub release notes.
   loads and not the cache a long prompt adds, so a Mac committed in full on
   paper can still run out under load. One too small to hold any model on this
   Mac is reported too. See
-  [Set how much memory models may use](docs/memory-budget.md).
+  [Set how much memory models may use](docs/memory-budget.md) and
+  [Why there is a memory budget](docs/memory-budget-explained.md).
 - **Request statistics**, a switch in Settings that is off until it is turned
   on. While it is on, Gropius records one content-free row per request it
   serves — the model, when the request arrived, how it ended, whether it

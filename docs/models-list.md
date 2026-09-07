@@ -186,8 +186,10 @@ rules.
   one pool of memory, and **Settings → Memory for loaded models** sets it to any
   figure up to the whole machine. A change applies to the next load, with no
   restart: nothing is unloaded to fit a lowered budget, so the machine can sit
-  above it until the models resident at the time go. See
-  [Set how much memory models may use](memory-budget.md).
+  above it until the models resident at the time go, and a figure larger than
+  this Mac's memory is held down to it. See
+  [Set how much memory models may use](memory-budget.md) and
+  [Why there is a memory budget](memory-budget-explained.md).
 - Each loaded model is charged 1.2 times its size on disk, the weights plus
   headroom for the cache and activations a running model needs. The cache a
   request builds as it works through a long prompt is not counted, so a machine

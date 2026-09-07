@@ -1,9 +1,9 @@
 # Set how much memory models may use
 
-Gropius holds as many models in memory as its memory budget allows, and unloads
-the one used longest ago when a request needs the room. The budget is a share of
-this Mac's memory, and it is a setting: a Mac that does nothing but serve models
-can give them most of itself, while a laptop someone also works on wants less.
+Gropius holds as many models in memory as its memory budget allows. The budget
+is a share of this Mac's memory by default, and it is a setting: a Mac that does
+nothing but serve models can give them most of itself, while a laptop someone
+also works on wants less.
 
 ## Set the budget
 
@@ -18,74 +18,48 @@ The budget applies at once — no restart. The next model to load is measured
 against the new figure, and the **Search** tab immediately hides the models that
 no longer fit and shows the ones that now do.
 
-## What the default is
+To go back to the default, clear the field and save. The line under it then
+shows the default figure for this Mac.
 
-With the field blank, the budget is 60% of this Mac's memory, which leaves the
-rest for macOS and everything else on a machine whose GPU and CPU share one pool
-of memory. Nothing is stored in that case: the figure is worked out on the Mac
-that is running, so a settings file copied to a smaller Mac gets that Mac's
-default rather than the first one's number.
+## What the save tells you
 
-If this Mac's memory cannot be read at all, the budget is a conservative 8 GB,
-the field shows no percentage, and any figure you type is taken at its word.
+A save is refused, with nothing written, when it makes matters worse:
 
-## What counts against it
+- **It raises the budget past this Mac's memory.** The message names what the
+  Mac has.
+- **It lowers the budget under what the [pinned models](pinning-models.md) need,
+  when the budget in force can still hold them.** A pinned model is never
+  unloaded, so a budget under their sum leaves no room for anything else. The
+  message names the sum.
 
-Each model in memory is charged its size on disk plus a fifth — the weights it
-loads, with headroom. That is the same figure the eviction rule uses, so the
-number under the field and the number a refusal quotes are one number. Two
-models of 45 GB and 29 GB are charged about 89 GB together, and they sit in
-memory together on a Mac whose budget is above that.
+Otherwise the save goes through, and the panel says so when the figure is worth
+a word:
 
-Gropius charges what a model loads, not what a conversation adds to it. Each
-request in flight also holds a cache of the prompt it is working through, which
-grows with the length of that prompt and differs sharply between architectures —
-dense models pay the most for it — and the model server keeps such caches
-between requests. None of that is counted. It is a known limit, open in the
-project's issue ledger as `iss-3`, and it is the reason a budget claiming most
-of the Mac draws a warning rather than an assurance: a machine
-fully committed on paper can still run out of memory under long prompts served
-concurrently.
+- **A budget that claims most of the Mac** is saved with a warning. macOS and
+  everything else running share this memory, and a model is charged what it
+  loads rather than what a long conversation adds to it, so the machine can
+  still run out.
+- **A budget too small to hold the smallest model on this Mac** is saved with a
+  warning too, naming what that model needs. Every request is refused until the
+  budget is raised.
+
+A figure that arrives already over this Mac — a settings file carried from a
+bigger one, or written during a start where the machine's memory could not be
+read — is applied rather than refused, so it never stands between you and saving
+an unrelated setting. Models are still held to the memory this Mac has, and the
+panel and the start-up log show the figure being enforced. Change the field to
+put your own figure back in charge.
 
 ## What a change does not do
 
-- **Lowering the budget unloads nothing.** The models in memory stay, and the
-  panel says the machine is over its budget until they go by the usual rules —
-  a request for something else, the idle timeout, or your own **Unload**. A
-  model is never taken away at the moment you press Save.
-- **The budget is not a hard ceiling during a swap.** A model being replaced is
-  credited back its memory as the replacement starts, so the two overlap for the
-  seconds it takes the first to exit.
-- **It does not reserve anything.** A budget of 100 GB on a Mac running other
-  work is a promise Gropius cannot keep for it; the figure only decides what
-  Gropius is willing to load.
+Lowering the budget unloads nothing. The models in memory stay, and the panel
+says the machine is over its budget until they go by the usual rules — a request
+for something else, the idle timeout, or your own **Unload**. A model is never
+taken away at the moment you press Save.
 
-## What Gropius refuses
+## Where the rules are
 
-- A save raising the budget above this Mac's memory. It is refused, naming what
-  the Mac has, and nothing is written.
-- A save lowering the budget below what the [pinned models](pinning-models.md)
-  cost together. A pinned model is never unloaded, so a budget under their sum
-  leaves no room for anything else and every other request is refused. The save
-  is refused, naming the sum.
-
-A pinned set that arrives already over budget — a settings file carried from a
-Mac with more memory — is reported rather than refused, so it never stands
-between you and saving an unrelated setting. The same holds for a budget larger
-than this Mac, which a settings file carried from a bigger one can carry: it is
-reported in the log at start-up and on the panel, and it stands until you change
-it. What is refused is a save that makes either worse — one that raises the
-budget past this Mac's memory, and one that lowers it under a pinned set the
-budget in force can hold.
-
-## Choose a figure
-
-Alice's Mac Studio serves models and does nothing else, so she raises the budget
-to most of the machine and keeps her writer and her reviewer in memory together.
-Bob works on the laptop he serves from, so he leaves the default alone: 60% is
-chosen to keep the rest of the machine usable.
-
-Add up the charged sizes of the models you want resident at the same time, leave
-room for the ones your clients ask for occasionally, and leave more room again
-if those clients send long prompts. The eviction rules the budget drives are set
-out in the [models list reference](models-list.md).
+The [models list reference](models-list.md) states what a loaded model is
+charged, what the default share is, and the rules by which models are unloaded.
+[Why there is a budget at all](memory-budget-explained.md) explains what those
+figures do and do not account for, and how to pick one.

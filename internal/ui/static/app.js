@@ -570,7 +570,7 @@ function budgetBytes(text) {
   if (!isFinite(gb) || gb <= 0) return 0;
   const bytes = Math.round(gb * 1024 * 1024 * 1024);
   // A figure no byte count can hold is not a budget. Left as Infinity it
-  // serialises as null, which the server reads as "the field was not sent" and
+  // serializes as null, which the server reads as "the field was not sent" and
   // answers by keeping what it had — a save that silently does nothing.
   if (!isFinite(bytes) || bytes > Number.MAX_SAFE_INTEGER) return 0;
   return bytes;

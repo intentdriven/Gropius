@@ -8,7 +8,7 @@ type Machine struct {
 	// RAMBudget is the memory Gropius will let loaded models use. It is spelled
 	// the way the control plane's own machine object spells it: both reach the
 	// same panel, and one number under two names is what this figure was
-	// centralised to prevent.
+	// centralized to prevent.
 	RAMBudget int64 `json:"budget"`
 	FreeDisk  int64 `json:"free_disk"` // free space on the models volume, bytes
 }

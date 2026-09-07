@@ -73,7 +73,9 @@ gigabytes, with the share of the machine shown beside it. Raise it on a Mac that
 serves models and does nothing else, and two large models sit in memory together
 rather than taking turns. A change applies to the next load, with no restart,
 and nothing is unloaded to fit a lowered figure. See
-[Set how much memory models may use](memory-budget.md).
+[Set how much memory models may use](memory-budget.md), and
+[Why there is a memory budget](memory-budget-explained.md) for what the figure
+does and does not account for.
 
 ### Keep a model in memory
 
