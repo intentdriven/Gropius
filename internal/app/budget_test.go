@@ -19,6 +19,13 @@ const gb = int64(1) << 30
 // that the machine nobody can measure is testable at all.
 func newBudgetApp(t *testing.T, ram int64, cfg config.Config) *App {
 	t.Helper()
+	// A literal config leaves the statistics retention figures at zero, which
+	// a settings save refuses for a reason unrelated to the budget these tests
+	// exercise; carry the shipped defaults for them.
+	if cfg.StatsMonths == 0 && cfg.StatsMaxBytes == 0 {
+		d := config.Default()
+		cfg.StatsMonths, cfg.StatsMaxBytes = d.StatsMonths, d.StatsMaxBytes
+	}
 	a, err := New(Options{
 		Paths:          config.NewPaths(t.TempDir()),
 		Config:         cfg,
@@ -365,12 +372,15 @@ func TestAnUnmeasurablePinDoesNotBlockALowerBudget(t *testing.T) {
 // panel whose own save cannot replace that account's file.
 func TestAPlantedBudgetIsEnforcedNoHigherThanTheMachine(t *testing.T) {
 	var logged bytes.Buffer
+	// Start from the defaults so the fields other settings validate (the
+	// statistics retention figures among them) carry their shipped values;
+	// the test is about the budget alone.
+	planted := config.Default()
+	planted.Host, planted.Port, planted.DecodeConcurrency = "127.0.0.1", 11535, 4
+	planted.MaxResidentBytes = 1 << 62
 	a, err := New(Options{
-		Paths: config.NewPaths(t.TempDir()),
-		Config: config.Config{
-			Host: "127.0.0.1", Port: 11535, DecodeConcurrency: 4,
-			MaxResidentBytes: 1 << 62,
-		},
+		Paths:          config.NewPaths(t.TempDir()),
+		Config:         planted,
 		PhysicalMemory: func() int64 { return 16 * gb },
 		Log:            slog.New(slog.NewTextHandler(&logged, nil)),
 	})
