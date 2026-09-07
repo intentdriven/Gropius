@@ -114,6 +114,20 @@ credits memory before the victim exits (iss-6).
 <!-- abcd-review: OWED receipt=rcp-0b2669b3be31 -->
 Fidelity review OWED (receipt rcp-0b2669b3be31).
 
+Acceptance criterion 3 is **diverged**, not met, and the divergence is
+deliberate. As built, a save is refused when it raises the budget above this
+Mac's memory; a budget that is merely inherited — a settings file carried from a
+larger Mac, or one written during a start where the machine could not be
+measured — is applied, warned about at start-up and on the control panel, and
+left for the operator to change. The criterion as written refuses every settings
+change there is, the API key that closes an open LAN endpoint included, over a
+figure the operator never chose on this machine, while the pool enforces that
+figure regardless — so the refusal blocks everything and protects nothing. Two
+independent reviews of the branch demonstrated it end to end. This is the same
+anti-wedge principle criterion 5 of itd-2609061441241254 was adopted as diverged
+under on 2026-09-07; the criterion and the principle could not both stand, and
+the principle won again.
+
 ## Grounds
 
 - pursued: we expect a shared Mac to serve several agents without their models evicting each other once the operator can pin, budget and grace, and once keyed clients can see what is warm; we are wrong if model swaps stay as frequent with those controls set as they were without them, measured by the statistics store

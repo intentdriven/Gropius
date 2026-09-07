@@ -254,3 +254,38 @@ settles something it left open. The record is annotated rather than rewritten.
    failed validation at *load*, which is the fail-closed branch this record went
    out of its way to avoid. `sanitizeBudget` drops it to the default and names
    it in the dropped list, as `sanitizePinned` does.
+
+## Corrections from the branch reviews (2026-09-07)
+
+Two independent reviews of the branch — adversarial security and senior code —
+returned the same blocking finding, and the points above are corrected here
+rather than rewritten.
+
+- **Point 5 extends to the ceiling.** Check 1 of the Approach ("if the incoming
+  budget exceeds the machine, refuse") was implemented literally and wedged
+  every settings save on a Mac holding an inherited over-machine budget: a
+  `config.json` carried from a larger Mac, or one written during a start where
+  `sysctl` could not read this one. Both reviews demonstrated it end to end,
+  the security review through the save that sets an API key on an open LAN
+  endpoint. A save is refused only when it **raises** the budget above this
+  Mac; an inherited figure is warned about at start-up and on the panel, and
+  the pool enforces it either way — so the refusal protected nothing while
+  blocking everything. This is the same anti-wedge principle that beat
+  criterion 5 of itd-2609061441241254 on 2026-09-07, and acceptance criterion 3
+  of this record is **diverged** in the same way and for the same reason.
+- **The pinned floor is judged on what the save changes, not on a bare
+  comparison.** Lowering the budget counts as making the set worse only when the
+  budget in force could hold that set. The panel renders gigabytes, so a save
+  that posts back what it shows can carry a figure a few bytes under the one in
+  force; on the bare comparison that flipped an inherited over-budget set from
+  warned to refused, and it let a pin whose model this Mac cannot measure block
+  every budget change with no way out but unpinning.
+- **`machine` carries `default_budget`.** Clearing the field is the documented
+  way back to the default, and the panel could not say what that would give.
+- Smaller: the panel's gigabyte rendering keeps enough precision to survive a
+  round trip; `Pool.MemoryBudget`'s lock is held by a `-race` test that fails
+  without it; the search test no longer depends on the host's free disk;
+  `sysctl` is executed by absolute path; `NewPool` treats a negative budget as
+  `SetMemoryBudget` does. `iss-2609062318532053` is amended, since this change
+  fixes the direction its remedy must take, and `iss-2609070042568257` is filed
+  for the low side of the range, which this record settles no floor for.
