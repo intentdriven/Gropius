@@ -112,7 +112,14 @@ on Apple Silicon.
 ## Audit Notes
 
 <!-- abcd-review: OWED receipt=rcp-799061841f58 -->
-Fidelity review OWED (receipt rcp-799061841f58).
+Fidelity review OWED (receipt rcp-799061841f58). The audit compares this
+promise against what was delivered, so it runs after the branch merges; the
+receipt's request lives in the per-machine tier and does not travel, so
+whoever runs it re-emits the request with `abcd intent audit`.
+
+What shipped diverges from the spec's Approach in six places, each with its
+reason: see the spec's "As built" section and the 2026-09-07 lines in
+`.abcd/work/DECISIONS.md`. None of them is one of the criteria above.
 
 ## Grounds
 

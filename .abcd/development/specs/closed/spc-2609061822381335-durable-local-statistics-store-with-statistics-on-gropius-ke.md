@@ -201,3 +201,40 @@ within it.
   and recorded against adr-2609061610107154 as the condition for
   reconsidering a database.
 - Whether the dropped-record counter is shown in the panel or only logged.
+
+## As built (2026-09-07)
+
+The Approach above is the design this spec settled on. Six of its details are
+not what shipped, and are listed here so that a reader who opens this record to
+write a `jq` filter is not reading a format the files do not use. Each is
+argued in the 2026-09-07 lines of `.abcd/work/DECISIONS.md`, which govern.
+
+- **Field names are the recorder's own.** A line is `v` and `kind` plus the
+  JSON tags of `stats.Record`, `stats.Event` or `stats.Settings`: `at` not
+  `ts`, `class` not `status`, `queue_wait_ms` / `load_wait_ms` /
+  `first_token_ms` not `queue_ms` / `load_ms` / `ttft_ms`. One vocabulary
+  across the panel, the API, the store and the page, rather than a translation
+  table that would have to stay correct.
+- **The removal kind is `removed`, not `evict`**, carrying the same `reason`
+  field this spec names. Only one of the seven reasons is an eviction, and a
+  record of a shutdown filed under `evict` would contradict the rule the
+  recorder states.
+- **There is no `cached_tokens`.** Nothing collects it, and a field that is
+  always zero is worse than an absent one.
+- **There is no `endpoint`.** It would have to become a field of the live
+  record, and so of the panel and the page, which is a change to the recorder
+  this intent does not own.
+- **The ring is not re-seeded from the newest file at startup.** No acceptance
+  criterion asks for it, replaying records through the recorder would write
+  them to the store a second time, and counters rebuilt from one file would
+  mean "since some arbitrary point" rather than "since recording was turned
+  on". History is the dashboard's (itd-2609061521159233).
+- **Retention is applied continuously**, not only at rotation and at open: on a
+  periodic pass, when recording starts, and the moment either figure changes —
+  and the horizon can retire the file being written. Without that a quiet Mac
+  kept records for years against a figure reading months.
+
+The measured single-pass scan time this spec asks for is on the branch as
+`BenchmarkLatestAtTheCap` in `internal/stats/store_bench_test.go`, with the
+reading recorded in the same ledger. The dropped-record counter is shown in
+the panel, beside the count of lines a read could not use.
