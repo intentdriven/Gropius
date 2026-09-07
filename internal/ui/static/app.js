@@ -448,6 +448,11 @@ function renderSettings() {
   $('setKey').value  = c.api_key || '';
   $('setIdle').value = c.idle_timeout_sec;
   $('setConc').value = c.decode_concurrency;
+  // From the machine object, not from the stored setting: what is enforced is
+  // what the pool holds, and the stored setting is blank while the default is
+  // in force.
+  $('setBudget').value = budgetFieldValue(state.machine);
+  updateBudgetHint();
   $('setHF').value   = c.hf_token || '';
   $('setStats').checked = !!c.statistics;
   $('setStatsMonths').value = c.stats_months;
@@ -556,12 +561,74 @@ function pinnedCharge(models, pinned) {
   }, 0);
 }
 
+// budgetBytes is what the memory-budget field posts: the operator types
+// gigabytes, the settings file stores bytes. A blank field — or anything that
+// is not a positive number — is zero, which means the default share of this
+// Mac's memory rather than a budget of nothing.
+function budgetBytes(text) {
+  const gb = parseFloat(text);
+  if (!isFinite(gb) || gb <= 0) return 0;
+  return Math.round(gb * 1024 * 1024 * 1024);
+}
+
+// budgetFieldValue is what the field shows: blank while the budget is the
+// default, so that saving an unrelated setting does not quietly turn the
+// default into a figure of the operator's own.
+function budgetFieldValue(machine) {
+  const m = machine || {};
+  if (!m.budget || m.budget_is_default) return '';
+  return String(Math.round((m.budget / (1024 * 1024 * 1024)) * 100) / 100);
+}
+
+// budgetHint is the line beside the field: what the budget is, what share of
+// this Mac that is, what the models in memory are using of it, and — above the
+// warning threshold — that this memory is shared with everything else running.
+//
+// A Mac whose memory could not be read states the budget alone: a percentage
+// of an unknown total is a number pretending to be information.
+function budgetHint(machine) {
+  const m = machine || {};
+  const budget = m.budget || 0;
+  const resident = m.resident_bytes || 0;
+  const share = m.total_ram
+    ? ` (${Math.round((budget * 100) / m.total_ram)}% of this Mac's ${size(m.total_ram)})`
+    : '';
+  const parts = [`${m.budget_is_default ? 'The default budget is' : 'The budget is'} ${size(budget)}${share}.`];
+  if (m.over_budget) {
+    parts.push(`The models in memory use ${size(resident)}, over the budget: a lower budget applies to the next load, and nothing is unloaded on your behalf.`);
+  } else if (resident) {
+    parts.push(`The models in memory use ${size(resident)} of it.`);
+  }
+  if (m.warn_above && budget > m.warn_above) {
+    parts.push('macOS and everything else running share this memory, and a model is charged the weights it loads rather than what a long conversation adds to it.');
+  }
+  return parts.join(' ');
+}
+
+// updateBudgetHint writes that line, against the figure being typed rather
+// than the one last saved, so the warning arrives while the number is being
+// chosen instead of after it is stored.
+function updateBudgetHint() {
+  const line = $('budgetHint');
+  if (!line) return;
+  const m = state.machine || {};
+  const typed = budgetBytes($('setBudget').value);
+  const budget = typed || m.budget || 0;
+  const shown = Object.assign({}, m, {
+    budget,
+    budget_is_default: !typed && !!m.budget_is_default,
+    over_budget: budget > 0 && (m.resident_bytes || 0) > budget,
+  });
+  line.textContent = budgetHint(shown);
+  line.className = shown.over_budget || (shown.warn_above && budget > shown.warn_above) ? 'msg err' : 'hint';
+}
+
 // updatePinBudget writes the line beside the boxes: what the ticked models
 // cost, and what that leaves for everything else.
 function updatePinBudget() {
   const line = $('pinBudget');
   if (!line) return;
-  const budget = state.memory_budget || 0;
+  const budget = (state.machine && state.machine.budget) || 0;
   const charge = pinnedCharge(state.models || [], checkedPinModels());
   if (!budget) {
     line.textContent = charge ? `Pinned models use about ${size(charge)}.` : '';
@@ -730,6 +797,7 @@ $('ovApply').addEventListener('click', () => {
 });
 
 $('setStats').addEventListener('change', () => { settingsTouched = true; });
+$('setBudget').addEventListener('input', updateBudgetHint);
 
 // Clear is not part of saving the form: it throws away what was recorded, so
 // it happens when it is pressed and says what it did.
@@ -803,6 +871,7 @@ $('settingsForm').addEventListener('submit', async (e) => {
     idle_timeout_sec:   parseInt($('setIdle').value, 10) || 0,
     decode_concurrency: parseInt($('setConc').value, 10) || 1,
     hf_token:           $('setHF').value,
+    max_resident_bytes: budgetBytes($('setBudget').value),
     statistics:         $('setStats').checked,
     stats_months:       parseInt($('setStatsMonths').value, 10) || 6,
     stats_max_bytes:    (parseInt($('setStatsMB').value, 10) || 200) * 1024 * 1024,
@@ -824,6 +893,7 @@ $('settingsForm').addEventListener('submit', async (e) => {
     if (res.restart) parts.push('Restart Gropius for the change to take effect.');
     // Sampling defaults are set when a model server starts, so a model that is
     // already loaded keeps the values it started with.
+    if (res.warning) parts.push(res.warning);
     if (res.reload_models && res.reload_models.length) {
       parts.push(`Load ${res.reload_models.join(', ')} again to serve with the new sampling defaults.`);
     }

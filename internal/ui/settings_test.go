@@ -216,7 +216,7 @@ func TestThePanelReadsThePinnedSetThePoolIsEnforcing(t *testing.T) {
 	if strings.Contains(src, "state.config.pinned") {
 		t.Error("the panel reads state.config.pinned; the stored settings are not what is being enforced")
 	}
-	if !strings.Contains(src, "state.memory_budget") {
-		t.Error("the panel never reads state.memory_budget, so it cannot say what a pinned set leaves")
+	if !strings.Contains(src, "state.machine") {
+		t.Error("the panel never reads state.machine, so it cannot say what a pinned set leaves of the budget")
 	}
 }
