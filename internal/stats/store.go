@@ -915,6 +915,13 @@ func checkAncestors(dir string) error {
 		if fi.Mode().Perm()&0o022 != 0 {
 			return fmt.Errorf("%s can be written by other accounts on this Mac (mode %04o)", dir, fi.Mode().Perm())
 		}
+		// And owned by this account or by the administrator. A directory
+		// another account owns is one they can replace between this check and
+		// the open, however tight its mode looks now; the mode check alone
+		// would let a store sit under a path only its owner can move.
+		if st, ok := fi.Sys().(*syscall.Stat_t); ok && st.Uid != uint32(os.Geteuid()) && st.Uid != 0 {
+			return fmt.Errorf("%s belongs to another account on this Mac", dir)
+		}
 		parent := filepath.Dir(dir)
 		if parent == dir {
 			return nil
@@ -1119,10 +1126,7 @@ func (w *storeWriter) rotate() error {
 // of it on a disk the operator asked to keep a limit on.
 func (w *storeWriter) prune() error {
 	months, maxBytes := w.limits()
-	var total int64
-	for _, f := range w.files {
-		total += f.size
-	}
+	total := w.totalBytes()
 	// Room for the file about to be opened, not just for what is already
 	// there: pruning to exactly the cap and then opening a new file would put
 	// the store over it for as long as that file took to fill, and the cap is
@@ -1199,11 +1203,16 @@ func (w *storeWriter) close() error {
 // summary is what the panel is shown: how many files, how many bytes, and how
 // far back the store reaches.
 func (w *storeWriter) summary() (int, int64, int64) {
+	return len(w.files), w.totalBytes(), w.oldest
+}
+
+// totalBytes is how much room the store is using.
+func (w *storeWriter) totalBytes() int64 {
 	var total int64
 	for _, f := range w.files {
 		total += f.size
 	}
-	return len(w.files), total, w.oldest
+	return total
 }
 
 // oldestRecord is the timestamp of the first record still held.
