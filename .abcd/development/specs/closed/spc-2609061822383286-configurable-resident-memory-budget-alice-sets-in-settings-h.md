@@ -205,3 +205,52 @@ of truth: the filter and the pool read one number.
 - Whether `capability.Assess` takes a budget parameter or an `App`-supplied
   `Machine`. Both satisfy criterion 7; the budget parameter is recommended, as it
   keeps the zero-means-default rule in one place.
+
+## As built (2026-09-07)
+
+Eight points where the shipped change differs from the Approach above, or
+settles something it left open. The record is annotated rather than rewritten.
+
+1. **The pool setter is `SetMemoryBudget`, not `SetMaxResidentBytes`.** The
+   pinned-models change had already added the reader as `Pool.MemoryBudget()`;
+   a setter under a second name for one figure is how two names for it start.
+   The budget also lives in a `maxResident` field guarded by `p.mu` rather than
+   in `p.opts`, so the value every eviction path reads is the one the setter
+   writes under the lock they already hold, and `MemoryBudget()` takes that lock
+   rather than reading a field being written.
+2. **`State` does not gain a `machine` object beside `memory_budget`; the
+   object replaces it.** `memory_budget` shipped with the pinned models a day
+   earlier and carries exactly `machine.budget`. Two spellings of one number on
+   one loopback snapshot is the drift this record exists to avoid, and the only
+   consumer is the panel in the same binary.
+3. **The 60% share moves to `capability.DefaultBudget`,** not only the machine
+   reading. The share existed twice, with a comment in each saying it must match
+   the other; `PhysicalMemory` alone would have left that duplication in place.
+   `internal/runtime` now imports `internal/capability` — so the collapse
+   `iss-2609062318532053` asks for must move `LoadCost` into `capability`
+   rather than the other way round.
+4. **The machine size is injected as `Options.PhysicalMemory func() int64`,**
+   not as a size field: zero is a *meaning* here — the Mac that cannot be
+   measured, which acceptance criterion 6 is about — so it cannot double as
+   "not injected".
+5. **The pinned floor is judged the way the pinned record leaves it.** A save is
+   refused when it makes the set worse: one that adds a pin, and now one that
+   lowers the budget under the pinned sum. A set that arrives already over
+   budget, under a budget the save does not lower, is applied and warned about
+   (`App.PinnedFitWarning`), per the 2026-09-07 ledger line. The Approach's "the
+   sum must fit the incoming budget" at every save would refuse every settings
+   change there is over a set the operator never chose on this Mac.
+6. **The warning threshold is 85% of physical memory,** exposed as
+   `machine.warn_above`. It is served in two places: on the state snapshot,
+   beside the open-endpoint warning, so it stands for as long as the budget
+   does; and in the save response, so the answer to the save that set it says
+   so. The panel writes it from the figure being typed, so the advice arrives
+   while the number is being chosen.
+7. **The field accepts fractional gigabytes** (`step="0.1"`), the open point the
+   Approach left to the implementer. Storage is bytes either way, and a Mac's
+   memory is not always a whole number of the units anyone wants to type.
+8. **`Validate` refuses a negative budget and `Load` drops one.** The Approach
+   named only the Validate rule; a hand-edited negative figure would then have
+   failed validation at *load*, which is the fail-closed branch this record went
+   out of its way to avoid. `sanitizeBudget` drops it to the default and names
+   it in the dropped list, as `sanitizePinned` does.

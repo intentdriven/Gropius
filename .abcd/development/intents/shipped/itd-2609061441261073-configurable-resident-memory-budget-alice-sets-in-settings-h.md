@@ -111,7 +111,8 @@ credits memory before the victim exits (iss-6).
 
 ## Audit Notes
 
-_Empty. Populated by intent-auditor when intent moves to shipped/._
+<!-- abcd-review: OWED receipt=rcp-0b2669b3be31 -->
+Fidelity review OWED (receipt rcp-0b2669b3be31).
 
 ## Grounds
 
