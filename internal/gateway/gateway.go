@@ -14,6 +14,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -400,6 +401,18 @@ func (g *Gateway) handleCompletions(w http.ResponseWriter, r *http.Request) {
 
 	up, release, err := g.pool.Acquire(r.Context(), model)
 	if err != nil {
+		// A refusal that came after a wait is the one a client most needs the
+		// figure for: it held the connection open for that long. Set before
+		// writeError, which writes the status line immediately.
+		var noRoom *runtime.NoRoomError
+		if errors.As(err, &noRoom) {
+			setWaitHeaders(w.Header(), g.admittedKeyed(r), noRoom.Waited)
+			// Recorded as well as reported. A request that held a connection
+			// for five minutes and got a 503 is the outcome an operator would
+			// go to the statistics to find, and it is exactly the one eviction
+			// grace produces when it fails.
+			obs.waited(runtime.AcquireStats{QueueWait: noRoom.Waited})
+		}
 		if errors.Is(err, context.Canceled) {
 			obs.failed(stats.ClassCancelled)
 			return // the client hung up while the model was loading
@@ -420,6 +433,10 @@ func (g *Gateway) handleCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	defer release()
 	obs.waited(up.Waits)
+	// Set here rather than beside WriteHeader below, so that the streamed and
+	// the non-streamed path take the same line and so that a later failure on
+	// this request still reports the wait it had already paid.
+	setWaitHeaders(w.Header(), g.admittedKeyed(r), up.Waits.LoadWait+up.Waits.QueueWait)
 
 	// The load-bearing rewrite. mlx-lm reads "model" as an instruction to *load*
 	// that model: anything other than the exact --model value it was started with
@@ -507,6 +524,53 @@ func (g *Gateway) handleCompletions(w http.ResponseWriter, r *http.Request) {
 	copyResponseHeaders(w.Header(), resp.Header)
 	w.WriteHeader(resp.StatusCode)
 	obs.relayed(relayRewritingModel(w, resp, up.ModelArg, requested, relay))
+}
+
+// gropiusHeaders are the response headers Gropius writes itself, which an
+// upstream may not add to.
+var gropiusHeaders = map[string]bool{
+	"x-gropius-state":      true,
+	"x-gropius-queue-time": true,
+}
+
+// setWaitHeaders tells the client what this request spent before its model
+// server was asked anything.
+//
+// Two values and one number. X-Gropius-State is warm or waited;
+// X-Gropius-Queue-Time is whole milliseconds, counting the wait for room under
+// an eviction grace, the wait for a cold model to load, and the wait for a
+// slot on a model already busy. "waited" is exactly "the queue time is not
+// zero", so a client never has to reconcile the two, and sub-millisecond
+// contention on the pool's own lock — which no client meant by a wait — reads
+// as warm.
+//
+// Written only on an install that has a key configured, which is the models
+// list's rule and is here for the models list's reason. These are residency
+// facts. "warm" is a server-attested statement that the model was in memory
+// with a free slot; "waited" on a model the same client has just seen warm is
+// the model's in-flight count at its batch ceiling — other clients are using
+// it, right now. That second one is what handleListModels withholds from an
+// open server, and unlike bare residency a stopwatch does not give it away: in
+// total latency the wait is inseparable from generation time, and this
+// separates it to the millisecond on every request, for free. The condition is
+// the install's rather than the request's, so a loopback client exempt from
+// the bearer check sees what the control panel already shows it.
+//
+// keyed is withAuth's own admission bit, carried on the request. Reading the
+// configured key again here would be a second reading of a live value, and a
+// request admitted while no key was configured could then be answered as if
+// one had been.
+func setWaitHeaders(h http.Header, keyed bool, waited time.Duration) {
+	if !keyed {
+		return
+	}
+	ms := waited.Milliseconds()
+	state := "warm"
+	if ms > 0 {
+		state = "waited"
+	}
+	h.Set("X-Gropius-State", state)
+	h.Set("X-Gropius-Queue-Time", strconv.FormatInt(ms, 10))
 }
 
 // relayRewritingModel forwards the upstream response body, mapping the
@@ -819,6 +883,13 @@ var hopByHopHeaders = map[string]bool{
 func copyResponseHeaders(dst, src http.Header) {
 	for k, vs := range src {
 		if hopByHopHeaders[strings.ToLower(k)] {
+			continue
+		}
+		// Gropius's own statement about this request, already written. This
+		// merges rather than replaces, so a model server emitting either name
+		// would otherwise add a second value beside ours and a client reading
+		// the first one it finds could be handed the model server's.
+		if gropiusHeaders[strings.ToLower(k)] {
 			continue
 		}
 		for _, v := range vs {

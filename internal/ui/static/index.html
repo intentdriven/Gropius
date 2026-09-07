@@ -52,6 +52,7 @@
 
 <!-- ── My Models ─────────────────────────────────────────── -->
 <section id="tab-models" class="panel active">
+  <p id="graceQueue" class="hint" hidden></p>
   <div id="modelList"></div>
   <div id="modelsEmpty" class="empty" hidden>
     <p><strong>No models yet.</strong></p>
@@ -207,6 +208,39 @@
       <input id="setBudget" type="number" step="any" min="0" placeholder="the default share of this Mac's memory">
     </label>
     <p id="budgetHint" class="hint"></p>
+    <fieldset class="group">
+      <legend>Eviction grace</legend>
+      <label class="switch">
+        <input id="setGrace" type="checkbox">
+        <span>Wait for a model to fall idle instead of evicting one that just finished</span>
+      </label>
+      <p class="hint">Off unless you turn it on. While it is off, a request for a model
+        that does not fit unloads the least recently used idle model straight away, even
+        one that answered a moment ago — which on a Mac two people share means their
+        models take turns evicting each other between turns. While it is on, that request
+        waits instead: for a model to have been idle for the protection below, or for its
+        own wait to have passed that long, whichever comes first. If nothing frees up
+        within the maximum, the request gets the same refusal it would have had at once,
+        now saying how long it waited. With an API key set above, every answer that
+        reached a model server also says whether it waited and for how long, in the
+        <code>X-Gropius-State</code> and <code>X-Gropius-Queue-Time</code> headers; a
+        server with no key sends them to nobody, the same rule the models list applies
+        to which models are loaded. The protection may not be longer than the idle
+        timeout above when one is set, or the idle timeout would unload the very model
+        a wait is protecting — and because that timeout only changes at a restart, a
+        longer protection saved beside a raised timeout is held to the timeout still in
+        force until you restart.</p>
+      <label>
+        <span>Protect a model that just finished for (seconds)</span>
+        <input id="setGraceSec" type="number" step="1" min="0" max="3600" placeholder="120">
+      </label>
+      <label>
+        <span>Wait at most (seconds)</span>
+        <input id="setGraceWait" type="number" step="1" min="0" max="3600" placeholder="300">
+      </label>
+      <p id="graceHint" class="hint" hidden></p>
+    </fieldset>
+
     <label>
       <span>Batched requests (decode concurrency)</span>
       <input id="setConc" type="number" min="1" max="64">

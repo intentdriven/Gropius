@@ -128,8 +128,11 @@ type Record struct {
 	FirstTokenMS int64 `json:"first_token_ms"`
 	// DurationMS is the whole request, from the moment it arrived.
 	DurationMS int64 `json:"duration_ms"`
-	// QueueWaitMS is how long it waited for a slot on a model already loaded;
-	// LoadWaitMS how long it waited for the model to load.
+	// QueueWaitMS is how long it waited for the machine rather than for the
+	// model: for memory to free up when eviction grace made it queue for room,
+	// and for a slot on a model that was already loaded and at its batch.
+	// LoadWaitMS is how long it waited for the model to load, which every
+	// waiter on that load pays and not only the request that started it.
 	QueueWaitMS int64 `json:"queue_wait_ms"`
 	LoadWaitMS  int64 `json:"load_wait_ms"`
 }

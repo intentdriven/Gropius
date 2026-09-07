@@ -51,6 +51,11 @@ Cross-machine LAN use works; TLS and notarized distribution are not yet included
 - **Pinned models** — the models you rely on stay in memory: never evicted to
   make room, never reaped by the idle timeout
   ([how to](docs/pinning-models.md)).
+- **Eviction grace, opt-in** — on a Mac two people share, a model that answered
+  a moment ago is not torn out for the next request: that request waits a
+  bounded time for something to fall idle, and is told that it waited
+  ([how to](docs/eviction-grace.md),
+  [why](docs/eviction-grace-explained.md)).
 - **Sampling defaults** — one place to say what an omitted `temperature` means
   for the whole machine, with an optional override per model; a request that
   sets its own value still wins.

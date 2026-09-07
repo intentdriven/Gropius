@@ -80,7 +80,7 @@ no answer, no key, no client address (see
 | `prompt_tokens`, `completion_tokens` | The model server's own count of what went in and what came out. Only an answered request carries them. |
 | `first_token_ms` | How long the model took to produce the first chunk of a streamed answer, measured from the request arriving to that chunk reaching Gropius. `-1` when there was no streamed chunk at all. |
 | `duration_ms` | How long the whole request took, from the moment it arrived. |
-| `queue_wait_ms` | How long it waited for a free slot on a model that was already loaded. |
+| `queue_wait_ms` | How long it waited for the machine rather than for the model: for a free slot on a model that was already loaded, and for memory to free up under [eviction grace](eviction-grace.md). |
 | `load_wait_ms` | How long it waited for the model to load. |
 
 ## `kind: "load"` — a model server became ready

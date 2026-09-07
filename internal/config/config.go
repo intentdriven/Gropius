@@ -403,6 +403,29 @@ type Config struct {
 	// save.
 	MaxResidentBytes int64 `json:"max_resident_bytes,omitempty"`
 
+	// EvictionGrace turns on the bounded wait a request pays instead of
+	// evicting a model that has only just finished work. It is off unless the
+	// operator turns it on, and while it is off a request for a model that
+	// does not fit takes an eviction victim at once, exactly as it always has.
+	EvictionGrace bool `json:"eviction_grace,omitempty"`
+
+	// EvictionGraceSec is how long a model is protected after it finishes a
+	// request, and EvictionMaxWaitSec is the longest a request will wait for
+	// room before it is refused. Both are whole seconds and both apply only
+	// while EvictionGrace is on.
+	//
+	// Zero means the default, the way it does for MaxResidentBytes: a field
+	// cleared in Settings, a file written by a build that had no such field,
+	// and a fresh install all mean the same thing, and none of them may stand
+	// between the operator and saving an unrelated setting. Read them through
+	// GraceSeconds and MaxWaitSeconds, which resolve that.
+	//
+	// The grace may not exceed a non-zero IdleTimeoutSec: the idle reaper
+	// would otherwise unload the very model a wait is protecting, which would
+	// make the promise false.
+	EvictionGraceSec   int `json:"eviction_grace_sec,omitempty"`
+	EvictionMaxWaitSec int `json:"eviction_max_wait_sec,omitempty"`
+
 	// Sampling holds the machine-wide sampling defaults every model server is
 	// launched with, so a request that omits a parameter is served with them.
 	Sampling Sampling `json:"sampling,omitzero"`
@@ -683,6 +706,112 @@ const (
 	MaxStatsMonths       = 120
 )
 
+// Bounds for the two eviction-grace intervals.
+//
+// The defaults are the record's: 120 seconds covers the pause an agent takes
+// between turns, which is the eviction this feature exists to prevent, and 300
+// seconds is longer than most clients will wait but short enough that a
+// request that will never be served fails rather than hangs. The ceiling is an
+// hour: past that the wait is longer than any interactive client's own
+// timeout, so a figure above it is a typing mistake rather than a policy. Zero
+// is not a figure but the absence of one, and resolves to the default: see
+// Config.GraceSeconds.
+const (
+	DefaultEvictionGraceSec   = 120
+	DefaultEvictionMaxWaitSec = 300
+	MaxEvictionWaitSec        = 3600
+)
+
+// validateGrace holds the two intervals to their ranges and to the idle
+// timeout.
+//
+// The idle rule applies only while the switch is on: with grace off the two
+// figures decide nothing, and refusing a save over an inert pair would put a
+// setting the operator is not using between them and the API key they came to
+// set.
+func (c Config) validateGrace() error {
+	if c.EvictionGraceSec < 0 || c.EvictionGraceSec > MaxEvictionWaitSec {
+		return fmt.Errorf("the eviction grace must be between 0 and %d seconds, got %d",
+			MaxEvictionWaitSec, c.EvictionGraceSec)
+	}
+	if c.EvictionMaxWaitSec < 0 || c.EvictionMaxWaitSec > MaxEvictionWaitSec {
+		return fmt.Errorf("the maximum wait must be between 0 and %d seconds, got %d",
+			MaxEvictionWaitSec, c.EvictionMaxWaitSec)
+	}
+	if c.EvictionGrace && c.IdleTimeoutSec > 0 && c.GraceSeconds() > c.IdleTimeoutSec {
+		return fmt.Errorf(
+			"the eviction grace (%d s) must not be longer than the idle timeout (%d s), "+
+				"or the idle timeout unloads the model the wait is protecting",
+			c.GraceSeconds(), c.IdleTimeoutSec)
+	}
+	// A maximum wait below the grace does not shorten the wait, it silently
+	// disables the rule that stops one client starving another: a waiting
+	// request may override a model's protection once its own age reaches the
+	// grace, and it is refused once its age reaches the maximum, so with the
+	// maximum the smaller of the two the first can never happen. Refused
+	// rather than raised at a save because the two are one pair, edited
+	// together in one fieldset, and telling the operator is better than
+	// quietly serving them a different figure.
+	if c.EvictionGrace && c.MaxWaitSeconds() < c.GraceSeconds() {
+		return fmt.Errorf(
+			"the maximum wait (%d s) must not be shorter than the eviction grace (%d s), "+
+				"or a waiting request is refused before its own wait can override the grace",
+			c.MaxWaitSeconds(), c.GraceSeconds())
+	}
+	return nil
+}
+
+// GraceSeconds and MaxWaitSeconds are the two intervals in force, with zero
+// resolved to its default. Everything that acts on them reads them here, so
+// "unset" has one meaning and not one per caller.
+func (c Config) GraceSeconds() int {
+	if c.EvictionGraceSec <= 0 {
+		return DefaultEvictionGraceSec
+	}
+	return c.EvictionGraceSec
+}
+
+func (c Config) MaxWaitSeconds() int {
+	if c.EvictionMaxWaitSec <= 0 {
+		return DefaultEvictionMaxWaitSec
+	}
+	return c.EvictionMaxWaitSec
+}
+
+// sanitizeGrace repairs eviction-grace figures this build cannot use and
+// returns what it repaired, so a hand-edited file, a backup or another build's
+// settings still load.
+//
+// Repaired rather than refused, for the reason sanitizeStats gives: a refused
+// config.json sends the next start into its fail-closed loopback-only branch.
+// An out-of-range interval falls back to its default; a grace longer than the
+// idle timeout is clamped to that timeout rather than dropped, because the
+// operator asked for a grace and the longest one the reaper leaves intact is
+// the timeout itself.
+func (c *Config) sanitizeGrace() []string {
+	var repaired []string
+	if c.EvictionGraceSec < 0 || c.EvictionGraceSec > MaxEvictionWaitSec {
+		repaired = append(repaired, "eviction_grace_sec="+strconv.Itoa(c.EvictionGraceSec))
+		c.EvictionGraceSec = DefaultEvictionGraceSec
+	}
+	if c.EvictionMaxWaitSec < 0 || c.EvictionMaxWaitSec > MaxEvictionWaitSec {
+		repaired = append(repaired, "eviction_max_wait_sec="+strconv.Itoa(c.EvictionMaxWaitSec))
+		c.EvictionMaxWaitSec = DefaultEvictionMaxWaitSec
+	}
+	if c.EvictionGrace && c.IdleTimeoutSec > 0 && c.GraceSeconds() > c.IdleTimeoutSec {
+		repaired = append(repaired, "eviction_grace_sec="+strconv.Itoa(c.GraceSeconds()))
+		c.EvictionGraceSec = c.IdleTimeoutSec
+	}
+	// Raised rather than refused on this path, and raised after the clamp
+	// above so it is measured against the grace that survives it. A file is
+	// repaired; a save is told (see validateGrace).
+	if c.EvictionGrace && c.MaxWaitSeconds() < c.GraceSeconds() {
+		repaired = append(repaired, "eviction_max_wait_sec="+strconv.Itoa(c.MaxWaitSeconds()))
+		c.EvictionMaxWaitSec = c.GraceSeconds()
+	}
+	return repaired
+}
+
 // Default returns the shipping defaults: LAN-exposed, unauthenticated.
 func Default() Config {
 	return Config{
@@ -694,6 +823,10 @@ func Default() Config {
 		DecodeConcurrency: 4,
 		StatsMonths:       DefaultStatsMonths,
 		StatsMaxBytes:     DefaultStatsMaxBytes,
+		// Stored even though the feature is off, so that switching it on in
+		// Settings is one tick rather than one tick and two numbers.
+		EvictionGraceSec:   DefaultEvictionGraceSec,
+		EvictionMaxWaitSec: DefaultEvictionMaxWaitSec,
 	}
 }
 
@@ -742,6 +875,9 @@ func (c Config) Validate() error {
 	}
 	if c.MaxResidentBytes < 0 {
 		return fmt.Errorf("max_resident_bytes must not be negative, got %d", c.MaxResidentBytes)
+	}
+	if err := c.validateGrace(); err != nil {
+		return err
 	}
 	// A sampling default becomes a launch flag on every model server, and the
 	// model server validates the effective value of every request against it:
@@ -805,6 +941,7 @@ func Load(path string) (Config, []string, error) {
 	dropped = append(dropped, cfg.sanitizePinned()...)
 	dropped = append(dropped, cfg.sanitizeStats()...)
 	dropped = append(dropped, cfg.sanitizeBudget()...)
+	dropped = append(dropped, cfg.sanitizeGrace()...)
 	if err := cfg.Validate(); err != nil {
 		return Default(), nil, fmt.Errorf("invalid config %s: %w", path, err)
 	}

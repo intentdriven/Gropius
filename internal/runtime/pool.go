@@ -42,8 +42,10 @@ type Upstream struct {
 //
 // LoadWait is time spent waiting for the model server to become ready, borne
 // by every waiter on that load and not only by the request that triggered it.
-// QueueWait is time spent waiting for a concurrency slot on a model that was
-// already loaded. A request that found its model warm and free pays neither.
+// QueueWait is time spent waiting for the machine rather than for the model:
+// for room to load it under eviction grace, and for a concurrency slot on a
+// model that was already loaded. A request that found its model warm and free
+// pays neither.
 type AcquireStats struct {
 	LoadWait  time.Duration
 	QueueWait time.Duration
@@ -111,6 +113,34 @@ type PoolOptions struct {
 	// waiter counts as in-flight, so it also blocks the model from being evicted)
 	// and pile up goroutines and connections. Zero uses a default.
 	MaxQueueDepth int
+	// EvictionGrace protects a model for this long after it finishes a
+	// request: while it is protected it is not chosen as an eviction victim,
+	// and a request that needs its memory waits instead of taking it. Zero —
+	// the default — switches the whole mechanism off, and a load that finds no
+	// room takes a victim at once exactly as it always has.
+	//
+	// It must not exceed a non-zero IdleTimeout, or the idle reaper unloads the
+	// very model a wait is protecting; internal/config holds a save to that.
+	// Replaced live with SetEvictionGrace.
+	EvictionGrace time.Duration
+	// MaxEvictionWait bounds that wait. Past it the request is refused with the
+	// same no-room refusal it would have had at once. Zero with a non-zero
+	// EvictionGrace means the grace itself.
+	MaxEvictionWait time.Duration
+	// MaxLoadWaiters bounds how many requests may be waiting for room at once.
+	// Past this, Acquire refuses immediately rather than joining them.
+	//
+	// It is deliberately not MaxQueueDepth. That queue drains at decoding
+	// speed; this one drains only when a model is evicted, which is seconds to
+	// tens of seconds, and every waiter is a goroutine holding its whole
+	// request body in memory meanwhile — twice over, in fact: the gateway
+	// holds the bytes it read, up to its 32 MiB limit, and the decoded value
+	// copies rather than aliases them. Call it 64 MiB a waiter, so eight of
+	// them is about half a gigabyte a client can pin without being admitted to
+	// anything, none of it charged against the memory budget, which counts
+	// model weights. That is the arithmetic the default is chosen against.
+	// Zero uses that default.
+	MaxLoadWaiters int
 	// ReadyTimeout bounds how long we wait for a model to load. Large models on
 	// a cold page cache genuinely take minutes.
 	ReadyTimeout time.Duration
@@ -159,6 +189,17 @@ type Pool struct {
 	// under, so the pool can both match a pin and report one. Guarded by mu,
 	// the same lock the eviction paths that read it already hold.
 	pinned map[string]string
+	// grace and maxWait are the eviction-grace intervals in force. They live
+	// here rather than in opts for the reason maxResident does: the operator
+	// changes them while the pool is running, and every path that reads them
+	// holds mu. A zero grace is the feature switched off.
+	grace   time.Duration
+	maxWait time.Duration
+	// waiters are the loads parked for want of room, oldest first. Guarded by
+	// mu; a waiter is never parked while holding it. Serving the head first is
+	// the whole fairness rule: serving whichever load is quickest would starve
+	// a large model under a stream of requests for small ones.
+	waiters []*loadWaiter
 
 	stopIdle chan struct{}
 	idleDone chan struct{}
@@ -189,6 +230,38 @@ type entry struct {
 	readyErr error
 }
 
+// loadWaiter is one request parked for want of room for its model.
+//
+// Its own clock is real time rather than the pool's injectable one: what it
+// measures is a promise to a client about wall-clock seconds, reported back to
+// that client in a header, and bounded so that no clock a test injects can
+// hold a request open. The grace a candidate is judged by is read from the
+// pool's clock instead, because that is what stamps lastFinished.
+type loadWaiter struct {
+	arrived time.Time
+	// need is what this load asked for, remembered from the attempt that
+	// failed. A parked waiter is judged on it — can this still ever fit, does
+	// a plan for it succeed yet — rather than by asking the registry and
+	// stat-ing the launcher's files again. Every wake-up wakes every waiter,
+	// so without it each completed request would do filesystem work under p.mu
+	// once per parked request.
+	//
+	// It can go stale: the model can be downloaded again at a different size
+	// while its request waits. That decides only whether this waiter is woken
+	// early or left parked a little longer, never what is admitted — the load
+	// itself resolves the model again, so a model that grew is measured at
+	// what it grew to.
+	need int64
+	// signal is buffered so that waking a waiter never blocks the goroutine
+	// holding p.mu, and so that a wake-up arriving between two checks is not
+	// lost.
+	signal chan struct{}
+}
+
+// defaultMaxLoadWaiters is the ceiling on parked loads. See
+// PoolOptions.MaxLoadWaiters for the arithmetic it is chosen against.
+const defaultMaxLoadWaiters = 8
+
 // NewPool creates a pool. Call Close to shut down every model server.
 func NewPool(opts PoolOptions) *Pool {
 	if opts.HTTP == nil {
@@ -214,6 +287,10 @@ func NewPool(opts PoolOptions) *Pool {
 	if opts.MaxQueueDepth <= 0 {
 		opts.MaxQueueDepth = 64
 	}
+	opts.EvictionGrace, opts.MaxEvictionWait = normalizeGrace(opts.EvictionGrace, opts.MaxEvictionWait)
+	if opts.MaxLoadWaiters <= 0 {
+		opts.MaxLoadWaiters = defaultMaxLoadWaiters
+	}
 	if opts.Log == nil {
 		opts.Log = slog.Default()
 	}
@@ -223,6 +300,8 @@ func NewPool(opts PoolOptions) *Pool {
 		entries:     map[string]*entry{},
 		maxResident: opts.MaxResidentBytes,
 		pinned:      pinnedSet(opts.Pinned),
+		grace:       opts.EvictionGrace,
+		maxWait:     opts.MaxEvictionWait,
 		stopIdle:    make(chan struct{}),
 		idleDone:    make(chan struct{}),
 	}
@@ -242,6 +321,10 @@ func (p *Pool) SetPinned(ids []string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.pinned = set
+	// A pin changes the answer to "can this load ever fit", in both
+	// directions, so a request already waiting for room is re-judged now
+	// rather than at the next release.
+	p.wakeWaitersLocked()
 }
 
 // SetMemoryBudget replaces the ceiling on the total charged size of resident
@@ -264,6 +347,9 @@ func (p *Pool) SetMemoryBudget(n int64) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.maxResident = n
+	// A raise can make room with nothing having to finish, so a request
+	// already waiting acts on it at once rather than at the next release.
+	p.wakeWaitersLocked()
 }
 
 // MemoryBudget is the ceiling on the total charged size of resident models.
@@ -275,6 +361,99 @@ func (p *Pool) MemoryBudget() int64 {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.maxResident
+}
+
+// SetEvictionGrace replaces the two eviction-grace intervals. It is the seam a
+// settings save uses, so switching grace on or off governs the requests being
+// served rather than the ones after a restart.
+//
+// A zero grace switches the mechanism off, which is the operator saying "swap
+// now": every request already waiting is woken and takes its victim rather
+// than sitting out a grace nobody wants any more.
+func (p *Pool) SetEvictionGrace(grace, maxWait time.Duration) {
+	grace, maxWait = normalizeGrace(grace, maxWait)
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.grace, p.maxWait = grace, maxWait
+	p.wakeWaitersLocked()
+}
+
+// EvictionGrace is the pair of intervals in force: how long a model is
+// protected after it finishes work, and the longest a request will wait for
+// one to fall past that. A zero grace is the mechanism switched off.
+//
+// It is read from the pool rather than from the stored settings for the reason
+// Pinned is: this is what is actually being enforced, and a save reaches the
+// two by different paths.
+func (p *Pool) EvictionGrace() (grace, maxWait time.Duration) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.grace, p.maxWait
+}
+
+// normalizeGrace resolves the two intervals the one way, so that a pool built
+// with PoolOptions and a pool told to change while it runs cannot disagree
+// about them. A negative grace is no grace, and a maximum wait shorter than
+// the grace — zero included — is raised to the grace.
+func normalizeGrace(grace, maxWait time.Duration) (time.Duration, time.Duration) {
+	if grace < 0 {
+		grace = 0
+	}
+	// A maximum wait below the grace makes the waiter-age clause in
+	// graceElapsedLocked unreachable — a waiter would be refused before its
+	// own wait could ever override a model's protection — which is the
+	// indefinite starvation this whole mechanism exists to prevent.
+	// internal/config refuses such a pair at a save and repairs one in a file;
+	// this is the pool refusing to be configured into the hole by any caller.
+	if maxWait < grace {
+		maxWait = grace
+	}
+	return grace, maxWait
+}
+
+// Waiting is how many requests are parked for want of room right now.
+//
+// It reports the queue rather than the entries, which is what Resident cannot:
+// a waiter holds no model and so appears nowhere in that list, and "nothing is
+// loading and nothing is refused" is otherwise indistinguishable from "six
+// clients are queued behind a model that will not fall idle".
+func (p *Pool) Waiting() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return len(p.waiters)
+}
+
+// wakeWaitersLocked prods every parked load to look again. Callers must hold
+// p.mu.
+//
+// Every wake-up is a prod rather than a decision: the waiter re-reads the pool
+// under the lock when it comes back, so it never acts on the view that woke
+// it. The sends cannot block — each channel is buffered and the send is
+// non-blocking — which is what makes this safe to call from under p.mu.
+func (p *Pool) wakeWaitersLocked() {
+	for _, w := range p.waiters {
+		select {
+		case w.signal <- struct{}{}:
+		default:
+		}
+	}
+}
+
+// leaveQueueLocked removes a waiter that is no longer waiting. Callers must
+// hold p.mu.
+func (p *Pool) leaveQueueLocked(w *loadWaiter) {
+	if w == nil {
+		return
+	}
+	for i, other := range p.waiters {
+		if other == w {
+			p.waiters = append(p.waiters[:i], p.waiters[i+1:]...)
+			break
+		}
+	}
+	// Whoever is now at the head may take a victim it could not take while
+	// somebody older stood in front of it.
+	p.wakeWaitersLocked()
 }
 
 // Pinned lists the protected models, in the spelling they were pinned under.
@@ -320,20 +499,96 @@ var ErrClosed = errors.New("pool is closed")
 // Acquire returns a ready upstream for repoID, loading the model if necessary
 // and evicting others to make room.
 //
+// With eviction grace switched on, a load that finds no room joins a queue
+// instead of taking a model that has only just finished work: see
+// PoolOptions.EvictionGrace for what it waits for and how long. With grace off
+// — the default — it takes its victim at once and nothing ever waits.
+//
 // The returned release function must be called when the request finishes. Until
 // it is, the model is pinned and cannot be evicted out from under the caller.
 func (p *Pool) Acquire(ctx context.Context, repoID string) (*Upstream, func(), error) {
-	p.mu.Lock()
-	if p.closed {
-		p.mu.Unlock()
-		return nil, nil, ErrClosed
-	}
+	return p.acquire(ctx, repoID, true)
+}
 
-	e, ok := p.entries[config.FoldRepoID(repoID)]
-	if !ok {
+// AcquireNow is Acquire for a caller that must not wait out an eviction grace.
+//
+// Start-up preloading is the case it exists for: it loads its models one after
+// another, so a list of models that cannot all fit would otherwise stall a
+// start by one maximum wait per model — and at start-up there is nobody to
+// protect, since no client has been served yet. Everything a client can reach
+// goes through Acquire.
+func (p *Pool) AcquireNow(ctx context.Context, repoID string) (*Upstream, func(), error) {
+	return p.acquire(ctx, repoID, false)
+}
+
+func (p *Pool) acquire(ctx context.Context, repoID string, mayWait bool) (*Upstream, func(), error) {
+	key := config.FoldRepoID(repoID)
+	// waited is what this acquisition spent parked for want of room, and it is
+	// reported to the caller: a request that waited for somebody else's model
+	// to fall idle is entitled to know that it did.
+	var (
+		w      *loadWaiter
+		waited time.Duration
+	)
+
+	p.mu.Lock()
+	var e *entry
+	for {
+		if p.closed {
+			p.leaveQueueLocked(w)
+			p.mu.Unlock()
+			return nil, nil, ErrClosed
+		}
+		// Checked on every pass, not only where the wait is parked. A woken
+		// waiter blocks on p.mu — the lock every Acquire, Resident, Unload and
+		// control-panel snapshot takes — and the client can hang up while it
+		// is blocked. Going on to evict a warm model and start a server for a
+		// request that no longer exists is the exact outcome this feature is
+		// here to prevent, paid for by nobody.
+		if err := ctx.Err(); err != nil {
+			p.leaveQueueLocked(w)
+			p.mu.Unlock()
+			return nil, nil, err
+		}
+		if held, ok := p.entries[key]; ok {
+			e = held
+			break
+		}
+
+		// A caller that will not wait honours neither the grace nor the queue.
+		// There is no point protecting a model from a load that is going to
+		// take it anyway, and holding a start-up preload behind somebody
+		// else's wait would leave the model cold for the rest of the session —
+		// which is what the no-wait path exists to prevent.
+		age := p.waitedBy(w)
+		adm := p.admissionLocked(w)
+		if !mayWait {
+			age, adm = p.grace, admitEvict
+		}
+
 		var err error
-		e, err = p.startLocked(repoID)
-		if err != nil {
+		if p.worthTryingLocked(w, age, adm) {
+			var started *entry
+			started, err = p.startLocked(repoID, age, adm)
+			if err == nil {
+				e = started
+				// Somebody may have been queued for this very model; it has an
+				// entry to join now.
+				p.wakeWaitersLocked()
+				break
+			}
+		} else {
+			// Nothing has changed that this waiter could act on, and asking
+			// again would resolve the model and stat the launcher's files
+			// under p.mu — on every wake-up, for every parked request. What is
+			// still worth re-checking (can this ever fit now, is it still
+			// inside its maximum) needs only what the waiter already carries.
+			err = p.noRoomLocked(w.need)
+		}
+		verdict := p.waitVerdictLocked(mayWait, w, err)
+		if verdict != waitYes {
+			queued := len(p.waiters)
+			p.leaveQueueLocked(w)
 			p.mu.Unlock()
 			// Logged out here, not where the refusal is built: p.mu is the
 			// pool's one lock — every Acquire, Resident, Pinned and Unload
@@ -342,12 +597,56 @@ func (p *Pool) Acquire(ctx context.Context, repoID string) (*Upstream, func(), e
 			// every other caller for the length of a write.
 			var noRoom *NoRoomError
 			if errors.As(err, &noRoom) {
-				p.opts.Log.Info("refused a model load: no model in memory could be freed",
-					"model", repoID, "protected", noRoom.Protected,
-					"limit", HumanBytes(noRoom.Limit))
+				// The refusal is this goroutine's own, freshly built and held
+				// by nobody else, so annotating it after the unlock is safe.
+				noRoom.Waited = p.waitedBy(w)
+				// Two different facts about this Mac, and an operator reading
+				// the log needs to tell them apart: a machine refusing loads
+				// because everything in memory is protected is not the same as
+				// one refusing them because the queue for memory is full.
+				if verdict == waitQueueFull {
+					p.opts.Log.Info("refused a model load: as many requests are already waiting for memory as the queue allows",
+						"model", repoID, "waiting", queued,
+						"limit", HumanBytes(noRoom.Limit))
+				} else {
+					p.opts.Log.Info("refused a model load: no model in memory could be freed",
+						"model", repoID, "protected", noRoom.Protected,
+						"limit", HumanBytes(noRoom.Limit), "waited", noRoom.Waited)
+				}
 			}
 			return nil, nil, err
 		}
+		if w == nil {
+			// willWaitLocked said yes, so the refusal is a *NoRoomError and
+			// carries what this load asked for.
+			var noRoom *NoRoomError
+			_ = errors.As(err, &noRoom)
+			w = &loadWaiter{arrived: time.Now(), need: noRoom.need, signal: make(chan struct{}, 1)}
+			p.waiters = append(p.waiters, w)
+		}
+		delay := p.wakeDelayLocked(w)
+		p.mu.Unlock()
+
+		// Parked off p.mu: Acquire holds it across startLocked, so waiting
+		// under it would block every other Acquire, Resident and Unload for
+		// the length of the wait.
+		timer := time.NewTimer(delay)
+		select {
+		case <-w.signal:
+		case <-timer.C:
+		case <-ctx.Done():
+			timer.Stop()
+			p.mu.Lock()
+			p.leaveQueueLocked(w)
+			p.mu.Unlock()
+			return nil, nil, ctx.Err()
+		}
+		timer.Stop()
+		p.mu.Lock()
+	}
+	if w != nil {
+		waited = p.waitedBy(w)
+		p.leaveQueueLocked(w)
 	}
 	// Refuse once the backlog for this model is already at its ceiling. Every
 	// in-flight request (running or merely queued on e.sem) pins the model, so an
@@ -388,6 +687,8 @@ func (p *Pool) Acquire(ctx context.Context, repoID string) (*Upstream, func(), e
 		if e.inFlight == 0 && !isReady(e) && p.entries[config.FoldRepoID(e.repoID)] == e {
 			p.stopEntryLocked(e, StopAbandoned)
 		}
+		// A model that has just fallen idle is the commonest way room appears.
+		p.wakeWaitersLocked()
 		p.mu.Unlock()
 	}
 
@@ -428,14 +729,22 @@ func (p *Pool) Acquire(ctx context.Context, repoID string) (*Upstream, func(), e
 		BaseURL:  fmt.Sprintf("http://127.0.0.1:%d", e.port),
 		ModelArg: e.modelArg,
 		Waits: AcquireStats{
-			LoadWait:  loaded.Sub(entered),
-			QueueWait: p.opts.now().Sub(loaded),
+			LoadWait: loaded.Sub(entered),
+			// The wait for room is a queue wait, not a load wait: nothing was
+			// loading, the machine was full. Reporting it as a load wait would
+			// say a model was cold when what it was, was somebody else's.
+			QueueWait: waited + p.opts.now().Sub(loaded),
 		},
 	}, releaseSlot, nil
 }
 
 // startLocked launches a model server. Callers must hold p.mu.
-func (p *Pool) startLocked(repoID string) (*entry, error) {
+//
+// waited is how long the caller has already been queued for room, which is
+// what bounds the protection an eviction grace gives; adm is what this caller
+// is allowed to do to the models in memory, and is what keeps the queue
+// first-in, first-out.
+func (p *Pool) startLocked(repoID string, waited time.Duration, adm admission) (*entry, error) {
 	path, size, err := p.opts.Models.Resolve(repoID)
 	if err != nil {
 		return nil, err
@@ -447,6 +756,16 @@ func (p *Pool) startLocked(repoID string) (*entry, error) {
 			"%s needs about %s of memory but the limit is %s — raise the memory budget or choose a smaller quantization",
 			repoID, HumanBytes(need), HumanBytes(p.maxResident))
 	}
+	// Plan the eviction before the precheck, and refuse from the plan alone.
+	// Precheck stats the launcher's files, and this runs under p.mu — the
+	// pool's one lock, which every Acquire, release, Resident, Unload and
+	// control-panel snapshot takes — so a refusal that did it would let a
+	// client set the rate at which this machine does filesystem work under
+	// that lock, simply by asking for loads that cannot be served.
+	victims, enough := p.evictionPlanLocked(need, waited)
+	if p.grace > 0 && (!enough || !allows(adm, victims)) {
+		return nil, p.noRoomLocked(need)
+	}
 	// Check cheap launch preconditions before evicting anything. Eviction is not
 	// reversible (stopEntryLocked's Stop cannot be undone), so if we evicted
 	// first and Launch failed moments later — a missing venv, or this repoID's
@@ -455,8 +774,15 @@ func (p *Pool) startLocked(repoID string) (*entry, error) {
 	if err := p.opts.Launcher.Precheck(Spec{RepoID: repoID, ModelPath: path}); err != nil {
 		return nil, fmt.Errorf("start model server for %s: %w", repoID, &LaunchError{Err: err})
 	}
-	if err := p.evictForLocked(need); err != nil {
-		return nil, err
+	for _, v := range victims {
+		p.stopEntryLocked(v, StopEvicted)
+	}
+	// With grace off the pool has always freed what it could and then refused,
+	// and that is what the off path still does: the plan above is executed
+	// whole before this, and only the on path returns before touching
+	// anything.
+	if !enough {
+		return nil, p.noRoomLocked(need)
 	}
 
 	port, err := freePort()
@@ -523,6 +849,7 @@ func (p *Pool) waitReady(e *entry) {
 		if p.entries[config.FoldRepoID(e.repoID)] == e {
 			delete(p.entries, config.FoldRepoID(e.repoID))
 			p.notify(func(o PoolObserver) { o.EntryStopped(e.repoID, StopLoadFailed) })
+			p.wakeWaitersLocked()
 		}
 	}
 	p.mu.Unlock()
@@ -554,6 +881,7 @@ func (p *Pool) watchExit(e *entry) {
 	if p.entries[config.FoldRepoID(e.repoID)] == e {
 		delete(p.entries, config.FoldRepoID(e.repoID))
 		p.notify(func(o PoolObserver) { o.EntryStopped(e.repoID, StopCrashed) })
+		p.wakeWaitersLocked()
 	}
 	p.mu.Unlock()
 }
@@ -616,47 +944,276 @@ func (p *Pool) probeReady(ctx context.Context, e *entry) error {
 	}
 }
 
-// evictForLocked frees enough budget for need bytes. Callers must hold p.mu.
-func (p *Pool) evictForLocked(need int64) error {
-	for {
-		var used int64
-		for _, e := range p.entries {
-			used += LoadCost(e.bytes)
-		}
-		if used+need <= p.maxResident {
-			return nil
-		}
-
-		// Evict the least recently used model that nobody is currently using.
-		var victim *entry
-		for _, e := range p.entries {
-			// Never evict a model that is still loading: its lone waiter can have
-			// already given up (context cancelled or timed out) and dropped
-			// inFlight to 0 while waitReady keeps running in the background.
-			// Killing it here would waste the in-progress load; isReady checks
-			// without blocking. Same reasoning as reapIdle's guard below.
-			if e.inFlight > 0 || !isReady(e) {
-				continue
-			}
-			// A pinned model is removed from the candidate set before the
-			// least-recently-used comparison runs, so it survives even when it
-			// is the better victim by age. That is the whole of the promise:
-			// the load that needed the room fails instead.
-			if p.isPinnedLocked(e.repoID) {
-				continue
-			}
-			if victim == nil || e.lastUsed.Before(victim.lastUsed) {
-				victim = e
-			}
-		}
-		if victim == nil {
-			return &NoRoomError{
-				Limit:     p.maxResident,
-				Protected: p.pinnedResidentLocked(),
-			}
-		}
-		p.stopEntryLocked(victim, StopEvicted)
+// allows reports whether a caller with this admission may take this plan.
+//
+// admitFreeRoom is the narrow one: a caller that could not join the queue
+// because it was full may still load into memory nothing is using, but may not
+// take a victim. Refusing it would be a denial of service over a place to
+// wait that it does not need, and it takes nothing from the waiter at the head
+// — that waiter is parked precisely because the free room is not enough for
+// it.
+func allows(adm admission, victims []*entry) bool {
+	switch adm {
+	case admitEvict:
+		return true
+	case admitFreeRoom:
+		return len(victims) == 0
+	default:
+		return false
 	}
+}
+
+// evictionPlanLocked names the models that would have to go for need bytes to
+// fit, least recently used first, and says whether taking them all is enough.
+// Callers must hold p.mu.
+func (p *Pool) evictionPlanLocked(need int64, waited time.Duration) ([]*entry, bool) {
+	var used int64
+	for _, e := range p.entries {
+		used += LoadCost(e.bytes)
+	}
+	if used+need <= p.maxResident {
+		return nil, true
+	}
+
+	candidates := make([]*entry, 0, len(p.entries))
+	for _, e := range p.entries {
+		// Never evict a model that is still loading: its lone waiter can have
+		// already given up (context cancelled or timed out) and dropped
+		// inFlight to 0 while waitReady keeps running in the background.
+		// Killing it here would waste the in-progress load; isReady checks
+		// without blocking. Same reasoning as reapIdle's guard below.
+		if e.inFlight > 0 || !isReady(e) {
+			continue
+		}
+		// A pinned model is removed from the candidate set before the
+		// least-recently-used comparison runs, so it survives even when it
+		// is the better victim by age. That is the whole of the promise:
+		// the load that needed the room fails instead.
+		if p.isPinnedLocked(e.repoID) {
+			continue
+		}
+		if !p.graceElapsedLocked(e, waited) {
+			continue
+		}
+		candidates = append(candidates, e)
+	}
+	sort.Slice(candidates, func(i, j int) bool {
+		return candidates[i].lastUsed.Before(candidates[j].lastUsed)
+	})
+
+	victims := make([]*entry, 0, len(candidates))
+	for _, e := range candidates {
+		victims = append(victims, e)
+		used -= LoadCost(e.bytes)
+		if used+need <= p.maxResident {
+			return victims, true
+		}
+	}
+	return victims, false
+}
+
+// graceElapsedLocked reports whether an idle model may be taken. Callers must
+// hold p.mu.
+//
+// Two clauses, and the second is the one that matters. Protection runs from
+// when the model last finished a request — but it is bounded by the waiting
+// request's own age, so a client sending a one-token request to one model
+// every few seconds cannot deny another client its model indefinitely. That
+// starvation is the failure the least-recently-used rule does not have, and
+// grace must not introduce it.
+func (p *Pool) graceElapsedLocked(e *entry, waited time.Duration) bool {
+	if p.grace <= 0 || waited >= p.grace {
+		return true
+	}
+	// A model with work in flight has not finished anything, so there is no
+	// idleness to measure. Its caller skips such an entry before it gets here,
+	// but the premise belongs to the rule: without this, a second caller added
+	// later would read a busy model's arrival stamp and quietly get the wrong
+	// answer.
+	if e.inFlight > 0 {
+		return false
+	}
+	// lastUsed is the clock, and for a candidate it is the moment the model
+	// stopped working: release stamps it when a request ends, and every caller
+	// of this has already skipped the entries with a request in flight, so
+	// nothing has touched it since. It is stamped on the way in as well, which
+	// is why that skip is part of this rule rather than merely part of the
+	// caller's — read from a busy entry, this would measure the wrong thing.
+	return p.opts.now().Sub(e.lastUsed) >= p.grace
+}
+
+// noRoomLocked builds the refusal a load gets when the budget cannot be made
+// to hold it. Callers must hold p.mu.
+func (p *Pool) noRoomLocked(need int64) *NoRoomError {
+	return &NoRoomError{
+		Limit:     p.maxResident,
+		Protected: p.pinnedResidentLocked(),
+		need:      need,
+	}
+}
+
+// waitVerdict says whether a load that found no room joins the queue, and if
+// not, why not — which is what lets the log tell a full queue apart from a
+// machine whose memory is all spoken for.
+type waitVerdict int
+
+const (
+	// waitYes: park it.
+	waitYes waitVerdict = iota
+	// waitNoGrace: grace is off, or this caller does not wait, or the refusal
+	// is not one that waiting could cure.
+	waitNoGrace
+	// waitNeverFits: no eviction could make room for this load, however long
+	// anyone waits.
+	waitNeverFits
+	// waitQueueFull: as many requests are already waiting as the cap allows.
+	waitQueueFull
+	// waitTimedOut: this one has waited its maximum.
+	waitTimedOut
+)
+
+// waitVerdictLocked decides whether a load that found no room joins the queue
+// rather than being refused now. Callers must hold p.mu.
+func (p *Pool) waitVerdictLocked(mayWait bool, w *loadWaiter, err error) waitVerdict {
+	if !mayWait || p.grace <= 0 {
+		return waitNoGrace
+	}
+	// Only a refusal about the machine being full can be cured by waiting. A
+	// missing model, a failed precheck or a model larger than the whole budget
+	// is the same answer however long anyone waits for it.
+	var noRoom *NoRoomError
+	if !errors.As(err, &noRoom) {
+		return waitNoGrace
+	}
+	// Nor is there anything to wait for when the pinned models plus what this
+	// load needs are already over the budget: no eviction can ever make that
+	// fit, and waiting would hold a connection and a buffered request body
+	// open for the whole maximum wait to reach the same refusal.
+	if !p.canEverFitLocked(noRoom.need) {
+		return waitNeverFits
+	}
+	if w == nil {
+		if len(p.waiters) >= p.opts.MaxLoadWaiters {
+			return waitQueueFull
+		}
+		return waitYes
+	}
+	if time.Since(w.arrived) >= p.maxWait {
+		return waitTimedOut
+	}
+	return waitYes
+}
+
+// worthTryingLocked reports whether this caller should ask the registry and
+// the launcher for a load. Callers must hold p.mu.
+//
+// A caller that has not queued always asks: it has no remembered need to
+// judge itself by, and one attempt is what it takes to learn one. A waiter
+// asks only when it could actually proceed, because every wake-up wakes every
+// waiter and startLocked resolves the model and stats two files before it
+// reaches the eviction plan — filesystem work under the pool's one lock, at
+// whatever rate the machine completes requests.
+func (p *Pool) worthTryingLocked(w *loadWaiter, age time.Duration, adm admission) bool {
+	// A caller that has not queued always asks, and so does every caller once
+	// grace is off: the off path evicts what it can before it refuses, and
+	// skipping the attempt would refuse a request that a swap would have
+	// served.
+	if w == nil || p.grace <= 0 {
+		return true
+	}
+	if adm == admitNothing {
+		return false
+	}
+	_, enough := p.evictionPlanLocked(w.need, age)
+	return enough
+}
+
+// canEverFitLocked reports whether evicting every model that is not pinned
+// would leave room for need bytes. Callers must hold p.mu.
+func (p *Pool) canEverFitLocked(need int64) bool {
+	var protected int64
+	for _, e := range p.entries {
+		if p.isPinnedLocked(e.repoID) {
+			protected += LoadCost(e.bytes)
+		}
+	}
+	return protected+need <= p.maxResident
+}
+
+// admission says what a caller may do to the models in memory to make room for
+// its own. It is the whole of the queue's fairness rule.
+type admission int
+
+const (
+	// admitEvict: take victims. The oldest waiter, anyone at all when nobody
+	// is waiting, and any caller once grace is off.
+	admitEvict admission = iota
+	// admitFreeRoom: load into memory nothing is using, but evict nothing. A
+	// caller that cannot join the queue because it is full — refusing it would
+	// deny service over a place to wait it does not need, and the request at
+	// the head is not waiting for that memory, or the free room would have
+	// served it already.
+	admitFreeRoom
+	// admitNothing: wait your turn.
+	admitNothing
+)
+
+// admissionLocked places this caller against the queue. Callers must hold
+// p.mu.
+//
+// Only the oldest waiter may evict, which is the whole of the fairness rule —
+// and it binds a request that has not queued at all, or a new arrival would
+// step over everyone already waiting. With grace off there is no queue to be
+// fair to: whatever is parked is being drained, the operator having just said
+// "swap now", so every caller takes the ordinary path.
+func (p *Pool) admissionLocked(w *loadWaiter) admission {
+	if p.grace <= 0 {
+		return admitEvict
+	}
+	if len(p.waiters) == 0 || (w != nil && p.waiters[0] == w) {
+		return admitEvict
+	}
+	if w == nil && len(p.waiters) >= p.opts.MaxLoadWaiters {
+		return admitFreeRoom
+	}
+	return admitNothing
+}
+
+// waitedBy is how long a waiter has been parked; zero for a caller that has
+// not parked at all.
+func (p *Pool) waitedBy(w *loadWaiter) time.Duration {
+	if w == nil {
+		return 0
+	}
+	return time.Since(w.arrived)
+}
+
+// wakeDelayLocked is how long a waiter may sleep before something could have
+// changed that nothing will signal. Callers must hold p.mu.
+//
+// Releases, stops, budget and pin changes all signal, so this covers only the
+// passage of time: the waiter's own age reaching the grace, the oldest
+// protected candidate's grace running out, and the maximum wait expiring. The
+// floor keeps a stopped clock from spinning.
+func (p *Pool) wakeDelayLocked(w *loadWaiter) time.Duration {
+	waited := time.Since(w.arrived)
+	delay := p.maxWait - waited
+	if own := p.grace - waited; own > 0 && own < delay {
+		delay = own
+	}
+	now := p.opts.now()
+	for _, e := range p.entries {
+		if e.inFlight > 0 || !isReady(e) || p.isPinnedLocked(e.repoID) {
+			continue
+		}
+		if left := p.grace - now.Sub(e.lastUsed); left > 0 && left < delay {
+			delay = left
+		}
+	}
+	if delay < time.Millisecond {
+		delay = time.Millisecond
+	}
+	return delay
 }
 
 // stopEntryLocked removes an entry and stops its process, reporting why it
@@ -664,6 +1221,8 @@ func (p *Pool) evictForLocked(need int64) error {
 func (p *Pool) stopEntryLocked(e *entry, reason StopReason) {
 	delete(p.entries, config.FoldRepoID(e.repoID))
 	p.notify(func(o PoolObserver) { o.EntryStopped(e.repoID, reason) })
+	// Room has just appeared, whatever took it away.
+	p.wakeWaitersLocked()
 	proc := e.proc
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
@@ -791,6 +1350,9 @@ func (p *Pool) Close() error {
 		p.notify(func(o PoolObserver) { o.EntryStopped(e.repoID, StopShutdown) })
 	}
 	p.entries = map[string]*entry{}
+	// Every parked request is answered rather than left holding a connection
+	// while the process goes away; each sees p.closed and returns ErrClosed.
+	p.wakeWaitersLocked()
 	p.mu.Unlock()
 
 	close(p.stopIdle)
@@ -827,13 +1389,28 @@ type NoRoomError struct {
 	Limit int64
 	// Protected names the pinned models in memory, for the log only.
 	Protected []string
+	// Waited is how long the refused request spent queued for room under an
+	// eviction grace, and zero when it did not queue at all. It is on the wire
+	// and in the response header, because a client that held a connection open
+	// for minutes is owed the reason; it names no model and says only that
+	// this machine was busy, which a stopwatch would have told it anyway.
+	Waited time.Duration
+	// need is what the refused load asked for, so Acquire can tell "no room
+	// now" from "no room however long anyone waits" without resolving the
+	// model a second time. Unexported: it is this package's arithmetic, not
+	// something to put on the wire.
+	need int64
 }
 
 // Error is the text a network client reads. It names no model.
 func (e *NoRoomError) Error() string {
-	return fmt.Sprintf(
+	msg := fmt.Sprintf(
 		"not enough memory to load another model, and no model in memory can be freed (limit %s)",
 		HumanBytes(e.Limit))
+	if e.Waited > 0 {
+		msg += fmt.Sprintf(" after waiting %s", e.Waited.Round(time.Millisecond))
+	}
+	return msg
 }
 
 // Unwrap makes this one of the refusals errors.Is(err, ErrBusy) matches: the
