@@ -1,6 +1,7 @@
 package archtest_test
 
 import (
+	"fmt"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -79,6 +80,16 @@ func TestThePageStatesTheBoundsTheFiguresAreDrawnUnder(t *testing.T) {
 	}
 	if want := grouped(stats.MaxHistoryRecords); !strings.Contains(page, want+" records") {
 		t.Errorf("the page does not say one pass reads at most %s records", want)
+	}
+	// All four, not the two a reader could otherwise take for the whole list:
+	// the row bound and the record bound are two orders of magnitude apart, and
+	// a reader told only about the larger draws the wrong conclusion from a
+	// reading the smaller one stopped.
+	if want := grouped(stats.MaxHistoryRows); !strings.Contains(page, want+" rows") {
+		t.Errorf("the page does not say one pass draws at most %s rows", want)
+	}
+	if want := fmt.Sprintf("%d MB", stats.MaxHistoryBytes>>20); !strings.Contains(page, want) {
+		t.Errorf("the page does not say one pass reads at most %s from the files", want)
 	}
 }
 

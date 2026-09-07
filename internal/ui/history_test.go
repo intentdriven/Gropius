@@ -132,8 +132,8 @@ func TestEveryHistoricalTableEscapesTheModelId(t *testing.T) {
 func TestTheBoundsLineSaysWhatTheFiguresCover(t *testing.T) {
 	got := evalPanel(t,
 		`historyBoundsLine({"from":1788696030,"to":1788796030,"narrowed":true,"truncated":true,`+
-			`"skipped":4,"max_days":366,"max_records":1000000})`,
-		"historyBoundsLine")
+			`"stopped_by":"records","skipped":4,"max_days":366,"max_records":1000000})`,
+		"historyBoundsLine", "stopReason")
 	for _, want := range []string{"366 days", "1000000 records", "4 lines could not be read", "switch was off"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("the bounds line does not say %q:\n%s", want, got)
@@ -142,7 +142,7 @@ func TestTheBoundsLineSaysWhatTheFiguresCover(t *testing.T) {
 	// And says none of it when none of it happened.
 	plain := evalPanel(t,
 		`historyBoundsLine({"from":1788696030,"to":1788796030,"max_days":366,"max_records":1000000})`,
-		"historyBoundsLine")
+		"historyBoundsLine", "stopReason")
 	for _, unwanted := range []string{"narrowed", "newest", "could not be read"} {
 		if strings.Contains(plain, unwanted) {
 			t.Errorf("the bounds line claims %q on a whole, untruncated range:\n%s", unwanted, plain)
@@ -211,6 +211,7 @@ var historyFunctions = []string{
 	"renderHistory", "historyBoundsLine", "dayRowHtml", "latencyRowHtml",
 	"spreadRowHtml", "hourRowHtml", "bucketLabels", "sharePercent",
 	"msFigure", "rateFigure", "millis", "figure", "showHistoryBusy", "busyLine",
+	"stopReason",
 }
 
 // evalPanelDOM runs one statement against the named functions and a stand-in
@@ -301,14 +302,14 @@ func TestARefusedReadingSaysSoRatherThanLeavingStaleTables(t *testing.T) {
 func TestTheBoundsLineTellsACoveredRangeFromOneDrawnShort(t *testing.T) {
 	covered := evalPanel(t,
 		`historyBoundsLine({"from":1788696030,"to":1788796030,"truncated":true,"reached_start":true,`+
-			`"max_days":366,"max_records":1000000})`, "historyBoundsLine")
+			`"max_days":366,"max_records":1000000})`, "historyBoundsLine", "stopReason")
 	if strings.Contains(covered, "short of the start") || strings.Contains(covered, "do not reach") {
 		t.Errorf("a range the reading covered is reported as drawn short: %q", covered)
 	}
 
 	short := evalPanel(t,
 		`historyBoundsLine({"from":1788696030,"to":1788796030,"truncated":true,"reached_start":false,`+
-			`"max_days":366,"max_records":1000000})`, "historyBoundsLine")
+			`"max_days":366,"max_records":1000000})`, "historyBoundsLine", "stopReason")
 	if !strings.Contains(short, "short of the start of this range") {
 		t.Errorf("a reading that stopped before the range's start does not say so: %q", short)
 	}
@@ -317,7 +318,7 @@ func TestTheBoundsLineTellsACoveredRangeFromOneDrawnShort(t *testing.T) {
 	// from a reading a bound stopped.
 	young := evalPanel(t,
 		`historyBoundsLine({"from":1788696030,"to":1788796030,"truncated":false,"reached_start":false,`+
-			`"max_days":366,"max_records":1000000})`, "historyBoundsLine")
+			`"max_days":366,"max_records":1000000})`, "historyBoundsLine", "stopReason")
 	if !strings.Contains(young, "records do not reach the start of this range") {
 		t.Errorf("a store younger than the range does not say so: %q", young)
 	}
@@ -362,5 +363,42 @@ func TestEverythingKeptAsksForTheWidestRangeRatherThanTheEpoch(t *testing.T) {
 	// different number that would drift from it.
 	if !strings.Contains(src, "const maxHistoryDays = 366") {
 		t.Error("the panel's widest range is not the 366 days the server bounds a view to")
+	}
+}
+
+// And it names the bound that actually stopped the pass. Four can, and the
+// figures are two orders of magnitude apart, so the line has to carry which.
+func TestTheBoundsLineNamesTheBoundThatFired(t *testing.T) {
+	for _, c := range []struct {
+		by   string
+		want string
+	}{
+		{"records", "1000000 records"},
+		{"lines", "1000000 lines of the records"},
+		{"rows", "20000 rows of the table"},
+		{"bytes", "512 MB of records"},
+	} {
+		t.Run(c.by, func(t *testing.T) {
+			got := evalPanel(t,
+				`historyBoundsLine({"from":1788696030,"to":1788796030,"truncated":true,"reached_start":false,`+
+					`"stopped_by":"`+c.by+`","max_days":366,"max_records":1000000,"max_rows":20000,`+
+					`"max_bytes":536870912})`,
+				"historyBoundsLine", "stopReason")
+			if !strings.Contains(got, c.want) {
+				t.Errorf("a pass stopped by the %s bound reads %q, want it to say %q", c.by, got, c.want)
+			}
+		})
+	}
+	// A stop with no bound named still says the range was not covered rather
+	// than inventing a figure.
+	got := evalPanel(t,
+		`historyBoundsLine({"from":1788696030,"to":1788796030,"truncated":true,"reached_start":false,`+
+			`"max_days":366,"max_records":1000000})`,
+		"historyBoundsLine", "stopReason")
+	if !strings.Contains(got, "stopped before the whole range was read") {
+		t.Errorf("a stop with no bound named reads %q", got)
+	}
+	if strings.Contains(got, "1000000") {
+		t.Errorf("a stop with no bound named invents a figure: %q", got)
 	}
 }

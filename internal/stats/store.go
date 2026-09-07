@@ -1340,14 +1340,21 @@ type ReadStats struct {
 	Skipped int64
 	// Bytes is how much file content was read.
 	Bytes int64
-	// Bounded reports a read that a bound stopped — the record limit, the line
-	// bound or the byte budget — rather than one that reached the end of the
-	// store or was stopped by fn.
-	Bounded bool
+	// Bounded reports a read that a bound stopped rather than one that reached
+	// the end of the store or was stopped by fn; BoundedBy names which of them
+	// did it — "records", "lines" or "bytes" — so a caller reporting the stop
+	// to a reader can name the figure that actually applied rather than the
+	// one it happens to know.
+	Bounded   bool
+	BoundedBy string
 }
 
 // Read walks the store newest record first, calling fn with each record until
 // it returns false or a bound is reached.
+//
+// It is the store's read primitive: every bounded, cancellable reading goes
+// through here, and a new reader — the per-model per-day summaries of
+// itd-2609061602043757 among them — should take this rather than Latest.
 //
 // Newest first and bounded, because that is how every reader of this store
 // wants it: the panel wants the last hour, and the dashboard
@@ -1394,7 +1401,7 @@ func (s *FileStore) Read(ctx context.Context, opts ReadOptions, fn func(Line) bo
 	}()
 	for i := len(files) - 1; i >= 0; i-- {
 		if got.Bytes >= budget {
-			got.Bounded = true
+			got.Bounded, got.BoundedBy = true, "bytes"
 			break
 		}
 		lines, err := readRawLines(root, files[i].name)
@@ -1423,7 +1430,7 @@ func (s *FileStore) Read(ctx context.Context, opts ReadOptions, fn func(Line) bo
 				continue
 			}
 			if opts.MaxLines > 0 && got.Lines >= int64(opts.MaxLines) {
-				got.Bounded = true
+				got.Bounded, got.BoundedBy = true, "lines"
 				return got, nil
 			}
 			got.Lines++
@@ -1437,7 +1444,7 @@ func (s *FileStore) Read(ctx context.Context, opts ReadOptions, fn func(Line) bo
 			}
 			got.Records++
 			if opts.Limit > 0 && got.Records >= opts.Limit {
-				got.Bounded = true
+				got.Bounded, got.BoundedBy = true, "records"
 				return got, nil
 			}
 		}
@@ -1445,9 +1452,15 @@ func (s *FileStore) Read(ctx context.Context, opts ReadOptions, fn func(Line) bo
 	return got, nil
 }
 
-// Latest is Read for a caller that wants records and has nothing to say about
-// the cost: every record, newest first, up to limit. It is the shape the panel
-// and the tests read the store with.
+// Latest is a thin wrapper over Read for a caller that wants records and has
+// nothing to say about the cost: every record, newest first, up to limit.
+//
+// It is deliberately the weaker of the two. It passes no context and no line
+// bound, so a store this build cannot read a line of costs it every byte and no
+// caller can stop it — which is exactly the shape the dashboard's own read had
+// before it was fixed. It suits a test and a one-off, and it does not suit
+// anything on a request path: a new reader takes Read, with a line bound and
+// the caller's context.
 func (s *FileStore) Latest(limit int, fn func(Line) bool) error {
 	_, err := s.Read(context.Background(), ReadOptions{Limit: limit}, fn)
 	return err

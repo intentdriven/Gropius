@@ -48,13 +48,17 @@ four. That row is marked **part of the day**, because beside whole days a third
 of a day reads as a quiet one.
 
 The line above the tables says which range the figures cover and what bounded
-them. One view covers at most 366 days, and one reading covers at most
-1,000,000 records — a store at its default size limit holds rather fewer than
-that, so the record bound only bites on a store whose limit has been raised. The
-line also says when the records do not reach as far back as the range does,
-which is the ordinary case on a Mac that has been recording for a week. A table
-that quietly stopped short reads exactly like a quiet month, so none of this is
-left to be inferred.
+them. Four things can bound a reading: a view covers at most 366 days, and a
+reading covers at most 1,000,000 records, at most 20,000 rows of the
+tokens-per-day table, and at most 512 MB read from the files. A store at its
+default size limit is inside all four, so on ordinary settings none of them
+bites. When one does, the line names that one and its own figure — the row
+bound and the record bound are two orders of magnitude apart, and a line that
+named the wrong one would be worse than a line that named none. It also says
+when the records do not reach as far back as the range does, which is the
+ordinary case on a Mac that has been recording for a week. A table that quietly
+stopped short reads exactly like a quiet month, so none of this is left to be
+inferred.
 
 Two readings of the records run at once and no more. One reading of a full store
 is a second or two of work, and the panel is reachable by everyone on this Mac,

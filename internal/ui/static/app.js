@@ -1213,7 +1213,7 @@ function historyBoundsLine(h) {
   // range covered the range: the bound stopped the walk beyond it, not the
   // figures. Only the other case is a figure drawn short.
   if (h.truncated && !h.reached_start) {
-    parts.push(`stopped after ${h.max_records} records, short of the start of this range`);
+    parts.push(`${stopReason(h)}, short of the start of this range`);
   } else if (!h.reached_start) {
     parts.push('the records do not reach the start of this range');
   }
@@ -1222,6 +1222,20 @@ function historyBoundsLine(h) {
   }
   parts.push('nothing recorded while the switch was off appears here');
   return parts.join(' · ');
+}
+
+// stopReason names the bound that actually stopped the reading, with its own
+// figure. Saying "a million records" when what stopped it was twenty thousand
+// day rows is two orders of magnitude wrong in the one line whose purpose is
+// that a table which stopped short does not read as a quiet month.
+function stopReason(h) {
+  switch (h.stopped_by) {
+    case 'rows':    return `stopped after ${h.max_rows} rows of the table`;
+    case 'bytes':   return `stopped after reading ${Math.round(h.max_bytes / (1024 * 1024))} MB of records`;
+    case 'lines':   return `stopped after ${h.max_records} lines of the records`;
+    case 'records': return `stopped after ${h.max_records} records`;
+    default:        return 'stopped before the whole range was read';
+  }
 }
 
 // dayRowHtml is one model's day: its own tokens, and its share of the whole

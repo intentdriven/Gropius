@@ -49,9 +49,9 @@ totals for the last hour and the last day, which reach back further than a
 thousand rows do on a busy Mac. Those live figures are held in memory and a
 restart empties them.
 
-Under them the same tab reads the records back over a range you choose —
-tokens per day by model with each model's share, how long requests took, and
-when models were evicted and reloaded.
+Under them the same tab reads the records back over a range you choose — four
+tables: tokens per day by model with each model's share, how long requests
+took, the spread of those times, and when models were evicted and reloaded.
 [Understanding the historical views](statistics-explained.md) says what each of
 those tables means and what none of them can show.
 

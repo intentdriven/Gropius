@@ -130,10 +130,9 @@ GitHub release notes.
   these tables widen what that means: the record files are the serving
   account's own, but the tab reads them back to whoever has the panel open, so
   on a Mac several people share, any of them sees months of which models served
-  what rather than the last thousand requests alone.
-  Days and hours are this Mac's own, and only a removal that
-  was an eviction is counted as one — an idle reap, an unload, a crash and a
-  shutdown are removals. The line above the tables says what the figures cover
+  what rather than the last thousand requests alone. Days and hours are this
+  Mac's own, and only a removal that was an eviction is counted as one — an
+  idle reap, an unload, a crash and a shutdown are removals. The line above the tables says what the figures cover
   and what bounded them: the range, whether it was narrowed to the widest one
   view covers, whether the reading stopped at its record bound, how many lines
   could not be read, and that nothing recorded while the switch was off appears.

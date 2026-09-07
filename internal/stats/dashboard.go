@@ -55,8 +55,13 @@ var historyRecordBound = MaxHistoryRecords
 // Nothing this Mac writes can produce that — a model id is the name of a
 // directory the registry resolved — but a store is a directory of plain files
 // that outlives the build that wrote it, and a reader of one must be bounded by
-// its own arithmetic rather than by a promise about what wrote it. A year of
-// days against fifty-odd models is comfortably inside this.
+// its own arithmetic rather than by a promise about what wrote it.
+//
+// Twenty thousand rows is a year of days against fifty-four models used every
+// one of those days, which is past what a Mac of this kind holds and short of
+// what a corrupt store can invent. A Mac that does exceed it is not left
+// guessing: the answer says which bound stopped the pass, and the panel names
+// that one rather than whichever figure it happens to know.
 const MaxHistoryRows = 20_000
 
 // historyRowBound is the row bound the pass actually applies, a variable for
@@ -250,10 +255,20 @@ type History struct {
 	ReachedStart bool `json:"reached_start"`
 	// Narrowed reports a range that was wider than MaxDays and was cut to it.
 	Narrowed bool `json:"narrowed"`
-	// MaxRecords and MaxDays are the bounds themselves, so the panel says what
-	// it was held to rather than repeating a number that could drift from it.
-	MaxRecords int `json:"max_records"`
-	MaxDays    int `json:"max_days"`
+	// StoppedBy names the bound that stopped the pass, when one did:
+	// "records", "rows", "lines" or "bytes". A line telling a reader the pass
+	// stopped after a million records when what stopped it was twenty thousand
+	// day rows is two orders of magnitude wrong in the one place whose whole
+	// purpose is that a table which stopped short does not read as a quiet
+	// month.
+	StoppedBy string `json:"stopped_by,omitempty"`
+	// MaxRecords, MaxRows, MaxBytes and MaxDays are the bounds themselves, so
+	// the panel says what it was held to rather than repeating a number that
+	// could drift from it.
+	MaxRecords int   `json:"max_records"`
+	MaxRows    int   `json:"max_rows"`
+	MaxBytes   int64 `json:"max_bytes"`
+	MaxDays    int   `json:"max_days"`
 }
 
 // MaxHistoryBytes is the most file content one pass reads.
@@ -278,10 +293,14 @@ type RecordSource interface {
 
 // Aggregate walks the store once and returns everything the dashboard draws.
 //
-// One pass, because the three views are sums and counts grouped by model, by
+// One pass, because the four views are sums and counts grouped by model, by
 // local day and by local hour, and a second pass would read the same bytes
-// again. Newest first, so a range that is a fraction of the store costs a
-// fraction of the reading: the pass stops once it is past the range's start.
+// again. Newest first, because that is the order the store reads back in and
+// the order the tables are drawn in — not because it makes a narrow range
+// cheap. It does not: there is no early stop (see the note above the bounds),
+// so every range costs the same pass, which is 1.4 s over a store at its
+// default size cap. The two-slot cap and the two-second Retry-After in
+// internal/gateway are sized on that figure.
 //
 // The location is the Mac's own, not UTC: "most evictions fall in one hour of
 // the day" is a claim about the hours a person keeps, and a day boundary drawn
@@ -305,6 +324,8 @@ func Aggregate(ctx context.Context, src RecordSource, from, to time.Time, loc *t
 		// that followed.
 		FirstTokenBucketEdgesMS: slices.Clone(FirstTokenBucketEdgesMS),
 		MaxRecords:              historyRecordBound,
+		MaxRows:                 historyRowBound,
+		MaxBytes:                MaxHistoryBytes,
 		MaxDays:                 MaxHistoryDays,
 	}
 	for i := range h.Hours {
@@ -337,6 +358,13 @@ func Aggregate(ctx context.Context, src RecordSource, from, to time.Time, loc *t
 	}
 	h.Records, h.ReachedStart = a.read, a.reachedStart
 	h.Truncated = a.truncated || read.Bounded
+	// The aggregation's own bounds are named first: it stops by returning
+	// false, which the reader reports as fn having stopped it rather than as a
+	// bound of its own.
+	h.StoppedBy = a.stoppedBy
+	if h.StoppedBy == "" {
+		h.StoppedBy = read.BoundedBy
+	}
 	h.Skipped = read.Skipped
 	if err != nil {
 		return h, err
@@ -379,6 +407,8 @@ type historyAgg struct {
 
 	read      int
 	truncated bool
+	// stoppedBy names which of the aggregation's own bounds ended the pass.
+	stoppedBy string
 	// err is the reason the pass gave up, when it was not the record bound:
 	// the caller going away.
 	err error
@@ -404,8 +434,12 @@ func newHistoryAgg(ctx context.Context, from, to int64, loc *time.Location) *his
 
 // take folds one line in, reporting whether the pass should carry on.
 func (a *historyAgg) take(l Line) bool {
-	if a.read >= historyRecordBound || len(a.days) >= historyRowBound {
-		a.truncated = true
+	if a.read >= historyRecordBound {
+		a.truncated, a.stoppedBy = true, "records"
+		return false
+	}
+	if len(a.days) >= historyRowBound {
+		a.truncated, a.stoppedBy = true, "rows"
 		return false
 	}
 	// Checked now and then rather than per record: a pass over a store at its
