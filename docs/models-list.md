@@ -202,8 +202,17 @@ rules.
   ceiling in that moment. A model with a request
   in flight is never the one chosen, a model still loading is not either, and a
   pinned model is not either. If nothing can be freed, the request is refused
-  with an error naming the memory pressure rather than waiting. That refusal
-  names no model: which models this Mac is protecting stays off the network.
+  with an error naming the memory pressure. That refusal names no model: which
+  models this Mac is protecting stays off the network.
+- **Eviction grace** (**Settings**, off by default) changes when that unload
+  happens. With it on, a model is protected for a set interval after it
+  finishes a request, and a request that needs its memory waits for another
+  model to fall idle rather than taking it — bounded by a maximum wait, past
+  which it gets the same refusal. Every answer says whether it waited, in the
+  headers [the response header reference](response-headers.md) describes.
+  Reading `state` from this listing before choosing a model is how a client
+  avoids the wait rather than only being told about it. See
+  [Give a busy model a moment before it is evicted](eviction-grace.md).
 - A model larger than the whole budget is refused outright: no eviction helps.
 - **Idle timeout** (**Settings**, off by default) unloads a model that has gone
   that long without a request, whether or not anything needs the room.

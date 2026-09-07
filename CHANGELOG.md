@@ -13,6 +13,36 @@ GitHub release notes.
 
 ### Added
 
+- **Eviction grace**, in Settings, off until you turn it on. Gropius unloads the
+  least recently used idle model to make room for a new one, and that rule
+  treats a model idle for one second the same as one idle for an hour — so on a
+  Mac two people share, their models take turns evicting each other in the
+  pauses between turns, each paying a reload of seconds to minutes afterwards.
+  Switch grace on and a model is protected for a set interval after it finishes
+  a request: a request that needs its memory waits for a model to fall idle
+  rather than taking one that has only just finished. It is served as soon as a
+  resident model has been idle for that interval, or as soon as its own wait has
+  passed it and a model is between requests — which is what stops a trickle of
+  short requests to one model denying another client indefinitely. Waiting
+  requests are served oldest first. Raising the memory budget, or removing a
+  pin, wakes them at once rather than leaving them to wait for something to
+  finish. A request that could never fit, one that arrives when the short queue
+  is already full, and the models loaded at start-up by Preload never wait at
+  all. If nothing frees up within the maximum wait, the request gets the same
+  refusal it would have had immediately, now saying how long it waited. The
+  protection may not be longer than the idle timeout when one is set, since the
+  idle timeout would otherwise unload the very model a request is waiting on; a
+  save that breaks that is refused naming both figures, and a settings file
+  edited by hand is shortened to the timeout rather than refused. Defaults are
+  120 seconds of protection and a 300 second maximum, and both apply the moment
+  they are saved. My Models says how many requests are waiting for memory. See
+  [Give a busy model a moment before it is evicted](docs/eviction-grace.md).
+- **Two response headers on every completion**, `X-Gropius-State` (`warm` or
+  `waited`) and `X-Gropius-Queue-Time` (whole milliseconds), on the answer and
+  on the 503 a request gets when this Mac has no memory for its model. They
+  count the wait for room, the wait for a cold model to load and the wait for a
+  slot on a busy one, and stop where generation begins. See
+  [the response header reference](docs/response-headers.md).
 - **A memory budget you set**, in Settings, beside the idle timeout and decode
   concurrency. How much of this Mac Gropius fills with loaded models was fixed
   at 60% of its memory with no field to change it, so a Mac that does nothing

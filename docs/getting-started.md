@@ -87,6 +87,18 @@ model at start-up and leaves it as evictable as any other, pinning protects a
 model but loads nothing. See
 [Pin a model so it stays in memory](pinning-models.md).
 
+### Stop two people's models evicting each other
+
+**Settings → Eviction grace** is off by default, and while it is off a request
+for a model that does not fit unloads the least recently used idle model at
+once — even one that answered a moment ago. Turn it on and that request waits
+instead: for a model to have been idle for the interval you set, or for its own
+wait to have passed that long, up to a maximum you also set. If nothing frees
+up in time it gets the same refusal it would have had immediately, now saying
+how long it waited, and every answer carries two headers saying whether it
+waited. The interval may not be longer than the idle timeout above when one is
+set. See [Give a busy model a moment before it is evicted](eviction-grace.md).
+
 ## 5. Talk to it — from another machine
 
 Open the **Connect** tab. It lists the exact base URLs to use, for example
