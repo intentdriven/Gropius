@@ -274,3 +274,51 @@ not find the differences unexplained. Nothing above this section is edited.
   the two coincide only while the candidate filter skips every entry with a
   request in flight, so a grace read from `lastUsed` would be correct by that
   filter's leave rather than by its own rule.
+
+## As built, addendum (2026-09-07, after the two adversarial reviews)
+
+Two independent reviews — one adversarial security, one senior code — ran
+against the branch and returned BLOCK and FIX FIRST. Three points above are
+superseded; the section stands as written and this one governs where they
+differ.
+
+- **Point 8 is narrowed.** "Strict first-in, first-out — only the head waiter
+  may take a victim" was the claim; the code gated the eviction and not the
+  load, so a request needing no eviction took the free room as it appeared and
+  a waiter at the head needing more than any one release frees was refused at
+  its maximum. That is the "smallest to load first starves a large model"
+  failure the queue exists to prevent, reached by the other door. `mayEvict`
+  now refuses the load whether or not the plan needs a victim, and
+  `mayEvictLocked`'s doc comment says so. Held by
+  `TestARequestThatFitsDoesNotStepOverTheWaiterAtTheHead`.
+- **The last point is withdrawn: `entry.lastFinished` is gone.** It was
+  provably equal to `lastUsed` for every entry the candidate filter admits —
+  `release` stamps both, `startLocked` stamps both, and nothing else writes
+  either while an entry is idle — so keeping it was a second invariant to
+  maintain in exchange for a comment. `graceElapsedLocked` reads `lastUsed` and
+  carries the reasoning, including why the in-flight skip is part of that rule
+  rather than merely part of its caller's. The Approach's `entry.lastFinished`
+  is therefore not in the tree.
+- **A waiter re-checks its context on every pass**, which the Approach does not
+  mention. A woken waiter blocks on `p.mu`, the lock every `Acquire`,
+  `Resident`, `Unload` and control-panel snapshot takes, and the client can
+  disconnect while it is blocked; without the check the loop went on to evict a
+  warm model and start a server for a request that no longer existed. Held by
+  `TestACancelledWaiterDoesNotEvictOnItsWayOut`, which holds the window open by
+  taking `p.mu` from the test.
+- **A waiter that is not at the head does not call `startLocked`.** Every
+  wake-up wakes every waiter, and `startLocked` resolves the model and stats the
+  launcher's files before it reaches the eviction plan, so a release did
+  filesystem work under `p.mu` once per parked request. `loadWaiter.need`
+  remembers what the failed attempt asked for, which is all the re-check needs.
+- **Six guards had no test that could fail.** The queue's fairness, the wake on
+  `release`, on `stopEntryLocked` and on `leaveQueueLocked`, the plan's
+  least-recently-used order, and the grace-off partial eviction were all
+  satisfiable by a build that did nothing. Each now has a test watched to fail
+  with the guard removed.
+- **`copyResponseHeaders` skips the two Gropius headers.** It merges rather
+  than replaces, so a model server emitting either name added a second value
+  beside ours.
+- **`docs/statistics-store-reference.md`'s `queue_wait_ms` row** now states the
+  wait for room as well as the wait for a slot, which point 3 of the section
+  above changed and that page did not carry.
