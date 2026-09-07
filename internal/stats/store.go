@@ -224,11 +224,17 @@ type StoreStatus struct {
 	// one that says it is missing.
 	Skipped int64 `json:"skipped"`
 	// RetentionWedged reports that the store cannot summarize what it is about
-	// to drop, so it is holding on to records past its own limits rather than
-	// deleting them uncounted. The reason is in the log. It is the honest thing
-	// to show: the alternative to saying so is a store quietly over the size
-	// the operator set.
+	// to drop. The reason is in the log. It is the honest thing to show: the
+	// alternative to saying so is a store quietly over the size the operator
+	// set.
 	RetentionWedged bool `json:"retention_wedged"`
+	// Unsummarized counts records removed without being counted into the
+	// summary first. It is what a wedged fold eventually costs: the size limit
+	// is the hard bound (adr-2609061610107154), so a store that cannot
+	// summarize what it drops still drops it rather than growing without end.
+	// A file too damaged to read contributes only the records that could still
+	// be read out of it; the log names the file and its size.
+	Unsummarized int64 `json:"unsummarized"`
 	// Refused reports a store that could not be opened where it must live, so
 	// the figures are being kept in memory and nothing is on disk. The reason
 	// is in the log; it names the directory, which is not the panel's to
@@ -801,6 +807,7 @@ func (s *FileStore) publish(w *storeWriter) {
 	s.statusMu.Lock()
 	s.status.Files, s.status.Bytes, s.status.Oldest = files, bytes, oldest
 	s.status.RetentionWedged = w.wedged
+	s.status.Unsummarized = w.unsummarized
 	s.status.Refused = false
 	s.statusMu.Unlock()
 }
@@ -852,6 +859,9 @@ type storeWriter struct {
 	// log rather than one per attempt.
 	wedged       bool
 	wedgedLogged bool
+	// unsummarized counts the records dropped without a summary, which is what
+	// holding the size limit through a wedged fold costs.
+	unsummarized int64
 }
 
 // openWriter checks the store's directory, creates it if it is not there, and
@@ -869,8 +879,12 @@ func (s *FileStore) openWriter() (*storeWriter, error) {
 	// finished here, so the file it already counted cannot be counted again and
 	// cannot be listed as though it were still held.
 	if err := w.reconcileSummary(); err != nil {
-		root.Close()
-		return nil, err
+		// The same answer as at any other moment: a fold that cannot be done
+		// costs retention and nothing else. Refusing the store here would make
+		// a file planted under one name the difference between recording and
+		// not, and the panel would say nothing is on disk when the records are
+		// perfectly safe.
+		w.retentionWedged(err)
 	}
 	w.summaryBytes = w.summaryFileBytes()
 	if w.files, err = listStoreFiles(root); err != nil {
@@ -1110,7 +1124,7 @@ func numOf(name string) int {
 
 // endsInNewline reports whether a file's last byte is a newline.
 func endsInNewline(root *os.Root, name string) (bool, error) {
-	f, err := root.Open(name)
+	f, err := openStoreFileForReading(root, name)
 	if err != nil {
 		return false, err
 	}
@@ -1252,7 +1266,7 @@ func (w *storeWriter) pruneOnce() (int, error) {
 	// recording.
 	if err := w.fold(w.files[:doomed]); err != nil {
 		w.retentionWedged(err)
-		return 0, nil
+		return w.dropUnsummarized(maxBytes), nil
 	}
 	w.retentionRan()
 	// The seam stands for the removals not happening: a crash after the rename,
@@ -1288,6 +1302,59 @@ func (w *storeWriter) pruneOnce() (int, error) {
 	}
 	w.files = append(stuck, w.files[doomed:]...)
 	return removed, nil
+}
+
+// dropUnsummarized holds the size limit when the summary cannot be written.
+//
+// The limit is the hard bound (adr-2609061610107154) and it still wins. Keeping
+// records that cannot be summarized is the right first answer — a record
+// deleted uncounted is gone twice over — but it cannot be the last one: a full
+// disk is exactly the case that makes the fold fail, and a store that could
+// not then free its own space would be a store that made a full disk
+// permanent. So once it is over the limit by more than the file it is about to
+// open, the oldest file goes without a summary, the loss is counted where the
+// panel can see it, and the log says so.
+//
+// It never takes the last file, and the wedge stands until a fold succeeds.
+func (w *storeWriter) dropUnsummarized(maxBytes int64) int {
+	// What the store really holds now, not what the pass above expected to be
+	// holding once it had dropped what it could not: nothing was dropped.
+	total := w.totalBytes()
+	if total <= maxBytes+w.opts.RotateBytes {
+		return 0
+	}
+	dropped := 0
+	for len(w.files) > 1 && total > maxBytes {
+		f := w.files[0]
+		lost := w.recordsIn(f.name)
+		if err := w.root.Remove(f.name); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return dropped
+		}
+		w.opts.Log.Warn("a statistics file was removed without being summarized first: the store is over its size limit and cannot summarize what it drops",
+			"file", f.name, "bytes", f.size, "records", lost)
+		w.unsummarized += lost
+		total -= f.size
+		w.files = w.files[1:]
+		dropped++
+	}
+	return dropped
+}
+
+// recordsIn counts the records a file still holds, for the figure the panel
+// shows when one is dropped without a summary. A file too damaged to read
+// counts nothing, which is the truth: what it held cannot be known.
+func (w *storeWriter) recordsIn(name string) int64 {
+	lines, err := readRawLines(w.root, name)
+	if err != nil {
+		return 0
+	}
+	n := int64(0)
+	for _, b := range lines {
+		if _, ok := parseLine(b); ok {
+			n++
+		}
+	}
+	return n
 }
 
 // retentionWedged records that retention cannot run, once per spell.
@@ -1399,7 +1466,7 @@ func firstRecordIn(root *os.Root, name string) int64 {
 // A file is kept or dropped on its newest record rather than on its name,
 // because a quiet Mac writes across days into one file.
 func (w *storeWriter) newestRecordIn(name string) int64 {
-	f, err := w.root.Open(name)
+	f, err := openStoreFileForReading(w.root, name)
 	if err != nil {
 		return 0
 	}
@@ -1609,7 +1676,7 @@ func (s *FileStore) Latest(limit int, fn func(Line) bool) error {
 // goroutine may be appending to. Splitting is cheap; it is decoding that is
 // not, which is why the caller decides how many lines to decode.
 func readRawLines(root *os.Root, name string) ([][]byte, error) {
-	f, err := root.Open(name)
+	f, err := openStoreFileForReading(root, name)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return nil, nil
@@ -1622,6 +1689,36 @@ func readRawLines(root *os.Root, name string) ([][]byte, error) {
 		return nil, err
 	}
 	return bytes.Split(raw, []byte{'\n'}), nil
+}
+
+// openStoreFileForReading opens one of the store's files to read, under the
+// same discipline the writer opens one to write: following no link, blocking on
+// nothing, and a regular file or nothing at all.
+//
+// The blocking half is the point. A named pipe left under a name the store
+// reads — summary.jsonl above all, which is a fixed name in a folder any
+// unsandboxed process running as this account can write — parks whoever opened
+// it forever. That is the store's lifecycle lock on the way in, the writer
+// goroutine at the next rotation, and a control-plane goroutine every time the
+// panel polls: an app that looks alive while its settings, its shutdown and its
+// figures are all stuck. O_NONBLOCK makes the open return, and the check on the
+// handle — not on the name, which could be swapped in between — makes it
+// refuse. A refusal wedges retention honestly; a hang says nothing at all.
+func openStoreFileForReading(root *os.Root, name string) (*os.File, error) {
+	f, err := root.OpenFile(name, os.O_RDONLY|syscall.O_NONBLOCK|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		return nil, err
+	}
+	info, err := f.Stat()
+	if err != nil {
+		f.Close()
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		f.Close()
+		return nil, fmt.Errorf("%s is not a regular file", name)
+	}
+	return f, nil
 }
 
 // parseLine turns one line into a record, reporting whether it was one.
