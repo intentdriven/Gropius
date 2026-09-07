@@ -603,7 +603,10 @@ func (s *FileStore) Clear() error {
 	root.Close()
 
 	s.statusMu.Lock()
-	s.status.Files, s.status.Bytes, s.status.Oldest = 0, 0, 0
+	// Every figure, the losses included: they described records that are no
+	// longer there, and a panel that still reported them after a Clear would
+	// be describing nothing.
+	s.status = StoreStatus{}
 	s.statusMu.Unlock()
 
 	if was {

@@ -167,6 +167,10 @@ it arrived, how many tokens it cost and how long it took: an activity
 timeline, and the shape of your prompts by size. They would not see a prompt,
 an answer, a key or an address, because none of those is ever recorded.
 
+Any of them can also press **Clear records** and remove what is kept, which
+Gropius notes in its own log without being able to say who did it — the
+control panel has no idea who is asking.
+
 So on a shared Mac this switch is a decision for everyone who uses it, not
 just for you. While it is on, the control panel says **Recording** beside the
 server status, so anyone who opens it can see that it is.

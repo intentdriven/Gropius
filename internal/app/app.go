@@ -419,6 +419,11 @@ func (a *App) effectiveSettings(c config.Config) stats.Settings {
 // recording on — a person clearing the figures is discarding what was
 // collected, not changing their mind about collecting it.
 func (a *App) ClearStats() error {
+	// Said out loud in the log. On a Mac several people log into, the control
+	// plane asks nobody for a password, so the person who cleared the records
+	// is not necessarily the person who recorded them — and a destructive
+	// action nothing anywhere notes is one nobody can ask about afterwards.
+	a.Log.Info("clearing the request statistics kept on this Mac")
 	a.Stats.Clear()
 	return a.StatsStore.Clear()
 }

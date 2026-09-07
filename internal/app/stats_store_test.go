@@ -164,6 +164,43 @@ func TestClearEmptiesTheStoreAndTheView(t *testing.T) {
 	}
 }
 
+// Clear removes the request records and nothing else. The per-model logs are
+// a different feature with their own rule about when they are emptied, and
+// they hold what a model server itself wrote — so a button about statistics
+// must not reach them.
+func TestClearLeavesThePerModelLogsAlone(t *testing.T) {
+	c := config.Default()
+	c.Statistics = true
+	a, paths := statsApp(t, c)
+	logs := map[string][]byte{
+		"org_a.log":                []byte("loading weights" + "\n"),
+		"stats-20260907-001.jsonl": []byte("a file named like a record, in the wrong directory" + "\n"),
+	}
+	for name, body := range logs {
+		if err := os.WriteFile(filepath.Join(paths.Logs, name), body, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	a.Stats.Add(stats.Record{Model: "org/a", At: 1788696030, Class: stats.ClassOK})
+	if err := a.StatsStore.Flush(); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := a.ClearStats(); err != nil {
+		t.Fatal(err)
+	}
+	for name, want := range logs {
+		got, err := os.ReadFile(filepath.Join(paths.Logs, name))
+		if err != nil {
+			t.Errorf("Clear removed %s from the log directory: %v", name, err)
+			continue
+		}
+		if string(got) != string(want) {
+			t.Errorf("%s reads %q after Clear, want %q", name, got, want)
+		}
+	}
+}
+
 // A store that cannot be created is not a reason to refuse to serve. The
 // records stay in memory and the refusal is said once.
 func TestAStoreThatCannotBeCreatedLeavesTheServerServing(t *testing.T) {

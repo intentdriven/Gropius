@@ -234,7 +234,10 @@ func (c *Control) handleStats(w http.ResponseWriter, r *http.Request) {
 // directory, and only on the file names the store itself writes.
 func (c *Control) handleClearStats(w http.ResponseWriter, r *http.Request) {
 	if err := c.App.ClearStats(); err != nil {
-		writeError(w, http.StatusInternalServerError, "the records could not be cleared: "+err.Error())
+		// The reason is logged, not returned: these errors name the store's
+		// directory, and the control plane answers every account on this Mac.
+		c.App.Log.Warn("the request statistics could not be cleared", "err", err)
+		writeError(w, http.StatusInternalServerError, "the records could not be cleared")
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"status": "cleared"})

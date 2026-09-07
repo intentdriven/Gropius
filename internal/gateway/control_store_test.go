@@ -1,6 +1,8 @@
 package gateway
 
 import (
+	"bytes"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -231,5 +233,30 @@ func TestNothingFromTheRequestReachesTheStore(t *testing.T) {
 				t.Errorf("%s carries %q", e.Name(), secret)
 			}
 		}
+	}
+}
+
+// Clearing is destructive and anonymous — the control plane asks nobody who
+// they are — so it leaves a line in the log saying it happened.
+func TestClearingTheRecordsIsNoted(t *testing.T) {
+	var logged bytes.Buffer
+	paths := config.NewPaths(t.TempDir())
+	cfg := config.Default()
+	cfg.Statistics = true
+	a, err := app.New(app.Options{Paths: paths, Config: cfg,
+		Log: slog.New(slog.NewTextHandler(&logged, nil))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { a.Close() })
+	ctrl := &Control{App: a}
+	mux := http.NewServeMux()
+	ctrl.Routes(mux)
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	postJSON(t, srv, "/api/stats/clear", `{}`).Body.Close()
+	if !strings.Contains(logged.String(), "clearing the request statistics") {
+		t.Errorf("clearing the records left no line in the log:\n%s", logged.String())
 	}
 }
