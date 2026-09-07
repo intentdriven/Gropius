@@ -120,7 +120,8 @@ tolerate, in which case grace only delays the same swaps.
 
 ## Audit Notes
 
-_Empty. Populated by intent-auditor when intent moves to shipped/._
+<!-- abcd-review: OWED receipt=rcp-5c77e5d702ce -->
+Fidelity review OWED (receipt rcp-5c77e5d702ce).
 
 ## Grounds
 

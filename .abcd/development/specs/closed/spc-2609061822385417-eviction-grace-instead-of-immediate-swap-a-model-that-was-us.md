@@ -207,3 +207,70 @@ and never sees the headers.
 - Whether `X-Gropius-State` carries a third value for a request served without
   loading at all. Two values satisfy the criteria.
 - Whether the control panel renders `Pool.Waiting()`. Presentation only.
+
+## As built (2026-09-07)
+
+Appended on closing, so a reader reconciling this record against the tree does
+not find the differences unexplained. Nothing above this section is edited.
+
+- **Zero means the default for the two intervals.** The Scope names three
+  settings; as built, `EvictionGraceSec` and `EvictionMaxWaitSec` treat zero as
+  "the default" rather than as a figure `Validate` refuses. The panel's number
+  field posts `parseInt(...) || 0`, so a strict rule would have refused the
+  whole settings save — the API key with it — over an interval the operator was
+  clearing. `Config.GraceSeconds` and `Config.MaxWaitSeconds` resolve it, and
+  everything that acts on the figures reads them there.
+- **The grace-versus-idle refusal lives in `config.Validate`**, not in
+  `App.SetConfig` as the Approach says. `Load` sanitises before it validates and
+  `sanitizeGrace` clamps the grace to the idle timeout, so a config file is
+  never made unloadable by the rule — the Approach's only reason for keeping it
+  out of `Validate`. It applies only while the switch is on.
+- **`Upstream.Waited` was not added.** The wait is carried on the existing
+  `Upstream.Waits.QueueWait`: the statistics recorder already has
+  `queue_wait_ms` and `load_wait_ms`, and a wait for room is a queue wait by
+  that schema's own definition — the machine was busy, nothing was loading. The
+  refusal path, which has no `Upstream`, carries it on `NoRoomError.Waited`.
+- **The two headers are defined against every wait**, not only the grace wait.
+  `X-Gropius-Queue-Time` is `LoadWait + QueueWait` in whole milliseconds and
+  `X-Gropius-State` is `waited` exactly when that is non-zero. Defining them on
+  the grace wait alone would have reported a cold start as `warm`. The open
+  point about a third value is therefore settled as no: two values and one
+  number that agree by construction.
+- **`Pool.SetEvictionGrace` and `Pool.EvictionGrace()`**, not the Approach's
+  unnamed setter. Off is a grace of zero rather than a flag of its own, so the
+  load path has one question to answer; switching it off wakes every parked
+  request.
+- **`Pool.AcquireNow`** is the "no-grace option" the Approach names for
+  start-up loaders, and it waives the grace as well as the wait — waiving only
+  the wait left a preload refused by the grace alone, with the model cold for
+  nothing.
+- **`evictForLocked` is plan-then-execute under grace and incremental with
+  grace off.** The Approach does not say how the pre-check and the eviction
+  compose; as built, a request about to join the queue evicts nothing, while
+  with grace off the victim set and its order — including the case where
+  eviction cannot free enough and everything evictable goes before the refusal —
+  are exactly what they were.
+- **Strict first-in, first-out.** Only the head waiter may take a victim, and
+  the rule binds a request that has not queued at all, or a new arrival would
+  step over everyone waiting. The cost is head-of-line blocking, bounded by the
+  maximum wait.
+- **`MaxLoadWaiters` defaults to 8** — the open design point. Eight waiters
+  times the gateway's 32 MiB body limit is 256 MiB an unadmitted client can pin,
+  and the field's comment carries that arithmetic.
+- **The control panel renders `Pool.Waiting()`** — the other open design point,
+  settled as yes. It reaches the panel as `State.Waiting` and a line on **My
+  Models**: a waiting request holds no model, so it appears on no card, and a
+  Mac with nothing loading looks identical to one with four clients queued.
+- **The docs list differs.** `docs/getting-started.md` gains a subsection under
+  section 4 rather than section 6 (loading models is the subject there, not
+  hardening); the two headers get their own reference page,
+  `docs/response-headers.md`, rather than a paragraph in a how-to; and a new
+  how-to, `docs/eviction-grace.md`, carries the operator-facing rules.
+  `docs/models-list.md` gains the pointer the record asks for and has its
+  eviction bullet corrected, since it ended in "refused … rather than waiting",
+  which grace makes conditional.
+- **`entry.lastFinished` is kept although it does not yet differ from
+  `lastUsed`** for an idle entry — `release` stamps both. Its comment says so:
+  the two coincide only while the candidate filter skips every entry with a
+  request in flight, so a grace read from `lastUsed` would be correct by that
+  filter's leave rather than by its own rule.
