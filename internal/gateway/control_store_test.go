@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"bytes"
+	"encoding/json"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -9,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/intentdriven/Gropius/internal/app"
 	"github.com/intentdriven/Gropius/internal/config"
@@ -299,5 +301,141 @@ func TestClearWorksWhileRecordingIsOff(t *testing.T) {
 	}
 	if _, err := os.Stat(paths.Stats); err != nil {
 		t.Errorf("the store directory went with the records: %v", err)
+	}
+}
+
+// The same scan, of the summary rather than of the records. The summary
+// outlives the detail it is folded from by years, so it is the file that would
+// carry a leak furthest — and it is written by a different path from the one
+// the records take.
+func TestNothingFromTheRequestReachesTheSummary(t *testing.T) {
+	const (
+		sentinel = "SENTINEL-PROMPT-9d41ae"
+		token    = "bh_secrettokenvalue4567"
+		lanAddr  = "192.0.2.51:51999"
+	)
+
+	const modelPath = "/models/" + testModelID
+	fake := mlxtest.Start(mlxtest.Options{ModelArg: modelPath, Reply: "GROPIUS OK"})
+	t.Cleanup(fake.Close)
+	models := &stubModels{models: []registry.Model{{RepoID: testModelID, Path: modelPath, State: registry.StateReady}}}
+
+	dir := filepath.Join(t.TempDir(), "stats")
+	// A cap the first handful of records passes, so the drop that writes the
+	// summary happens inside this test rather than in a year's time.
+	store := stats.NewStore(dir, stats.StoreOptions{MaxBytes: 4 << 10, RotateBytes: 1 << 10})
+	t.Cleanup(func() { store.Close() })
+	if err := store.SetEnabled(true); err != nil {
+		t.Fatal(err)
+	}
+	rec := stats.New(stats.Options{Store: store})
+	rec.SetEnabled(true)
+
+	cfg := config.Default()
+	cfg.Statistics = true
+	cfg.APIKey = token
+	g := New(Options{Config: cfg, Pool: &stubPool{srv: fake}, Models: models, Stats: rec})
+
+	for range 40 {
+		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+			strings.NewReader(`{"model":"`+testModelID+`","stream":true,"messages":[{"role":"user","content":"`+sentinel+`"}]}`))
+		req.RemoteAddr = lanAddr
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+token)
+		w := httptest.NewRecorder()
+		g.Handler().ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200: %s", w.Code, w.Body.String())
+		}
+	}
+	rec.LoadFinished(testModelID, 0, nil)
+	rec.Removed(testModelID, stats.ReasonEvicted)
+	if err := store.Flush(); err != nil {
+		t.Fatal(err)
+	}
+
+	summary := filepath.Join(dir, "summary.jsonl")
+	raw, err := os.ReadFile(summary)
+	if err != nil {
+		t.Fatalf("no summary was written, so this scan proves nothing: %v", err)
+	}
+	if len(raw) == 0 {
+		t.Fatal("the summary is empty, so this scan proves nothing")
+	}
+	if !strings.Contains(string(raw), testModelID) {
+		t.Fatalf("the summary does not name the model whose requests it counts, so this scan proves nothing:\n%s", raw)
+	}
+	for _, secret := range []string{sentinel, token, "192.0.2.51", "GROPIUS OK"} {
+		if strings.Contains(string(raw), secret) {
+			t.Errorf("the summary carries %q", secret)
+		}
+	}
+	// And the closed field set, so a field added without a word about it fails
+	// here rather than shipping.
+	allowed := map[string]bool{"v": true, "kind": true}
+	for _, f := range stats.StoreFields() {
+		allowed[f] = true
+	}
+	for _, line := range strings.Split(strings.TrimSpace(string(raw)), "\n") {
+		var obj map[string]json.RawMessage
+		if err := json.Unmarshal([]byte(line), &obj); err != nil {
+			t.Fatalf("a summary line is not one JSON object: %q", line)
+		}
+		for k := range obj {
+			if !allowed[k] {
+				t.Errorf("the summary carries %q, which is no field the store documents", k)
+			}
+		}
+	}
+}
+
+// The endpoint the Statistics tab reads carries the days whose detail the
+// store no longer holds, or nothing a person can see would say a period's
+// records are gone rather than that nothing happened in it.
+func TestTheStatisticsEndpointCarriesTheDaysWhoseDetailIsGone(t *testing.T) {
+	a, srv, _ := recordingServer(t)
+	// Two years back, against a one-month horizon: the file goes, and the fold
+	// keeps its totals.
+	old := time.Now().AddDate(-2, 0, 0).Unix()
+	for range 3 {
+		a.Stats.Add(stats.Record{
+			Model: testModelID, At: old, Class: stats.ClassOK,
+			PromptTokens: 10, CompletionTokens: 20, FirstTokenMS: 30, DurationMS: 100,
+		})
+	}
+	if err := a.StatsStore.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	a.StatsStore.SetRetention(1, 200<<20)
+	if err := a.StatsStore.Flush(); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := http.Get(srv.URL + "/api/stats")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", res.StatusCode)
+	}
+	var view struct {
+		Summaries []stats.SummaryDay `json:"summaries"`
+	}
+	if err := json.NewDecoder(res.Body).Decode(&view); err != nil {
+		t.Fatal(err)
+	}
+	if len(view.Summaries) != 1 {
+		t.Fatalf("the endpoint carries %d summarized days, want the one the horizon dropped", len(view.Summaries))
+	}
+	got := view.Summaries[0]
+	if _, err := time.Parse(time.DateOnly, got.Day); err != nil {
+		t.Errorf("the summarized day came back as %q, which is no date: %v", got.Day, err)
+	}
+	if got.Requests != 3 || got.CompletionTokens != 60 {
+		t.Errorf("the day came back as %d requests and %d tokens out, want 3 and 60", got.Requests, got.CompletionTokens)
+	}
+	if got.DetailHeld {
+		t.Error("a day the store holds no records from is reported as one whose detail is still held")
 	}
 }

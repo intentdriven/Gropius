@@ -230,6 +230,11 @@ type View struct {
 	// describe. It is filled in by whoever holds the store; the recorder
 	// itself neither has one nor knows what is in it.
 	Store *StoreStatus `json:"store,omitempty"`
+	// Summaries are the days whose detailed records have been dropped, newest
+	// first. They are what is left of a period the store no longer holds, and
+	// they are filled in from the store for the same reason Store is: the
+	// recorder has no disk of its own.
+	Summaries []SummaryDay `json:"summaries,omitempty"`
 }
 
 // Options configures a Recorder.

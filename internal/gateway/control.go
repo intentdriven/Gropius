@@ -282,6 +282,30 @@ func (c *Control) handleStats(w http.ResponseWriter, r *http.Request) {
 	if view.Enabled {
 		status := c.App.StatsStore.Status()
 		view.Store = &status
+		// And what is left of the days the store no longer holds in detail. A
+		// month whose records retention has dropped still has its per-model
+		// totals, and the view says so rather than showing a gap where the
+		// traffic was (itd-2609061602043757).
+		// The request's own context, so a reader who closes the panel part-way
+		// through stops being paid for, exactly as the history endpoint does.
+		if _, err := c.App.StatsStore.Summaries(r.Context(),
+			stats.SummaryOptions{Days: maxSummaryDays}, func(d stats.SummaryDay) bool {
+				view.Summaries = append(view.Summaries, d)
+				return true
+			}); err != nil {
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				// The reader went away. There is no socket left to answer, and
+				// logging it at Warn would let anyone who can open this
+				// endpoint write an unbounded run of failure lines into the
+				// operator's log.
+				c.App.Log.Debug("a reading of the request statistics summary was abandoned", "err", err)
+				return
+			}
+			// Logged, not returned: the live figures are worth showing even
+			// when the summary cannot be read, and the reason names the store's
+			// directory, which the control plane must not publish.
+			c.App.Log.Warn("the request statistics summary could not be read", "err", err)
+		}
 	}
 	writeJSON(w, http.StatusOK, view)
 }
@@ -444,6 +468,15 @@ func historyRange(from, to, now time.Time) (time.Time, time.Time, bool) {
 	}
 	return from, to, true
 }
+
+// maxSummaryDays bounds what one answer carries, in days rather than in lines.
+// A day is one line per model that served on it, so a bound on lines would hand
+// a Mac running ten models a tenth of the span it handed a Mac running one. The
+// figure is past what the summary's own share of the default size limit holds
+// — three years of days for ten models, and more for fewer — so on a store
+// Gropius wrote this cuts nothing off; it is here so that a summary grown by a
+// build with a larger limit cannot make this answer unbounded.
+const maxSummaryDays = 1500
 
 // handleClearStats throws away everything recording has produced: the files
 // and the live view both. It is the only thing that removes a record —

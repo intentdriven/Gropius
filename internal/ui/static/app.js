@@ -860,6 +860,13 @@ function renderStatsStore() {
     parts.push('No records kept yet');
   }
   parts.push(`${(store.bytes / (1024 * 1024)).toFixed(1)} MB in ${store.files} file${store.files === 1 ? '' : 's'}`);
+  if (store.retention_wedged) {
+    parts.push('what is being dropped cannot be summarised first — the records are kept while there is ' +
+      'room for them, and once there is not the oldest go without a summary (its own log says why)');
+  }
+  if (store.unsummarized) {
+    parts.push(`${store.unsummarized} removed without a summary`);
+  }
   if (store.dropped) {
     parts.push(`${store.dropped} not written — the disk could not keep up`);
   }
@@ -989,6 +996,39 @@ function renderStats(view) {
       <td class="figure${bad}">${c.rate}</td>
       <td class="figure${bad}">${c.waited}</td>
       <td class="figure${bad}">${c.total}</td>
+    </tr>`;
+  }).join('');
+
+  renderStatsSummary(view.summaries || []);
+}
+
+// renderStatsSummary shows what is left of the days the store no longer holds
+// in detail. The table above it reaches back only as far as retention allowed;
+// without this, a month whose records have been dropped looks like a month with
+// no traffic in it.
+function renderStatsSummary(days) {
+  const block = $('statsSummaryBlock');
+  block.hidden = days.length === 0;
+  if (!days.length) return;
+  const gone = days.filter((d) => !d.detail_held).length;
+  $('statsSummaryNote').textContent = gone
+    ? `The detailed records for ${gone === days.length ? 'these days' : `${gone} of these days`} are no longer held — ` +
+      'these totals are all that is kept of them. Days marked "partly kept" have some records left in the table above, ' +
+      'and these totals cover only the part that was dropped.'
+    : 'These totals cover the records already dropped for these days; the rest are still in the table above.';
+  $('statsSummaryRows').innerHTML = days.map((d) => {
+    const first = d.first_token_requests
+      ? millis(Math.round(d.first_token_ms_total / d.first_token_requests))
+      : '—';
+    const total = d.requests ? millis(Math.round(d.duration_ms_total / d.requests)) : '—';
+    return `<tr>
+      <td>${escapeHtml(d.day || '—')}</td>
+      <td>${escapeHtml(d.model || '—')}</td>
+      <td class="figure">${d.requests}</td>
+      <td class="figure">${d.prompt_tokens} / ${d.completion_tokens}</td>
+      <td class="figure">${first}</td>
+      <td class="figure">${total}</td>
+      <td>${d.detail_held ? 'partly kept' : 'gone'}</td>
     </tr>`;
   }).join('');
 }

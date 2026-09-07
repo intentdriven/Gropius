@@ -53,6 +53,20 @@ func read(t *testing.T, s *FileStore, limit int) []Line {
 	return out
 }
 
+// recordFiles is the store's own record files, which is what a test about
+// retention means by what the store holds: the summary of what has already
+// been dropped outlives them by design.
+func recordFiles(t *testing.T, dir string) []string {
+	t.Helper()
+	var out []string
+	for _, name := range names(t, dir) {
+		if storeFilePattern.MatchString(name) {
+			out = append(out, name)
+		}
+	}
+	return out
+}
+
 func names(t *testing.T, dir string) []string {
 	t.Helper()
 	ents, err := os.ReadDir(dir)
@@ -303,7 +317,7 @@ func TestFilesOlderThanTheHorizonArePruned(t *testing.T) {
 	if err := s.Flush(); err != nil {
 		t.Fatal(err)
 	}
-	kept := names(t, dir)
+	kept := recordFiles(t, dir)
 	if len(kept) == 0 {
 		t.Fatal("the store holds no files")
 	}
@@ -1000,11 +1014,11 @@ func TestTheHorizonIsAppliedWithoutAnyRotation(t *testing.T) {
 		if err := s.SetEnabled(false); err != nil {
 			t.Fatal(err)
 		}
-		if len(names(t, dir)) == 0 {
+		if len(recordFiles(t, dir)) == 0 {
 			t.Fatal("nothing was written, so this test proves nothing")
 		}
 		on(t, s)
-		if got := names(t, dir); len(got) != 0 {
+		if got := recordFiles(t, dir); len(got) != 0 {
 			t.Errorf("a record two years past a one-month horizon is still held: %v", got)
 		}
 		if got := s.Status().Oldest; got != 0 {
@@ -1021,16 +1035,16 @@ func TestTheHorizonIsAppliedWithoutAnyRotation(t *testing.T) {
 		if err := s.Flush(); err != nil {
 			t.Fatal(err)
 		}
-		if len(names(t, dir)) == 0 {
+		if len(recordFiles(t, dir)) == 0 {
 			t.Fatal("nothing was written, so this test proves nothing")
 		}
 		deadline := time.Now().Add(5 * time.Second)
 		for {
-			if len(names(t, dir)) == 0 {
+			if len(recordFiles(t, dir)) == 0 {
 				return
 			}
 			if time.Now().After(deadline) {
-				t.Fatalf("a record two years past a one-month horizon is still held: %v", names(t, dir))
+				t.Fatalf("a record two years past a one-month horizon is still held: %v", recordFiles(t, dir))
 			}
 			time.Sleep(5 * time.Millisecond)
 		}
