@@ -833,3 +833,92 @@ func TestACancelledWaiterDoesNotEvictOnItsWayOut(t *testing.T) {
 		t.Errorf("launched %v; a request that had hung up started a model server", got)
 	}
 }
+
+// A caller that will not wait is not held behind the queue either. The
+// fairness rule is about who gets to wait for room; a start-up preload has
+// already been told it may take what it needs, and refusing it because
+// somebody else is queued would leave the model cold for the rest of the
+// session — the failure the no-wait path exists to prevent, reached by the
+// other door.
+func TestAcquireNowIsNotHeldBehindTheQueue(t *testing.T) {
+	l := newFakeLauncher()
+	p := newTestPool(t, l, fairnessModels(), PoolOptions{
+		MaxResidentBytes: fairnessBudget,
+		EvictionGrace:    30 * time.Second,
+		MaxEvictionWait:  20 * time.Second,
+	})
+
+	// One small model resident and protected, leaving room for another small
+	// one but not for the big one.
+	warm(t, p, "org/s1")
+
+	head, cancelHead := context.WithCancel(context.Background())
+	defer cancelHead()
+	go func() {
+		if _, rel, err := p.Acquire(head, "org/big"); err == nil {
+			rel()
+		}
+	}()
+	waitUntil(t, 2*time.Second, func() bool { return p.Waiting() == 1 },
+		"the big model's request never joined the queue")
+
+	start := time.Now()
+	_, release, err := p.AcquireNow(context.Background(), "org/s2")
+	if err != nil {
+		t.Fatalf("AcquireNow(org/s2) while another request was queued: %v", err)
+	}
+	defer release()
+	if took := time.Since(start); took > time.Second {
+		t.Errorf("AcquireNow took %s; it does not queue", took)
+	}
+	if ids := residentIDs(p); !slices.Contains(ids, "org/s2") {
+		t.Errorf("resident = %v, want the model AcquireNow asked for", ids)
+	}
+}
+
+// Every wake-up wakes every waiter, and startLocked resolves the model and
+// stats two files before it reaches the eviction plan. Done on each wake-up
+// that is a parked request, that is filesystem work under the pool's one lock
+// — the lock every Acquire, Resident, Unload and control-panel snapshot takes
+// — at whatever rate the machine completes requests. A waiter asks only when
+// it could actually proceed.
+func TestAParkedWaiterDoesNoFilesystemWorkOnEveryCompletedRequest(t *testing.T) {
+	l := newFakeLauncher()
+	p := newTestPool(t, l, fairnessModels(), PoolOptions{
+		MaxResidentBytes: fairnessBudget,
+		EvictionGrace:    30 * time.Second,
+		MaxEvictionWait:  20 * time.Second,
+	})
+
+	// Resident and protected, so the waiter for the big model can never make
+	// a plan while this test runs.
+	warm(t, p, "org/s1")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		if _, rel, err := p.Acquire(ctx, "org/big"); err == nil {
+			rel()
+		}
+	}()
+	waitUntil(t, 2*time.Second, func() bool { return p.Waiting() == 1 },
+		"the request never joined the queue")
+
+	before := l.precheckCount()
+	for range 20 {
+		_, release, err := p.Acquire(context.Background(), "org/s1")
+		if err != nil {
+			t.Fatalf("Acquire(org/s1): %v", err)
+		}
+		release()
+		// Spaced, so each release is its own wake-up: the signal channel holds
+		// one, so a burst would be collapsed into a single wake and the cost
+		// this measures would be hidden.
+		time.Sleep(5 * time.Millisecond)
+	}
+	time.Sleep(200 * time.Millisecond) // let the last wake-up be acted on
+	if got := l.precheckCount() - before; got != 0 {
+		t.Errorf("20 requests to a resident model cost %d launch prechecks on the "+
+			"parked waiter's behalf, want none: it could not have proceeded", got)
+	}
+}

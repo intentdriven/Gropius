@@ -133,9 +133,12 @@ type PoolOptions struct {
 	// It is deliberately not MaxQueueDepth. That queue drains at decoding
 	// speed; this one drains only when a model is evicted, which is seconds to
 	// tens of seconds, and every waiter is a goroutine holding its whole
-	// request body in memory meanwhile — up to the gateway's 32 MiB limit
-	// each. Eight of those is 256 MiB a client can pin without being admitted
-	// to anything, which is the arithmetic the default is chosen against.
+	// request body in memory meanwhile — twice over, in fact: the gateway
+	// holds the bytes it read, up to its 32 MiB limit, and the decoded value
+	// copies rather than aliases them. Call it 64 MiB a waiter, so eight of
+	// them is about half a gigabyte a client can pin without being admitted to
+	// anything, none of it charged against the memory budget, which counts
+	// model weights. That is the arithmetic the default is chosen against.
 	// Zero uses that default.
 	MaxLoadWaiters int
 	// ReadyTimeout bounds how long we wait for a model to load. Large models on
@@ -237,11 +240,17 @@ type entry struct {
 type loadWaiter struct {
 	arrived time.Time
 	// need is what this load asked for, remembered from the attempt that
-	// failed. A waiter that is not at the head of the queue is judged on it —
-	// can this still ever fit, is it still inside its maximum — rather than by
-	// asking the registry and stat-ing the launcher's files again. Every
-	// wake-up wakes every waiter, so without it each release would do
-	// filesystem work under p.mu once per parked request.
+	// failed. A parked waiter is judged on it — can this still ever fit, does
+	// a plan for it succeed yet — rather than by asking the registry and
+	// stat-ing the launcher's files again. Every wake-up wakes every waiter,
+	// so without it each completed request would do filesystem work under p.mu
+	// once per parked request.
+	//
+	// It can go stale: the model can be downloaded again at a different size
+	// while its request waits. That decides only whether this waiter is woken
+	// early or left parked a little longer, never what is admitted — the load
+	// itself resolves the model again, so a model that grew is measured at
+	// what it grew to.
 	need int64
 	// signal is buffered so that waking a waiter never blocks the goroutine
 	// holding p.mu, and so that a wake-up arriving between two checks is not
@@ -541,19 +550,21 @@ func (p *Pool) acquire(ctx context.Context, repoID string, mayWait bool) (*Upstr
 			break
 		}
 
+		// A caller that will not wait honours neither the grace nor the queue.
+		// There is no point protecting a model from a load that is going to
+		// take it anyway, and holding a start-up preload behind somebody
+		// else's wait would leave the model cold for the rest of the session —
+		// which is what the no-wait path exists to prevent.
+		age := p.waitedBy(w)
+		mayEvict := p.mayEvictLocked(w)
+		if !mayWait {
+			age, mayEvict = p.grace, true
+		}
+
 		var err error
-		if w == nil || p.mayEvictLocked(w) {
-			// A caller that will not wait does not honour the grace either:
-			// there is no point protecting a model from a load that is going
-			// to take it anyway, and reporting no room to a start-up preload
-			// that the grace alone was refusing would leave the model cold for
-			// nothing.
-			age := p.waitedBy(w)
-			if !mayWait {
-				age = p.grace
-			}
+		if p.worthTryingLocked(w, age, mayEvict) {
 			var started *entry
-			started, err = p.startLocked(repoID, age, p.mayEvictLocked(w))
+			started, err = p.startLocked(repoID, age, mayEvict)
 			if err == nil {
 				e = started
 				// Somebody may have been queued for this very model; it has an
@@ -562,11 +573,11 @@ func (p *Pool) acquire(ctx context.Context, repoID string, mayWait bool) (*Upstr
 				break
 			}
 		} else {
-			// Not this waiter's turn, and asking again would resolve the model
-			// and stat the launcher's files under p.mu — on every wake-up, for
-			// every parked request. What is still worth re-checking (can this
-			// ever fit now, is it still inside its maximum) needs only what the
-			// waiter already carries.
+			// Nothing has changed that this waiter could act on, and asking
+			// again would resolve the model and stat the launcher's files
+			// under p.mu — on every wake-up, for every parked request. What is
+			// still worth re-checking (can this ever fit now, is it still
+			// inside its maximum) needs only what the waiter already carries.
 			err = p.noRoomLocked(w.need)
 		}
 		if !p.willWaitLocked(mayWait, w, err) {
@@ -1035,6 +1046,26 @@ func (p *Pool) willWaitLocked(mayWait bool, w *loadWaiter, err error) bool {
 		return len(p.waiters) < p.opts.MaxLoadWaiters
 	}
 	return time.Since(w.arrived) < p.maxWait
+}
+
+// worthTryingLocked reports whether this caller should ask the registry and
+// the launcher for a load. Callers must hold p.mu.
+//
+// A caller that has not queued always asks: it has no remembered need to
+// judge itself by, and one attempt is what it takes to learn one. A waiter
+// asks only when it could actually proceed, because every wake-up wakes every
+// waiter and startLocked resolves the model and stats two files before it
+// reaches the eviction plan — filesystem work under the pool's one lock, at
+// whatever rate the machine completes requests.
+func (p *Pool) worthTryingLocked(w *loadWaiter, age time.Duration, mayEvict bool) bool {
+	if w == nil {
+		return true
+	}
+	if !mayEvict {
+		return false
+	}
+	_, enough := p.evictionPlanLocked(w.need, age)
+	return enough
 }
 
 // canEverFitLocked reports whether evicting every model that is not pinned

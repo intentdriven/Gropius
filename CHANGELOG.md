@@ -24,9 +24,11 @@ GitHub release notes.
   resident model has been idle for that interval, or as soon as its own wait has
   passed it and a model is between requests — which is what stops a trickle of
   short requests to one model denying another client indefinitely. Waiting
-  requests are served oldest first. Raising the memory budget, or removing a
-  pin, wakes them at once rather than leaving them to wait for something to
-  finish. A request that could never fit, one that arrives when the short queue
+  requests are served oldest first, and once anything is waiting, every request
+  for a model that is not already in memory joins the queue behind it —
+  including one there is room for, since free memory belongs to whoever has
+  waited longest. Raising the memory budget, or removing a pin, wakes them at
+  once rather than leaving them to wait for something to finish. A request that could never fit, one that arrives when the short queue
   is already full, and the models loaded at start-up by Preload never wait at
   all. If nothing frees up within the maximum wait, the request gets the same
   refusal it would have had immediately, now saying how long it waited. The

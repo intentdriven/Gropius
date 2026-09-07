@@ -67,8 +67,9 @@ type fakeLauncher struct {
 	// real model server does when the weights are corrupt.
 	dieAfter map[string]bool
 
-	mu       sync.Mutex
-	launched []string
+	mu        sync.Mutex
+	prechecks int
+	launched  []string
 	// specs records the last Spec each model was launched with, so a test can
 	// see what the process would have been given on its command line.
 	specs map[string]Spec
@@ -89,6 +90,7 @@ func newFakeLauncher() *fakeLauncher {
 func (l *fakeLauncher) Precheck(spec Spec) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	l.prechecks++
 	if l.failPrecheckFor == spec.RepoID {
 		return errors.New("simulated precheck failure")
 	}
@@ -132,6 +134,16 @@ func (l *fakeLauncher) Launch(ctx context.Context, spec Spec) (Process, error) {
 		}()
 	}
 	return p, nil
+}
+
+// precheckCount is how many times the pool has asked whether a model could be
+// launched. The real Precheck stats the venv interpreter and the model
+// directory, and the pool asks under its one lock, so this counts filesystem
+// work on a path every other caller of the pool waits behind.
+func (l *fakeLauncher) precheckCount() int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.prechecks
 }
 
 func (l *fakeLauncher) launchCount() int {

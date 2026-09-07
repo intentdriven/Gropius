@@ -10,8 +10,8 @@ Eviction grace protects a model for a short while after it finishes work. A
 request that needs that model's memory waits for it rather than taking it, and
 the answer says that it waited.
 
-Off unless you turn it on. Leave it off and requests are served exactly as they
-always have been.
+Off unless you turn it on. Leave it off and a request for a model that does not
+fit unloads a model at once, exactly as it always has.
 
 ## Switch it on
 
@@ -32,7 +32,13 @@ waiting.
 
 ## What a waiting request waits for
 
-A request for a model that does not fit is served as soon as either happens:
+Once anything is waiting, every request for a model that is not already in
+memory joins the queue behind it — including one there is room for. Free memory
+belongs to the request that has waited longest, or a stream of small requests
+would take it as it appears while a request needing more than any one unload
+frees never fits.
+
+A waiting request is served as soon as either happens:
 
 - a resident, unpinned model has been idle for the protection interval, or
 - the request has itself waited that long and a resident model is between
@@ -61,7 +67,8 @@ Three things end a wait early:
   away too. The queue is deliberately short: it drains only when a model is
   unloaded, and every waiting request holds its whole body in memory meanwhile.
 - Models loaded at start-up by **Preload**, which load one after another and
-  would otherwise wait for each other.
+  would otherwise wait for each other. They are not held behind the queue
+  either.
 - A model you load yourself from the control panel does wait. You asked for it,
   and you can unload something to force the swap.
 
@@ -96,11 +103,17 @@ nothing changes.
 
 A waiting request holds its connection open, so the maximum wait is also how
 long a client can occupy one. The queue's own length is the second bound, and
-it is short for that reason. The case that reaches the maximum most easily is
-not a protected model but a busy one: a model with a request still running is
-never an eviction candidate at all, so one long generation turns every request
-for another model into a wait rather than an instant refusal, for as long as it
-runs.
+it is short for that reason.
+
+The case that reaches the maximum most easily is not a protected model but a
+busy one. A model with a request still running is never an eviction candidate
+at all, so one long generation turns every request for another model into a
+wait rather than an instant refusal, for as long as it runs — and because the
+queue is one queue for the whole machine, a request stuck at its head holds up
+every load behind it, from every client, until its own maximum runs out.
+Requests for models already in memory are unaffected throughout. On a Mac whose
+endpoint is open to the network, that is worth weighing against a shorter
+maximum wait.
 
 Keep the maximum wait at least as long as the protection. A maximum shorter
 than the protection is accepted, but it means a request can only ever be served
