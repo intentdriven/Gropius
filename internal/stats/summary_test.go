@@ -1320,3 +1320,88 @@ func TestAPassThatChangedNothingDoesNotRewriteTheSummary(t *testing.T) {
 		t.Errorf("the summary was rewritten by a pass that folded nothing: %s became %s", was.ModTime(), now.ModTime())
 	}
 }
+
+// The bound on a read is days, not lines. A day is one line per model that
+// served on it, so a bound on lines hands a Mac running ten models a tenth of
+// the span it hands a Mac running one — and neither of them any sign that the
+// list was cut short.
+func TestTheBoundOnSummariesIsDaysNotLines(t *testing.T) {
+	clock := &testClock{}
+	clock.set(day(2026, time.January, 10, 9))
+	s, _ := summarizeTestStore(t, clock, StoreOptions{Months: 1})
+	on(t, s)
+	models := []string{"org/a", "org/b", "org/c", "org/d", "org/e"}
+	for d := range 20 {
+		for _, m := range models {
+			if err := s.AppendRequest(request(day(2025, time.January, 1+d, 9), m)); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if err := s.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	s.SetRetention(2, 1<<20)
+	s.SetRetention(1, 1<<20)
+	if err := s.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	if got := len(summaries(t, s)); got != 20*len(models) {
+		t.Fatalf("the summary holds %d lines, want one for each of %d models on each of 20 days", got, len(models))
+	}
+
+	var got []SummaryDay
+	if err := s.Summaries(3, func(d SummaryDay) bool { got = append(got, d); return true }); err != nil {
+		t.Fatal(err)
+	}
+	seen := map[string]int{}
+	for _, d := range got {
+		seen[d.Day]++
+	}
+	if len(seen) != 3 {
+		t.Errorf("a bound of three gave %d days (%d lines); the bound is days: %v", len(seen), len(got), days(got))
+	}
+	if len(got) != 3*len(models) {
+		t.Errorf("a bound of three days gave %d lines, want every model on each of them", len(got))
+	}
+	for _, d := range []string{"2025-01-20", "2025-01-19", "2025-01-18"} {
+		if seen[d] != len(models) {
+			t.Errorf("day %s came back %d times, want one line per model on the newest three days", d, seen[d])
+		}
+	}
+}
+
+// A day is as long as the zone made it. On the day a zone falls back it is
+// twenty-five hours, and a fixed 86,400 puts the last hour of it on the wrong
+// side of the line between "the detail for this day is gone" and "this day is
+// only partly summarized".
+func TestADaysLengthIsWhateverTheZoneMadeIt(t *testing.T) {
+	london, err := time.LoadLocation("Europe/London")
+	if err != nil {
+		t.Skipf("no zone database on this machine: %v", err)
+	}
+	// 2025-10-26 is a 25-hour day in London: the clocks go back at 02:00 BST.
+	start := time.Date(2025, time.October, 26, 0, 0, 0, 0, london)
+	sum := &Summary{At: start.Unix(), Day: "2025-10-26", Model: "org/a"}
+	// A record from the last hour of that day, which a fixed 86,400 would put
+	// in the next one.
+	lastHour := time.Date(2025, time.October, 26, 23, 30, 0, 0, london).Unix()
+	if !detailHeld(lastHour, sum, london) {
+		t.Error("a record from the last hour of a 25-hour day is treated as belonging to the next one")
+	}
+	// And the fixed length this replaces would have said the opposite: the day
+	// ran to 23:00 UTC + one hour, so 23:30 local fell past start+86,400.
+	if lastHour < start.Unix()+86400 {
+		t.Fatal("this day is not the 25-hour one, so the test proves nothing")
+	}
+	// The day after it really is the day after.
+	next := time.Date(2025, time.October, 27, 0, 30, 0, 0, london).Unix()
+	if detailHeld(next, sum, london) {
+		t.Error("a store whose oldest record is the next day is reported as still holding this one's detail")
+	}
+	// A record older than the day is older than its end too, so its detail is
+	// certainly still there.
+	if !detailHeld(start.Add(-time.Hour).Unix(), sum, london) {
+		t.Error("a store holding records from before the day is reported as holding none from it")
+	}
+}

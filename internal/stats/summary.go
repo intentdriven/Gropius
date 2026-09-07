@@ -52,17 +52,21 @@ const summaryTempPrefix = "summary-"
 const summaryTempSuffix = ".tmp"
 
 // summaryShare is the fraction of the store's size cap the summary may use: a
-// twentieth, so a decade of daily lines cannot crowd out the detail it exists
+// twentieth, which at the 200 MB default is years of daily lines — three of
+// them for ten models — without the summary crowding out the detail it exists
 // to outlive. Over that, its oldest days go first.
 const summaryShare = 20
 
-// ApproxSummaryBytes bounds one summary line, which is what the
-// documentation's arithmetic about how many days a summary holds rests on. It
-// is measured rather than guessed: the widest line this format can emit — all
-// ten outcome classes and all seven removal reasons present, a 64-character
-// repo id, and every counter run up into the millions and billions — marshals
-// to 767 bytes, which TestASummaryLineIsTheSizeTheDocumentationSays builds and
-// holds to this figure. The bound is round, so a longer repo id has room.
+// ApproxSummaryBytes is what one summary line measures at its widest, which is
+// what the documentation's arithmetic about how many days a summary holds
+// rests on. It is measured rather than guessed: the widest line this format can
+// emit — all ten outcome classes and all seven removal reasons present, a
+// 64-character repo id, and every counter run up into the millions and
+// billions — marshals to 767 bytes, which
+// TestASummaryLineIsTheSizeTheDocumentationSays builds and holds to this
+// figure. It is a figure to reason from rather than a limit the code enforces:
+// a repo id longer than 64 characters makes a longer line, and the arithmetic
+// it feeds is about how many days a summary holds, not about what is allowed.
 const ApproxSummaryBytes = 800
 
 // SummaryShareOfCap is how much of the store's size limit the summary may use:
@@ -661,7 +665,7 @@ func removeSummaryFiles(root *os.Root, match func(string) bool) error {
 // day appears here and in Latest both, the detail is what is still held and
 // the summary is what is not — the fold never subtracts, so the two are added
 // rather than reconciled.
-func (s *FileStore) Summaries(limit int, fn func(SummaryDay) bool) error {
+func (s *FileStore) Summaries(days int, fn func(SummaryDay) bool) error {
 	if s == nil {
 		return nil
 	}
@@ -695,20 +699,43 @@ func (s *FileStore) Summaries(limit int, fn func(SummaryDay) bool) error {
 		}
 	}
 	all := set.sorted()
-	given := 0
+	seen, last := 0, ""
 	for i := len(all) - 1; i >= 0; i-- {
-		d := SummaryDay{Summary: *all[i]}
-		// The day ends a day after it starts, in the zone that was in force.
-		// A day whose last second is still older than the oldest record held
-		// has nothing left of it but this line.
-		d.DetailHeld = oldest != 0 && oldest < all[i].At+86400
-		if !fn(d) {
-			return nil
+		// The bound is days, not lines. A day is one line per model that served
+		// on it, so a bound on lines would hand a Mac running ten models a
+		// tenth of the span it handed a Mac running one — and neither of them
+		// any way of telling that the list had been cut short.
+		if all[i].Day != last {
+			if days > 0 && seen >= days {
+				return nil
+			}
+			last = all[i].Day
+			seen++
 		}
-		given++
-		if limit > 0 && given >= limit {
+		d := SummaryDay{Summary: *all[i], DetailHeld: detailHeld(oldest, all[i], s.opts.loc)}
+		if !fn(d) {
 			return nil
 		}
 	}
 	return nil
+}
+
+// detailHeld reports whether the store still holds records from a summarized
+// day, which is the difference between "this day is partly summarized" and
+// "the detail for this day is gone".
+//
+// The day ends at the next local midnight, computed rather than assumed: on the
+// day a zone falls back, a day is twenty-five hours long, and a fixed 86,400
+// would put the last hour of it on the wrong side of the line.
+func detailHeld(oldest int64, s *Summary, loc *time.Location) bool {
+	if oldest == 0 {
+		return false
+	}
+	if loc == nil {
+		loc = time.Local
+	}
+	start := time.Unix(s.At, 0).In(loc)
+	y, m, d := start.Date()
+	end := time.Date(y, m, d+1, 0, 0, 0, 0, loc).Unix()
+	return oldest < end
 }

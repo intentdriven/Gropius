@@ -62,7 +62,7 @@ func TestThePanelSaysHowFarBackTheStoreReaches(t *testing.T) {
 
 // Retention that cannot run is a store quietly over the size the operator set,
 // so the panel says it out loud beside the two figures rather than leaving
-// them looking honoured.
+// them looking honored.
 func TestThePanelSaysWhenRetentionIsStuck(t *testing.T) {
 	src := readPanelSource(t)
 	if !strings.Contains(src, "retention_wedged") {
@@ -93,10 +93,15 @@ func TestThePanelShowsTheDaysWhoseDetailIsGone(t *testing.T) {
 			t.Errorf("the statistics tab has no %s", id)
 		}
 	}
+	if !strings.Contains(markup, "Earlier days") {
+		t.Error("the statistics tab does not head the summarized days with anything a reader can find")
+	}
 	src := readPanelSource(t)
-	// Every figure a summary line carries that the panel can draw with.
+	// Every figure a summary line carries that the panel can draw with. Only
+	// the names that are the summary's own: "day" and "requests" appear on the
+	// page for other reasons and would pass whatever this rendered.
 	for _, field := range []string{
-		"summaries", "detail_held", "day", "requests", "prompt_tokens",
+		"summaries", "detail_held", "prompt_tokens",
 		"completion_tokens", "first_token_ms_total", "first_token_requests",
 		"duration_ms_total",
 	} {

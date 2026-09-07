@@ -457,10 +457,15 @@ func historyRange(from, to, now time.Time) (time.Time, time.Time, bool) {
 	}
 	return from, to, true
 }
-// maxSummaryDays bounds what one answer carries. A day is one line per model,
-// so this is years of them on any Mac, and it is here so that a summary grown
-// by a build with a larger cap cannot make this answer unbounded.
-const maxSummaryDays = 1000
+
+// maxSummaryDays bounds what one answer carries, in days rather than in lines.
+// A day is one line per model that served on it, so a bound on lines would hand
+// a Mac running ten models a tenth of the span it handed a Mac running one. The
+// figure is past what the summary's own share of the default size limit holds
+// — three years of days for ten models, and more for fewer — so on a store
+// Gropius wrote this cuts nothing off; it is here so that a summary grown by a
+// build with a larger limit cannot make this answer unbounded.
+const maxSummaryDays = 1500
 
 // handleClearStats throws away everything recording has produced: the files
 // and the live view both. It is the only thing that removes a record —
