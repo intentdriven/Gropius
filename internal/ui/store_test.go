@@ -59,3 +59,43 @@ func TestThePanelSaysHowFarBackTheStoreReaches(t *testing.T) {
 		t.Error("the Clear dialog does not say the records cannot be got back")
 	}
 }
+
+// Retention that cannot run is a store quietly over the size the operator set,
+// so the panel says it out loud beside the two figures rather than leaving
+// them looking honoured.
+func TestThePanelSaysWhenRetentionIsStuck(t *testing.T) {
+	src := readPanelSource(t)
+	if !strings.Contains(src, "retention_wedged") {
+		t.Error("the panel never reads retention_wedged, so a store past its own limits looks like one within them")
+	}
+	if !strings.Contains(src, "the limits are not being applied") {
+		t.Error("the panel does not say what a stuck retention means for the figures beside it")
+	}
+}
+
+// The table of recent requests reaches back only as far as retention allowed.
+// A month whose records have been dropped must not look like a month with no
+// traffic in it: the totals that were kept are shown, and the panel says the
+// detail for those days is gone.
+func TestThePanelShowsTheDaysWhoseDetailIsGone(t *testing.T) {
+	markup := readPanelMarkup(t)
+	for _, id := range []string{`id="statsSummaryBlock"`, `id="statsSummaryRows"`, `id="statsSummaryNote"`} {
+		if !strings.Contains(markup, id) {
+			t.Errorf("the statistics tab has no %s", id)
+		}
+	}
+	src := readPanelSource(t)
+	// Every figure a summary line carries that the panel can draw with.
+	for _, field := range []string{
+		"summaries", "detail_held", "day", "requests", "prompt_tokens",
+		"completion_tokens", "first_token_ms_total", "first_token_requests",
+		"duration_ms_total",
+	} {
+		if !strings.Contains(src, field) {
+			t.Errorf("the panel never reads %q, which a summary line carries — a figure nobody can see", field)
+		}
+	}
+	if !strings.Contains(src, "no longer held") {
+		t.Error("the panel never says the detailed records for those days are no longer held")
+	}
+}
