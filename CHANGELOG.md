@@ -11,6 +11,58 @@ GitHub release notes.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-09-08
+
+### Changed
+
+- **A server that binds a LAN address now generates an API key rather than
+  running open.** The default bind reaches every machine on your network, and
+  the only thing standing between a fresh install and an open endpoint was a
+  warning nobody running headless ever reads. A key is now generated, saved and
+  printed before the server answers anything. Existing clients need that key:
+  it is in Settings, and you can change it or clear it there. If the key cannot
+  be generated or saved, the server binds loopback only rather than continuing
+  open. **A loopback-only install is unaffected.**
+
+- **Eviction grace needs an API key on a LAN-exposed server.** The queue of
+  requests waiting for memory is now shared out per key, so one client filling
+  it costs that client its own share and nobody else's. Without a key there is
+  no way to tell callers apart, so grace cannot be switched on. **A
+  loopback-only install is unaffected** and keeps the feature with no key.
+
+- **Each account gets its own copy of the MLX runtime.** Models are still
+  shared between accounts on one Mac, which is what the shared cache is for.
+  The interpreter and its packages are not: whoever installed a shared runtime
+  owned those files and could change them, and every other account ran the
+  result. The first launch on each account provisions its own runtime.
+
+### Fixed
+
+- **Installing without administrator rights works.** `/Applications` is
+  writable only by administrators, so a standard account could not install at
+  all — which is exactly the account that most often wants the chat client on a
+  shared Mac. Gropius now installs to your own Applications folder when the
+  system one is not writable, and says which it used.
+
+- **An interrupted upgrade no longer leaves you with no app.** The installer
+  removed the installed copy before writing the new one, so a copy that failed
+  part way — a full disk, a locked file — left nothing behind. The new copy is
+  staged and swapped into place.
+
+- **Large prompts are no longer cut off at ten minutes.** A model reading a
+  long prompt was mistaken for a stalled one, and the request failed with a
+  message blaming the model server. The wait now scales with the prompt: short
+  prompts are unchanged, a very long one gets around half an hour, and the
+  message says the work may still be running and that retrying makes it slower.
+  `upstream_header_timeout_sec` in Settings overrides it.
+
+- **A second copy of Gropius can no longer be impersonated.** Deciding whether
+  the process already on the port was your own Gropius relied on a token stored
+  on disk and served to any local caller. Another account on the same Mac could
+  read it, wait for your server to quit, take the port, and have your next
+  launch quietly route your prompts through theirs. Ownership is now proved by
+  a single-use challenge that stores nothing and repeats nothing.
+
 ## [0.2.1] - 2026-09-08
 
 ### Fixed
