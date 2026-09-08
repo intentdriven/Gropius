@@ -910,6 +910,18 @@ func (c Config) Validate() error {
 	if c.Host == "" {
 		return errors.New("host must not be empty")
 	}
+	// A Host that cannot be bound is refused here rather than at the listener.
+	// It used to travel two ways: cmd/gropius built "<host>:<port>" and the
+	// process exited when that would not listen, and — before it got that far —
+	// gateway.Endpoints pasted the same value into the base URL the panel, the
+	// menu bar and the clipboard hand out. A value carrying CR or LF in a base
+	// URL is a header-injection primitive in whichever client takes it, so the
+	// fence belongs where the value is first read rather than at each surface
+	// that repeats it. Load turns a refusal here into a lock-down to loopback,
+	// which is the same fail-closed path a corrupt file takes.
+	if !ValidBindHost(c.Host) {
+		return fmt.Errorf("host %q is neither an IP address (bracketed, as \"[::1]\", for IPv6) nor a host name", c.Host)
+	}
 	if c.DecodeConcurrency < 1 {
 		return fmt.Errorf("decode_concurrency must be >= 1, got %d", c.DecodeConcurrency)
 	}
@@ -945,6 +957,106 @@ func (c Config) Validate() error {
 	// that parameter. Load sanitizes before it validates, so this strictness
 	// only ever refuses a save, never a start-up.
 	return c.validateSampling()
+}
+
+// ValidBindHost reports whether a value is something cmd/gropius can bind.
+//
+// It is deliberately as wide as the listener and no wider. The address is
+// built as "<host>:<port>", which means an IPv6 literal binds only when the
+// configuration carries it bracketed — "[::1]:11535" listens, "::1:11535" does
+// not — so both spellings are legal here or a working install stops starting.
+// A zone ("[fe80::1%en0]") binds too, and is legal for the same reason, even
+// though URLHost refuses to put one in a URL.
+func ValidBindHost(host string) bool {
+	bare, ok := unbracket(host)
+	if !ok {
+		return false
+	}
+	if addr, zone, hasZone := strings.Cut(bare, "%"); hasZone {
+		return net.ParseIP(addr) != nil && validHostLabel(zone)
+	}
+	return net.ParseIP(bare) != nil || validHostName(bare)
+}
+
+// URLHost returns the host as a URL must spell it, and reports whether it can
+// appear in one at all.
+//
+// The brackets a bind needs come off exactly once here: net.JoinHostPort adds
+// its own, and passing it a host that is already bracketed produced
+// "http://[[::1]]:11535/v1" — the address of nothing, handed out as the base
+// URL of everything. A zone is refused rather than carried: the "%" that
+// separates it is an escape introducer in a URL and not a literal, so there is
+// no spelling of "fe80::1%en0" that both means what it says and parses.
+// Refusing leaves that address off the list, which is the same answer the list
+// gives for every other address it cannot describe truthfully.
+func URLHost(host string) (string, bool) {
+	bare, ok := unbracket(host)
+	if !ok || strings.Contains(bare, "%") {
+		return "", false
+	}
+	if net.ParseIP(bare) == nil && !validHostName(bare) {
+		return "", false
+	}
+	return bare, true
+}
+
+// unbracket removes the brackets an IPv6 bind is written with, and refuses a
+// value that is bracketed on one side only or bracketed around nothing.
+func unbracket(host string) (string, bool) {
+	if host == "" {
+		return "", false
+	}
+	opened, closed := strings.HasPrefix(host, "["), strings.HasSuffix(host, "]")
+	switch {
+	case opened && closed:
+		inner := host[1 : len(host)-1]
+		if inner == "" || strings.ContainsAny(inner, "[]") {
+			return "", false
+		}
+		return inner, true
+	case opened || closed:
+		return "", false
+	}
+	return host, !strings.ContainsAny(host, "[]")
+}
+
+// validHostName reports whether a value is a host name: dot-separated labels,
+// optionally fully qualified with a trailing dot. Underscores are allowed
+// inside a label — they are not RFC 1123, and they are handed out by real
+// networks, and refusing one here would stop a server that binds today.
+func validHostName(s string) bool {
+	if len(s) > 253 {
+		return false
+	}
+	s = strings.TrimSuffix(s, ".")
+	if s == "" {
+		return false
+	}
+	for _, label := range strings.Split(s, ".") {
+		if !validHostLabel(label) {
+			return false
+		}
+	}
+	return true
+}
+
+// validHostLabel reports whether one dot-separated label is well formed. It is
+// also what an IPv6 zone is held to: an interface name, which on this platform
+// is letters and digits.
+func validHostLabel(label string) bool {
+	if label == "" || len(label) > 63 {
+		return false
+	}
+	for i := 0; i < len(label); i++ {
+		c := label[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9', c == '_':
+		case c == '-' && i != 0 && i != len(label)-1:
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // ExposedToLAN reports whether the bind address accepts non-loopback traffic.

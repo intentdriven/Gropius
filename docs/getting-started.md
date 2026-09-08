@@ -105,7 +105,10 @@ and [the response header reference](response-headers.md).
 ## 5. Talk to it — from another machine
 
 Open the **Connect** tab. It lists the exact base URLs to use, for example
-`http://your-mac.local:11535/v1`. From any other machine on the same network:
+`http://your-mac.local:11535/v1`. An address in that list that sits on a private
+network carries a mark saying so: the mark names the network the address belongs
+to, and says nothing about how safe it is or who else can reach it. From any
+other machine on the same network:
 
 ```python
 from openai import OpenAI

@@ -19,6 +19,7 @@ import (
 	"github.com/intentdriven/Gropius/internal/capability"
 	"github.com/intentdriven/Gropius/internal/config"
 	"github.com/intentdriven/Gropius/internal/hub"
+	"github.com/intentdriven/Gropius/internal/netshape"
 	"github.com/intentdriven/Gropius/internal/registry"
 	"github.com/intentdriven/Gropius/internal/runtime"
 	"github.com/intentdriven/Gropius/internal/stats"
@@ -179,9 +180,10 @@ type State struct {
 	// what they are using of it — everything Settings says about the budget,
 	// as figures rather than as UI text that nothing can check.
 	Machine Machine `json:"machine"`
-	// Endpoints are the URLs other machines should use.
-	Endpoints []string `json:"endpoints"`
-	Hostname  string   `json:"hostname"`
+	// Endpoints are the URLs other machines should use, each with the kind of
+	// network its address sits on.
+	Endpoints []Endpoint `json:"endpoints"`
+	Hostname  string     `json:"hostname"`
 	// Warnings surface things the user should know, e.g. an open LAN endpoint.
 	Warnings []string `json:"warnings"`
 	// Stats is the per-model summary, present only while the operator has
@@ -541,46 +543,172 @@ func redactConfig(c config.Config) config.Config {
 
 const redacted = "********"
 
+// Endpoint is one base URL clients can point at, and the kind of network the
+// address sits on.
+//
+// Network is an observation and never a promise: it says which network Gropius
+// found the address on, not what that network is worth. Gropius cannot see
+// whether that network has since been published to the internet, shared with
+// machines the operator does not own, or logged out from, and a word like
+// "encrypted" survives every one of those and then lies
+// (adr-2609081118587999, rule 1). It is empty for an ordinary address, which
+// is every address on a machine with no private network.
+type Endpoint struct {
+	URL string `json:"url"`
+	// Network names the kind of network — never the vendor, which this
+	// detection cannot tell apart anyway.
+	Network string `json:"network,omitempty"`
+}
+
 // Endpoints lists the base URLs clients can point at.
-func Endpoints(cfg config.Config) []string {
-	var out []string
+//
+// It lists only what this server answers on. With a wildcard bind that is
+// every address the machine holds; with a specific bind it is that address
+// alone, because the rest refuse the connection — and an endpoint list that
+// offers a dead address, still worse a marked dead address, is worse than one
+// that offers nothing.
+//
+// Nothing here is memoized. The private network can appear, disappear or
+// change address while Gropius runs, and the panel rebuilds this list on every
+// snapshot; the classification behind it is interface inspection with no
+// network call and no subprocess, so it can stay on that path.
+func Endpoints(cfg config.Config) []Endpoint {
+	var out []Endpoint
 	if cfg.ExposedToLAN() {
-		// The .local name resolves to LAN addresses, so a loopback-only bind
-		// must not advertise it: the menu bar shows the first entry as the
-		// endpoint, and it would be one the server never answers on.
-		if h := hostname(); h != "" {
-			out = append(out, fmt.Sprintf("http://%s.local:%d/v1", h, cfg.Port))
-		}
-		for _, ip := range lanIPs() {
-			out = append(out, fmt.Sprintf("http://%s:%d/v1", ip, cfg.Port))
+		addrs := netshape.Addrs()
+		bound, wildcard := boundAddr(cfg.Host)
+		switch {
+		case wildcard:
+			// The wildcard: every address answers, so the list is as it was.
+			// A loopback-only bind must still not advertise the .local name,
+			// which resolves to LAN addresses — the menu bar shows the first
+			// entry as the endpoint, and it would be one the server never
+			// answers on. Neither may a machine that holds no address on a
+			// local network: with only a private-network address up, the name
+			// resolves to nothing, and it would be the entry the menu bar
+			// hands out.
+			if hasLocalNetworkAddr(addrs) {
+				out = appendLocalName(out, cfg.Port)
+			}
+			for _, a := range addrs {
+				out = appendEndpoint(out, a.IP, cfg.Port, a.Network)
+			}
+		case bound != "":
+			// A specific bind. The .local name resolves to the addresses this
+			// machine holds on the local network, so it answers only when the
+			// bind covers the sole one of those; with others on the machine it
+			// may resolve to one of them, and a name that might land elsewhere
+			// is exactly what this list is dropping. An address on a private
+			// network is not one the name resolves to at all, so a machine
+			// holding only that one does not get the name either.
+			if len(addrs) == 1 && addrs[0].IP == bound && addrs[0].Network == "" {
+				out = appendLocalName(out, cfg.Port)
+			}
+			out = appendEndpoint(out, bound, cfg.Port, networkOf(addrs, bound))
+		default:
+			// A Host that is neither a wildcard nor anything a client can be
+			// pointed at. config.Validate refuses it, so reaching here means
+			// the configuration was not loaded through Load; nothing is listed
+			// for it either way. An address the server cannot even bind is the
+			// dead address this list exists to stop offering, and a Host
+			// carrying control characters is worse than dead — it is a base
+			// URL the panel, the menu bar and the clipboard hand out.
 		}
 	}
-	out = append(out, fmt.Sprintf("http://127.0.0.1:%d/v1", cfg.Port))
+	out = appendEndpoint(out, "127.0.0.1", cfg.Port, "")
 	return out
+}
+
+// boundAddr is the one address this server answers on, and whether the bind is
+// a wildcard on which every address answers. A host that is neither — one no
+// listener could take — is "", false, and nothing is listed for it.
+//
+// A Host that is a name is a specific bind too: it resolves to whatever it
+// resolves to, and the addresses beside it are no more reachable for that.
+func boundAddr(host string) (string, bool) {
+	if host == "" {
+		return "", true
+	}
+	// The bind spelling and the URL spelling of an IPv6 address differ, and
+	// this is where the two meet: config.Host carries the brackets the listener
+	// needs, and everything downstream of here works with the bare address.
+	bare, ok := config.URLHost(host)
+	if !ok {
+		return "", false
+	}
+	if ip := net.ParseIP(bare); ip != nil {
+		if ip.IsUnspecified() {
+			return "", true
+		}
+		return ip.String(), false
+	}
+	return bare, false
+}
+
+// networkOf is the kind of network the bound address sits on, read out of the
+// addresses this machine already reported rather than by enumerating them a
+// second time. An address the machine does not hold is on no network this can
+// name, which is the same answer a fresh look would give.
+func networkOf(addrs []netshape.Addr, bound string) string {
+	for _, a := range addrs {
+		if a.IP == bound {
+			return a.Network
+		}
+	}
+	return ""
+}
+
+// hasLocalNetworkAddr reports whether this machine holds an address the .local
+// name could resolve to. An address on a private network is not one: that name
+// is answered over the local network, not through a tunnel.
+func hasLocalNetworkAddr(addrs []netshape.Addr) bool {
+	for _, a := range addrs {
+		if a.Network == "" {
+			return true
+		}
+	}
+	return false
+}
+
+// appendLocalName adds this Mac's .local endpoint, when it has a name to give.
+func appendLocalName(out []Endpoint, port int) []Endpoint {
+	if h := hostname(); h != "" {
+		out = appendEndpoint(out, h+".local", port, "")
+	}
+	return out
+}
+
+// appendEndpoint adds one entry, and adds nothing when the host will not make
+// a URL. Every entry goes through here, including the machine's own name,
+// which is read from scutil and is no more trusted for this than a
+// hand-edited Host is.
+func appendEndpoint(out []Endpoint, host string, port int, network string) []Endpoint {
+	if u := endpointURL(host, port); u != "" {
+		out = append(out, Endpoint{URL: u, Network: network})
+	}
+	return out
+}
+
+// endpointURL is the base URL for one host, or "" when the host is not
+// something a URL can carry.
+//
+// It goes through JoinHostPort so an IPv6 literal is bracketed rather than run
+// together with the port into something no client can parse — and through
+// config.URLHost first, because JoinHostPort brackets unconditionally and the
+// bind spelling of an IPv6 address is already bracketed. Doubling them
+// produced "http://[[::1]]:11535/v1" as the menu-bar title, the clipboard's
+// contents and the panel's curl and Python base URL.
+func endpointURL(host string, port int) string {
+	h, ok := config.URLHost(host)
+	if !ok {
+		return ""
+	}
+	return "http://" + net.JoinHostPort(h, strconv.Itoa(port)) + "/v1"
 }
 
 // hostname is the name other machines use to reach this Mac.
 func hostname() string {
 	return config.LocalHostName()
-}
-
-// lanIPs returns the machine's non-loopback IPv4 addresses.
-func lanIPs() []string {
-	addrs, err := net.InterfaceAddrs()
-	if err != nil {
-		return nil
-	}
-	var out []string
-	for _, a := range addrs {
-		ipnet, ok := a.(*net.IPNet)
-		if !ok || ipnet.IP.IsLoopback() {
-			continue
-		}
-		if ip4 := ipnet.IP.To4(); ip4 != nil {
-			out = append(out, ip4.String())
-		}
-	}
-	return out
 }
 
 // maxSearchLimit bounds the "limit" query parameter on /api/search. Without a

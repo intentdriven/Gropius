@@ -29,10 +29,18 @@ site:
 ## build: the plain binary. LDFLAGS is empty for dev builds (keeps debug symbols
 ## for delve); the app/release build overrides it to strip. VERSION is stamped
 ## into `gropius -version`; the release workflow passes the tag explicitly.
+##
+## TAGS is empty for dev builds and for every `go build ./...` and `go test`,
+## which is what keeps netshape.SetEnumerator — the seam the private-network
+## classifier's tests drive from other packages — available to them. The `app`
+## target sets it to `prod`, which builds that seam out: exported test-only API
+## in the shipped binary is a supported way for anything linked in to make the
+## classifier say whatever it likes. internal/archtest holds both halves.
 LDFLAGS ?=
+TAGS ?=
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 build:
-	go build -ldflags "$(LDFLAGS) -X main.version=$(VERSION)" -o $(BIN) $(PKG)
+	go build -tags "$(TAGS)" -ldflags "$(LDFLAGS) -X main.version=$(VERSION)" -o $(BIN) $(PKG)
 
 ## app: a real .app bundle (menu-bar app, LAN + Bonjour entitlements).
 ## Strips debug info (-s -w): a distributed binary needs no DWARF, and it roughly
@@ -44,6 +52,7 @@ build:
 ## tag was already pushed. Regeneration is `make icon`, run by hand when the art
 ## changes. internal/archtest holds both halves of that.
 app: LDFLAGS = -s -w
+app: TAGS = prod
 app: build
 	@test -s build/AppIcon.icns || { \
 		echo "build/AppIcon.icns is missing or empty; it is committed art — restore it, or run 'make icon' (needs librsvg)" >&2; \

@@ -350,10 +350,10 @@ func TestEndpointsIncludeLoopbackAndHostname(t *testing.T) {
 	eps := Endpoints(cfg)
 	var hasLoopback, hasLocal bool
 	for _, e := range eps {
-		if strings.Contains(e, "127.0.0.1:11535/v1") {
+		if strings.Contains(e.URL, "127.0.0.1:11535/v1") {
 			hasLoopback = true
 		}
-		if strings.Contains(e, ".local:11535/v1") {
+		if strings.Contains(e.URL, ".local:11535/v1") {
 			hasLocal = true
 		}
 	}
@@ -371,11 +371,11 @@ func TestLoopbackOnlyConfigAdvertisesNoLANAddress(t *testing.T) {
 	cfg.Host = "127.0.0.1"
 
 	for _, e := range Endpoints(cfg) {
-		if strings.Contains(e, "192.168.") || strings.Contains(e, "10.") {
-			t.Errorf("a loopback-bound server advertised a LAN address: %s", e)
+		if strings.Contains(e.URL, "192.168.") || strings.Contains(e.URL, "10.") {
+			t.Errorf("a loopback-bound server advertised a LAN address: %s", e.URL)
 		}
-		if strings.Contains(e, ".local:") {
-			t.Errorf("a loopback-bound server advertised its .local name, which resolves to LAN addresses it will not answer on: %s", e)
+		if strings.Contains(e.URL, ".local:") {
+			t.Errorf("a loopback-bound server advertised its .local name, which resolves to LAN addresses it will not answer on: %s", e.URL)
 		}
 	}
 }
