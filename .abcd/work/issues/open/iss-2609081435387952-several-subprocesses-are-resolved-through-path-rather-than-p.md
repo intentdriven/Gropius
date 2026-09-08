@@ -30,3 +30,33 @@ precedent is in the package the conventions already name as a trust boundary.
 Checked rather than taken on report: the finding reached this ledger from
 another session's message, and the call sites above were confirmed here before
 it was written down.
+
+## Measured, not hypothesised
+
+The writable-PATH-directory premise is the state of a stock developer Mac, not a
+contrivance. On the machine this was found on, `/opt/homebrew/bin` is
+`drwxrwsr-x` owned `admin:admin` — group-writable, and setgid, so anything
+planted there inherits the group too — and the local `admin` group has four
+members. Any of them can write a directory that sits on another account's PATH
+ahead of `/usr/sbin` and `/usr/bin`.
+
+## The three sites are not equal
+
+`open` (`cmd/gropius/main.go:291`) and `pbcopy` (`cmd/gropius/clipboard.go:11`)
+both need a human to choose a menu item. `scutil`
+(`internal/config/hostname_darwin.go:38`) does not: `LocalHostName` memoises
+behind a `sync.Once`, and it is reached from the endpoint list, which the menu
+bar builds and the control panel's state snapshot re-renders. So it runs once
+per server process, early, with no user gesture at all — in every account on
+the machine that launches Gropius. That is the one to fix first.
+
+## Not the installer's class
+
+An installer shim receives elevation and can harvest an administrator password.
+A shim here executes with the victim account's own privileges. Same root cause,
+different severity, and the two should not be recorded as one — an installer
+fix must not be read as having covered this.
+
+Verified in this repository and on this machine before being written down; the
+finding arrived from another session and the directory mode, the group size,
+the three call sites and the `sync.Once` were each checked here.
