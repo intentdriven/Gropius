@@ -11,6 +11,26 @@ GitHub release notes.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The landing page no longer scrolls sideways.** A grid track held at the
+  intrinsic width of the install one-liner — 894 pixels of unbreakable
+  command — and pushed the column beside it off the page, so the release list
+  was clipped on a desktop and the page scrolled sideways at every width
+  measured between 375 and 1440 pixels. It also meant the rule that exists to
+  scroll that command inside its own box had never once engaged.
+- **The right-hand column gives way on a narrow screen.** The mark steps aside
+  below 820 pixels instead of reordering above the headline, where the first
+  thing on a phone was an ornament rather than the sentence saying what
+  Gropius is; the fact list stacks below 560 pixels rather than wrapping its
+  values beside a label column.
+
+### Added
+
+- **One click selects a whole install command.** Clicking a command on the
+  landing page takes the entire line, ready to copy, rather than the word
+  under the pointer.
+
 ## [0.2.1] - 2026-09-08
 
 ### Fixed
