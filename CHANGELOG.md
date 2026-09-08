@@ -11,6 +11,16 @@ GitHub release notes.
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-09-08
+
+### Fixed
+
+- **The one-line install from the README runs again.** `install.sh` read
+  `$APP…` as the variable name plus the first byte of the ellipsis that
+  follows it, so under `set -u` the script stopped with `APP?: unbound
+  variable` before it downloaded anything. Every shell tested was affected:
+  the macOS stock `/bin/bash` 3.2, `/bin/sh`, and Homebrew bash 5.3.9.
+
 ## [0.2.0] - 2026-09-07
 
 ### Added
