@@ -31,6 +31,10 @@ import (
 	"github.com/intentdriven/Gropius/internal/ui"
 )
 
+// loopbackBind is the Host every fail-closed path narrows to: reachable from
+// this Mac and from nothing else.
+const loopbackBind = "127.0.0.1"
+
 // version is stamped by the Makefile via -ldflags "-X main.version=…"; a
 // build outside make reports "dev".
 var version = "dev"
@@ -74,22 +78,12 @@ func main() {
 	}
 	paths := config.NewPaths(rootDir)
 
-	cfg, dropped, err := config.Load(paths.Config)
-	if err != nil {
-		// config.json exists but is unreadable/corrupt (a fresh install returns no
-		// error). The shipping default is LAN-exposed with no key, so falling back
-		// to it here would silently discard the user's hardening — a truncated
-		// config would swing a locked-down server wide open. Fail CLOSED to
-		// loopback instead; the user fixes or deletes the file from the local UI.
-		log.Error("config.json could not be read — starting locked down to loopback only so the server is not unintentionally exposed; fix or delete it and restart",
-			"path", paths.Config, "err", err)
-		cfg = config.Default()
-		cfg.Host = "127.0.0.1"
-		cfg.Advertise = false
+	start := loadStartupConfig(paths.Config)
+	cfg := start.Config
+	if start.Problem != "" {
+		log.Error(start.Problem, start.Args...)
 	}
-	// Reported after the error branch, since a config that could not be read
-	// has no preferences to report.
-	warnDroppedSettings(log, dropped)
+	warnDroppedSettings(log, start.Dropped)
 
 	// Fail closed on an exposed bind with no key. A LAN-bound listener with no
 	// API key is reachable, unauthenticated, by everyone on the network, and a
@@ -106,7 +100,7 @@ func main() {
 		lockDown := func(msg string, args ...any) {
 			log.Error(msg, args...)
 			cfg.APIKey = ""
-			cfg.Host = "127.0.0.1"
+			cfg.Host = loopbackBind
 			cfg.Advertise = false
 		}
 		key, err := config.GenerateAPIKey()
@@ -146,6 +140,76 @@ func main() {
 	if err := runServer(ln, paths, cfg, *headless, log); err != nil {
 		log.Error("server stopped", "err", err)
 		os.Exit(1)
+	}
+}
+
+// startupConfig is what the process will run with, and what to say about how
+// it got there.
+type startupConfig struct {
+	Config  config.Config
+	Dropped []string
+	// Problem is the message explaining a lockdown, empty when config.json
+	// loaded cleanly. Args carries its structured fields.
+	Problem string
+	Args    []any
+}
+
+// loadStartupConfig loads config.json and decides what to run when it will not
+// load. Every failure narrows the bind to loopback and stops Bonjour; what
+// differs is how much of the operator's configuration survives, and what the
+// log says happened.
+//
+// The three cases are genuinely different, and collapsing them was a bug in
+// both halves:
+//
+//   - The file is absent. A fresh install: the shipping defaults, no message.
+//   - The file cannot be read or parsed. Nothing is known about what the
+//     operator wanted — a truncated file is a truncated file — so the shipping
+//     defaults, locked down. The defaults are LAN-exposed with no key, so
+//     running them as-is would swing a hardened server wide open.
+//   - The file read and parsed and one setting failed Validate. Everything
+//     except the bind is known and good, and it was all being thrown away: the
+//     operator's API key, port, pinned models, memory budget and statistics
+//     retention were replaced by defaults because a hand-edited Host would not
+//     bind — under a log line reading "config.json could not be read" about a
+//     file that read perfectly. The rest is kept and only the bind is locked
+//     down. If the configuration is still invalid with a loopback bind, then
+//     the objection was to something else and the defaults are all that is
+//     left.
+func loadStartupConfig(path string) startupConfig {
+	cfg, dropped, err := config.Load(path)
+	if err == nil {
+		return startupConfig{Config: cfg, Dropped: dropped}
+	}
+
+	lockedDefaults := config.Default()
+	lockedDefaults.Host = loopbackBind
+	lockedDefaults.Advertise = false
+
+	var invalid *config.InvalidError
+	if !errors.As(err, &invalid) {
+		return startupConfig{
+			Config:  lockedDefaults,
+			Problem: "config.json could not be read — starting locked down to loopback only so the server is not unintentionally exposed; fix or delete it and restart",
+			Args:    []any{"path", path, "err", err},
+		}
+	}
+
+	locked := invalid.Parsed
+	locked.Host = loopbackBind
+	locked.Advertise = false
+	if err := locked.Validate(); err != nil {
+		return startupConfig{
+			Config:  lockedDefaults,
+			Problem: "config.json is not a valid configuration and locking the bind down does not make it one — starting from the shipping defaults, loopback only; fix or delete it and restart",
+			Args:    []any{"path", path, "err", invalid.Err, "with_a_loopback_bind", err},
+		}
+	}
+	return startupConfig{
+		Config:  locked,
+		Dropped: invalid.Dropped,
+		Problem: "config.json is not a valid configuration — the bind address is locked down to loopback only and the rest of your settings are kept; fix it in Settings and restart",
+		Args:    []any{"path", path, "err", invalid.Err},
 	}
 }
 

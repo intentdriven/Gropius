@@ -910,6 +910,18 @@ func (c Config) Validate() error {
 	if c.Host == "" {
 		return errors.New("host must not be empty")
 	}
+	// A Host that cannot be bound is refused here rather than at the listener.
+	// It used to travel two ways: cmd/gropius built "<host>:<port>" and the
+	// process exited when that would not listen, and — before it got that far —
+	// gateway.Endpoints pasted the same value into the base URL the panel, the
+	// menu bar and the clipboard hand out. A value carrying CR or LF in a base
+	// URL is a header-injection primitive in whichever client takes it, so the
+	// fence belongs where the value is first read rather than at each surface
+	// that repeats it. Load turns a refusal here into a lock-down to loopback,
+	// which is the same fail-closed path a corrupt file takes.
+	if !ValidBindHost(c.Host) {
+		return fmt.Errorf("host %q is neither an IP address (bracketed, as \"[::1]\", for IPv6) nor a host name", c.Host)
+	}
 	if c.DecodeConcurrency < 1 {
 		return fmt.Errorf("decode_concurrency must be >= 1, got %d", c.DecodeConcurrency)
 	}
@@ -947,15 +959,238 @@ func (c Config) Validate() error {
 	return c.validateSampling()
 }
 
+// ValidBindHost reports whether a value is something cmd/gropius can bind.
+//
+// It is as wide as the listener and no wider, and that is checked rather than
+// asserted: every value the table in host_test.go marks bindable was watched
+// to produce a listener, and every value it refuses was watched to fail.
+//
+// The address is built as "<host>:<port>", so an IPv6 literal binds only when
+// the configuration carries it bracketed. That is a rule about spelling, not
+// about which addresses exist: "[::1]:11535" listens and "::1:11535" is
+// refused by net.SplitHostPort as "too many colons in address" — at every
+// port, for every IPv6 address, on every machine. An earlier version of this
+// comment said both spellings had to stay legal "or a working install stops
+// starting", which had it exactly backwards: an unbracketed IPv6 host is one
+// no working install can be carrying, because main.go logs "cannot listen"
+// and exits 1 before it serves anything. Accepting it turned a hand-edited
+// typo into an app that would not start; refusing it sends Load down the
+// narrow-to-loopback path, and the app starts and says why. A zone
+// ("[fe80::1%en0]") binds and stays legal, even though URLHost refuses to put
+// one in a URL.
+func ValidBindHost(host string) bool {
+	bare, ok := unbracket(host)
+	if !ok {
+		return false
+	}
+	// Unbracketed, a colon is the port separator, so no value carrying one is
+	// a host cmd/gropius can bind — neither "::1" nor "192.168.1.5:8080".
+	if !strings.HasPrefix(host, "[") && strings.Contains(bare, ":") {
+		return false
+	}
+	if addr, zone, hasZone := strings.Cut(bare, "%"); hasZone {
+		return net.ParseIP(addr) != nil && validHostLabel(zone)
+	}
+	return net.ParseIP(bare) != nil || validHostName(bare)
+}
+
+// URLHost returns the host as a URL must spell it, and reports whether it can
+// appear in one at all.
+//
+// The brackets a bind needs come off exactly once here: net.JoinHostPort adds
+// its own, and passing it a host that is already bracketed produced
+// "http://[[::1]]:11535/v1" — the address of nothing, handed out as the base
+// URL of everything. A zone is refused rather than carried: the "%" that
+// separates it is an escape introducer in a URL and not a literal, so there is
+// no spelling of "fe80::1%en0" that both means what it says and parses.
+// Refusing leaves that address off the list, which is the same answer the list
+// gives for every other address it cannot describe truthfully.
+func URLHost(host string) (string, bool) {
+	bare, ok := unbracket(host)
+	if !ok || strings.Contains(bare, "%") {
+		return "", false
+	}
+	if net.ParseIP(bare) == nil && !validHostName(bare) {
+		return "", false
+	}
+	return bare, true
+}
+
+// unbracket removes the brackets an IPv6 bind is written with, and refuses a
+// value that is bracketed on one side only or bracketed around nothing.
+func unbracket(host string) (string, bool) {
+	if host == "" {
+		return "", false
+	}
+	opened, closed := strings.HasPrefix(host, "["), strings.HasSuffix(host, "]")
+	switch {
+	case opened && closed:
+		inner := host[1 : len(host)-1]
+		if inner == "" || strings.ContainsAny(inner, "[]") {
+			return "", false
+		}
+		return inner, true
+	case opened || closed:
+		return "", false
+	}
+	return host, !strings.ContainsAny(host, "[]")
+}
+
+// validHostName reports whether a value is a host name: dot-separated labels,
+// optionally fully qualified with a trailing dot. Underscores are allowed
+// inside a label — they are not RFC 1123, and they are handed out by real
+// networks, and refusing one here would stop a server that binds today.
+//
+// A name is refused when it is really an address, and that takes two rules
+// rather than one, because RFC 1123 §2.1's "the top label is alphabetic" is
+// not the same test as "contains a letter" — which is what this used to
+// apply, and hex spells an address with letters in it. Measured, every one of
+// "0x0", "0X0", "0x00000000", "0x0.0x0.0x0.0x0" and "0.0.0.0x0" was accepted
+// and bound "[::]", every interface on this Mac, while "0x7f000001",
+// "0x7f.0x0.0x0.0x1" and "127.0.0.0x1" were accepted and bound 127.0.0.1.
+//
+// So: the top label must carry a letter, AND the labels must not all be
+// numeric in one of the forms inet_aton reads. Measured on this platform,
+// net.Listen takes "0:0" and returns a listener on "[::]" — the unspecified
+// address, every interface on the machine — while "127.1", "2130706433",
+// "0x7f.1" and "0177.0.0.1" all come back 127.0.0.1.
+//
+// Both directions are wrong, and in opposite ways. `{"host":"0"}` bound
+// everything while everything downstream read it as a specific bind by name,
+// so the control panel offered "http://0:11535/v1" and listed nothing else: a
+// wildcard under-reported, which is the dead-address fault seen from the other
+// side. `{"host":"127.1"}` bound loopback while ExposedToLAN read a name and
+// told the operator they bind a LAN address.
+//
+// Refusing is the closed direction: Validate refuses the file, and cmd/gropius
+// locks the bind down to loopback rather than binding wider than the panel
+// says. Nobody writes "0" meaning the wildcard; they write "0.0.0.0" or leave
+// it empty, and both still work.
+func validHostName(s string) bool {
+	if len(s) > 253 {
+		return false
+	}
+	s = strings.TrimSuffix(s, ".")
+	if s == "" {
+		return false
+	}
+	labels := strings.Split(s, ".")
+	numeric := true
+	for _, label := range labels {
+		if !validHostLabel(label) {
+			return false
+		}
+		if !numericLabel(label) {
+			numeric = false
+		}
+	}
+	if numeric {
+		return false
+	}
+	return hasLetter(labels[len(labels)-1])
+}
+
+// numericLabel reports whether a label is one of the numeric forms inet_aton
+// reads a part of an address as: decimal, octal written with a leading zero,
+// or hex written with a leading "0x". A value whose every label is one of
+// these is an address however many parts it has, so it is not a name, whatever
+// letters the hex spelling happens to contain.
+//
+// It is deliberately this grammar rather than strconv.ParseUint(label, 0, 64),
+// which also reads Go's own "0b"/"0o" prefixes and digit-separating
+// underscores. Those are not spellings getaddrinfo accepts, and an underscore
+// is legal inside a label here, so borrowing Go's parser would refuse a name
+// like "1_0.2_0" that resolves perfectly well.
+func numericLabel(s string) bool {
+	if s == "" {
+		return false
+	}
+	if len(s) > 2 && s[0] == '0' && (s[1] == 'x' || s[1] == 'X') {
+		for i := 2; i < len(s); i++ {
+			c := s[i]
+			if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+				return false
+			}
+		}
+		return true
+	}
+	for i := 0; i < len(s); i++ {
+		if c := s[i]; c < '0' || c > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// hasLetter reports whether a label contains an ASCII letter. It is what
+// separates a host name's top label from a legacy spelling of an IPv4 address.
+func hasLetter(label string) bool {
+	for i := 0; i < len(label); i++ {
+		if c := label[i]; (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') {
+			return true
+		}
+	}
+	return false
+}
+
+// validHostLabel reports whether one dot-separated label is well formed. It is
+// also what an IPv6 zone is held to: an interface name, which on this platform
+// is letters and digits.
+func validHostLabel(label string) bool {
+	if label == "" || len(label) > 63 {
+		return false
+	}
+	for i := 0; i < len(label); i++ {
+		c := label[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9', c == '_':
+		case c == '-' && i != 0 && i != len(label)-1:
+		default:
+			return false
+		}
+	}
+	return true
+}
+
 // ExposedToLAN reports whether the bind address accepts non-loopback traffic.
 // Anything that is not loopback counts: a specific interface address exposes
 // the gateway to the LAN just as the wildcard does, and must trigger the same
 // security warnings.
+//
+// It is read by everything that decides how open this server is — the
+// generate-a-key-or-drop-to-loopback branch in cmd/gropius, the eviction-grace
+// key requirement, the panel's warning, whether Bonjour advertises at all, and
+// whether the endpoint list enumerates this machine's addresses — so it has to
+// understand the same spellings of the bind that the listener does. It did
+// not: it compared c.Host as a string, and an IPv6 literal binds only when
+// config.json carries it bracketed, so a "[::1]" bind was read as LAN-exposed.
+// That errs closed — a key was generated for a server nothing off this Mac can
+// reach — but it also told the operator "this server binds a LAN address" and
+// advertised a Bonjour service no machine on the LAN could connect to, which
+// is a false statement about their exposure (adr-2609081118587999 rule 4).
+//
+// Everything this cannot resolve to a loopback address is exposed. That is the
+// direction the errors have to run: a name resolves to whatever the resolver
+// says today, and a malformed value binds nothing at all, and neither is a
+// reason to stand down.
 func (c Config) ExposedToLAN() bool {
-	if c.Host == "localhost" {
+	bare, ok := unbracket(c.Host)
+	if !ok {
+		return true
+	}
+	// A zone belongs to the interface, not to the address: "[::1%lo0]" is the
+	// same loopback bind as "[::1]".
+	if addr, _, hasZone := strings.Cut(bare, "%"); hasZone {
+		bare = addr
+	}
+	// The resolver folds case and ignores a trailing dot, and this compared
+	// bytes: "LOCALHOST", "LocalHost" and "localhost." each bind 127.0.0.1 and
+	// nothing else, and each was read here as a LAN bind. Same class as the
+	// "[::1]" fault above, and the same four false statements follow from it.
+	if strings.EqualFold(strings.TrimSuffix(bare, "."), "localhost") {
 		return false
 	}
-	if ip := net.ParseIP(c.Host); ip != nil {
+	if ip := net.ParseIP(bare); ip != nil {
 		return !ip.IsLoopback()
 	}
 	return true
@@ -1003,10 +1238,40 @@ func Load(path string) (Config, []string, error) {
 	dropped = append(dropped, cfg.sanitizeBudget()...)
 	dropped = append(dropped, cfg.sanitizeGrace()...)
 	if err := cfg.Validate(); err != nil {
-		return Default(), nil, fmt.Errorf("invalid config %s: %w", path, err)
+		return Default(), nil, &InvalidError{Path: path, Err: err, Parsed: cfg, Dropped: dropped}
 	}
 	return cfg, dropped, nil
 }
+
+// InvalidError reports a config.json that read and parsed cleanly and then
+// failed Validate, and carries the configuration it parsed.
+//
+// The distinction is the whole point of the type. A file that cannot be read
+// or cannot be parsed tells us nothing about what the operator wanted, and the
+// only safe answer is the shipping defaults with the bind locked down. A file
+// that parsed tells us everything except the one field Validate objected to —
+// and the caller was throwing all of it away: an API key, a port, pinned
+// models, a memory budget and a statistics retention period were silently
+// replaced by defaults because a hand-edited Host would not bind, under a log
+// line reading "config.json could not be read" about a file that read fine.
+//
+// The first return value of Load stays Default() so a caller that ignores the
+// error is unchanged. A caller that handles it can narrow the lockdown to the
+// bind.
+type InvalidError struct {
+	Path string
+	Err  error
+	// Parsed is the configuration as it was read: sanitized, and invalid in
+	// whatever way Err names. It is not safe to run as it stands.
+	Parsed Config
+	// Dropped names the sampling preferences sanitizeSampling discarded, as
+	// Load's second return value would have carried them.
+	Dropped []string
+}
+
+func (e *InvalidError) Error() string { return "invalid config " + e.Path + ": " + e.Err.Error() }
+
+func (e *InvalidError) Unwrap() error { return e.Err }
 
 // Save atomically writes config to path.
 //

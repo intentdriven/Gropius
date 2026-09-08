@@ -394,19 +394,38 @@ function renderSearch(data) {
 }
 
 // ── connect ──────────────────────────────────────────────
+// endpointOf reads one entry of state.endpoints: the URL a client points at,
+// and the kind of network that address sits on. The second is blank on every
+// Mac with no private network, which is most of them.
+function endpointOf(e) {
+  return { url: (e && e.url) || '', network: (e && e.network) || '' };
+}
+
+// endpointLine is one row: the URL, and beside it the network Gropius found
+// the address on. The mark is what the server observed and not what it
+// guarantees — it says which network, never what that network is worth
+// (adr-2609081118587999) — and it sits in its own element, so nothing that
+// hands the operator something to paste can pick it up.
+function endpointLine(ep) {
+  const mark = ep.network ? `<span class="pill">${escapeHtml(ep.network)}</span>` : '';
+  return `<span>${escapeHtml(ep.url)}</span>${mark}`;
+}
+
 function renderConnect() {
   const box = $('endpoints');
   box.innerHTML = '';
-  const eps = state.endpoints || [];
-  eps.forEach((url) => {
+  const eps = (state.endpoints || []).map(endpointOf);
+  eps.forEach((ep) => {
     const row = document.createElement('div');
     row.className = 'endpoint';
-    row.innerHTML = `<span>${escapeHtml(url)}</span>`;
-    row.append(btn('Copy', 'ghost', () => navigator.clipboard.writeText(url)));
+    row.innerHTML = endpointLine(ep);
+    row.append(btn('Copy', 'ghost', () => navigator.clipboard.writeText(ep.url)));
     box.appendChild(row);
   });
 
-  const base = eps[0] || `http://localhost:${state.config.port}/v1`;
+  // The examples take the URL field, never the rendered row: a base URL with
+  // a network mark appended to it is not a base URL.
+  const base = (eps.length ? eps[0].url : '') || `http://localhost:${state.config.port}/v1`;
   const model = (state.models.find((m) => m.state === 'ready') || {}).repo_id
     || 'mlx-community/Qwen3-8B-4bit';
   const authCurl = state.config.api_key

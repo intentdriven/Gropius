@@ -5,6 +5,22 @@ PKG     := ./cmd/gropius
 
 .PHONY: all test build app icon install run clean fmt vet lint allow-firewall install-shared site
 
+## Every goal in this file runs serially, even under `make -j`.
+##
+## `build` and `app` both write $(BIN), and `app` copies it into the bundle.
+## Under `-j` those are three unordered writers of one path: measured, `make
+## -j8 build app` left bin/gropius as the 13.8 MB untagged dev binary while
+## the bundle carried the 9.0 MB prod one — the `cp` at the end of `app` is
+## ordered against neither `go build`, and it happened to win. It is the same
+## untagged-binary hazard the sub-make in `app` exists to close (a bundle
+## assembled from a binary carrying netshape.SetEnumerator), reintroduced by a
+## flag rather than by a goal ordering.
+##
+## Nothing here is slow enough for parallelism to be worth a race: the one
+## expensive step is `go build`, which already parallelises internally.
+## release.yml is unaffected either way — it names one goal and passes no -j.
+.NOTPARALLEL:
+
 all: test build
 
 ## test: unit tests with the race detector
@@ -29,10 +45,18 @@ site:
 ## build: the plain binary. LDFLAGS is empty for dev builds (keeps debug symbols
 ## for delve); the app/release build overrides it to strip. VERSION is stamped
 ## into `gropius -version`; the release workflow passes the tag explicitly.
+##
+## TAGS is empty for dev builds and for every `go build ./...` and `go test`,
+## which is what keeps netshape.SetEnumerator — the seam the private-network
+## classifier's tests drive from other packages — available to them. The `app`
+## target passes `prod`, which builds that seam out: exported test-only API
+## in the shipped binary is a supported way for anything linked in to make the
+## classifier say whatever it likes. internal/archtest holds both halves.
 LDFLAGS ?=
+TAGS ?=
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 build:
-	go build -ldflags "$(LDFLAGS) -X main.version=$(VERSION)" -o $(BIN) $(PKG)
+	go build -tags "$(TAGS)" -ldflags "$(LDFLAGS) -X main.version=$(VERSION)" -o $(BIN) $(PKG)
 
 ## app: a real .app bundle (menu-bar app, LAN + Bonjour entitlements).
 ## Strips debug info (-s -w): a distributed binary needs no DWARF, and it roughly
@@ -43,8 +67,19 @@ build:
 ## would fail `make app` on a clean checkout and turn the release red after the
 ## tag was already pushed. Regeneration is `make icon`, run by hand when the art
 ## changes. internal/archtest holds both halves of that.
-app: LDFLAGS = -s -w
-app: build
+##
+## The binary is built by a sub-make rather than by naming `build` as a
+## prerequisite. A target-specific variable (`app: TAGS = prod`) reaches only
+## the prerequisites make rebuilds FOR THIS target, and make builds each target
+## once per invocation: `make build app`, `make all app` and `make run app`
+## each built bin/gropius as a goal in its own right first — no tag, no strip —
+## and `app`'s dependency on it was then already satisfied. The bundle was
+## assembled from a dev binary carrying the classifier's injection seam. The
+## recursion pins the tag and the strip to the bundle instead of to the
+## invocation, and `internal/archtest` asks make what each of those orderings
+## would run.
+app:
+	$(MAKE) build TAGS=prod LDFLAGS="-s -w"
 	@test -s build/AppIcon.icns || { \
 		echo "build/AppIcon.icns is missing or empty; it is committed art — restore it, or run 'make icon' (needs librsvg)" >&2; \
 		exit 1; \

@@ -350,10 +350,10 @@ func TestEndpointsIncludeLoopbackAndHostname(t *testing.T) {
 	eps := Endpoints(cfg)
 	var hasLoopback, hasLocal bool
 	for _, e := range eps {
-		if strings.Contains(e, "127.0.0.1:11535/v1") {
+		if strings.Contains(e.URL, "127.0.0.1:11535/v1") {
 			hasLoopback = true
 		}
-		if strings.Contains(e, ".local:11535/v1") {
+		if strings.Contains(e.URL, ".local:11535/v1") {
 			hasLocal = true
 		}
 	}
@@ -371,11 +371,11 @@ func TestLoopbackOnlyConfigAdvertisesNoLANAddress(t *testing.T) {
 	cfg.Host = "127.0.0.1"
 
 	for _, e := range Endpoints(cfg) {
-		if strings.Contains(e, "192.168.") || strings.Contains(e, "10.") {
-			t.Errorf("a loopback-bound server advertised a LAN address: %s", e)
+		if strings.Contains(e.URL, "192.168.") || strings.Contains(e.URL, "10.") {
+			t.Errorf("a loopback-bound server advertised a LAN address: %s", e.URL)
 		}
-		if strings.Contains(e, ".local:") {
-			t.Errorf("a loopback-bound server advertised its .local name, which resolves to LAN addresses it will not answer on: %s", e)
+		if strings.Contains(e.URL, ".local:") {
+			t.Errorf("a loopback-bound server advertised its .local name, which resolves to LAN addresses it will not answer on: %s", e.URL)
 		}
 	}
 }
@@ -686,4 +686,55 @@ func fetchState(t *testing.T, srv *httptest.Server) State {
 		t.Fatal(err)
 	}
 	return st
+}
+
+// appendEndpoint's comment says every entry goes through the URL check,
+// "including the machine's own name, which is read from scutil and is no more
+// trusted for this than a hand-edited Host is". Nothing tested that claim:
+// deleting the config.URLHost guard from endpointURL left the whole suite
+// green, because the bind path is already filtered by boundAddr — which calls
+// URLHost itself — and the two hosts that reach endpointURL without passing
+// through boundAddr, this Mac's scutil name and each enumerated address, have
+// no seam a test can drive.
+//
+// So the guard is tested where it is: on the function. A host that cannot be
+// carried in a URL yields no URL and no entry, rather than a base URL the
+// panel, the menu bar and the clipboard hand out.
+func TestEndpointURLRefusesAHostNoURLCanCarry(t *testing.T) {
+	refused := []struct {
+		host string
+		why  string
+	}{
+		{"", "scutil returns an empty name on a Mac that will not say it"},
+		{"alices mac.local", "a space is in neither an address nor a name, and scutil will hand one over"},
+		{"alices\r\nmac.local", "CR and LF in a base URL is a header-injection primitive in whichever client pastes it"},
+		{"fe80::1%en0", "a zone's % introduces an escape in a URL rather than standing for itself"},
+		{"[fe80::1%en0]", "and bracketed"},
+		{"[::1", "an unclosed bracket"},
+		{"::1]", "an unopened bracket"},
+		{"[]", "brackets around nothing"},
+		{"[[::1]]", "already doubled"},
+		{"-nope.local", "not a legal label"},
+		{"192.168.1.5:8080", "a host and a port is not a host"},
+	}
+	for _, c := range refused {
+		if got := endpointURL(c.host, 11535); got != "" {
+			t.Errorf("endpointURL(%q) = %q, want \"\" — %s", c.host, got, c.why)
+		}
+		if got := appendEndpoint(nil, c.host, 11535, ""); len(got) != 0 {
+			t.Errorf("appendEndpoint(%q) listed %#v, want nothing — %s", c.host, got, c.why)
+		}
+	}
+
+	accepted := map[string]string{
+		"alices-mac.local": "http://alices-mac.local:11535/v1",
+		"192.168.1.5":      "http://192.168.1.5:11535/v1",
+		"[::1]":            "http://[::1]:11535/v1",
+		"::1":              "http://[::1]:11535/v1",
+	}
+	for host, want := range accepted {
+		if got := endpointURL(host, 11535); got != want {
+			t.Errorf("endpointURL(%q) = %q, want %q — refusing this one would drop an address the server answers on", host, got, want)
+		}
+	}
 }

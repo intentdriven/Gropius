@@ -51,9 +51,13 @@ func runMenuBar(a *app.App, log *slog.Logger) {
 				}
 				status.SetTitle(line)
 
+				// The first entry, as before: the private-network address is
+				// marked in the panel, not promoted here. Which address the
+				// menu bar hands out is behaviour, and the mark is
+				// presentation.
 				eps := gateway.Endpoints(a.Config())
 				if len(eps) > 0 {
-					endpoint.SetTitle(eps[0])
+					endpoint.SetTitle(eps[0].URL)
 				}
 			}
 		}()
@@ -64,8 +68,10 @@ func runMenuBar(a *app.App, log *slog.Logger) {
 				case <-open.ClickedCh:
 					openBrowser(panelURL(a.Config()))
 				case <-copyURL.ClickedCh:
+					// The URL and nothing else: a mark pasted into a client's
+					// base-URL field is not a URL.
 					if eps := gateway.Endpoints(a.Config()); len(eps) > 0 {
-						copyToClipboard(eps[0])
+						copyToClipboard(eps[0].URL)
 					}
 				case <-quitItem.ClickedCh:
 					systray.Quit()

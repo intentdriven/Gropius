@@ -197,6 +197,9 @@ form label.switch input { width: auto; flex: none; }
   font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 13px;
 }
 .endpoint span { flex: 1; word-break: break-all; }
+/* The network mark sits beside the URL rather than sharing its line, and does
+   not stretch: it is a note about the address, not part of it. */
+.endpoint .pill { flex: 0 0 auto; margin-left: 0; color: var(--muted); }
 .endpoint button { padding: 4px 10px; font-size: 12px; }
 
 .empty { padding: 48px 0; text-align: center; color: var(--muted); }

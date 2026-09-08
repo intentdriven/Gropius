@@ -7,7 +7,7 @@ supersedes: null
 superseded_by: null
 related_intents: [itd-2609081015545349]
 related_rfcs: []
-related_adrs: []
+related_adrs: [adr-2609061503319212]
 ---
 
 # ADR-2609081118587999: Detecting a private-network daemon may inform what Gropius says, never what it enforces
@@ -17,9 +17,12 @@ related_adrs: []
 Gropius serves an OpenAI-compatible API over plain HTTP with no TLS anywhere.
 Everything that decides who may reach it is derived from two pieces of local
 state: the bind address (`config.Config.Host`, default `0.0.0.0`, with
-`ExposedToLAN` treating anything non-loopback as exposed) and an optional shared
-bearer token (`Gateway.withAuth`). The control plane is separately locked to
-loopback by both remote address and `Host` header.
+`Config.ExposedToLAN` treating anything non-loopback as exposed) and a shared
+bearer token (`Gateway.withAuth`). The token is optional only on a loopback
+install: since iss-1, an exposed bind with no key generates and persists one
+before the gateway serves anything, and drops to a loopback bind if it cannot
+(`cmd/gropius/main.go`). The control plane is separately locked to loopback by
+both remote address and `Host` header.
 
 Operators commonly run a mesh VPN — Tailscale is the case in front of us —
 across the machines they serve models to. That already changes what Gropius
@@ -29,10 +32,12 @@ Wi-Fi addresses, with nothing distinguishing an encrypted path from a cleartext
 one. Two proposals follow from that observation, and they pull in opposite
 directions:
 
-- **Naming.** Detect the tailnet address and label it as private and encrypted,
-  under the stable name the tailnet resolves (itd-2609081015545349). The
-  `.local` name Bonjour supplies for the LAN does not exist here — mDNS is
-  link-local multicast and does not traverse a tailnet.
+- **Marking.** Detect the address on the private network and say so
+  (itd-2609081015545349). The intent was first drafted as "label it private and
+  encrypted, under the stable name the tailnet resolves"; both halves were cut
+  before planning — the wording by rule 1 below, and the name because obtaining
+  it means reading another vendor's daemon over an interface that differs
+  across three ways of installing it.
 - **Relaxing.** Treat a detected tailnet as evidence the server is safely
   reached, and on the strength of it suppress the "reachable by anyone on your
   network and requires no API key" warning, waive the API key requirement that
@@ -56,9 +61,19 @@ own: `100.64.0.0/10` is the shared CGNAT range, handed out by ISPs as well.
 Detection of a third-party private-network daemon may inform what Gropius
 **reports**. It may never be an input to what Gropius **enforces**.
 
-1. **Presentation may branch on it.** Labelling an endpoint, ordering the
-   endpoint list, choosing which name to display, and the wording of advice are
-   all free to say "this one is a private, encrypted network".
+1. **Presentation may branch on it, and may state only what was observed.**
+   Labelling an endpoint, ordering the endpoint list and the wording of advice
+   may all say which network an address belongs to. They may not say what that
+   network is worth. "On a private network" is an observation and is allowed;
+   "private and encrypted", "only your devices can reach this", or any wording
+   an operator would read as a statement about their exposure is not — those
+   are the same claim rule 4 refuses, moved one surface over.
+
+   The test is whether the words survive the transitions Gropius cannot see. A
+   mesh VPN can publish that exact address to the public internet, and a
+   sharing rule can hand it to machines the operator does not own; both leave
+   the interface and the address untouched. A label saying where the address
+   lives is still true afterwards. A label saying it is private is not.
 2. **Enforcement may not.** No authentication decision, no admission decision,
    no validation rule, and no warning's firing condition may read the presence,
    absence or shape of such a daemon. In particular: the bearer-token check, the
@@ -69,8 +84,17 @@ Detection of a third-party private-network daemon may inform what Gropius
    the exposure genuinely reduced narrows it by binding to a specific address
    rather than the wildcard. That is enforcement Gropius owns end to end, and it
    fails closed: if the interface is not there, the bind fails and the server
-   does not start half-protected. A future "tailnet only" bind mode is
+   does not start half-protected. A future "private network only" bind mode is
    admissible under this rule precisely because it is a bind, not an inference.
+
+   This escape hatch does not work today, and the rule names its prerequisite
+   rather than assuming it: **iss-7** records that a specific-address bind
+   leaves the control panel unreachable from anywhere, that the settings UI
+   offers only the wildcard and loopback so such a bind needs a hand-edited
+   configuration file, and that unbracketed IPv6 literals fail at startup.
+   iss-7 is deferred because every fix is a design decision touching a declared
+   trust boundary. Until it is resolved, rule 3 states the intended shape of
+   the narrowing, not a route an operator can currently take.
 4. **A warning may soften only on state Gropius owns.** Wording that follows
    from the bind address is fine; wording that follows from "a tailnet daemon
    seems to be running" is not, because the operator reads a softened warning as
@@ -95,19 +119,33 @@ Detection of a third-party private-network daemon may inform what Gropius
 - **Do nothing at all, and document it.** No code, no risk. Rejected as
   insufficient on its own: the tailnet address is *already* in the endpoint list
   today, unlabelled, which is a small but real way to hand someone a cleartext
-  address believing it is the encrypted one. Naming is the fix; the docs follow
-  it rather than replacing it.
+  address believing it is the encrypted one. Marking is the fix; the docs
+  follow it rather than replacing it.
 
 ## Consequences
 
-- itd-2609081015545349 is bounded by rule 1: it is a labelling change with an
-  acceptance criterion asserting that enforcement is byte-for-byte unaffected.
-- A "tailnet only" bind intent is admissible under rule 3 and must be built as a
-  bind, not as a detection. Whatever it does when the interface is absent at
-  launch must fail closed.
+- itd-2609081015545349 is bounded by rule 1 as amended. It marks which network
+  an address belongs to, names no vendor, and claims nothing about encryption
+  or reachability; it carries a criterion requiring that authentication,
+  admission and every other enforcement path behave exactly as on a build with
+  no detection at all. It also carries the dead-address fix, because a mark on
+  an address the server does not answer on is rule 1's failure mode in the
+  other direction: an observation that is not even true of the machine.
+- A "private network only" bind intent is admissible under rule 3 and must be
+  built as a bind, not as a detection. Whatever it does when the interface is
+  absent at launch must fail closed, and it inherits iss-7 as a prerequisite.
 - Any future integration with another environment-detection signal — a corporate
   VPN, a firewall's state, a network's SSID — inherits this rule. The rule is
   about inferences over state Gropius does not own, not about Tailscale.
-- The rule is not mechanically enforced. There is no test that fails when
-  someone reads a detection result inside `withAuth`; this record and review of
-  the trust-boundary packages are the guard.
+- The rule is not mechanically enforced, and cannot be. `internal/archtest`
+  holds rules that fail when the enforcement path names the classifier, the
+  field its answer travels on, or the type that carries it; those catch a
+  maintainer coupling enforcement to the classifier by accident, which is worth
+  having and is all they are. They are not a barrier against code that means to
+  read the classification, because the classification is not secret information:
+  anything linked into this process can call `net.Interfaces()` and re-derive it
+  in three lines without touching `internal/netshape` at all. No scan over
+  identifiers can prevent that. This record and review of the trust-boundary
+  packages are the guard; the tests are the accidents review need not catch.
+  `internal/archtest/enforcement_detection_test.go` lists in full what they do
+  not close.
