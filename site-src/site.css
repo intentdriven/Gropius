@@ -330,16 +330,23 @@ h2 {
    page itself never scrolls sideways (criterion 7). */
 .snippet {
   overflow-x: auto;
+  background: var(--code-bg);
+  border-left: 6px solid var(--rule);
 }
 
+/* The ground and the rule belong to .snippet, which stays put, and not to the
+   <pre>, which moves. A background on the scrolling child is only ever as wide
+   as the box, so scrolling the one-liner slid the dark ground out from under it
+   and left the tail of the command on the bare page. min-content keeps the
+   <pre> from being squeezed to the box's width and wrapping the comment lines
+   instead of scrolling with the command they label. */
 pre {
   margin: 0;
   padding: 18px 20px;
-  background: var(--code-bg);
+  min-width: min-content;
   color: var(--code-fg);
   font-size: 14px;
   line-height: 1.6;
-  border-left: 6px solid var(--rule);
 }
 
 /* One click takes the whole command. Dragging across a one-liner that carries a

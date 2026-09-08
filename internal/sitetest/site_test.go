@@ -651,6 +651,25 @@ func TestEveryMultiColumnSectionCanShrinkBelowItsContent(t *testing.T) {
 	}
 }
 
+// The dark ground belongs to the box, not to the thing scrolling inside it. A
+// background painted on the <pre> is only ever as wide as the box, so scrolling
+// the one-liner slid the ground out from under it and left the tail of the
+// command sitting on the bare page. Nobody saw it while the track was growing
+// instead of scrolling; the moment the snippet actually scrolled, it showed.
+func TestTheCodeBoxStaysPutWhileTheCommandScrolls(t *testing.T) {
+	if got := decl(t, css, ".snippet", "background"); got != "var(--code-bg)" {
+		t.Errorf(".snippet background is %q; the ground belongs to the box that stays put", got)
+	}
+	if got := decl(t, css, ".snippet", "border-left"); !strings.Contains(got, "var(--rule)") {
+		t.Errorf(".snippet border-left is %q; the rule marks the box, so it cannot scroll away with the text", got)
+	}
+	// And the scrolling child paints no ground of its own, or the two grounds
+	// come apart again the moment they differ in width.
+	if body := blockAfter(t, css, "pre"); strings.Contains(body, "background:") {
+		t.Error("pre paints its own background; a ground on the scrolling child is only as wide as the box")
+	}
+}
+
 // A visitor's next act after reading the install section is to copy the command
 // out of it, and selecting a URL-bearing one-liner by dragging is fiddly on a
 // trackpad and worse on a phone. One click selects the whole command instead.
