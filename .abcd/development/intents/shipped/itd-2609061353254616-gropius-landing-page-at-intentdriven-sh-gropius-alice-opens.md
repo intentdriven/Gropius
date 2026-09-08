@@ -114,6 +114,37 @@ Fidelity review OWED (receipt rcp-4e582cc5457f). The audit runs after the
 branch merges: it reads the delivered diff against these acceptance criteria,
 and the diff is not final until review closes.
 
+
+2026-09-08 — **Criteria 1 and 2 diverge by a maintainer decision, adopted on
+the day it was taken.** The page no longer carries a download button, and no
+element on it links an application bundle. Criterion 1 requires the download
+button and the repository link above the fold; criterion 2 requires the button
+to fetch the latest release's `Gropius.app.zip`. Both are left as written.
+
+What forced it, observed rather than reasoned: a maintainer on a second macOS
+account followed the page's download button and macOS answered "Apple could not
+verify Gropius is free of malware" with a single action, **Move to Bin**. A
+browser download carries the quarantine attribute, the bundles are ad-hoc
+signed and not notarized, so Gatekeeper refuses them. The button led users to
+an application they could not open, and the press release's promise that the
+page is "where someone who is not building from source starts" was false for
+exactly those people.
+
+As built: the primary action is the install command, the repository link stays
+beside it, and the release facts still name every asset with its size but link
+none of them. The checksums file is still linked, because it is text and
+nothing launches it — it is what a careful user verifies a download against.
+The install script fetches the archive, verifies it against those checksums and
+clears the quarantine, which is the path that works and now the only one the
+page offers.
+
+This is a narrowing of what the page offers, not of what it promises: someone
+who is not building from source still starts here, and now leaves with a
+working install rather than a bundle in the Bin. It stands until the bundles
+are notarized, at which point the button can return and these criteria are met
+as written. Held by `sitetest.TestThePageOffersNoDirectDownload` and by the
+release-region test, which now asserts assets are named and NOT linked.
+
 ## Grounds
 
 - pursued: we expect one public page with a working download to reach people who will not read a README, and rendering it at release to keep it correct without upkeep; we are wrong if downloads from the page stay flat against the release page's, or if the page drifts from the README within two releases

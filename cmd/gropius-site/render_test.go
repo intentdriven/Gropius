@@ -327,14 +327,14 @@ func TestInterfaceStringsAreAClosedList(t *testing.T) {
 		if err := json.Unmarshal([]byte(read(t, root, filepath.Join("site-src", "ui.json"))), &ui); err != nil {
 			t.Fatal(err)
 		}
-		delete(ui, "download_label")
+		delete(ui, "install_label")
 		b, _ := json.MarshalIndent(ui, "", "  ")
 		write(t, root, filepath.Join("site-src", "ui.json"), string(b))
 		_, err := renderFixture(t, root)
 		if err == nil {
-			t.Fatal("a ui.json without download_label rendered; the download button would carry no label")
+			t.Fatal("a ui.json without install_label rendered; the install button would carry no label")
 		}
-		if !strings.Contains(err.Error(), "download_label") {
+		if !strings.Contains(err.Error(), "install_label") {
 			t.Errorf("the error does not name the missing string: %v", err)
 		}
 	})

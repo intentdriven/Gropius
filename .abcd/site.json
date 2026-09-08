@@ -15,8 +15,7 @@
   "forge": {
     "base": "https://github.com",
     "repository": "intentdriven/Gropius",
-    "branch": "main",
-    "download_asset": "Gropius.app.zip"
+    "branch": "main"
   },
   "sources": {
     "pillars": {

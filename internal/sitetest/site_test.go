@@ -102,7 +102,7 @@ func renderTreeWithRelease(root, out, release string) (rendered, error) {
 func TestDownloadAndSourceSitAboveTheFold(t *testing.T) {
 	// Document order first: the two actions must precede the install section,
 	// which is where the prototype already put them.
-	actions := strings.Index(page, `id="download"`)
+	actions := strings.Index(page, `id="get"`)
 	install := strings.Index(page, `id="install"`)
 	if actions < 0 || install < 0 {
 		t.Fatalf("the page has no download section (%d) or no install section (%d)", actions, install)
@@ -116,8 +116,15 @@ func TestDownloadAndSourceSitAboveTheFold(t *testing.T) {
 	}
 	// Both elements the criterion names, in the one row above the fold.
 	actionRow := between(t, page, `class="cta-row"`, "</div>")
-	if !strings.Contains(actionRow, "/releases/latest/download/") {
-		t.Error("the action row holds no download button")
+	// The primary action is the install command, not a direct download: a
+	// browser-fetched archive arrives quarantined, and an ad-hoc-signed bundle
+	// is then refused by Gatekeeper or moved to the Bin. See the dated note in
+	// the landing-page intent's Audit Notes.
+	if !strings.Contains(actionRow, `href="#install"`) {
+		t.Error("the action row holds no link to the install command")
+	}
+	if strings.Contains(actionRow, "/releases/latest/download/") {
+		t.Error("the action row offers a direct download; the page must not hand out a quarantined archive")
 	}
 	// The repository's own URL, not merely a prefix of one: the download link
 	// starts with it, so a substring test would pass with the second action gone.
@@ -213,16 +220,32 @@ func headlineLines(t *testing.T) int {
 
 // --- Criterion 2 -----------------------------------------------------------
 //
-// "Given the release marked latest is a given version, when Alice activates the
-// download button, then the browser fetches that release's Gropius.app.zip."
+// The criterion as written says the download button fetches the latest
+// release's Gropius.app.zip. The page no longer carries that button: a browser
+// download arrives with the quarantine attribute, and because the bundles are
+// ad-hoc signed and not notarized, macOS refuses them and offers to move them
+// to the Bin — so the button led users to an app they could not open. The
+// criterion is left as written, and the divergence is recorded in the
+// landing-page intent's Audit Notes for the maintainer's decision.
+//
+// What is held instead: the page offers no direct asset download at all, and
+// still names no version, which is the mechanism the original criterion
+// existed to protect.
 
-func TestDownloadButtonResolvesTheLatestRelease(t *testing.T) {
+func TestThePageOffersNoDirectDownload(t *testing.T) {
 	href := attr(t, page, `<a class="btn btn-primary" href="([^"]+)"`)
-	want := regexp.MustCompile(`^https://[^"]+/releases/latest/download/Gropius\.app\.zip$`)
-	if !want.MatchString(href) {
-		t.Errorf("download href is %q; it must be the forge's latest-release redirect for Gropius.app.zip", href)
+	if href != "#install" {
+		t.Errorf("the primary action is %q; it must be the install command", href)
 	}
-	// The mechanism that keeps it true between releases: nothing on the page
+	// No element may hand out an application bundle. The hazard is specific: a
+	// browser-fetched .app.zip carries the quarantine attribute, and an ad-hoc
+	// signed bundle is then refused. A checksums file is still linked, because
+	// it is text — nothing launches it, and it is what a careful user verifies
+	// a download against.
+	if regexp.MustCompile(`href="[^"]*\.app\.zip"`).MatchString(page) {
+		t.Error("the page links an application bundle directly; a browser-fetched archive is quarantined and cannot be opened")
+	}
+	// The mechanism that keeps the page current between releases: nothing on it
 	// names a version, so there is nothing to go stale.
 	if m := regexp.MustCompile(`v[0-9]+\.[0-9]+\.[0-9]+`).FindString(page); m != "" {
 		t.Errorf("the page carries the version literal %q; a static page cannot keep one current", m)

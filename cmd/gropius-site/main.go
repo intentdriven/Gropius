@@ -192,10 +192,9 @@ type manifest struct {
 	Headers   string   `json:"headers"`
 	OutSubdir string   `json:"out_subdir"`
 	Forge     struct {
-		Base          string `json:"base"`
-		Repository    string `json:"repository"`
-		Branch        string `json:"branch"`
-		DownloadAsset string `json:"download_asset"`
+		Base       string `json:"base"`
+		Repository string `json:"repository"`
+		Branch     string `json:"branch"`
 	} `json:"forge"`
 	Sources struct {
 		Pillars      source   `json:"pillars"`
@@ -217,7 +216,6 @@ type uiStrings struct {
 	Purpose           string   `json:"_purpose"`
 	Lang              string   `json:"lang"`
 	NavLabel          string   `json:"nav_label"`
-	NavDownload       string   `json:"nav_download"`
 	NavInstall        string   `json:"nav_install"`
 	NavSource         string   `json:"nav_source"`
 	NavGettingStarted string   `json:"nav_getting_started"`
@@ -225,8 +223,8 @@ type uiStrings struct {
 	Headline          []string `json:"headline"`
 	HeadlineAccent    string   `json:"headline_accent"`
 	MarkLabel         string   `json:"mark_label"`
-	DownloadLabel     string   `json:"download_label"`
-	DownloadNote      string   `json:"download_note"`
+	InstallLabel      string   `json:"install_label"`
+	InstallNote       string   `json:"install_note"`
 	RepositoryLabel   string   `json:"repository_label"`
 	FactRequires      string   `json:"fact_requires"`
 	FactEndpoint      string   `json:"fact_endpoint"`
@@ -260,7 +258,6 @@ type links struct {
 	Home           string
 	Repository     string
 	RepositoryName string
-	Download       string
 	Releases       string
 	GettingStarted string
 }
@@ -500,7 +497,6 @@ func forgeLinks(m manifest) links {
 		Home:           "./",
 		Repository:     repo,
 		RepositoryName: m.Forge.Repository,
-		Download:       repo + "/releases/latest/download/" + m.Forge.DownloadAsset,
 		Releases:       repo + "/releases",
 		GettingStarted: repo + "/blob/" + m.Forge.Branch + "/docs/getting-started.md",
 	}
