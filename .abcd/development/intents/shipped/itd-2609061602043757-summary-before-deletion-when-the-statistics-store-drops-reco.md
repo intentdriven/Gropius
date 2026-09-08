@@ -130,6 +130,21 @@ a day collapses 23 KB into the same line. The claim's conclusion — that the
 summary can outlive the detail by years at negligible cost — holds either way;
 the reference page states the measured figure rather than the ratio.
 
+
+2026-09-08 — **Adopted.** The maintainer adopts the press-release divergence:
+the promise that a short summary outlives the detail does not hold in the one
+case the press release does not imagine, where the summary itself cannot be
+written and the store is over its hard bound. Past the limit the oldest file
+goes without a summary, and Alice can lose a period with neither its detail nor
+its summary.
+
+The adoption rests on the disclosure, which an independent review (receipt
+rcp-849f518f44a0) verified rather than took on trust: the log names the file,
+the bytes and the records lost (`internal/stats/store.go:1332`), and Settings
+renders both the sentence saying the limits are not being applied and a separate
+count of records removed without a summary (`internal/ui/static/app.js:913`,
+`:917`). A promise that degrades loudly on a full disk is the promise being
+adopted; a silent one would not be.
 ## Grounds
 
 - pursued: we want to learn how local models are actually used on this Mac, which models, how many tokens, what latencies, and we expect a month of records to change which models we keep and how we set the memory budget; we are wrong if, after a month with the dashboard, no such decision has changed
