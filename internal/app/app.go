@@ -201,6 +201,9 @@ func New(opts Options) (*App, error) {
 		EvictionGrace:   grace,
 		MaxEvictionWait: maxWait,
 		Log:             opts.Log,
+		// One caller may hold at most a quarter of the queue, so filling it
+		// costs that caller its own share and nobody else's.
+		MaxLoadWaitersPerSource: 2,
 	})
 	a.applyStatistics(opts.Config)
 

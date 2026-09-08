@@ -16,6 +16,9 @@ func TestSaveLoadRoundTripKeepsTheEvictionGraceSettings(t *testing.T) {
 	c := Default()
 	c.IdleTimeoutSec = 600
 	c.EvictionGrace = true
+	// Grace on a LAN-exposed server needs a key: the wait queue is shared out
+	// per key, so without one it cannot be shared out at all.
+	c.APIKey = "test-key"
 	c.EvictionGraceSec = 45
 	c.EvictionMaxWaitSec = 90
 	if err := Save(path, c); err != nil {
@@ -61,6 +64,9 @@ func TestAFreshInstallHasEvictionGraceOffWithTheDefaultIntervals(t *testing.T) {
 func TestValidateRefusesAGraceLongerThanTheIdleTimeout(t *testing.T) {
 	c := Default()
 	c.EvictionGrace = true
+	// Grace on a LAN-exposed server needs a key: the wait queue is shared out
+	// per key, so without one it cannot be shared out at all.
+	c.APIKey = "test-key"
 	c.IdleTimeoutSec = 60
 	c.EvictionGraceSec = 120
 
@@ -81,6 +87,9 @@ func TestValidateRefusesAGraceLongerThanTheIdleTimeout(t *testing.T) {
 		t.Errorf("Validate refused an inert grace: %v", err)
 	}
 	c.EvictionGrace = true
+	// Grace on a LAN-exposed server needs a key: the wait queue is shared out
+	// per key, so without one it cannot be shared out at all.
+	c.APIKey = "test-key"
 	c.IdleTimeoutSec = 0
 	if err := c.Validate(); err != nil {
 		t.Errorf("Validate refused a grace on a Mac with no idle timeout: %v", err)
@@ -155,6 +164,9 @@ func TestLoadRepairsAnUnusableEvictionGrace(t *testing.T) {
 func TestAClearedIntervalMeansTheDefaultRatherThanARefusal(t *testing.T) {
 	c := Default()
 	c.EvictionGrace = true
+	// Grace on a LAN-exposed server needs a key: the wait queue is shared out
+	// per key, so without one it cannot be shared out at all.
+	c.APIKey = "test-key"
 	c.EvictionGraceSec = 0
 	c.EvictionMaxWaitSec = 0
 
@@ -185,6 +197,9 @@ func TestAClearedIntervalMeansTheDefaultRatherThanARefusal(t *testing.T) {
 func TestValidateRefusesAMaximumWaitBelowTheGrace(t *testing.T) {
 	c := Default()
 	c.EvictionGrace = true
+	// Grace on a LAN-exposed server needs a key: the wait queue is shared out
+	// per key, so without one it cannot be shared out at all.
+	c.APIKey = "test-key"
 	c.EvictionGraceSec = 300
 	c.EvictionMaxWaitSec = 60
 
@@ -239,5 +254,45 @@ func TestLoadRaisesAMaximumWaitBelowTheGrace(t *testing.T) {
 	}
 	if err := got.Validate(); err != nil {
 		t.Errorf("the repaired config does not validate: %v", err)
+	}
+}
+
+// Eviction grace on an open endpoint is a denial-of-service lever: the wait
+// queue is shared out per API key, so with no key it cannot be shared out at
+// all and one client can hold up model loading for everyone.
+func TestGraceNeedsAKeyOnlyWhenExposed(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		host    string
+		key     string
+		wantErr bool
+	}{
+		{name: "LAN with no key is refused", host: "0.0.0.0", wantErr: true},
+		{name: "specific LAN address with no key is refused", host: "192.0.2.5", wantErr: true},
+		{name: "LAN with a key is allowed", host: "0.0.0.0", key: "k"},
+		{name: "loopback with no key is allowed", host: "127.0.0.1"},
+		{name: "localhost with no key is allowed", host: "localhost"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := Default()
+			c.Host, c.APIKey, c.EvictionGrace = tc.host, tc.key, true
+			err := c.Validate()
+			if tc.wantErr && err == nil {
+				t.Error("expected grace to be refused without a key on an exposed bind")
+			}
+			if !tc.wantErr && err != nil {
+				t.Errorf("unexpected refusal: %v", err)
+			}
+		})
+	}
+}
+
+// Grace off must never be refused, whatever the bind: the shipping default
+// stores the two intervals while the feature is switched off.
+func TestGraceOffIsNeverRefused(t *testing.T) {
+	c := Default()
+	c.Host, c.APIKey, c.EvictionGrace = "0.0.0.0", "", false
+	if err := c.Validate(); err != nil {
+		t.Errorf("grace off must validate: %v", err)
 	}
 }

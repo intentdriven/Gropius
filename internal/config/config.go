@@ -916,6 +916,16 @@ func (c Config) Validate() error {
 	if err := c.validatePinned(); err != nil {
 		return err
 	}
+	// Eviction grace on an open endpoint is a denial-of-service lever: a parked
+	// waiter that cannot progress blocks every cold load needing an eviction
+	// for as long as the maximum wait allows, and the queue is shared out per
+	// API key — which means it cannot be shared out at all when there is no key
+	// to tell callers apart. Loopback-only installs are unaffected: there is no
+	// network caller to defend against, and the check turns on exposure rather
+	// than on the key alone.
+	if c.EvictionGrace && c.ExposedToLAN() && c.APIKey == "" {
+		return errors.New("eviction grace needs an API key on a LAN-exposed server: without one the wait queue cannot be shared out between callers, and one client can hold up model loading for everyone")
+	}
 	if c.StatsMonths < 1 || c.StatsMonths > MaxStatsMonths {
 		return fmt.Errorf("keep statistics for between 1 and %d months, got %d", MaxStatsMonths, c.StatsMonths)
 	}

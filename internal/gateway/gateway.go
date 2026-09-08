@@ -163,7 +163,11 @@ func (g *Gateway) withAuth(next http.Handler) http.Handler {
 				"invalid or missing API key — send it as 'Authorization: Bearer <key>'")
 			return
 		}
-		next.ServeHTTP(w, r)
+		// Tag the caller so the pool can share the load-waiter queue out per
+		// key rather than first-come. Only a verified key reaches here, so the
+		// tag cannot be spoofed by an unauthenticated caller; everyone else
+		// falls through untagged and shares one bucket.
+		next.ServeHTTP(w, r.WithContext(runtime.WithSource(r.Context(), token)))
 	})
 }
 
