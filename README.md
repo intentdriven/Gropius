@@ -81,6 +81,15 @@ it through the firewall, and launches it:
 curl -fsSL https://raw.githubusercontent.com/intentdriven/Gropius/main/install.sh | bash
 ```
 
+The server needs administrator rights once, to allow itself through the macOS
+firewall so other machines can reach it. The installer asks for them at the
+start, through the standard macOS authentication panel: **this account does not
+have to be an administrator** — the panel takes an administrator's name and
+password, so someone else can enter theirs. Decline it and nothing is downloaded
+or installed. The bundle is ad-hoc signed, so its identity changes with every
+build and the firewall grant has to be made again on each update. The chat
+client needs no administrator rights at all.
+
 That command and a direct download of the current release are also on the
 project's page at <https://intentdriven.sh/Gropius>, which is where someone who
 is not building from source starts. The page names the release GitHub flags as
