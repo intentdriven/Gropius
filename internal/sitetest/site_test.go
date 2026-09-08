@@ -629,6 +629,48 @@ func TestNothingScrollsSidewaysOnAPhone(t *testing.T) {
 	}
 }
 
+// A grid item's min-width is auto, not zero, so a track holds at the intrinsic
+// width of the widest unwrappable thing inside it however small its fr share
+// says it should be. The install one-liner is 894px of unbreakable command, so
+// every section that shares a row with it was pushed off the page: measured in
+// a browser before the rule under test existed, the document scrolled sideways
+// by 547px at a 375px viewport, 286px at 900px and 86px at 1100px — at every
+// width tried between 375 and 1200. The .snippet overflow-x rule above cannot
+// help, and was measurably never engaging: the track grew instead of the box
+// scrolling. TestNothingScrollsSidewaysOnAPhone passed throughout, because it
+// reads declarations and a viewport is the one thing a stylesheet cannot state.
+func TestEveryMultiColumnSectionCanShrinkBelowItsContent(t *testing.T) {
+	var covered string
+	for _, m := range regexp.MustCompile(`(?s)([^{}]+)\{[^{}]*min-width:\s*0\s*[;}]`).FindAllStringSubmatch(css, -1) {
+		covered += m[1]
+	}
+	for _, section := range []string{".hero", ".actions", ".install"} {
+		if !strings.Contains(covered, section+" > *") {
+			t.Errorf("nothing lets the children of %s shrink below their content; one unwrappable line in either column pushes the other off the page at every viewport", section)
+		}
+	}
+}
+
+// The mark is decoration. On a narrow viewport the stacked layout put it above
+// the headline, so the first thing on a phone was a 220px logo and the sentence
+// saying what Gropius is fell below it.
+func TestTheMarkStepsAsideOnANarrowViewport(t *testing.T) {
+	narrow := blockAfter(t, css, "@media (max-width: 820px)")
+	if got := decl(t, narrow, ".mark", "display"); got != "none" {
+		t.Errorf(".mark display is %q on a narrow viewport; the decoration must not take the top of the page from the headline", got)
+	}
+}
+
+// The facts are a two-column definition list. On a phone the labels hold their
+// own column and the values wrap in what is left of 375px, which is why they
+// stack instead below the width where that stops reading as a list.
+func TestTheFactListStacksOnAPhone(t *testing.T) {
+	phone := blockAfter(t, css, "@media (max-width: 560px)")
+	if got := decl(t, phone, ".facts", "grid-template-columns"); got != "1fr" {
+		t.Errorf(".facts grid-template-columns is %q on a phone; the label column leaves too little for the value", got)
+	}
+}
+
 // buttonHeight is one .btn: its padding, its border, and the two lines of text
 // inside it.
 func buttonHeight(t *testing.T) float64 {
