@@ -153,7 +153,7 @@ if [ "$mode" = "server" ] && [ "${GITHUB_ACTIONS:-}" != "true" ]; then
 		die "administrator authorization was declined or failed. Nothing has been downloaded or installed. Re-run this command with an administrator's credentials to hand."
 fi
 
-tmp="$(mktemp -d)"
+tmp="$(/usr/bin/mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 zip="$tmp/$ASSET"
 
@@ -189,7 +189,7 @@ fi
 fetch() {
 	local name="$1" dest="$2"
 	if [ -n "$ASSET_DIR" ]; then
-		cp "$ASSET_DIR/$name" "$dest" ||
+		/bin/cp "$ASSET_DIR/$name" "$dest" ||
 			die "could not read $name from $ASSET_DIR."
 		return 0
 	fi
@@ -216,8 +216,23 @@ fetch "$ASSET" "$zip"
 # skips the other app's line.
 echo "Verifying checksum…"
 fetch "SHA256SUMS.txt" "$tmp/SHA256SUMS.txt"
-( cd "$tmp" && shasum -a 256 -c --ignore-missing SHA256SUMS.txt ) >/dev/null 2>&1 ||
+# /usr/bin/shasum, not shasum: this line is the only integrity control in the
+# whole install path, so the binary that runs it must not be one PATH chose. A
+# planted shim is the hostile case, but the ordinary one matters too — a
+# Homebrew coreutils or another implementation earlier on PATH need not accept
+# `--ignore-missing`, and a checksum check that silently stops checking is worse
+# than none, because it still prints reassurance. Verified against this exact
+# binary: a matching file exits 0, while a wrong hash, a checksums file naming
+# no downloaded file, an empty file and an HTML error page each exit non-zero.
+# It fails closed on all four.
+#
+# The output is captured rather than discarded so the failure says which of
+# those fired. Sending it to /dev/null made every cause look identical, and this
+# is the one message a user most needs to be able to act on.
+if ! checksum_output="$( cd "$tmp" && /usr/bin/shasum -a 256 -c --ignore-missing SHA256SUMS.txt 2>&1 )"; then
+	echo "$checksum_output" >&2
 	die "checksum mismatch for $ASSET — the download is corrupt or tampered. Refusing to install."
+fi
 echo "Checksum OK."
 
 # Choose where the bundle goes. /Applications is root:admin and group-writable,
@@ -240,24 +255,24 @@ else
 fi
 
 echo "Installing ${APP}.app to ${DEST}…"
-ditto -x -k "$zip" "$tmp/extract" || die "could not unpack $ASSET."
+/usr/bin/ditto -x -k "$zip" "$tmp/extract" || die "could not unpack $ASSET."
 [ -d "$tmp/extract/$APP.app" ] || die "$ASSET did not contain $APP.app."
 # Safe to clear the quarantine now: we have cryptographically verified this .app
 # is the exact artifact the release workflow built and signed. (curl downloads
 # are usually not quarantined anyway, but a proxy or prior run might have tagged
 # it, which would otherwise block launch.)
-xattr -dr com.apple.quarantine "$tmp/extract/$APP.app" 2>/dev/null || true
+/usr/bin/xattr -dr com.apple.quarantine "$tmp/extract/$APP.app" 2>/dev/null || true
 # Quit a running copy first. LaunchServices' `open` activates an already-running
 # process instead of launching the new binary, so an upgrade over a live app
 # would report success while the old version keeps running.
-if pgrep -qf "$DEST/$APP.app/Contents/MacOS/" 2>/dev/null; then
+if /usr/bin/pgrep -qf "$DEST/$APP.app/Contents/MacOS/" 2>/dev/null; then
 	echo "Quitting the running ${APP}…"
 	/usr/bin/osascript -e "quit app \"$APP\"" >/dev/null 2>&1 || true
 	for _ in $(seq 1 20); do
-		pgrep -qf "$DEST/$APP.app/Contents/MacOS/" || break
+		/usr/bin/pgrep -qf "$DEST/$APP.app/Contents/MacOS/" || break
 		sleep 0.5
 	done
-	if pgrep -qf "$DEST/$APP.app/Contents/MacOS/" 2>/dev/null; then
+	if /usr/bin/pgrep -qf "$DEST/$APP.app/Contents/MacOS/" 2>/dev/null; then
 		echo "warning: $APP is still running; quit it and relaunch to finish the upgrade." >&2
 	fi
 fi

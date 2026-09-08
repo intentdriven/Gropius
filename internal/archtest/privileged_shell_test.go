@@ -84,6 +84,47 @@ func TestOsascriptIsInvokedByAbsolutePath(t *testing.T) {
 	})
 }
 
+// TestInstallerPinsTheCommandsItTrusts refuses a PATH-resolved invocation of the
+// commands install.sh depends on for integrity or for placing the bundle.
+//
+// `curl | bash` runs with the invoking user's PATH, and a normal developer PATH
+// puts user-writable directories ahead of /usr/bin. The sharp one is shasum: it
+// is the only integrity control in the whole install path, so a shim there
+// defeats the verification silently. The others place, unpack and inspect the
+// bundle, and a shim in any of them subverts what lands on disk.
+//
+// The ordinary case matters as much as the hostile one. A Homebrew coreutils or
+// another implementation earlier on PATH need not accept the same flags —
+// `--ignore-missing` is not universal — and a checksum check that quietly stops
+// checking is worse than no check at all, because it still prints reassurance.
+//
+// Scoped to install.sh: it is the script that runs on a machine whose PATH
+// nobody here controls. `open` is deliberately absent, being a launch
+// convenience with no integrity role.
+func TestInstallerPinsTheCommandsItTrusts(t *testing.T) {
+	path := filepath.Join(repoRootDir(t), "install.sh")
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read install.sh: %v", err)
+	}
+
+	pinned := []string{"shasum", "ditto", "xattr", "mktemp", "pgrep"}
+	for i, line := range strings.Split(string(b), "\n") {
+		code, _, _ := strings.Cut(line, "#")
+		for _, field := range strings.FieldsFunc(code, func(r rune) bool {
+			return r == ' ' || r == '\t' || r == ';' || r == '|' || r == '&' ||
+				r == '(' || r == ')' || r == '$' || r == '"'
+		}) {
+			for _, name := range pinned {
+				if field == name {
+					t.Errorf("install.sh:%d: %q resolves through the caller's PATH — "+
+						"invoke it as /usr/bin/%s: %s", i+1, name, name, strings.TrimSpace(line))
+				}
+			}
+		}
+	}
+}
+
 // TestInstallerElevatesThroughTheAuthenticationPanel refuses `sudo` as the
 // installer's route to administrator rights.
 //
