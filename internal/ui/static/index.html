@@ -5,17 +5,20 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Gropius · MLX Model Server</title>
 <link rel="stylesheet" href="style.css">
-<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' fill='%23111'/><circle cx='30' cy='30' r='18' fill='%23e63946'/><rect x='52' y='12' width='36' height='36' fill='%23f4d35e'/><polygon points='30,88 12,56 48,56' fill='%231d63c4'/></svg>">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 1024 1024'><rect width='1024' height='1024' fill='%2317181d'/><polygon points='302,132 472,472 132,472' fill='%23F5C518'/><rect x='552' y='132' width='340' height='340' fill='%23B4B6BB'/><rect x='132' y='552' width='340' height='340' fill='%232B5DAA'/><circle cx='722' cy='722' r='170' fill='%23E63329'/></svg>">
 </head>
 <body>
 
 <header>
   <div class="brand">
-    <svg class="logo" viewBox="0 0 100 100" aria-hidden="true">
-      <circle cx="30" cy="30" r="18" fill="#e63946"/>
-      <rect x="52" y="12" width="36" height="36" fill="#f4d35e"/>
-      <polygon points="30,88 12,56 48,56" fill="#1d63c4"/>
-      <rect x="52" y="56" width="36" height="32" fill="#e9e9e9"/>
+    <!-- The mark is build/icon.svg's drawing, at its own coordinates so the two
+         cannot drift apart by rounding. The dark ground is omitted: the header
+         supplies its own. archtest holds this to the icon. -->
+    <svg class="logo" viewBox="0 0 1024 1024" aria-hidden="true">
+      <polygon points="302,132 472,472 132,472" fill="#F5C518"/>
+      <rect x="552" y="132" width="340" height="340" fill="#B4B6BB"/>
+      <rect x="132" y="552" width="340" height="340" fill="#2B5DAA"/>
+      <circle cx="722" cy="722" r="170" fill="#E63329"/>
     </svg>
     <div>
       <h1>Gropius</h1>
@@ -34,10 +37,11 @@
 <div id="warnings"></div>
 
 <div id="setupBanner" class="banner setup" hidden>
-  <div class="spinner"></div>
+  <div class="spinner" id="setupSpinner"></div>
+  <div class="failmark" id="setupFailMark" hidden>&#9888;</div>
   <div>
     <strong id="setupStage">Setting up the MLX runtime…</strong>
-    <p>Gropius is installing its own private Python and MLX. This happens once and takes a few minutes.</p>
+    <p id="setupBlurb">Gropius is installing its own private Python and MLX. This happens once and takes a few minutes.</p>
     <p class="mono" id="setupErr"></p>
   </div>
 </div>
