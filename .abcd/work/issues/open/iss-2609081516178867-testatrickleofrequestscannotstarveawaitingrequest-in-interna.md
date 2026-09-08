@@ -98,11 +98,33 @@ which a 40ms-cadence trickle makes true a large fraction of the time — the thi
 term is skipped as well. Neither contributes, and `delay` falls back to
 `maxWait - waited`. The waiter parks until the maximum.
 
-It is rescued only by an explicit signal, and releases, stops, budget and pin
-changes all do signal. So this is not a guaranteed stall: it needs the release
-to land in the window between the waiter's check and its park. That is a
-plausible rare race, and "rare" is what the evidence says — one failure, not
-reproduced in 40 local runs with the race detector.
+It is rescued by an explicit signal, and releases, stops, budget and pin changes
+all do signal.
+
+**There is no lost-wakeup race, and saying there was understated this.** The
+waiter is appended to `p.waiters` and its delay computed while `p.mu` is still
+held, and only then is the lock released; `w.signal` is `make(chan struct{}, 1)`
+and `wakeWaitersLocked` does a non-blocking send into that buffer. So a wake
+arriving between the unlock and the select is not lost — it sits in the buffer
+and the select takes it at once. The buffering exists for exactly this.
+
+That makes the stall deterministic rather than a coin flip, and it explains the
+pairing. The fallback to the maximum bites only when *nothing* calls
+`wakeWaitersLocked` for the whole interval, and here that is entailed rather than
+lucky: the trickle's own acquire was blocked, so it called no `release()`, and
+the only other actor is the waiter itself, also parked. Two parked waiters, no
+third party, therefore no wakes, therefore both sleep on timers derived from
+`maxWait - waited`, therefore both come unstuck within a few hundred
+milliseconds of each other at the boundary. The 20.003 / 20.311 pairing falls
+out of the mechanism instead of needing a coincidence.
+
+What is rare is *arriving* in the state — a waiter past its grace, the sole
+candidate in flight at the instant of the check, and no other traffic to prod
+anyone. Once there, the wait to the maximum follows. That distinction matters
+for whoever fixes it: a lost-wakeup race would invite adding a signal somewhere,
+and no signal is missing. The defect is that `wakeDelayLocked` treats "the only
+candidate is momentarily in flight" as "nothing can change", when in flight is
+the most transient state a candidate has.
 
 **Status of these claims.** The sequential loop is checkable from
 `internal/runtime/grace_test.go` and was checked. The `wakeDelayLocked`
