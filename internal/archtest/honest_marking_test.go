@@ -33,9 +33,10 @@ import (
 // it because no claim pattern matches it. If one ever did, the fix is a better
 // pattern and not a list of blessed sentences.
 //
-// WHERE THIS SCAN STOPS. It stops in three places, and this list is the whole
+// WHERE THIS SCAN STOPS. It stops in four places, and this list is the whole
 // of what the scan is worth — a clean run means "none of these patterns
-// appears in a passage this scans", and it does not mean the prose claims
+// appears in a passage this scans, and no vendor name appears on a line
+// nobody has written a reason beside", and it does not mean the prose claims
 // nothing.
 //
 //  1. SCOPE. A claim in a passage that never names the mark, and is not beside
@@ -51,18 +52,110 @@ import (
 //     is what lets an honest denial through and is also how a claim can be
 //     dressed as one. cancelledNegations lists the shapes that get past the
 //     cancellation.
+//  4. THE ALLOW MARKER. A vendor name on a line carrying
+//     "<!-- abcd-lint:allow: <reason> -->" is not reported, because a person
+//     writing a page can say what the app cannot. It buys a VENDOR NAME and
+//     never a claim, it needs a reason written down, and it exempts the line
+//     it is on. allowDirective states why the asymmetry is the shape it is.
 //
-// Each of the three has been narrower than the comment describing it at least
-// once. TestANegatorDoesNotDisarmAClaimItDoesNotNegate holds the sentences
-// that proved it, so the same wordings cannot come back.
+// Each of the first three has been narrower than the comment describing it at
+// least once. TestANegatorDoesNotDisarmAClaimItDoesNotNegate holds the
+// sentences that proved it, so the same wordings cannot come back.
 
-// vendorNames are never right anywhere in any surface, in prose or in markup or
-// in a script. The classifier cannot tell one product on the range from
-// another, so naming one is a guess presented as a finding — and the reason has
-// nothing to do with claims, which is why these stay a bare-word scan over the
-// whole file.
+// vendorNames are what the app may not say. The classifier cannot tell one
+// product on the range from another, so a name the app prints is a guess
+// presented as a finding — and the reason has nothing to do with claims, which
+// is why these stay a bare-word scan rather than a pattern over sentences.
+//
+// A page is not the app. A person writing one can say what was actually
+// reasoned about and tested against, which is why the maintainer's decision on
+// iss-2609081221484689 is that documentation may name the vendor even though
+// the app does not. That decision needs a route through this scan, and the
+// route is allowDirective below: line-scoped, and only where a reason is
+// written down.
+//
+// The scan is now per LINE rather than over the whole file, because the marker
+// has to be able to say which mention it exempts. Every name here is a single
+// word, and Markdown's hard wrapping breaks lines between words and not inside
+// them, so nothing that was caught over the whole file escapes a line at a
+// time. A name deliberately split across a line break would, and that is the
+// measured cost of being able to exempt one mention rather than a file.
 var vendorNames = []string{
 	"tailscale", "tailnet", "headscale", "zerotier", "wireguard", "nebula",
+}
+
+// allowDirective is this repository's own spelling of a line-scoped exemption:
+// site-src/index.html.tmpl already carries "<!-- abcd-lint:allow: SVG path
+// coordinates, not addresses -->" for the privacy scan, and abcd's README uses
+// the same idiom. Following it rather than inventing a second one means a
+// reader who has seen one marker has seen them all, and it means the marker
+// costs nothing to a renderer: an HTML comment is invisible in Markdown and in
+// HTML alike.
+//
+// The directive ends in the colon on purpose. "abcd-lint:allow" with nothing
+// after it is not this directive and exempts nothing, which is the first half
+// of REQUIRING A REASON; allowedReason is the second half.
+//
+// THE EXEMPTION IS FOR VENDOR NAMES AND FOR NOTHING ELSE. It is not wired into
+// claimIn, and it must not be. The two findings this rule makes are not the
+// same kind of thing:
+//
+//   - A vendor name is refused because GROPIUS cannot know which product it is
+//     looking at. A person can, so a person writing it down is a real answer to
+//     the real objection, and the marker is where they write it.
+//   - A claim of encryption, exclusivity or safety is refused because it is not
+//     true of any address, by anybody, on any surface — the network can be
+//     published to the internet or shared with machines the operator does not
+//     own, and neither transition touches the address (adr-2609081118587999
+//     rule 1). There is nothing a person knows that makes it true, so there is
+//     nothing a comment could write down, so a comment must not be able to wave
+//     it through. A reviewer who wants a claim to pass is asking for the claim
+//     to be rewritten, not for an exemption.
+//
+// TestOnlyAReasonedMarkerExemptsAVendorNameAndNothingExemptsAClaim measures
+// both halves.
+const allowDirective = "abcd-lint:allow:"
+
+// allowedReason returns what a line's allow marker gives as its reason, or ""
+// when the line carries no marker, or carries one with nothing written after
+// the colon. A bare marker is not an exemption: the whole value of the marker
+// is the sentence beside it, and a marker with no sentence is an unexplained
+// exception wearing the costume of an explained one.
+func allowedReason(line string) string {
+	i := strings.Index(line, allowDirective)
+	if i < 0 {
+		return ""
+	}
+	reason := strings.TrimSpace(line[i+len(allowDirective):])
+	// Strip whichever comment terminator the marker is wrapped in, so that
+	// "<!-- abcd-lint:allow: -->" reads as the empty reason it is rather than
+	// as the reason "-->".
+	for _, closer := range []string{"-->", "*/"} {
+		reason = strings.TrimSpace(strings.TrimSuffix(reason, closer))
+	}
+	return reason
+}
+
+// markerIsHonouredIn reports whether an allow marker on a line of this surface
+// means anything.
+//
+// It does not in site-src/ui.json, and that is a decision rather than an
+// oversight. JSON has no comment syntax, so a marker written there would have
+// to live inside a value — and every value in that file is a LABEL that
+// cmd/gropius-site renders verbatim onto the public landing page, which would
+// put the words "abcd-lint:allow" in front of every reader of it. The
+// alternative, a sibling key, would be a second convention for one file. There
+// is no need for either: ui.json's own _purpose says it holds labels and that
+// every sentence the page asserts comes from somewhere else, so a mention that
+// wants explaining belongs in site-src/index.html.tmpl, which is HTML and can
+// carry the ordinary marker on the line the mention is on.
+//
+// Everything else this rule scans — Markdown, HTML, and the panel's script —
+// has a comment syntax, and allowedReason reads the directive out of any of
+// them because it looks for the directive text rather than for the comment
+// wrapping it.
+func markerIsHonouredIn(surface string) bool {
+	return !strings.HasSuffix(surface, ".json")
 }
 
 // exposureClaims are the shapes a sentence takes when it tells an operator
@@ -135,7 +228,7 @@ func TestTheDocumentationAndThePanelClaimNothingAboutAPrivateNetwork(t *testing.
 	}
 	vendors, claims, passages := scanSurfaces(t, root)
 	for _, v := range vendors {
-		t.Errorf("%s names %q — the classifier cannot tell one product on that address range from another, so naming one states as a finding what is a guess (adr-2609081118587999 rule 1)", v.surface, v.match)
+		t.Errorf("%s names %q, in:\n\n%s\n\nThe classifier cannot tell one product on that address range from another, so the app naming one states as a finding what is a guess (adr-2609081118587999 rule 1). A page is not the app: if a person can say what was actually reasoned about and tested against, write that on the line as <!-- %s why -->. A marker with nothing after the colon exempts nothing, and no marker of any kind exempts a claim about encryption, exclusivity or safety", v.surface, v.match, v.passage, allowDirective)
 	}
 	for _, c := range claims {
 		t.Errorf("%s says %q about the private-network mark, in:\n\n%s\n\nThe mark says which network an address is on. It cannot say what that network is worth: the network can be published to the internet or shared with machines the operator does not own, and neither transition touches the address (adr-2609081118587999 rule 1)", c.surface, c.match, c.passage)
@@ -157,10 +250,16 @@ func scanSurfaces(t *testing.T, root string) (vendors, claims []claim, passages 
 		t.Fatalf("found %d prose surfaces and %d script surfaces under %s — the scan is asserting nothing", len(prose), len(scripts), root)
 	}
 	for _, s := range append(append([]docSurface{}, prose...), scripts...) {
-		lower := strings.ToLower(s.text)
-		for _, vendor := range vendorNames {
-			if strings.Contains(lower, vendor) {
-				vendors = append(vendors, claim{surface: s.name, match: vendor})
+		honoursMarkers := markerIsHonouredIn(s.name)
+		for _, line := range strings.Split(strings.ReplaceAll(s.text, "\r\n", "\n"), "\n") {
+			if honoursMarkers && allowedReason(line) != "" {
+				continue
+			}
+			lower := strings.ToLower(line)
+			for _, vendor := range vendorNames {
+				if strings.Contains(lower, vendor) {
+					vendors = append(vendors, claim{surface: s.name, match: vendor, passage: strings.TrimSpace(line)})
+				}
 			}
 		}
 	}
@@ -420,6 +519,113 @@ func TestTheClaimScanCatchesWhatItSaysItCatches(t *testing.T) {
 			vendors, claims, _ := scanSurfaces(t, root)
 			if len(vendors) == 0 && len(claims) == 0 {
 				t.Errorf("the scan misses this, planted in %s:\n\n%s\nIt is exactly what adr-2609081118587999 rule 1 refuses, and nothing else in the repository would catch it", c.where, c.plant)
+			}
+		})
+	}
+}
+
+// The vendor scan has one exemption and the claim scan has none, and this is
+// where that asymmetry is measured rather than only asserted in a comment.
+//
+// Each case plants text into a copy of the tree and runs the whole rule over
+// it. `found` says whether the rule must still report something: a reasoned
+// marker is the only thing that turns a vendor finding off, and nothing turns a
+// claim finding off.
+func TestOnlyAReasonedMarkerExemptsAVendorNameAndNothingExemptsAClaim(t *testing.T) {
+	cases := []struct {
+		name  string
+		where string
+		plant string
+		found bool
+	}{
+		{
+			"a vendor name with a reasoned marker, in a Markdown page",
+			"docs/guides/mesh-networks.md",
+			"# Mesh networks\n\nGropius was tested against Tailscale. <!-- abcd-lint:allow: a page is written by a person who can say what was tested -->\n",
+			false,
+		},
+		{
+			"a vendor name with a reasoned marker, in the README",
+			"README.md",
+			"\nGropius was tested against Tailscale. <!-- abcd-lint:allow: a page is written by a person who can say what was tested -->\n",
+			false,
+		},
+		{
+			"a vendor name with a reasoned marker, in the panel's markup",
+			"internal/ui/static/index.html",
+			"\n<p>Tested against Tailscale.</p> <!-- abcd-lint:allow: a page is written by a person who can say what was tested -->\n",
+			false,
+		},
+		{
+			"a vendor name with a reasoned marker, in the landing page's template",
+			"site-src/index.html.tmpl",
+			"\n<p>Tested against Tailscale.</p> <!-- abcd-lint:allow: a page is written by a person who can say what was tested -->\n",
+			false,
+		},
+		{
+			"a vendor name with a reasoned marker in the script's own comment syntax",
+			"internal/ui/static/app.js",
+			"\nconst TESTED_AGAINST = 'Tailscale'; // abcd-lint:allow: a person wrote down what was tested\n",
+			false,
+		},
+		{
+			"a vendor name whose marker is on the line above it, which is not the line it exempts",
+			"internal/ui/static/app.js",
+			"\n// abcd-lint:allow: a person wrote down what was tested\nconst TESTED_AGAINST_TOO = 'Tailscale';\n",
+			true,
+		},
+		{
+			"a vendor name with a bare marker, no colon",
+			"docs/guides/mesh-networks.md",
+			"# Mesh networks\n\nGropius was tested against Tailscale. <!-- abcd-lint:allow -->\n",
+			true,
+		},
+		{
+			"a vendor name with a bare marker, a colon and nothing after it",
+			"docs/guides/mesh-networks.md",
+			"# Mesh networks\n\nGropius was tested against Tailscale. <!-- abcd-lint:allow: -->\n",
+			true,
+		},
+		{
+			"a vendor name with a marker whose reason is whitespace",
+			"docs/guides/mesh-networks.md",
+			"# Mesh networks\n\nGropius was tested against Tailscale. <!-- abcd-lint:allow:    -->\n",
+			true,
+		},
+		{
+			"a vendor name with no marker at all",
+			"docs/guides/mesh-networks.md",
+			"# Mesh networks\n\nGropius was tested against Tailscale.\n",
+			true,
+		},
+		{
+			"a vendor name in a landing-page label, where the marker is not honoured",
+			"site-src/ui.json",
+			"\n{\"mark_note\": \"Your Tailscale address <!-- abcd-lint:allow: a page is written by a person -->\"}\n",
+			true,
+		},
+		{
+			"a claim with a reasoned marker, which is not a thing a comment may wave through",
+			"docs/getting-started.md",
+			"\n## More about the mark\n\nAn address on a private network is encrypted. <!-- abcd-lint:allow: the maintainer looked at this and was happy -->\n",
+			true,
+		},
+		{
+			"a claim with a reasoned marker in the panel's markup",
+			"internal/ui/static/index.html",
+			"\n<p>An address on a private network is protected.</p> <!-- abcd-lint:allow: the maintainer looked at this and was happy -->\n",
+			true,
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			root := plantedTree(t, c.where, c.plant)
+			vendors, claims, _ := scanSurfaces(t, root)
+			got := len(vendors) > 0 || len(claims) > 0
+			if got != c.found {
+				t.Errorf("the rule reported %d vendor names and %d claims for this, planted in %s, and had to report %s:\n\n%s",
+					len(vendors), len(claims), c.where, map[bool]string{true: "something", false: "nothing"}[c.found], c.plant)
 			}
 		})
 	}
