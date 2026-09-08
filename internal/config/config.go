@@ -6,6 +6,8 @@
 package config
 
 import (
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -113,13 +115,44 @@ func writableDir(dir string) bool {
 	return true
 }
 
+// ExecRoot is where this account's EXECUTABLES live for a data root: uv, the
+// virtualenv, and the uv-managed CPython tree.
+//
+// Everywhere but the shared root that is the root itself. The shared root is
+// the exception, and the executables go under this account's own Application
+// Support directory instead, for a reason the data does not share: models are
+// inert bytes every account may read, while these are programs every account
+// EXECUTES. One shared copy means whichever account provisioned it owns those
+// files and can rewrite them at any time, and every other account then runs
+// the result under its own uid — an owner-trust residue no mode check can
+// remove, because the owner is legitimately allowed to write their own files.
+// Per-account executables remove it by construction: no account ever executes
+// another account's binaries. Models stay shared, which is what the shared
+// root exists for; a 70 GB model is not duplicated to buy this.
+//
+// Follows StatsDir's rule and its fallback: a home directory that cannot be
+// resolved falls back to the root, where the provisioner's own refusal to run
+// an interpreter that is not owned by this account or root is what stops it.
+// This function decides where to look, never whether the place is safe.
+func ExecRoot(root string) string {
+	if !sameDir(root, SharedRoot) {
+		return root
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return root
+	}
+	return filepath.Join(home, "Library", "Application Support", "Gropius")
+}
+
 // NewPaths derives the layout from a root directory.
 func NewPaths(root string) Paths {
+	exec := ExecRoot(root)
 	return Paths{
 		Root:    root,
-		Bin:     filepath.Join(root, "bin"),
-		Venv:    filepath.Join(root, "venv"),
-		Python:  filepath.Join(root, "python"),
+		Bin:     filepath.Join(exec, "bin"),
+		Venv:    filepath.Join(exec, "venv"),
+		Python:  filepath.Join(exec, "python"),
 		Models:  filepath.Join(root, "models"),
 		HFCache: filepath.Join(root, "hf", "hub"),
 		Logs:    filepath.Join(root, "logs"),
@@ -1006,4 +1039,21 @@ func Save(path string, c Config) error {
 		return err
 	}
 	return os.Rename(tmpName, path)
+}
+
+// GenerateAPIKey returns a fresh random API key, 32 bytes of crypto/rand
+// rendered as URL-safe base64 without padding.
+//
+// Used to fail closed rather than open: a server that binds a LAN address with
+// no key configured is reachable, unauthenticated, by everyone on the network,
+// and the warning that said so was the only thing standing between a fresh
+// install and an open endpoint. A generated key is announced loudly, persisted,
+// and shown in the control panel, so the operator can use it or replace it —
+// but there is no window in which the endpoint is open by default.
+func GenerateAPIKey() (string, error) {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return "", fmt.Errorf("generate api key: %w", err)
+	}
+	return base64.RawURLEncoding.EncodeToString(b), nil
 }
