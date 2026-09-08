@@ -8,7 +8,8 @@
 #   Client (GropiusChat, universal):
 #     curl -fsSL https://raw.githubusercontent.com/intentdriven/Gropius/main/install.sh | bash -s -- client
 #
-# It downloads the latest release, installs the .app into /Applications, and (for
+# It downloads the latest release, installs the .app into /Applications (or into
+# ~/Applications when this account cannot write /Applications), and (for
 # the server) allows it through the macOS firewall and launches it. A binary
 # fetched by curl is not Gatekeeper-quarantined, so no right-click-to-open dance.
 set -euo pipefail
@@ -104,7 +105,25 @@ fetch "SHA256SUMS.txt" "$tmp/SHA256SUMS.txt"
 	die "checksum mismatch for $ASSET — the download is corrupt or tampered. Refusing to install."
 echo "Checksum OK."
 
-echo "Installing $APP.app to /Applications…"
+# Choose where the bundle goes. /Applications is root:admin and group-writable,
+# so a standard (non-admin) account cannot write it — and on a Mac several
+# people share, the account that most needs the chat client is exactly the one
+# without admin rights. ~/Applications is the per-user location macOS already
+# understands: Spotlight and Launchpad index it, and it needs no privileges.
+#
+# Preferred over prompting for sudo on purpose. Asking a standard user for an
+# admin password they may not have turns a working install into a dead end, and
+# asking an admin to elevate for a per-user app installs it for everyone when
+# only one account wanted it.
+if [ -w /Applications ]; then
+	DEST="/Applications"
+else
+	DEST="$HOME/Applications"
+	mkdir -p "$DEST" || die "no write access to /Applications, and $DEST could not be created."
+	echo "No write access to /Applications (this account is not an administrator) — installing to $DEST instead."
+fi
+
+echo "Installing $APP.app to $DEST…"
 ditto -x -k "$zip" "$tmp/extract" || die "could not unpack $ASSET."
 [ -d "$tmp/extract/$APP.app" ] || die "$ASSET did not contain $APP.app."
 # Safe to clear the quarantine now: we have cryptographically verified this .app
@@ -115,32 +134,47 @@ xattr -dr com.apple.quarantine "$tmp/extract/$APP.app" 2>/dev/null || true
 # Quit a running copy first. LaunchServices' `open` activates an already-running
 # process instead of launching the new binary, so an upgrade over a live app
 # would report success while the old version keeps running.
-if pgrep -qf "/Applications/$APP.app/Contents/MacOS/" 2>/dev/null; then
+if pgrep -qf "$DEST/$APP.app/Contents/MacOS/" 2>/dev/null; then
 	echo "Quitting the running ${APP}…"
 	osascript -e "quit app \"$APP\"" >/dev/null 2>&1 || true
 	for _ in $(seq 1 20); do
-		pgrep -qf "/Applications/$APP.app/Contents/MacOS/" || break
+		pgrep -qf "$DEST/$APP.app/Contents/MacOS/" || break
 		sleep 0.5
 	done
-	if pgrep -qf "/Applications/$APP.app/Contents/MacOS/" 2>/dev/null; then
+	if pgrep -qf "$DEST/$APP.app/Contents/MacOS/" 2>/dev/null; then
 		echo "warning: $APP is still running; quit it and relaunch to finish the upgrade." >&2
 	fi
 fi
-rm -rf "/Applications/$APP.app"
-cp -R "$tmp/extract/$APP.app" /Applications/
+# Stage the new bundle beside the old one, then swap. Copying straight over the
+# installed app means deleting it BEFORE knowing the replacement can be written:
+# a copy that then fails — a full disk, a locked file, a revoked permission —
+# leaves the machine with no app at all, turning an upgrade into a destroyed
+# install. Staging first keeps the working copy until the new one is complete,
+# and the final move is a rename within one directory.
+staged="$DEST/.$APP.app.incoming.$$"
+rm -rf "$staged"
+cp -R "$tmp/extract/$APP.app" "$staged" || {
+	rm -rf "$staged"
+	die "could not write $APP.app to $DEST — the installed copy is untouched."
+}
+rm -rf "$DEST/$APP.app"
+mv "$staged" "$DEST/$APP.app" || {
+	rm -rf "$staged"
+	die "could not move $APP.app into place in $DEST."
+}
 
 if [ "$mode" = "client" ]; then
-	echo "Installed /Applications/$APP.app."
+	echo "Installed $DEST/$APP.app."
 	echo "Open it, then point it at your Gropius server: the address from the server's Connect tab"
 	echo "without the trailing /v1 (GropiusChat adds the path itself)."
-	open "/Applications/$APP.app"
+	open "$DEST/$APP.app"
 	exit 0
 fi
 
 # Server: allow it through the macOS Application Firewall so other machines on the
 # LAN can reach it. Without this the firewall accepts the handshake but drops the
 # data — loopback works, the LAN sees an empty response. This needs sudo.
-BIN="/Applications/$APP.app/Contents/MacOS/gropius"
+BIN="$DEST/$APP.app/Contents/MacOS/gropius"
 echo "Allowing $APP through the macOS firewall (needs your password)…"
 if sudo /usr/libexec/ApplicationFirewall/socketfilterfw --add "$BIN" >/dev/null &&
 	sudo /usr/libexec/ApplicationFirewall/socketfilterfw --unblockapp "$BIN" >/dev/null; then
@@ -152,7 +186,7 @@ else
 	echo "  sudo /usr/libexec/ApplicationFirewall/socketfilterfw --unblockapp '$BIN'" >&2
 fi
 
-open "/Applications/$APP.app"
+open "$DEST/$APP.app"
 cat <<'DONE'
 
 Gropius is running in the menu bar. Click its icon to open the control panel,
