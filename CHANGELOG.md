@@ -21,19 +21,28 @@ GitHub release notes.
   all. 0.3.0 shipped an installer that stopped on its first line of work
   because the chain built and published it without ever executing it, and the
   break was reachable only by someone installing from the tag. The gate also
-  checks that what the installer put in place is byte-for-byte what that run
-  built, so an installer that quietly falls back to the previous release cannot
-  pass it.
-- **`install.sh` reads `GROPIUS_ASSET_DIR`, and only inside GitHub Actions.**
-  The seam lets the release gate hand the script the artefacts of a release
-  that does not exist yet. It is refused everywhere else, and the reason is the
-  checksum: while the seam is honoured, the bundle and the `SHA256SUMS.txt` it
-  is verified against both come from the named directory, so the verification
-  shows the directory is self-consistent and says nothing about where its
-  contents came from. Every step of the script still executes — the
-  destination choice, the unpacking, the staged swap — but the integrity check
-  is the CI one, not the one a user gets, and a run that honours the seam says
-  so on stderr before it says `Checksum OK.`
+  checks that the executable inside each installed bundle is byte-for-byte the
+  one that run built, so an installer that quietly falls back to the previous
+  release cannot pass it.
+- **`install.sh` reads `GROPIUS_ASSET_DIR`, and stops unless
+  `GITHUB_ACTIONS=true`.** The seam lets the release gate hand the script the
+  artefacts of a release that does not exist yet. The reason for the refusal is
+  the checksum: while the seam is honoured, the bundle and the `SHA256SUMS.txt`
+  it is verified against both come from the named directory, so the
+  verification shows only that the directory is self-consistent and says
+  nothing about where its contents came from. Every step of the script still
+  executes — the destination choice, the unpacking, the staged swap — but the
+  integrity check is the CI one, not the one a user gets.
+
+  What that refusal is worth, stated plainly: `GITHUB_ACTIONS` is an ordinary
+  environment variable, and a caller who sets one can set two. Setting both
+  still installs whatever the named directory holds, end to end — quarantine
+  cleared, firewall rule added, app launched. This is a loudness control, not
+  an integrity control. It keeps the seam from being reached by accident, by a
+  stray export, or by a tutorial that tells someone to set it, and it makes the
+  substitution announce itself on stderr before `Checksum OK.` is printed. What
+  proves where a build came from is the published release and
+  `gh attestation verify`.
 
 ## [0.3.1] - 2026-09-08
 
