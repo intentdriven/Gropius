@@ -282,17 +282,47 @@ fi
 # leaves the machine with no app at all, turning an upgrade into a destroyed
 # install. Staging first keeps the working copy until the new one is complete,
 # and the final move is a rename within one directory.
-staged="$DEST/.$APP.app.incoming.$$"
-rm -rf "$staged"
-cp -R "$tmp/extract/$APP.app" "$staged" || {
-	rm -rf "$staged"
+#
+# The staging name comes from mktemp, not from the pid. `.$APP.app.incoming.$$`
+# is predictable, which hands anyone watching the directory a reliable signal
+# for when to act on it.
+staged="$(/usr/bin/mktemp -d "$DEST/.$APP.incoming.XXXXXXXX")" ||
+	die "could not create a staging directory in $DEST."
+/bin/cp -R "$tmp/extract/$APP.app" "$staged/$APP.app" || {
+	/bin/rm -rf "$staged"
 	die "could not write $APP.app to $DEST — the installed copy is untouched."
 }
-rm -rf "$DEST/$APP.app"
-mv "$staged" "$DEST/$APP.app" || {
-	rm -rf "$staged"
-	die "could not move $APP.app into place in $DEST."
+
+# Move the old bundle ASIDE rather than deleting it, put the new one in place,
+# and only then delete what was set aside. The previous order deleted the
+# installed bundle first and, on a failed rename, deleted the staged copy too —
+# so an ordinary rename failure left NO application at all, which is precisely
+# the outcome the paragraph above says staging exists to prevent. It needed no
+# attacker and no unusual filesystem: one failing rename was enough. Every
+# failure path below now ends with a working bundle at the destination.
+#
+# What this does NOT fix, stated plainly so nobody reads it as settled: `mv`
+# nests into a destination that already exists as a directory and follows one
+# that is a symlink, exiting 0 in both cases. It has no dependable "fail if the
+# destination exists" mode, and any test-then-move is a race by construction, so
+# an attacker who wins the window between the two renames below is not stopped
+# here. Closing that needs os.Rename semantics — Go, not shell.
+retired=""
+if [ -e "$DEST/$APP.app" ] || [ -L "$DEST/$APP.app" ]; then
+	retired="$staged/$APP.app.retired"
+	mv "$DEST/$APP.app" "$retired" || {
+		/bin/rm -rf "$staged"
+		die "could not set the installed $APP.app aside in $DEST — it is untouched."
+	}
+fi
+mv "$staged/$APP.app" "$DEST/$APP.app" || {
+	# Put the old bundle back before giving up, so a failure here is a no-op
+	# rather than an uninstall.
+	[ -n "$retired" ] && mv "$retired" "$DEST/$APP.app" 2>/dev/null
+	/bin/rm -rf "$staged"
+	die "could not move $APP.app into place in $DEST — the previous copy is left as it was."
 }
+/bin/rm -rf "$staged"
 
 if [ "$mode" = "client" ]; then
 	echo "Installed $DEST/$APP.app."

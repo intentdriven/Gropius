@@ -125,6 +125,39 @@ func TestInstallerPinsTheCommandsItTrusts(t *testing.T) {
 	}
 }
 
+// TestInstallerNeverDeletesTheBundleBeforeTheReplacementLands pins the ordering
+// of the staged swap.
+//
+// The installed bundle must be renamed ASIDE, never deleted, before the new one
+// is moved into place. An earlier version deleted it first and, on a failed
+// rename, deleted the staged copy too — so an ordinary rename failure left no
+// application at all, which is the exact outcome the staging comment says the
+// staging exists to prevent. The bug needed no attacker and no unusual
+// filesystem: one failing rename was enough.
+//
+// This checks the property that is cheap to check mechanically — that no `rm`
+// of the destination bundle appears before the move that replaces it. It does
+// not prove the swap is atomic, which it is not: `mv` nests into an existing
+// directory and follows a symlink, and closing that needs os.Rename.
+func TestInstallerNeverDeletesTheBundleBeforeTheReplacementLands(t *testing.T) {
+	path := filepath.Join(repoRootDir(t), "install.sh")
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read install.sh: %v", err)
+	}
+	src := string(b)
+
+	move := strings.Index(src, `mv "$staged/$APP.app" "$DEST/$APP.app"`)
+	if move < 0 {
+		t.Fatal("install.sh no longer moves the staged bundle into place — update this test")
+	}
+	if del := strings.Index(src, `rm -rf "$DEST/$APP.app"`); del >= 0 && del < move {
+		t.Errorf("install.sh deletes the installed bundle before the replacement is in "+
+			"place (offset %d, before the move at %d); rename it aside instead, so a "+
+			"failed rename leaves a working application", del, move)
+	}
+}
+
 // TestInstallerElevatesThroughTheAuthenticationPanel refuses `sudo` as the
 // installer's route to administrator rights.
 //
