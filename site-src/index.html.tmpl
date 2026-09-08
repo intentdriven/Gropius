@@ -79,7 +79,7 @@
       <div class="snippet"><pre>{{ range $i, $step := .Install }}{{ if $i }}
 
 {{ end }}<span class="c">{{ $step.Comment }}</span>
-{{ $step.Command }}{{ end }}</pre></div>
+<span class="cmd">{{ $step.Command }}</span>{{ end }}</pre></div>
       <p>{{ range $i, $n := .InstallNote }}{{ if $i }} {{ end }}{{ $n }}{{ end }}</p>
     </div>
     <div class="release-facts">

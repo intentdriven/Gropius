@@ -651,6 +651,27 @@ func TestEveryMultiColumnSectionCanShrinkBelowItsContent(t *testing.T) {
 	}
 }
 
+// A visitor's next act after reading the install section is to copy the command
+// out of it, and selecting a URL-bearing one-liner by dragging is fiddly on a
+// trackpad and worse on a phone. One click selects the whole command instead.
+// It is CSS rather than a clipboard button on purpose: the page carries no
+// script and the policy in site-src/headers refuses one, which release_test.go
+// holds at script-src 'none'.
+func TestOneClickSelectsAWholeCommand(t *testing.T) {
+	for _, property := range []string{"user-select", "-webkit-user-select"} {
+		if got := decl(t, css, ".snippet .cmd", property); got != "all" {
+			t.Errorf(".snippet .cmd %s is %q; one click must take the whole command, not the word under the pointer", property, got)
+		}
+	}
+	// Every command the page shows is selectable, not just the first: the
+	// client install is the one a visitor on an Intel Mac needs.
+	commands := strings.Count(page, `<span class="cmd">`)
+	steps := strings.Count(page, `<span class="c">`)
+	if commands != steps || commands == 0 {
+		t.Errorf("the page has %d selectable commands for %d install steps; every step's command carries the handle", commands, steps)
+	}
+}
+
 // The mark is decoration. On a narrow viewport the stacked layout put it above
 // the headline, so the first thing on a phone was a 220px logo and the sentence
 // saying what Gropius is fell below it.

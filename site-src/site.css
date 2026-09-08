@@ -342,6 +342,21 @@ pre {
   border-left: 6px solid var(--rule);
 }
 
+/* One click takes the whole command. Dragging across a one-liner that carries a
+   URL is fiddly on a trackpad and worse on a phone, and the visitor's next act
+   after reading this section is to copy the line out of it. This is CSS and not
+   a clipboard button because the page carries no script: site-src/headers
+   refuses one at script-src 'none', and internal/sitetest holds that. The
+   hover tint is the only affordance saying the line is one thing to click. */
+.snippet .cmd {
+  -webkit-user-select: all;
+  user-select: all;
+  cursor: pointer;
+  border-radius: 2px;
+}
+
+.snippet .cmd:hover { background: rgba(236, 236, 232, 0.12); }
+
 pre .c { color: #9A9CA3; }
 pre .k { color: var(--rule); }
 
