@@ -26,6 +26,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 // gateStepName anchors every assertion below on the gate step itself. The
@@ -34,6 +35,14 @@ import (
 // packaging and attestation satisfies while the real gate is moved after
 // `gh release create` — reproduced, and it left the guard green.
 const gateStepName = "Gate the release on the tagged tree's own installer"
+
+// The two steps that turn a build into a published release. Named here because
+// the gate's fatality is only worth as much as their unconditionality: a gate
+// that fails the job does not stop a step that runs anyway.
+const (
+	attestStepName  = "Attest the release assets"
+	publishStepName = "Publish the Release with both apps attached"
+)
 
 // TestTheReleaseGateRunsTheTaggedTreesInstallerBeforeItPublishes holds the
 // gate's POSITION, which is the whole of its value (a gate after the publish is
@@ -50,24 +59,20 @@ func TestTheReleaseGateRunsTheTaggedTreesInstallerBeforeItPublishes(t *testing.T
 	// The gate is found by its own `- name:` line, not by the first mention of
 	// the script anywhere in the job, so `gate` is the position of the step
 	// that actually does the work.
+	//
+	// workflowStep takes the FIRST match, so a second step carrying the same
+	// name would shadow the real gate: every assertion below would read the
+	// decoy, and the gate itself could then be moved after `gh release create`
+	// or deleted outright. The name has to identify one step.
+	if n := len(stepsNamed(job, gateStepName)); n != 1 {
+		t.Fatalf("the release job declares %d steps named %q, want exactly 1: every assertion here anchors on "+
+			"that name and reads the FIRST match, so a duplicate shadows the real gate", n, gateStepName)
+	}
 	step, gate := workflowStep(t, job, gateStepName)
 
-	// It runs the script out of the checkout. `./install.sh` is the handle: the
-	// job checks out the released commit, so the script it runs is the tagged
-	// tree's own — the copy on the default branch is a different file exactly
-	// when this matters.
-	if !strings.Contains(step, "./install.sh") {
-		t.Error("the gate step never runs ./install.sh; the artefacts it publishes are built but not exercised")
-	}
 	if strings.Contains(job, "raw.githubusercontent.com") {
 		t.Error("the release job fetches install.sh over the network; it must run the tagged tree's own copy, " +
 			"which is the copy that differs from the default branch when a repair is in flight")
-	}
-	// And against the artefacts this job just built, not a published Release:
-	// there is none yet, which is the point of gating here.
-	if !strings.Contains(step, "GROPIUS_ASSET_DIR") {
-		t.Error("the gate step does not point install.sh at the artefacts it built (GROPIUS_ASSET_DIR); " +
-			"it would install the PREVIOUS release and pass while the tagged one is broken")
 	}
 
 	// A gate is a step that can fail the job. `continue-on-error: true` demotes
@@ -112,19 +117,73 @@ func TestTheReleaseGateRunsTheTaggedTreesInstallerBeforeItPublishes(t *testing.T
 		}
 	}
 
+	// Everything below reads the gate's shell BODY, and reads it as whole
+	// LINES. Substring matching over the step block is satisfied by a step
+	// with the right name whose body merely mentions the expected text —
+	//
+	//	- name: Gate the release on the tagged tree's own installer
+	//	  run: echo './install.sh GROPIUS_ASSET_DIR dist/Gropius.app/…'
+	//
+	// — which was reproduced against the substring version of this guard and
+	// left it green while the gate installed nothing. An anchored line is the
+	// difference between "the text appears" and "the command runs".
+	body := stepRunBody(t, step, gateStepName)
+
+	// The body's own fatality. `set -euo pipefail` is the first thing it does,
+	// so nothing runs unguarded ahead of it; and nothing later may take the
+	// guard back off, stop early with a success, or swallow a failure. Each of
+	// `exit 0` after the `set` line, `set +e`, and `|| true` on an invocation
+	// was reproduced and left the step green having installed and verified
+	// nothing.
+	if first := firstCommand(body); first != "set -euo pipefail" {
+		t.Errorf("the gate's first command is %q, want %q: the body has to be under -e, -u and pipefail before "+
+			"it does anything, and a command ahead of the `set` line runs unguarded", first, "set -euo pipefail")
+	}
+	for _, neuter := range []struct{ pattern, what, why string }{
+		{`(?m)^[ \t]*set[ \t]+\+`, "set +e / set +o pipefail",
+			"it takes the guard back off, and every command after it can fail without failing the step"},
+		{`(?m)^[ \t]*exit[ \t]+0[ \t]*$`, "a bare `exit 0`",
+			"the step then succeeds having installed and verified however little ran before it, and the release publishes"},
+		{`(?m)\|\|[ \t]*(true|:)\b`, "`|| true`",
+			"it swallows the failure of whatever it is attached to, which is the one thing this step exists to surface"},
+	} {
+		if regexp.MustCompile(neuter.pattern).MatchString(body) {
+			t.Errorf("the gate's body contains %s: %s", neuter.what, neuter.why)
+		}
+	}
+
+	// The work itself, matched as whole lines. Both documented invocations plus
+	// the piped form, and the asset directory that points all three at the
+	// artefacts THIS job built rather than a published Release — of which there
+	// is none yet, which is the point of gating here.
+	for _, run := range []struct{ pattern, why string }{
+		{`(?m)^[ \t]*export GROPIUS_ASSET_DIR="\$PWD"[ \t]*$`,
+			"the gate does not point install.sh at the artefacts it built; it would install the PREVIOUS release and pass while the tagged one is broken"},
+		{`(?m)^[ \t]*bash -s -- < \./install\.sh[ \t]*$`,
+			"the gate never runs the checked-out install.sh in its documented server form"},
+		{`(?m)^[ \t]*bash -s -- client < \./install\.sh[ \t]*$`,
+			"the gate never runs the checked-out install.sh in its documented client form"},
+		{`(?m)^[ \t]*cat \./install\.sh \| bash -s --[ \t]*$`,
+			"the gate never runs install.sh through a real pipe, which is the form the README documents (`curl … | bash`)"},
+	} {
+		if !regexp.MustCompile(run.pattern).MatchString(body) {
+			t.Errorf("no line of the gate's body matches %s: %s", run.pattern, run.why)
+		}
+	}
+
 	// The gate must bind what it INSTALLED to what this job BUILT. Asserting
 	// only that some .app landed somewhere is satisfied by install.sh falling
 	// through to the previous published Release if the asset-directory seam ever
 	// stops taking effect while the runner has network — the gate would then go
 	// green having never touched the tagged artefacts, which is this gate's own
 	// failure mode one level up.
-	for _, bind := range []struct{ marker, why string }{
-		{"dist/Gropius.app/Contents/MacOS/gropius", "the built server executable"},
-		{"client/dist/GropiusChat.app/Contents/MacOS/GropiusChat", "the built client executable"},
+	for _, bind := range []struct{ pattern, why string }{
+		{`(?m)^[ \t]*built="dist/Gropius\.app/Contents/MacOS/gropius"[ \t]*$`, "the built server executable"},
+		{`(?m)^[ \t]*built="client/dist/GropiusChat\.app/Contents/MacOS/GropiusChat"[ \t]*$`, "the built client executable"},
 	} {
-		if !strings.Contains(step, bind.marker) {
-			t.Errorf("the installer gate never compares what it installed against %s (%s); "+
-				"a fall-through to the PREVIOUS release would install, launch and pass", bind.why, bind.marker)
+		if !regexp.MustCompile(bind.pattern).MatchString(body) {
+			t.Errorf("the installer gate never binds what it installed to %s (no line matching %s); "+
+				"a fall-through to the PREVIOUS release would install, launch and pass", bind.why, bind.pattern)
 		}
 	}
 
@@ -143,6 +202,66 @@ func TestTheReleaseGateRunsTheTaggedTreesInstallerBeforeItPublishes(t *testing.T
 	if !strings.Contains(installer, "GITHUB_ACTIONS") {
 		t.Error("install.sh no longer restricts GROPIUS_ASSET_DIR to CI; the seam voids the script's only " +
 			"integrity control wherever it is honoured")
+	}
+}
+
+// TestNothingAfterTheInstallerGatePublishesOnAFailedRun holds what the gate's
+// fatality is actually worth.
+//
+// The gate failing the job stops the release only for as long as the steps
+// after it are unconditional. `if: ${{ always() }}` on the publish step — a
+// plausible edit, and one that sells itself as making re-runs idempotent —
+// makes `gh release create` run after the gate has failed: broken installer,
+// Release published, assets uploaded, and every assertion in the test above
+// still green, because it inspects keys on the GATE and nothing holds the two
+// steps to its right. Reproduced.
+//
+// The tripwire that closes the job is the one step after the gate that may
+// carry a condition, and it carries `!cancelled()` on purpose: it asserts the
+// job pushed to no branch, which matters most when an earlier step FAILED. It
+// publishes nothing, which is the line drawn below.
+func TestNothingAfterTheInstallerGatePublishesOnAFailedRun(t *testing.T) {
+	root := repoRootDir(t)
+	job := withoutComments(workflowJob(t, readRepoFile(t, root, filepath.Join(".github", "workflows", "release.yml")), "release"))
+	_, gate := workflowStep(t, job, gateStepName)
+
+	// The two steps that publish must be unconditional, and they must sit after
+	// the gate. No `if:` at all, not merely no `if:` that looks dangerous:
+	// refusing the key outright is what stops a later edit from writing a
+	// condition whose truth has to be reasoned about.
+	for _, name := range []string{attestStepName, publishStepName} {
+		step, at := workflowStep(t, job, name)
+		if at < gate {
+			t.Errorf("%q runs BEFORE the installer gate; a gate that runs after the publish is a report, not a gate", name)
+		}
+		for _, forbidden := range []struct{ key, why string }{
+			{"if", "a condition here can be true on a run the gate FAILED (`always()` is the obvious one), and the release then publishes over a broken installer"},
+			{"continue-on-error", "a publishing step that continues on error hides its own failure from the job"},
+		} {
+			if hasStepKey(step, forbidden.key) {
+				t.Errorf("%q declares %q: %s", name, forbidden.key, forbidden.why)
+			}
+		}
+	}
+
+	// And no OTHER step to the gate's right may combine a condition with
+	// publishing work: that is the same defeat wearing a different name.
+	// `always()` is refused outright wherever it appears after the gate — it
+	// runs on failure AND on cancellation, and no step in this job needs that.
+	for _, s := range workflowSteps(job) {
+		if s.at <= gate || !hasStepKey(s.block, "if") {
+			continue
+		}
+		if strings.Contains(s.block, "always()") {
+			t.Errorf("the step %q runs after the installer gate under `always()`; that condition is true on a run "+
+				"the gate failed, so nothing about the gate's fatality survives it", s.name)
+		}
+		for _, marker := range []string{"gh release create", "gh release upload", "attest-build-provenance"} {
+			if strings.Contains(s.block, marker) {
+				t.Errorf("the step %q runs %s after the installer gate and declares an `if:`; a conditional publish "+
+					"is a publish that can outlive the gate's failure", s.name, marker)
+			}
+		}
 	}
 }
 
@@ -248,6 +367,20 @@ func installerFixture(t *testing.T) *fixture {
 		// and a runner image below the bundle's floor turns it into a silent
 		// no-op — the failure mode the release gate exists to prevent, one
 		// level up. ci.yml pins macos-26 for exactly this reason.
+		//
+		// COUPLING, recorded rather than removed. Keying the fatality on
+		// GITHUB_ACTIONS ties the Go suite to the runner image: raise
+		// build/Info.plist's LSMinimumSystemVersion above what GitHub offers
+		// — 27, say, on its release day — and `go test ./...` turns red on
+		// ci.yml's check job AND on release.yml's verify job, with a message
+		// about runner provisioning rather than about the plist that was
+		// edited. The alternative is to key it on a variable the workflows
+		// set (GROPIUS_INSTALLER_GATE_REQUIRED=1), which decouples "this
+		// repository's CI" from "any GitHub Actions runner"; it is not done
+		// here because a variable a workflow sets is a variable a workflow
+		// edit can unset, and the failure this guard prevents is exactly a
+		// silent skip. If the floor is ever raised past the available image,
+		// the fix is to pin the image or ship the floor — not to soften this.
 		if os.Getenv("GITHUB_ACTIONS") == "true" {
 			t.Fatalf("this runner is macOS %d but install.sh declares a floor of %s, so this guard would not run: "+
 				"pin the workflow's runner to a macOS image at or above the floor",
@@ -289,8 +422,15 @@ func installerFixture(t *testing.T) *fixture {
 	// seam above is being narrowed for. So the real /Applications is recorded
 	// here and compared after every run instead: the fixture is safe by
 	// construction (the run dies at "did not contain", before `staged=` is
-	// ever evaluated), and this is what catches a future fixture edit that
-	// walks past that refusal on a contributor's machine.
+	// ever evaluated), and this is the tripwire under that reasoning.
+	//
+	// Names alone would not be a tripwire. On a Mac that ALREADY has Gropius
+	// installed — every maintainer's — a fixture edit that supplied a real
+	// bundle would OVERWRITE the existing one and leave the name list
+	// identical, and this test would pass having clobbered the developer's
+	// install. So the two bundles this installer writes are fingerprinted as
+	// well; install.sh replaces the whole directory in a staged swap, which
+	// changes both the fingerprint's inputs.
 	fx.appsBefore = applicationsListing(t)
 	return fx
 }
@@ -317,20 +457,38 @@ func (fx *fixture) run(t *testing.T, extra ...string) (string, error) {
 	return string(out), err
 }
 
-// applicationsListing is the top-level entries of /Applications, sorted. An
-// unreadable or absent directory yields nil, which compares equal to itself.
+// applicationsListing is the top-level entries of /Applications, sorted, plus a
+// fingerprint of each bundle install.sh would write there. An unreadable or
+// absent directory yields only the fingerprints, which compare equal to
+// themselves.
+//
+// The fingerprints are what make this a tripwire on a machine that already has
+// the app: a name comparison is blind to a bundle being replaced in place.
 func applicationsListing(t *testing.T) []string {
 	t.Helper()
-	entries, err := os.ReadDir("/Applications")
-	if err != nil {
-		return nil
+	var names []string
+	if entries, err := os.ReadDir("/Applications"); err == nil {
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		sort.Strings(names)
 	}
-	names := make([]string, 0, len(entries))
-	for _, e := range entries {
-		names = append(names, e.Name())
+	for _, bundle := range []string{"Gropius.app", "GropiusChat.app"} {
+		names = append(names, bundle+" = "+bundleFingerprint(filepath.Join("/Applications", bundle)))
 	}
-	sort.Strings(names)
 	return names
+}
+
+// bundleFingerprint identifies a bundle directory by its modification time and
+// size, or reports it absent. install.sh installs by moving a freshly unpacked
+// directory into place, so a reinstall — even over an identical version —
+// gives the destination a new mtime.
+func bundleFingerprint(path string) string {
+	fi, err := os.Lstat(path)
+	if err != nil {
+		return "absent"
+	}
+	return fi.ModTime().UTC().Format(time.RFC3339Nano) + " " + strconv.FormatInt(fi.Size(), 10)
 }
 
 func equalStrings(a, b []string) bool {
@@ -382,6 +540,85 @@ func workflowStep(t *testing.T, job, name string) (string, int) {
 		block = block[:nl+1+end[0]]
 	}
 	return block, start[0]
+}
+
+// stepsNamed returns the offset of every step in a job whose `- name:` line
+// carries exactly this name. workflowStep reads the first of them, so more than
+// one is a shadowed gate, not a duplicate label.
+func stepsNamed(job, name string) []int {
+	var at []int
+	for _, m := range regexp.MustCompile(`(?m)^      - name: `+regexp.QuoteMeta(name)+`\s*$`).FindAllStringIndex(job, -1) {
+		at = append(at, m[0])
+	}
+	return at
+}
+
+// jobStep is one step of a job: its name (empty if it declares none), its block,
+// and the offset of the `- ` line that opens it.
+type jobStep struct {
+	name  string
+	block string
+	at    int
+}
+
+// workflowSteps returns every step of a job in file order. A step opens at
+// `      - ` and runs to the next such line, so a step's block holds its own
+// keys and its block scalars and nothing of its neighbours — the same slicing
+// workflowStep does for one named step.
+func workflowSteps(job string) []jobStep {
+	starts := regexp.MustCompile(`(?m)^      - `).FindAllStringIndex(job, -1)
+	nameOf := regexp.MustCompile(`(?m)^(?:      - |        )name: (.*)$`)
+	out := make([]jobStep, 0, len(starts))
+	for i, s := range starts {
+		end := len(job)
+		if i+1 < len(starts) {
+			end = starts[i+1][0]
+		}
+		block := job[s[0]:end]
+		var name string
+		if m := nameOf.FindStringSubmatch(block); m != nil {
+			name = strings.TrimSpace(m[1])
+		}
+		out = append(out, jobStep{name: name, block: block, at: s[0]})
+	}
+	return out
+}
+
+// stepRunBody returns the body of a step's `run:` block scalar: the lines
+// indented deeper than the step's own mapping. Assertions read this rather than
+// the step block so that a step's other keys — and its name — cannot satisfy a
+// claim about what the step RUNS.
+func stepRunBody(t *testing.T, step, name string) string {
+	t.Helper()
+	loc := regexp.MustCompile(`(?m)^        run: [|>][-+]?\s*$`).FindStringIndex(step)
+	if loc == nil {
+		t.Fatalf("the step %q declares no `run:` block scalar; this guard reads its shell body, and a gate that "+
+			"runs no shell installs nothing", name)
+	}
+	var body []string
+	for _, line := range strings.Split(step[loc[1]:], "\n") {
+		if strings.TrimSpace(line) == "" {
+			body = append(body, "")
+			continue
+		}
+		if leadingSpaces(line) <= 8 {
+			break
+		}
+		body = append(body, line)
+	}
+	return strings.Join(body, "\n")
+}
+
+// firstCommand returns the first line of a shell body that does anything.
+// Comments are already blanked by withoutComments, so a non-blank line is a
+// command.
+func firstCommand(body string) string {
+	for _, line := range strings.Split(body, "\n") {
+		if s := strings.TrimSpace(line); s != "" {
+			return s
+		}
+	}
+	return ""
 }
 
 // hasStepKey reports whether a step block declares the given key at the step's
