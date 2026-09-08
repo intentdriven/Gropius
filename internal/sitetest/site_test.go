@@ -629,6 +629,88 @@ func TestNothingScrollsSidewaysOnAPhone(t *testing.T) {
 	}
 }
 
+// A grid item's min-width is auto, not zero, so a track holds at the intrinsic
+// width of the widest unwrappable thing inside it however small its fr share
+// says it should be. The install one-liner is 894px of unbreakable command, so
+// every section that shares a row with it was pushed off the page: measured in
+// a browser before the rule under test existed, the document scrolled sideways
+// by 547px at a 375px viewport, 286px at 900px and 86px at 1100px — at every
+// width tried between 375 and 1200. The .snippet overflow-x rule above cannot
+// help, and was measurably never engaging: the track grew instead of the box
+// scrolling. TestNothingScrollsSidewaysOnAPhone passed throughout, because it
+// reads declarations and a viewport is the one thing a stylesheet cannot state.
+func TestEveryMultiColumnSectionCanShrinkBelowItsContent(t *testing.T) {
+	var covered string
+	for _, m := range regexp.MustCompile(`(?s)([^{}]+)\{[^{}]*min-width:\s*0\s*[;}]`).FindAllStringSubmatch(css, -1) {
+		covered += m[1]
+	}
+	for _, section := range []string{".hero", ".actions", ".install"} {
+		if !strings.Contains(covered, section+" > *") {
+			t.Errorf("nothing lets the children of %s shrink below their content; one unwrappable line in either column pushes the other off the page at every viewport", section)
+		}
+	}
+}
+
+// The dark ground belongs to the box, not to the thing scrolling inside it. A
+// background painted on the <pre> is only ever as wide as the box, so scrolling
+// the one-liner slid the ground out from under it and left the tail of the
+// command sitting on the bare page. Nobody saw it while the track was growing
+// instead of scrolling; the moment the snippet actually scrolled, it showed.
+func TestTheCodeBoxStaysPutWhileTheCommandScrolls(t *testing.T) {
+	if got := decl(t, css, ".snippet", "background"); got != "var(--code-bg)" {
+		t.Errorf(".snippet background is %q; the ground belongs to the box that stays put", got)
+	}
+	if got := decl(t, css, ".snippet", "border-left"); !strings.Contains(got, "var(--rule)") {
+		t.Errorf(".snippet border-left is %q; the rule marks the box, so it cannot scroll away with the text", got)
+	}
+	// And the scrolling child paints no ground of its own, or the two grounds
+	// come apart again the moment they differ in width.
+	if body := blockAfter(t, css, "pre"); strings.Contains(body, "background:") {
+		t.Error("pre paints its own background; a ground on the scrolling child is only as wide as the box")
+	}
+}
+
+// A visitor's next act after reading the install section is to copy the command
+// out of it, and selecting a URL-bearing one-liner by dragging is fiddly on a
+// trackpad and worse on a phone. One click selects the whole command instead.
+// It is CSS rather than a clipboard button on purpose: the page carries no
+// script and the policy in site-src/headers refuses one, which release_test.go
+// holds at script-src 'none'.
+func TestOneClickSelectsAWholeCommand(t *testing.T) {
+	for _, property := range []string{"user-select", "-webkit-user-select"} {
+		if got := decl(t, css, ".snippet .cmd", property); got != "all" {
+			t.Errorf(".snippet .cmd %s is %q; one click must take the whole command, not the word under the pointer", property, got)
+		}
+	}
+	// Every command the page shows is selectable, not just the first: the
+	// client install is the one a visitor on an Intel Mac needs.
+	commands := strings.Count(page, `<span class="cmd">`)
+	steps := strings.Count(page, `<span class="c">`)
+	if commands != steps || commands == 0 {
+		t.Errorf("the page has %d selectable commands for %d install steps; every step's command carries the handle", commands, steps)
+	}
+}
+
+// The mark is decoration. On a narrow viewport the stacked layout put it above
+// the headline, so the first thing on a phone was a 220px logo and the sentence
+// saying what Gropius is fell below it.
+func TestTheMarkStepsAsideOnANarrowViewport(t *testing.T) {
+	narrow := blockAfter(t, css, "@media (max-width: 820px)")
+	if got := decl(t, narrow, ".mark", "display"); got != "none" {
+		t.Errorf(".mark display is %q on a narrow viewport; the decoration must not take the top of the page from the headline", got)
+	}
+}
+
+// The facts are a two-column definition list. On a phone the labels hold their
+// own column and the values wrap in what is left of 375px, which is why they
+// stack instead below the width where that stops reading as a list.
+func TestTheFactListStacksOnAPhone(t *testing.T) {
+	phone := blockAfter(t, css, "@media (max-width: 560px)")
+	if got := decl(t, phone, ".facts", "grid-template-columns"); got != "1fr" {
+		t.Errorf(".facts grid-template-columns is %q on a phone; the label column leaves too little for the value", got)
+	}
+}
+
 // buttonHeight is one .btn: its padding, its border, and the two lines of text
 // inside it.
 func buttonHeight(t *testing.T) float64 {

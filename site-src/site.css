@@ -109,6 +109,16 @@ code, pre, .mono {
   padding: 0 28px 64px;
 }
 
+/* The three sections below are two-column grids, and a grid item's min-width is
+   auto rather than zero: a track holds at the intrinsic width of the widest
+   unwrappable thing inside it, whatever its fr share says. The install
+   one-liner is 894px of unbreakable command, so it sized its own track and
+   pushed the column beside it off the page at every viewport — 547px of
+   sideways scroll at 375px wide, 86px at 1100px. This is also what stopped
+   .snippet's overflow-x from ever engaging: the track grew instead of the box
+   scrolling. Held by internal/sitetest. */
+.hero > *, .actions > *, .install > * { min-width: 0; }
+
 /* Top bar */
 .bar {
   display: flex;
@@ -320,17 +330,39 @@ h2 {
    page itself never scrolls sideways (criterion 7). */
 .snippet {
   overflow-x: auto;
+  background: var(--code-bg);
+  border-left: 6px solid var(--rule);
 }
 
+/* The ground and the rule belong to .snippet, which stays put, and not to the
+   <pre>, which moves. A background on the scrolling child is only ever as wide
+   as the box, so scrolling the one-liner slid the dark ground out from under it
+   and left the tail of the command on the bare page. min-content keeps the
+   <pre> from being squeezed to the box's width and wrapping the comment lines
+   instead of scrolling with the command they label. */
 pre {
   margin: 0;
   padding: 18px 20px;
-  background: var(--code-bg);
+  min-width: min-content;
   color: var(--code-fg);
   font-size: 14px;
   line-height: 1.6;
-  border-left: 6px solid var(--rule);
 }
+
+/* One click takes the whole command. Dragging across a one-liner that carries a
+   URL is fiddly on a trackpad and worse on a phone, and the visitor's next act
+   after reading this section is to copy the line out of it. This is CSS and not
+   a clipboard button because the page carries no script: site-src/headers
+   refuses one at script-src 'none', and internal/sitetest holds that. The
+   hover tint is the only affordance saying the line is one thing to click. */
+.snippet .cmd {
+  -webkit-user-select: all;
+  user-select: all;
+  cursor: pointer;
+  border-radius: 2px;
+}
+
+.snippet .cmd:hover { background: rgba(236, 236, 232, 0.12); }
 
 pre .c { color: #9A9CA3; }
 pre .k { color: var(--rule); }
@@ -411,9 +443,22 @@ footer a:hover { color: var(--accent); }
 
 @media (max-width: 820px) {
   .hero, .actions, .install { grid-template-columns: 1fr; gap: 32px; }
-  .mark { justify-self: start; max-width: 220px; order: -1; }
+  /* The mark is decoration, and stacking put it above the headline: the first
+     thing on a narrow screen was a logo, with the sentence saying what Gropius
+     is below it. It steps aside rather than reordering, since there is no
+     position in a single column where a 220px ornament earns its space. */
+  .mark { display: none; }
   .pillars { grid-template-columns: 1fr; gap: 26px; }
   .bar nav { display: none; }
+}
+
+/* The facts read as a list only while the value column has room to hold a
+   sentence. Below this the label sits on its own line and the value takes the
+   full width, rather than wrapping in what is left beside a label column. */
+@media (max-width: 560px) {
+  .facts { grid-template-columns: 1fr; gap: 2px; }
+  .facts dt { padding-top: 12px; }
+  .facts dt:first-of-type { padding-top: 0; }
 }
 
 @media (prefers-reduced-motion: reduce) {
