@@ -16,6 +16,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/intentdriven/Gropius/internal/config"
@@ -84,10 +85,12 @@ func New(opts Options) *Gateway {
 		// Model servers are on loopback and a long generation can legitimately
 		// run for minutes, so there is no response timeout here. The client's
 		// context governs the request's lifetime instead.
+		// No ResponseHeaderTimeout here: it is a property of the transport, so
+		// it would apply one number to every request regardless of prompt size,
+		// which is the defect being fixed. The wait for headers is bounded per
+		// request instead, in prefillBudget.
 		opts.Transport = &http.Transport{
 			MaxIdleConnsPerHost: 32,
-			// A model that is generating slowly is not a stalled connection.
-			ResponseHeaderTimeout: 10 * time.Minute,
 		}
 	}
 	return &Gateway{
@@ -502,9 +505,34 @@ func (g *Gateway) handleCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	// The client's bearer token is ours to check, not the model server's to see.
 
+	// Bound the wait for headers — that is, for prefill — rather than the whole
+	// exchange: generation legitimately runs for minutes after the first token.
+	// The timer is stopped the moment headers arrive, so it never touches the
+	// body stream; the context is released when the handler returns.
+	budget := prefillBudget(len(body), cfg.UpstreamHeaderTimeoutSec)
+	hdrCtx, cancelHdr := context.WithCancel(r.Context())
+	defer cancelHdr()
+	timedOut := &atomic.Bool{}
+	timer := time.AfterFunc(budget, func() { timedOut.Store(true); cancelHdr() })
+	req = req.WithContext(hdrCtx)
+
 	resp, err := g.tr.RoundTrip(req)
+	timer.Stop()
 	if err != nil {
-		if r.Context().Err() != nil {
+		switch {
+		case timedOut.Load():
+			// Distinguished from an unreachable server on purpose: the old
+			// message blamed the model server for a bound the gateway chose,
+			// and a client that retries on it makes things worse — the
+			// abandoned request keeps prefilling upstream and its cache stays
+			// resident, so the next request runs at less than half speed.
+			obs.failed(stats.ClassUnreachable)
+			g.log.Error("upstream did not return headers within the prefill budget",
+				"model", model, "budget", budget, "request_bytes", len(body))
+			writeError(w, http.StatusGatewayTimeout,
+				fmt.Sprintf("the model server did not finish reading the prompt within %s; it may still be working on it, and retrying will slow it further. Raise upstream_header_timeout_sec in Settings if this prompt legitimately needs longer.", budget.Round(time.Second)))
+			return
+		case r.Context().Err() != nil:
 			obs.failed(stats.ClassCancelled)
 			return // client cancelled
 		}
@@ -970,4 +998,44 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 			"code":    status,
 		},
 	})
+}
+
+// prefillBudget returns how long to wait for a model server to return response
+// headers for a request whose encoded body is bodyBytes long.
+//
+// Prefill time scales with the prompt, and a single fixed bound cannot serve
+// both ends of the range: measured on Apple Silicon, prefill runs at over 1,200
+// tokens per second on a small prompt and falls below 200 at the largest
+// verified sizes, so a ten-minute bound sized from small prompts killed three
+// of four local models mid-prefill and reported it as an upstream failure.
+//
+// The rate used is deliberately below every measured floor, and a minute is
+// added for the fixed costs around prefill. The base is kept as the minimum so
+// nothing that works today gets a shorter deadline: prompts under roughly 80K
+// tokens are unaffected.
+//
+// Tokens are estimated from the encoded body at four bytes per token, which is
+// the usual ballpark for English text and is deliberately crude — the estimate
+// only has to be right to within a factor of about two to keep the bound on the
+// correct side, and an exact count would mean tokenising every request on the
+// gateway's own hot path.
+//
+// A positive override replaces the derivation entirely, including the base:
+// an operator who says thirty seconds means thirty seconds.
+func prefillBudget(bodyBytes, overrideSec int) time.Duration {
+	if overrideSec > 0 {
+		return time.Duration(overrideSec) * time.Second
+	}
+	const (
+		base            = 10 * time.Minute
+		bytesPerToken   = 4
+		tokensPerSecond = 150
+		fixedOverhead   = time.Minute
+	)
+	tokens := bodyBytes / bytesPerToken
+	derived := time.Duration(tokens/tokensPerSecond)*time.Second + fixedOverhead
+	if derived < base {
+		return base
+	}
+	return derived
 }

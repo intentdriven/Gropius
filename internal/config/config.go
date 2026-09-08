@@ -390,6 +390,22 @@ type Config struct {
 	// requests. Empty (the default) means the LAN endpoint is open.
 	APIKey string `json:"api_key"`
 
+	// UpstreamHeaderTimeoutSec bounds how long the gateway waits for a model
+	// server to return response headers, i.e. to finish prefill.
+	//
+	// Zero means automatic: the bound is derived from the prompt's size, which
+	// is what actually decides prefill time. A fixed bound cannot be right for
+	// both a 4K prompt and a 256K one — measured prefill on this hardware falls
+	// from about 1,300 tokens per second at 8K to under 200 at the largest
+	// verified sizes, so a bound sized from small prompts is wrong by two to
+	// four times exactly where it matters.
+	//
+	// A positive value overrides the derivation with a fixed number of seconds.
+	// It exists because the derivation encodes a measurement, and a measurement
+	// can be wrong for hardware or a model nobody tested: an operator who finds
+	// it so must be able to say so without waiting for a release.
+	UpstreamHeaderTimeoutSec int `json:"upstream_header_timeout_sec"`
+
 	// Advertise the service over Bonjour/mDNS so other machines can find it.
 	Advertise bool `json:"advertise"`
 
@@ -848,14 +864,15 @@ func (c *Config) sanitizeGrace() []string {
 // Default returns the shipping defaults: LAN-exposed, unauthenticated.
 func Default() Config {
 	return Config{
-		Host:              "0.0.0.0",
-		Port:              11535,
-		APIKey:            "",
-		Advertise:         true,
-		IdleTimeoutSec:    0,
-		DecodeConcurrency: 4,
-		StatsMonths:       DefaultStatsMonths,
-		StatsMaxBytes:     DefaultStatsMaxBytes,
+		Host:                     "0.0.0.0",
+		Port:                     11535,
+		APIKey:                   "",
+		UpstreamHeaderTimeoutSec: 0,
+		Advertise:                true,
+		IdleTimeoutSec:           0,
+		DecodeConcurrency:        4,
+		StatsMonths:              DefaultStatsMonths,
+		StatsMaxBytes:            DefaultStatsMaxBytes,
 		// Stored even though the feature is off, so that switching it on in
 		// Settings is one tick rather than one tick and two numbers.
 		EvictionGraceSec:   DefaultEvictionGraceSec,

@@ -1946,3 +1946,36 @@ func TestRefusalToANetworkClientNamesNoPinnedModel(t *testing.T) {
 		t.Errorf("pool holds %d models after the refusal, want the pinned one still there", got)
 	}
 }
+
+// The prefill bound must not shorten anything that works today, must grow with
+// the prompt, and must honour an operator override exactly.
+func TestPrefillBudget(t *testing.T) {
+	const base = 10 * time.Minute
+	for _, tc := range []struct {
+		name      string
+		bodyBytes int
+		override  int
+		want      time.Duration
+		atLeast   time.Duration
+	}{
+		{name: "empty request keeps the base", want: base},
+		{name: "small prompt keeps the base", bodyBytes: 40_000, want: base},
+		{name: "80K tokens still keeps the base", bodyBytes: 80_000 * 4, want: base},
+		{name: "256K tokens gets far longer", bodyBytes: 256_000 * 4, atLeast: 28 * time.Minute},
+		{name: "override wins over the base", bodyBytes: 0, override: 30, want: 30 * time.Second},
+		{name: "override wins over a huge prompt", bodyBytes: 256_000 * 4, override: 60, want: time.Minute},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := prefillBudget(tc.bodyBytes, tc.override)
+			if tc.want != 0 && got != tc.want {
+				t.Errorf("prefillBudget(%d, %d) = %s, want %s", tc.bodyBytes, tc.override, got, tc.want)
+			}
+			if tc.atLeast != 0 && got < tc.atLeast {
+				t.Errorf("prefillBudget(%d, %d) = %s, want at least %s", tc.bodyBytes, tc.override, got, tc.atLeast)
+			}
+			if tc.override == 0 && got < base {
+				t.Errorf("derived bound %s is shorter than the base %s", got, base)
+			}
+		})
+	}
+}
