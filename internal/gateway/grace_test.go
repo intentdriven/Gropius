@@ -16,7 +16,7 @@ import (
 func TestSavingTheEvictionGraceNeedsNoRestart(t *testing.T) {
 	a, srv := newBudgetControl(t, config.Default(), 128*gb, nil)
 
-	body := `{"host":"0.0.0.0","port":11535,"api_key":"","decode_concurrency":4,` +
+	body := `{"host":"0.0.0.0","port":11535,"api_key":"test-key","decode_concurrency":4,` +
 		`"idle_timeout_sec":0,"eviction_grace":true,"eviction_grace_sec":45,` +
 		`"eviction_max_wait_sec":90}`
 	resp := postJSON(t, srv, "/api/settings", body)
@@ -44,7 +44,7 @@ func TestSavingTheEvictionGraceNeedsNoRestart(t *testing.T) {
 func TestSettingsRefusesAGraceLongerThanTheIdleTimeout(t *testing.T) {
 	a, srv := newBudgetControl(t, config.Default(), 128*gb, nil)
 
-	body := `{"host":"0.0.0.0","port":11535,"api_key":"","decode_concurrency":4,` +
+	body := `{"host":"0.0.0.0","port":11535,"api_key":"test-key","decode_concurrency":4,` +
 		`"idle_timeout_sec":60,"eviction_grace":true,"eviction_grace_sec":300,` +
 		`"eviction_max_wait_sec":600}`
 	resp := postJSON(t, srv, "/api/settings", body)

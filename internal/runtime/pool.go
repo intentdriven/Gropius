@@ -141,6 +141,17 @@ type PoolOptions struct {
 	// model weights. That is the arithmetic the default is chosen against.
 	// Zero uses that default.
 	MaxLoadWaiters int
+
+	// MaxLoadWaitersPerSource bounds how many of those waiters any one caller
+	// may hold. Zero disables the per-source cap and leaves only the global
+	// one, which is the pre-existing behaviour.
+	//
+	// Identity is the presented API key, so this is only meaningful where a key
+	// is required — which is why enabling eviction grace on a LAN-exposed
+	// server requires one. Unkeyed and loopback callers share a single bucket:
+	// the pool cannot distinguish two anonymous callers, and an address is not
+	// a client.
+	MaxLoadWaitersPerSource int
 	// ReadyTimeout bounds how long we wait for a model to load. Large models on
 	// a cold page cache genuinely take minutes.
 	ReadyTimeout time.Duration
@@ -239,6 +250,12 @@ type entry struct {
 // pool's clock instead, because that is what stamps lastFinished.
 type loadWaiter struct {
 	arrived time.Time
+	// source identifies who this load is waiting for, so the queue can be
+	// shared out rather than filled by one caller. It is the presented API key
+	// on a keyed install and "" for a loopback or unkeyed caller, which is a
+	// single shared bucket — the pool cannot tell two anonymous callers apart,
+	// and an address is not a client.
+	source string
 	// need is what this load asked for, remembered from the attempt that
 	// failed. A parked waiter is judged on it — can this still ever fit, does
 	// a plan for it succeed yet — rather than by asking the registry and
@@ -290,6 +307,9 @@ func NewPool(opts PoolOptions) *Pool {
 	opts.EvictionGrace, opts.MaxEvictionWait = normalizeGrace(opts.EvictionGrace, opts.MaxEvictionWait)
 	if opts.MaxLoadWaiters <= 0 {
 		opts.MaxLoadWaiters = defaultMaxLoadWaiters
+	}
+	if opts.MaxLoadWaitersPerSource < 0 {
+		opts.MaxLoadWaitersPerSource = 0
 	}
 	if opts.Log == nil {
 		opts.Log = slog.Default()
@@ -522,6 +542,7 @@ func (p *Pool) AcquireNow(ctx context.Context, repoID string) (*Upstream, func()
 }
 
 func (p *Pool) acquire(ctx context.Context, repoID string, mayWait bool) (*Upstream, func(), error) {
+	src := sourceFrom(ctx)
 	key := config.FoldRepoID(repoID)
 	// waited is what this acquisition spent parked for want of room, and it is
 	// reported to the caller: a request that waited for somebody else's model
@@ -585,7 +606,7 @@ func (p *Pool) acquire(ctx context.Context, repoID string, mayWait bool) (*Upstr
 			// inside its maximum) needs only what the waiter already carries.
 			err = p.noRoomLocked(w.need)
 		}
-		verdict := p.waitVerdictLocked(mayWait, w, err)
+		verdict := p.waitVerdictLocked(mayWait, w, src, err)
 		if verdict != waitYes {
 			queued := len(p.waiters)
 			p.leaveQueueLocked(w)
@@ -621,7 +642,7 @@ func (p *Pool) acquire(ctx context.Context, repoID string, mayWait bool) (*Upstr
 			// carries what this load asked for.
 			var noRoom *NoRoomError
 			_ = errors.As(err, &noRoom)
-			w = &loadWaiter{arrived: time.Now(), need: noRoom.need, signal: make(chan struct{}, 1)}
+			w = &loadWaiter{arrived: time.Now(), need: noRoom.need, source: src, signal: make(chan struct{}, 1)}
 			p.waiters = append(p.waiters, w)
 		}
 		delay := p.wakeDelayLocked(w)
@@ -1074,7 +1095,7 @@ const (
 
 // waitVerdictLocked decides whether a load that found no room joins the queue
 // rather than being refused now. Callers must hold p.mu.
-func (p *Pool) waitVerdictLocked(mayWait bool, w *loadWaiter, err error) waitVerdict {
+func (p *Pool) waitVerdictLocked(mayWait bool, w *loadWaiter, src string, err error) waitVerdict {
 	if !mayWait || p.grace <= 0 {
 		return waitNoGrace
 	}
@@ -1095,6 +1116,23 @@ func (p *Pool) waitVerdictLocked(mayWait bool, w *loadWaiter, err error) waitVer
 	if w == nil {
 		if len(p.waiters) >= p.opts.MaxLoadWaiters {
 			return waitQueueFull
+		}
+		// A per-source cap as well as the global one. The global cap alone
+		// counts REQUESTS, so one caller could fill the queue and deny every
+		// cold load that needs an eviction to everyone else on the network —
+		// eight connections, for as long as the maximum wait allows. Counting
+		// per source makes filling the queue cost one caller its own share and
+		// nobody else's.
+		if p.opts.MaxLoadWaitersPerSource > 0 {
+			mine := 0
+			for _, other := range p.waiters {
+				if other.source == src {
+					mine++
+				}
+			}
+			if mine >= p.opts.MaxLoadWaitersPerSource {
+				return waitQueueFull
+			}
 		}
 		return waitYes
 	}
@@ -1462,4 +1500,28 @@ func HumanBytes(n int64) string {
 		exp++
 	}
 	return fmt.Sprintf("%.1f %cB", float64(n)/float64(div), "KMGTPE"[exp])
+}
+
+// sourceKey types the context value carrying a caller's identity.
+type sourceKey struct{}
+
+// WithSource tags a request context with the caller's identity, which the pool
+// uses to share the load-waiter queue out rather than serve it first-come.
+//
+// The value is the presented API key. It is carried in the context rather than
+// added to Acquire's signature because it is request-scoped metadata that only
+// one decision consults, and threading it through every call site and test
+// would say the pool needs an identity to load a model. It does not; it needs
+// one to decide whose turn it is when there is no room.
+func WithSource(ctx context.Context, source string) context.Context {
+	return context.WithValue(ctx, sourceKey{}, source)
+}
+
+// sourceFrom returns the caller identity tagged onto ctx, or "" for a caller
+// that carries none — a loopback client, or any caller on an unkeyed server.
+// All of them share one bucket, which is the honest answer: an unauthenticated
+// endpoint cannot tell its callers apart.
+func sourceFrom(ctx context.Context) string {
+	s, _ := ctx.Value(sourceKey{}).(string)
+	return s
 }
