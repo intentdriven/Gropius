@@ -56,3 +56,68 @@ stalled and released everything at its boundary all produce the same line.
 
 Evidence supplied by the peer session that hit the failure; the figures and the
 `grace_test.go` line numbers were checked here against the tree.
+
+## Second amendment: the trickle loop is sequential, and a candidate mechanism
+
+**Corrected timeline.** The trickle goroutine is a sequential loop — a select on
+a 40ms timer, then a *blocking* `p.Acquire`, then round again. One acquire at a
+time. So the acquire that reports `waited=20.003911208s` was blocked for those
+twenty seconds, and while it was blocked the loop could not iterate: no timer,
+no further acquires, nothing renewing `org/a`'s idleness clock.
+
+That moves where the test's premise ended. It did not end at the refusal; it
+ended roughly twenty seconds earlier, when that acquire first blocked — about
+0.3s into a 20.33s run. For essentially the whole measured window there was no
+trickle at all.
+
+This makes the finding worse rather than milder, and it retires the earlier
+reading above. `org/b` was not held off by competing traffic it should have been
+protected from: there was no competing traffic. `org/a`'s clock stopped being
+renewed almost immediately, its 300ms grace should have expired inside the first
+second, and `org/b` still was not served until the maximum. The clause failed
+with nothing to defeat it. It also retires the causal story in either direction
+— neither acquire released the other; both were blocked on the same thing and
+both came unstuck at the boundary, which is why they land 0.3s apart at the end
+of a 20s window rather than anywhere during it.
+
+**A mechanism that fits, from the code rather than from the logs.**
+`Pool.wakeDelayLocked` computes how long a parked waiter may sleep before
+something could have changed that nothing will signal. It takes the minimum of
+three terms:
+
+- the maximum wait remaining, `p.maxWait - waited`;
+- the waiter's own age reaching the grace, `p.grace - waited`, applied only
+  `if own > 0`;
+- for each entry, its grace running out — but the loop `continue`s over any
+  entry with `inFlight > 0`.
+
+Once the waiter is older than the grace the second term is non-positive and
+drops out, which is correct in itself: that moment has passed. But if the waiter
+then re-checks at an instant when the only candidate is momentarily in flight —
+which a 40ms-cadence trickle makes true a large fraction of the time — the third
+term is skipped as well. Neither contributes, and `delay` falls back to
+`maxWait - waited`. The waiter parks until the maximum.
+
+It is rescued only by an explicit signal, and releases, stops, budget and pin
+changes all do signal. So this is not a guaranteed stall: it needs the release
+to land in the window between the waiter's check and its park. That is a
+plausible rare race, and "rare" is what the evidence says — one failure, not
+reproduced in 40 local runs with the race detector.
+
+**Status of these claims.** The sequential loop is checkable from
+`internal/runtime/grace_test.go` and was checked. The `wakeDelayLocked`
+arithmetic is checkable from `internal/runtime/pool.go` and was checked. That
+the two combined produced *this* failure is a reading of the evidence, not a
+demonstrated fact: nobody knows when that acquire first blocked, only that it
+blocked for 20.003s. It is offered as the first place to look, not as a
+diagnosis.
+
+**Third probe.** Beside the waiter's own age at service and the reason the
+trickle's acquire was refused, record the timestamp of the trickle's last
+*successful* acquire. That is what separates "the premise held and the clause
+lost" from "the premise collapsed and the clause was never tested" — and without
+it a future reader cannot tell whether the test measured what its name says.
+
+The sequential-loop observation and the corrected timeline came from the peer
+session that hit the failure; the loop shape, the `wakeDelayLocked` terms and
+the line references were checked here against the tree.
