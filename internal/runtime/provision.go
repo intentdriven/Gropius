@@ -370,8 +370,19 @@ func (p *Provisioner) ensureVenv(ctx context.Context) error {
 	if _, err := os.Stat(p.Paths.VenvPython()); err == nil {
 		return nil
 	}
+	// --clear because reaching this line means there is no usable interpreter:
+	// the check above returns early when one exists, and Ensure returns earlier
+	// still when the whole runtime is installed. So anything occupying the venv
+	// path here is a PARTIAL one — an interrupted first run, or a tree whose
+	// interpreter was removed for failing the trust check — and uv refuses to
+	// write into it ("a virtual environment already exists"), which strands
+	// setup permanently: every relaunch takes the same refusal, and the panel
+	// reports a failure the user has no way to clear from inside the app.
+	//
+	// It cannot discard a working runtime, because a working runtime never
+	// reaches this line.
 	cmd := exec.CommandContext(ctx, p.Paths.UV(),
-		"venv", "--python", pythonVersion, p.Paths.Venv)
+		"venv", "--clear", "--python", pythonVersion, p.Paths.Venv)
 	cmd.Env = p.uvEnv()
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("create venv: %w: %s", err, strings.TrimSpace(string(out)))

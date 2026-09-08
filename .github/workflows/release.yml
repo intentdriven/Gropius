@@ -201,9 +201,217 @@ jobs:
           ditto -c -k --keepParent client/dist/GropiusChat.app GropiusChat.app.zip
           shasum -a 256 Gropius.app.zip GropiusChat.app.zip | tee SHA256SUMS.txt
 
+      # THE INSTALLER GATE. Nothing above this step has proved that the tagged
+      # tree WORKS — it has proved that it builds. v0.3.0 was tagged, built,
+      # packaged and published carrying an install.sh that aborted on its first
+      # line of work with "DEST?: unbound variable"; the chain never executed
+      # it, so only somebody installing from the tag found out
+      # (iss-2609081257343394). This step executes it.
+      #
+      # It runs ./install.sh from THIS checkout — the tagged commit — and not
+      # the copy on the default branch, because the two differ exactly when it
+      # matters: the fix for v0.3.0 was in flight on main while the tag carried
+      # the broken script. The assets come out of the workspace through
+      # GROPIUS_ASSET_DIR, because the Release they would otherwise be fetched
+      # from does not exist yet; the bytes are the ones the publish step below
+      # uploads, so the checksum verification, the unpacking, the destination
+      # choice and the staged swap all run against the real artefacts.
+      #
+      # GROPIUS_ASSET_DIR is a seam install.sh honours ONLY under
+      # GITHUB_ACTIONS, and it voids the script's checksum verification while it
+      # is honoured (the bundle and the SHA256SUMS.txt it is checked against
+      # both come from the named directory). That is sound here — the directory
+      # is this job's own workspace — and it is why the script refuses the seam
+      # anywhere else. What it costs the gate is that "Checksum OK." proves
+      # nothing about WHICH artefacts were installed, so the assertions below
+      # bind the installed executables to the ones this job built.
+      #
+      # `open` is stubbed on PATH: the gate installs both apps but must not
+      # leave a menu-bar server and a chat client running on the runner. The
+      # stub doubles as the probe that the script reached its last step, which
+      # is what makes a truncated or silently-short run visible.
+      #
+      # PERMISSIONS. This step executes a script out of the checked-out tree
+      # inside a job holding contents: write, id-token: write and
+      # attestations: write. That is not a new trust boundary — `make app` and
+      # client/build.sh, three steps above, already run tree code in this same
+      # job — but it has never been written down: whoever can land a commit on
+      # a released tag can run code beside those tokens, and what stands
+      # between the two is the review that lands the commit, not this job.
+      #
+      # FAIL-CLOSED. Any non-zero here fails the job before the attestation and
+      # before `gh release create`, so a broken installer yields no Release, no
+      # assets and no attestation. That holds only while EVERY step to the
+      # right of this one is unconditional: `if: ${{ always() }}` on the
+      # publish step — an edit that sells itself as making re-runs idempotent —
+      # runs `gh release create` on a run this gate failed. Neither the attest
+      # step nor the publish step may declare `if:` or `continue-on-error`, and
+      # a guard holds them to it
+      # (TestNothingAfterTheInstallerGatePublishesOnAFailedRun). The tripwire
+      # that closes the job is the one step after this that carries a
+      # condition; it publishes nothing.
+      #
+      # On a failure the tag stays, pointing at a commit that was never
+      # published; auto-release re-attempts it on the next push to main
+      # (`detect` sees a tag with no Release) and keeps failing here until the
+      # tree is fixed under a newer CHANGELOG version, which is then the version
+      # it tags. Nothing is left half-published and no later release is blocked.
+      #
+      # NEVER EXECUTED. This gate has not run in Actions. The `rehearsal` job
+      # does not cover it — covering it would mean running `make app` and
+      # client/build.sh, the 30-minute build this job does, on every manual
+      # dispatch — and no tag has been pushed since the gate landed. Its first
+      # execution will therefore be a real tagged release. That is acceptable
+      # in this direction and only this one: an untested gate that is wrong
+      # fails the run and publishes nothing, and auto-release re-attempts on
+      # the next push to main. Being untested can cost a release cycle; it
+      # cannot let a broken installer through.
+      - name: Gate the release on the tagged tree's own installer
+        run: |
+          set -euo pipefail
+
+          # The artefacts this job just built. There is no Release to fetch yet
+          # — that is the point of gating here.
+          export GROPIUS_ASSET_DIR="$PWD"
+
+          gate_bin="$RUNNER_TEMP/installer-gate-bin"
+          launched="$RUNNER_TEMP/installer-gate-launched.txt"
+          mkdir -p "$gate_bin"
+          : > "$launched"
+          cat > "$gate_bin/open" <<EOF
+          #!/usr/bin/env bash
+          printf '%s\n' "\$@" >> "$launched"
+          EOF
+          chmod +x "$gate_bin/open"
+          export PATH="$gate_bin:$PATH"
+
+          # Both documented invocations. `< ./install.sh` is a REDIRECT, not a
+          # pipe, and the two are not equivalent: bash reads a seekable stdin
+          # in a different pattern from a pipe, so a script truncated past the
+          # read-ahead buffer runs to a different point under each. The
+          # redirect is kept because bash's exit status is then the script's
+          # own, with no pipeline between them.
+          bash -s -- < ./install.sh
+          bash -s -- client < ./install.sh
+
+          # And once through a real pipe, the form the README documents
+          # (`curl … | bash`), so the gate meets what a script read from a pipe
+          # meets rather than assuming the redirect stands in for it. `cat` is
+          # the pipe: replacing it with a redirect is exactly the substitution
+          # this line exists to avoid. `bash` is the LAST element, so its
+          # status is the pipeline's with or without `pipefail` — that option
+          # buys nothing here except the case where `cat` itself fails (an
+          # unreadable install.sh), which would otherwise be swallowed by a
+          # bash that read an empty script and exited 0.
+          # shellcheck disable=SC2002
+          cat ./install.sh | bash -s --
+
+          # Each bundle is installed where the script chose to put it, its
+          # Contents/MacOS executable is byte-for-byte the one THIS job built,
+          # and the script reached the launch at the end of its own run. One
+          # executable per bundle is what the digest covers — not the bundle:
+          # Info.plist, resources, frameworks and the signature are not
+          # compared, so this proves origin, not that the whole bundle is
+          # intact.
+          #
+          # The binding to dist/ is the load-bearing assertion. Checking only
+          # that some .app exists is satisfied by install.sh falling through to
+          # DOWNLOADING THE PREVIOUS RELEASE — which is what it does if the
+          # asset-directory seam ever stops taking effect while the runner has
+          # network. It would install, launch and pass, the gate green having
+          # never touched the tagged artefacts: this gate's own failure mode,
+          # one level up.
+          #
+          # COVERAGE, stated rather than implied: a runner account is an
+          # administrator, so `[ -w /Applications ]` is true and all three
+          # invocations above take the /Applications branch. The
+          # $HOME/Applications branch — the one every non-admin account takes —
+          # is NOT exercised here. Forcing it would need either a second
+          # override seam in install.sh (the thing being narrowed, not
+          # widened) or a standard user created on the runner. The loop looks
+          # in both places so its failure message stays accurate, not because
+          # both are covered.
+          for app in Gropius GropiusChat; do
+            # The executable inside a bundle is not the bundle's name: the
+            # server's is lowercase, from build/Info.plist's CFBundleExecutable
+            # and the Makefile's `cp $(BIN) …/MacOS/gropius`. Spelling it "$app"
+            # only ever passed because the runner's volume is case-insensitive;
+            # on a case-sensitive one every release would fail here.
+            case "$app" in
+              Gropius)
+                built="dist/Gropius.app/Contents/MacOS/gropius"
+                exe="gropius"
+                ;;
+              GropiusChat)
+                built="client/dist/GropiusChat.app/Contents/MacOS/GropiusChat"
+                exe="GropiusChat"
+                ;;
+            esac
+            dest=""
+            for candidate in "/Applications/$app.app" "$HOME/Applications/$app.app"; do
+              if [ -d "$candidate" ]; then dest="$candidate"; break; fi
+            done
+            if [ -z "$dest" ]; then
+              echo "the tagged tree's install.sh did not install $app.app" >&2
+              exit 1
+            fi
+            installed="$dest/Contents/MacOS/$exe"
+            if [ ! -x "$installed" ]; then
+              echo "$dest carries no executable at Contents/MacOS/$exe" >&2
+              exit 1
+            fi
+            # Fail closed — and NOT because of the `set` line. With -e and
+            # pipefail on, a failing shasum propagates through the command
+            # substitution and the assignment stops the step. With both off,
+            # the assignment still lands an EMPTY sum; `$installed` was proved
+            # executable four lines up, so a missing or unreadable `built`
+            # then mismatches a real digest and exits 1 below anyway. The
+            # `set` line makes the failure earlier and its message clearer;
+            # it is not what makes the comparison unskippable.
+            installed_sum="$(shasum -a 256 "$installed" | awk '{print $1}')"
+            built_sum="$(shasum -a 256 "$built" | awk '{print $1}')"
+            if [ "$installed_sum" != "$built_sum" ]; then
+              echo "the installed $app is not the one this job built" >&2
+              echo "  installed: $installed ($installed_sum)" >&2
+              echo "  built:     $built ($built_sum)" >&2
+              echo "install.sh installed something other than the tagged artefacts — most likely by falling through to the previously published Release" >&2
+              exit 1
+            fi
+            if ! grep -Fqx "$dest" "$launched"; then
+              echo "install.sh never reached its launch step for ${app} — it stopped early" >&2
+              exit 1
+            fi
+            # Says exactly what was compared. The digest covers ONE file —
+            # Contents/MacOS/$exe — not the bundle: Info.plist, the frameworks,
+            # the code signature and the resources are not digested here, and a
+            # message reading "byte-for-byte what this job built" would claim
+            # they were. What this line proves is that the executable came from
+            # this job's own dist/, which is the fall-through it exists to
+            # catch.
+            echo "installed this job's own $exe and launched it: $dest (Contents/MacOS/$exe sha256 $installed_sum; the rest of the bundle is not digested)"
+          done
+
+          # BIND THE EXERCISED BYTES TO THE PUBLISHED BYTES. Everything above
+          # proves the installer works on the three assets sitting in this
+          # workspace right now; nothing above stops a later step from
+          # re-packaging dist/ and uploading something this gate never saw. A
+          # "Re-package after the gate" step inserted between here and the
+          # publish does exactly that, and every position assertion in the
+          # guard stays green. So record the digests of the assets this gate
+          # actually exercised — the publish step re-verifies them as the first
+          # thing it does, and refuses to upload anything else.
+          shasum -a 256 Gropius.app.zip GropiusChat.app.zip SHA256SUMS.txt \
+            | tee "$RUNNER_TEMP/gate-verified-assets.txt"
+
       # Build-provenance attestation over exactly the bytes published below.
       # Anyone can verify an asset came from this workflow on this repository:
       #   gh attestation verify Gropius.app.zip --repo <owner>/<repo>
+      #
+      # This is the ONLY step between the installer gate and the publish, and it
+      # is a `uses:` — it runs no shell of this repository's and writes none of
+      # these assets. A guard holds that: no step between the two may declare a
+      # `run:` block, because a `run:` there is where a re-packaging step would
+      # go (TestTheGateBindsTheBytesItExercisedToTheBytesPublished).
       - name: Attest the release assets
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
@@ -228,6 +436,13 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
+          # The bytes uploaded below must be the bytes the installer gate
+          # exercised. The gate recorded their digests; re-verify them here,
+          # before the first `gh release` call, so a step that re-packaged
+          # dist/ after the gate ran cannot ship artefacts the gate never saw.
+          # This is the binding, not the ordering assertions in the guard:
+          # ordering says the gate ran first, this says it ran on THESE bytes.
+          shasum -a 256 -c "$RUNNER_TEMP/gate-verified-assets.txt"
           assets="Gropius.app.zip GropiusChat.app.zip SHA256SUMS.txt"
           if gh release view "$TAG" >/dev/null 2>&1; then
             echo "Release $TAG exists — uploading assets."
@@ -240,13 +455,59 @@ jobs:
             # latest only if no newer released tag exists. The listing is
             # fetched on its own line so a failed gh call aborts the step
             # instead of silently yielding latest=true.
-            released="$(gh release list --exclude-drafts --exclude-pre-releases \
-              --json tagName --jq '.[].tagName')"
-            newest="$(printf '%s\n%s\n' "$released" "$TAG" | sort -V | tail -n1)"
-            if [ "$newest" = "$TAG" ]; then latest=true; else latest=false; fi
-            echo "Marking $TAG with --latest=$latest (newest released tag: $newest)."
-            gh release create "$TAG" $assets \
-              --verify-tag --title "$TAG" --latest="$latest" --generate-notes
+            # Under semantic versioning a hyphen introduces the pre-release
+            # identifiers, so the tag alone classifies itself — no lookup, and
+            # nothing that can fall out of step with the forge.
+            case "$TAG" in
+            *-*) prerelease=true ;;
+            *) prerelease=false ;;
+            esac
+
+            if [ "$prerelease" = true ]; then
+              # A candidate is never the release install.sh fetches. Two things
+              # went wrong here and either alone still leaves the hole. It was
+              # published without --prerelease, so it became an ordinary release
+              # that no later --exclude-pre-releases query can filter; and the
+              # election below appended $TAG to a candidate list it had just
+              # filtered, so the tag under consideration bypassed the very
+              # exclusion meant to keep it out. Not electing at all on a
+              # pre-release tag closes the second by construction.
+              echo "Publishing $TAG as a pre-release; releases/latest is left alone."
+              gh release create "$TAG" $assets \
+                --verify-tag --title "$TAG" --prerelease --latest=false --generate-notes
+            else
+              released="$(gh release list --exclude-drafts --exclude-pre-releases \
+                --json tagName --jq '.[].tagName')"
+              # Drop pre-release-shaped tags on this side too, rather than
+              # trusting the forge's flag alone: a candidate published before
+              # this rule existed carries no pre-release flag there, so the
+              # query still returns it — and `sort -V` orders v0.4.0-rc1 AFTER
+              # v0.4.0, the opposite of the semantic version rule, so one such
+              # tag would beat every real release that follows it, for ever.
+              #
+              # Filtered with the shell's own `case` rather than with grep. The
+              # obvious spelling, `grep -v -- '-'`, is not portable: it is
+              # refused outright by at least one grep implementation that people
+              # install over the system one, and a release election is a bad
+              # place to depend on which grep a PATH happens to resolve.
+              # Compared pairwise rather than by accumulating a list: building a
+              # newline-separated list inside an indented YAML block folds the
+              # block's own indentation into the values, and `sort -V` would then
+              # be ranking tags with leading spaces and the equality test below
+              # would never match. Seeding with $TAG also states the rule
+              # directly — this tag is latest unless some released tag beats it.
+              newest="$TAG"
+              for candidate in $released; do
+                case "$candidate" in
+                *-*) continue ;;
+                esac
+                newest="$(printf '%s\n%s\n' "$newest" "$candidate" | sort -V | tail -n1)"
+              done
+              if [ "$newest" = "$TAG" ]; then latest=true; else latest=false; fi
+              echo "Marking $TAG with --latest=$latest (newest released tag: $newest)."
+              gh release create "$TAG" $assets \
+                --verify-tag --title "$TAG" --latest="$latest" --generate-notes
+            fi
           fi
 
       - name: Assert the release job pushed nothing to the default branch

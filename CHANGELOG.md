@@ -33,6 +33,37 @@ GitHub release notes.
   IPv6 loopback URL rather than `127.0.0.1`, which such a server refuses.
   **A default install is unaffected.**
 
+- **A release is proved before it is published.** The release workflow now runs
+  the tagged tree's own `install.sh` against the artefacts it has just built —
+  after they are packaged, before the build-provenance attestation and before
+  the release is created — and fails the run if the installer does not install
+  both apps. A tag whose installer is broken therefore publishes nothing at
+  all. 0.3.0 shipped an installer that stopped on its first line of work
+  because the chain built and published it without ever executing it, and the
+  break was reachable only by someone installing from the tag. The gate also
+  checks that the executable inside each installed bundle is byte-for-byte the
+  one that run built, so an installer that quietly falls back to the previous
+  release cannot pass it.
+- **`install.sh` reads `GROPIUS_ASSET_DIR`, and stops unless
+  `GITHUB_ACTIONS=true`.** The seam lets the release gate hand the script the
+  artefacts of a release that does not exist yet. The reason for the refusal is
+  the checksum: while the seam is honoured, the bundle and the `SHA256SUMS.txt`
+  it is verified against both come from the named directory, so the
+  verification shows only that the directory is self-consistent and says
+  nothing about where its contents came from. Every step of the script still
+  executes — the destination choice, the unpacking, the staged swap — but the
+  integrity check is the CI one, not the one a user gets.
+
+  What that refusal is worth, stated plainly: `GITHUB_ACTIONS` is an ordinary
+  environment variable, and a caller who sets one can set two. Setting both
+  still installs whatever the named directory holds, end to end — quarantine
+  cleared, firewall rule added, app launched. This is a loudness control, not
+  an integrity control. It keeps the seam from being reached by accident, by a
+  stray export, or by a tutorial that tells someone to set it, and it makes the
+  substitution announce itself on stderr before `Checksum OK.` is printed. What
+  proves where a build came from is the published release and
+  `gh attestation verify`.
+
 ### Fixed
 
 - **A bind address written the way IPv6 requires is no longer treated as a LAN
@@ -49,12 +80,74 @@ GitHub release notes.
   bound every interface on the Mac while the Connect tab offered a single
   address nothing could use.
 
+- **A standard account can install the server.** The installer asked for
+  administrator rights with `sudo`, at the very end of its work. `sudo` can
+  only ever accept the invoking user's own password, and a standard
+  (non-administrator) account is not in the sudoers set at all, so no password
+  that person could type would do — and they found out only after the download
+  and after the app had been placed. The request now comes through the standard
+  macOS authentication panel, which takes an administrator's name **and**
+  password, so someone else can enter theirs. It is raised before anything is
+  downloaded or written, so declining costs nothing and leaves nothing behind.
+  The firewall grant is keyed to the bundle's code identity, and the bundle is
+  ad-hoc signed, so the panel appears again on every update rather than once.
+- **A failed rename no longer leaves the Mac with no application.** The staged
+  swap deleted the installed bundle before moving the new one into place and,
+  if that move failed, deleted the staged copy too — the exact outcome staging
+  exists to prevent, reachable by one ordinary rename failure with no attacker
+  involved. The old bundle is now renamed aside, the new one moved in, and the
+  set-aside copy deleted last; a failure puts the old bundle back. The staging
+  directory also takes an unguessable name instead of one built from the
+  process id.
+- **A failed checksum says what went wrong.** The verification's output went to
+  `/dev/null`, so a corrupt download, a truncated checksums file and an HTML
+  error page were reported identically. The output is now printed.
+
+### Security
+
+- **The installer no longer trusts `PATH` for the commands it depends on.**
+  `curl | bash` runs with the invoking user's `PATH`, and an ordinary
+  developer `PATH` puts user-writable directories ahead of `/usr/bin`. Every
+  command the installer resolved by name was therefore substitutable by
+  unprivileged code already running as that user. `shasum` is the sharp one:
+  that call is the only integrity control in the whole install path, so a
+  planted shim defeated the verification silently. `osascript` is the other,
+  because a shim there receives the elevation and can draw its own
+  authentication panel to harvest an administrator password — a risk the move
+  to a system panel creates rather than inherits, since it teaches the reader
+  that a panel is the legitimate way to install. `shasum`, `osascript`,
+  `ditto`, `xattr`, `mktemp` and `pgrep` are now invoked by absolute path, and
+  a test refuses a bare invocation of any of them.
+
+## [0.3.1] - 2026-09-08
+
+### Fixed
+
+- **The one-line install runs again.** `install.sh` read `$DEST…` as the
+  variable name plus the first byte of the ellipsis that follows it, so under
+  `set -u` it stopped with `DEST?: unbound variable` after reporting where it
+  would install and before copying anything. The line runs on every path, so
+  this affected every user rather than only the non-administrator case it was
+  written for. Shipped in 0.3.0 and fixed immediately afterwards; the install
+  command on the website fetches the script from the default branch, so it was
+  serving the fixed script from the moment it merged.
+
+- **The website no longer offers a download that macOS refuses.** Following the
+  download button produced "Apple could not verify Gropius is free of malware",
+  whose only offered action is Move to Bin: a browser download is quarantined,
+  and the bundles are ad-hoc signed rather than notarized. The page now leads
+  with the install command, which verifies the archive against the published
+  checksums and clears the quarantine, and keeps the link to the repository
+  beside it. Release assets are still named with their sizes; none is linked.
+
+
 - **The landing page no longer scrolls sideways.** A grid track held at the
   intrinsic width of the install one-liner — 894 pixels of unbreakable
   command — and pushed the column beside it off the page, so the release list
   was clipped on a desktop and the page scrolled sideways at every width
   measured between 375 and 1440 pixels. It also meant the rule that exists to
   scroll that command inside its own box had never once engaged.
+
 - **The right-hand column gives way on a narrow screen.** The mark steps aside
   below 820 pixels instead of reordering above the headline, where the first
   thing on a phone was an ornament rather than the sentence saying what

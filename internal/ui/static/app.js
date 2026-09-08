@@ -149,9 +149,19 @@ function renderSetup() {
   banner.hidden = s.ready || (!busy && s.stage !== 'failed');
   if (banner.hidden) return;
 
-  $('setupStage').textContent =
-    s.stage === 'failed' ? 'Setup failed' : `Setting up: ${s.stage}…`;
+  // A failed setup must not read as a running one. The spinner and the "this
+  // takes a few minutes" line describe work in progress; left in place beside
+  // the words "Setup failed" they tell the operator to wait for something that
+  // is not happening, and the panel offers no other signal that it has stopped.
+  const failed = s.stage === 'failed';
+  $('setupStage').textContent = failed ? 'Setup failed' : `Setting up: ${s.stage}…`;
+  $('setupSpinner').hidden = failed;
+  $('setupFailMark').hidden = !failed;
+  $('setupBlurb').textContent = failed
+    ? 'Setup stopped and will not finish on its own. Quit Gropius and open it again to retry; if it keeps failing, the message below says why.'
+    : 'Gropius is installing its own private Python and MLX. This happens once and takes a few minutes.';
   $('setupErr').textContent = s.err || '';
+  banner.classList.toggle('failed', failed);
 }
 
 // ── my models ────────────────────────────────────────────

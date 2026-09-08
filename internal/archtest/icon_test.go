@@ -68,3 +68,85 @@ func TestAppIconMatchesTheCommittedArt(t *testing.T) {
 		t.Errorf("build/AppIcon.icns was built from art with hash %s, but build/icon.svg hashes to %s — run `make icon` (needs librsvg)", got, want)
 	}
 }
+
+// TestControlPanelMarkMatchesTheAppIcon holds the control panel's header mark
+// and its favicon to build/icon.svg, the declared source of the drawing.
+//
+// internal/sitetest already holds the WEBSITE's mark to that file, so the page
+// and the Dock icon cannot disagree. The control panel was outside that check
+// and drifted: it carried a different arrangement (a red circle where the icon
+// has a yellow triangle, a downward blue triangle where the icon has a square)
+// in a different palette, so the app a user looked at every day showed a
+// different logo from the one on its own website and in its own Dock tile.
+//
+// The mark is compared by the shapes' own coordinates rather than by rendering:
+// the panel uses the icon's viewBox so the two files carry the same numbers,
+// which is what makes a drift a textual difference a test can see.
+func TestControlPanelMarkMatchesTheAppIcon(t *testing.T) {
+	root := repoRootDir(t)
+	read := func(rel ...string) string {
+		b, err := os.ReadFile(filepath.Join(append([]string{root}, rel...)...))
+		if err != nil {
+			t.Fatalf("read %v: %v", rel, err)
+		}
+		return string(b)
+	}
+	icon := read("build", "icon.svg")
+	panel := read("internal", "ui", "static", "index.html")
+
+	// The header mark and the favicon are checked SEPARATELY. Checking the file
+	// as a whole lets one satisfy the assertion for the other: with the header's
+	// red drifted and the favicon's intact, a whole-file containment test still
+	// passes, because the favicon carries the shape the header lost. Watched
+	// doing exactly that before this split.
+	header := between(panel, `<svg class="logo"`, "</svg>")
+	favicon := between(panel, `<link rel="icon"`, `</svg>"`)
+	if header == "" || favicon == "" {
+		t.Fatal("the control panel carries no header mark or no favicon")
+	}
+
+	shape := regexp.MustCompile(`<(?:polygon|rect|circle)[^>]*fill="(#[0-9A-Fa-f]{6})"[^>]*/?>`)
+	var want []string
+	for _, m := range shape.FindAllString(icon, -1) {
+		if strings.Contains(m, `width="1024"`) {
+			continue // the ground; the header supplies its own
+		}
+		want = append(want, normaliseShape(m))
+	}
+	if len(want) != 4 {
+		t.Fatalf("expected four shapes in build/icon.svg, found %d", len(want))
+	}
+	for _, region := range []struct{ name, body string }{
+		{"header mark", header}, {"favicon", favicon},
+	} {
+		got := normaliseShape(region.body)
+		for _, w := range want {
+			if !strings.Contains(got, w) {
+				t.Errorf("the control panel %s is missing the icon's shape %q — it must carry build/icon.svg's drawing", region.name, w)
+			}
+		}
+	}
+}
+
+// normaliseShape collapses attribute quoting and whitespace so the same drawing
+// compares equal whether it is written as markup or embedded in a data: URL.
+func normaliseShape(s string) string {
+	s = strings.ReplaceAll(s, "'", `"`)
+	s = strings.ReplaceAll(s, "%23", "#")
+	s = strings.Join(strings.Fields(s), " ")
+	return strings.ToUpper(s)
+}
+
+// between returns the text from the first occurrence of open through the next
+// close, or "" when either is absent.
+func between(s, open, close string) string {
+	i := strings.Index(s, open)
+	if i < 0 {
+		return ""
+	}
+	j := strings.Index(s[i:], close)
+	if j < 0 {
+		return ""
+	}
+	return s[i : i+j+len(close)]
+}

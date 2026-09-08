@@ -47,6 +47,19 @@ func main() {
 	)
 	flag.Parse()
 
+	// Go's flag package stops at the first non-flag argument and leaves the rest
+	// in flag.Args(), which nothing here used to read — so a positional argument
+	// was silently discarded and the process went on to start the server. That is
+	// the wrong default for this program in particular: `gropius install` bound
+	// the configured address, generated and printed an API key, advertised over
+	// Bonjour and never returned, so a typo or a subcommand name guessed against
+	// a build that predates it stood up a LAN-exposed server instead of saying it
+	// did not understand. Refuse before any of that happens.
+	if msg := refuseUnknownArgs(flag.Args()); msg != "" {
+		fmt.Fprintln(os.Stderr, msg)
+		os.Exit(2)
+	}
+
 	if *showVer {
 		fmt.Println("gropius " + version)
 		return
