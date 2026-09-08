@@ -240,13 +240,59 @@ jobs:
             # latest only if no newer released tag exists. The listing is
             # fetched on its own line so a failed gh call aborts the step
             # instead of silently yielding latest=true.
-            released="$(gh release list --exclude-drafts --exclude-pre-releases \
-              --json tagName --jq '.[].tagName')"
-            newest="$(printf '%s\n%s\n' "$released" "$TAG" | sort -V | tail -n1)"
-            if [ "$newest" = "$TAG" ]; then latest=true; else latest=false; fi
-            echo "Marking $TAG with --latest=$latest (newest released tag: $newest)."
-            gh release create "$TAG" $assets \
-              --verify-tag --title "$TAG" --latest="$latest" --generate-notes
+            # Under semantic versioning a hyphen introduces the pre-release
+            # identifiers, so the tag alone classifies itself — no lookup, and
+            # nothing that can fall out of step with the forge.
+            case "$TAG" in
+            *-*) prerelease=true ;;
+            *) prerelease=false ;;
+            esac
+
+            if [ "$prerelease" = true ]; then
+              # A candidate is never the release install.sh fetches. Two things
+              # went wrong here and either alone still leaves the hole. It was
+              # published without --prerelease, so it became an ordinary release
+              # that no later --exclude-pre-releases query can filter; and the
+              # election below appended $TAG to a candidate list it had just
+              # filtered, so the tag under consideration bypassed the very
+              # exclusion meant to keep it out. Not electing at all on a
+              # pre-release tag closes the second by construction.
+              echo "Publishing $TAG as a pre-release; releases/latest is left alone."
+              gh release create "$TAG" $assets \
+                --verify-tag --title "$TAG" --prerelease --latest=false --generate-notes
+            else
+              released="$(gh release list --exclude-drafts --exclude-pre-releases \
+                --json tagName --jq '.[].tagName')"
+              # Drop pre-release-shaped tags on this side too, rather than
+              # trusting the forge's flag alone: a candidate published before
+              # this rule existed carries no pre-release flag there, so the
+              # query still returns it — and `sort -V` orders v0.4.0-rc1 AFTER
+              # v0.4.0, the opposite of the semantic version rule, so one such
+              # tag would beat every real release that follows it, for ever.
+              #
+              # Filtered with the shell's own `case` rather than with grep. The
+              # obvious spelling, `grep -v -- '-'`, is not portable: it is
+              # refused outright by at least one grep implementation that people
+              # install over the system one, and a release election is a bad
+              # place to depend on which grep a PATH happens to resolve.
+              # Compared pairwise rather than by accumulating a list: building a
+              # newline-separated list inside an indented YAML block folds the
+              # block's own indentation into the values, and `sort -V` would then
+              # be ranking tags with leading spaces and the equality test below
+              # would never match. Seeding with $TAG also states the rule
+              # directly — this tag is latest unless some released tag beats it.
+              newest="$TAG"
+              for candidate in $released; do
+                case "$candidate" in
+                *-*) continue ;;
+                esac
+                newest="$(printf '%s\n%s\n' "$newest" "$candidate" | sort -V | tail -n1)"
+              done
+              if [ "$newest" = "$TAG" ]; then latest=true; else latest=false; fi
+              echo "Marking $TAG with --latest=$latest (newest released tag: $newest)."
+              gh release create "$TAG" $assets \
+                --verify-tag --title "$TAG" --latest="$latest" --generate-notes
+            fi
           fi
 
       - name: Assert the release job pushed nothing to the default branch
