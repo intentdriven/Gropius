@@ -157,5 +157,21 @@ CI (`.github/workflows/ci.yml`) gates on: `gofmt -l .` (must be empty),
   it, and a record that moved folder — an issue from `open/` to `resolved/` —
   reads as a file the branch has and `main` lacks. Never delete a branch a
   worktree holds.
+- **Three surfaces, and they are not interchangeable.** Go is the power tool
+  and carries the whole of the functionality; the terminal is a legitimate
+  place for the person running a server to reach it. The web control panel is
+  the accessible layer, carrying the most important settings, and it must be
+  kept in sync with what Go can do — a Go capability with no panel equivalent
+  is a gap, not a feature tier. `config.json` is a third surface, hand-editable
+  by design: a save must never be refused over a setting the operator did not
+  touch, which is a wedge this repository has built three times. Swift is the
+  client and only the client; someone using the chat application never sees the
+  server side. The sync obligation is armed the way every other cross-surface
+  promise here is — a test, not a habit.
+- **A build-provenance attestation is not a signature.** User-facing prose
+  never calls a release "signed" on the strength of checksums or attestation:
+  the bundles are ad-hoc signed, not notarised, and neither control is visible
+  to Gatekeeper. Say what is true — verified against published checksums — or
+  say nothing.
 
 <!-- /working-conventions -->
