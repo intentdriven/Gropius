@@ -201,6 +201,81 @@ jobs:
           ditto -c -k --keepParent client/dist/GropiusChat.app GropiusChat.app.zip
           shasum -a 256 Gropius.app.zip GropiusChat.app.zip | tee SHA256SUMS.txt
 
+      # THE INSTALLER GATE. Nothing above this step has proved that the tagged
+      # tree WORKS — it has proved that it builds. v0.3.0 was tagged, built,
+      # packaged and published carrying an install.sh that aborted on its first
+      # line of work with "DEST?: unbound variable"; the chain never executed
+      # it, so only somebody installing from the tag found out
+      # (iss-2609081257343394). This step executes it.
+      #
+      # It runs ./install.sh from THIS checkout — the tagged commit — and not
+      # the copy on the default branch, because the two differ exactly when it
+      # matters: the fix for v0.3.0 was in flight on main while the tag carried
+      # the broken script. The assets come out of the workspace through
+      # GROPIUS_ASSET_DIR, because the Release they would otherwise be fetched
+      # from does not exist yet; the bytes are the ones the publish step below
+      # uploads, so the checksum verification, the unpacking, the destination
+      # choice and the staged swap all run against the real artefacts.
+      #
+      # `open` is stubbed on PATH: the gate installs both apps but must not
+      # leave a menu-bar server and a chat client running on the runner. The
+      # stub doubles as the probe that the script reached its last step, which
+      # is what makes a truncated or silently-short run visible.
+      #
+      # FAIL-CLOSED. Any non-zero here fails the job before the attestation and
+      # before `gh release create`, so a broken installer yields no Release, no
+      # assets and no attestation. The tag stays, pointing at a commit that was
+      # never published; auto-release re-attempts it on the next push to main
+      # (`detect` sees a tag with no Release) and keeps failing here until the
+      # tree is fixed under a newer CHANGELOG version, which is then the version
+      # it tags. Nothing is left half-published and no later release is blocked.
+      - name: Gate the release on the tagged tree's own installer
+        run: |
+          set -euo pipefail
+
+          # The artefacts this job just built. There is no Release to fetch yet
+          # — that is the point of gating here.
+          export GROPIUS_ASSET_DIR="$PWD"
+
+          gate_bin="$RUNNER_TEMP/installer-gate-bin"
+          launched="$RUNNER_TEMP/installer-gate-launched.txt"
+          mkdir -p "$gate_bin"
+          : > "$launched"
+          cat > "$gate_bin/open" <<EOF
+          #!/usr/bin/env bash
+          printf '%s\n' "\$@" >> "$launched"
+          EOF
+          chmod +x "$gate_bin/open"
+          export PATH="$gate_bin:$PATH"
+
+          # Both documented invocations, piped into bash exactly as the
+          # one-liners in the README are, so the gate meets whatever a script
+          # read from stdin meets.
+          bash -s -- < ./install.sh
+          bash -s -- client < ./install.sh
+
+          # Each bundle is installed where the script chose to put it, and the
+          # script reached the launch at the end of its own run.
+          for app in Gropius GropiusChat; do
+            dest=""
+            for candidate in "/Applications/$app.app" "$HOME/Applications/$app.app"; do
+              if [ -d "$candidate" ]; then dest="$candidate"; break; fi
+            done
+            if [ -z "$dest" ]; then
+              echo "the tagged tree's install.sh did not install $app.app" >&2
+              exit 1
+            fi
+            if [ ! -x "$dest/Contents/MacOS/$app" ]; then
+              echo "$dest carries no executable" >&2
+              exit 1
+            fi
+            if ! grep -Fqx "$dest" "$launched"; then
+              echo "install.sh never reached its launch step for ${app} — it stopped early" >&2
+              exit 1
+            fi
+            echo "installed and launched: $dest"
+          done
+
       # Build-provenance attestation over exactly the bytes published below.
       # Anyone can verify an asset came from this workflow on this repository:
       #   gh attestation verify Gropius.app.zip --repo <owner>/<repo>

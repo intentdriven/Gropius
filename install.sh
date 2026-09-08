@@ -74,10 +74,24 @@ tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 zip="$tmp/$ASSET"
 
+# Where the release assets come from. Normally the latest published Release;
+# GROPIUS_ASSET_DIR points this run at a local directory holding the same asset
+# names instead. That is what lets the release workflow run THIS script against
+# the artefacts it has just built, before they are published — the only moment
+# an installer broken in the tagged tree can still be stopped
+# (iss-2609081257343394). Everything after the fetch is unchanged, checksum
+# verification included, so what the gate exercises is the script a user runs.
+ASSET_DIR="${GROPIUS_ASSET_DIR:-}"
+
 # fetch <asset-name> <dest>: download a release asset, trying the public URL
 # first and falling back to gh (transient errors, or a private fork).
 fetch() {
 	local name="$1" dest="$2"
+	if [ -n "$ASSET_DIR" ]; then
+		cp "$ASSET_DIR/$name" "$dest" ||
+			die "could not read $name from $ASSET_DIR."
+		return 0
+	fi
 	# -q first: ignore any curlrc that could re-point the connection while the
 	# URL still reads github.com; --proto pins HTTPS end to end, redirects
 	# included. The asset and the checksums that verify it come from this same

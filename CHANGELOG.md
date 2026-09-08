@@ -11,6 +11,20 @@ GitHub release notes.
 
 ## [Unreleased]
 
+### Changed
+
+- **A release is proved before it is published.** The release workflow now runs
+  the tagged tree's own `install.sh` against the artefacts it has just built —
+  after they are packaged, before the build-provenance attestation and before
+  the release is created — and fails the run if the installer does not install
+  both apps. A tag whose installer is broken therefore publishes nothing at
+  all. 0.3.0 shipped an installer that stopped on its first line of work
+  because the chain built and published it without ever executing it, and the
+  break was reachable only by someone installing from the tag. `install.sh`
+  reads `GROPIUS_ASSET_DIR` so the gate can hand it the artefacts of a release
+  that does not exist yet; every other step of the script, checksum
+  verification included, is the one a user runs.
+
 ## [0.3.1] - 2026-09-08
 
 ### Fixed
