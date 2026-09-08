@@ -147,8 +147,9 @@ absent.
 The tokens-per-day table follows one rule about that edge: a row whose figures
 come from a coarse per-model daily total rather than from the day's own records
 is marked **from daily totals**, so exact rows and summary totals are never
-mixed without saying so. Gropius writes no such totals, so no row carries the
-mark; the rule is what the table does with one when there is one.
+mixed without saying so. Gropius writes those totals when retention folds a
+day's records away, keeping one line per day and model, so a row covering a
+folded day carries the mark.
 
 **Who sent anything.** No client address is recorded, so every table is per
 model and per period and never says who: not which machine on your network,
