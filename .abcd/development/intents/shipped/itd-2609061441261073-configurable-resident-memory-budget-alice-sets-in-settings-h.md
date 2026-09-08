@@ -162,6 +162,17 @@ itd-2609061441241254 and criteria 3 and 4 here are all awaiting the maintainer's
 adopt-or-reject; none of them has been adopted, and none may be cited as
 precedent for the others until one is.
 
+
+2026-09-08 — **Adopted, both.** The maintainer adopts criteria 3 and 4 as
+diverged, on the same anti-wedge argument, decided together with criterion 5 of
+itd-2609061441241254 rather than either being cited as precedent for the other.
+An independent fidelity review (receipt rcp-0b2669b3be31) agreed both narrowings
+are real and deliberate, and recorded that each is narrower than this record
+claims: for criterion 3 the operator-caused case IS still refused, naming the
+machine's memory (`internal/app/app.go:445`), and for criterion 4 the narrowing
+lies outside the criterion's own precondition, so with a fitting set the refusal
+fires exactly as written (`internal/app/app.go:637`). The adoption covers the
+narrowings as built and as tested, not a wider reading of them.
 ## Grounds
 
 - pursued: we expect a shared Mac to serve several agents without their models evicting each other once the operator can pin, budget and grace, and once keyed clients can see what is warm; we are wrong if model swaps stay as frequent with those controls set as they were without them, measured by the statistics store

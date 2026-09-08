@@ -172,6 +172,24 @@ next, which is then the oldest. Held by
 `runtime.TestRaisingTheMemoryBudgetServesEveryWaiterItFits`, which parks four
 and is mutation-checked against a build where the cascade does not happen.
 
+
+2026-09-08 — **Adopted, both.** The maintainer adopts criteria 3 and 6 as
+diverged. Both narrowings came out of the adversarial security review rather
+than the anti-wedge argument, and both are adopted on that review's reasoning:
+for criterion 3, that `warm` and `waited` are residency facts and an
+unauthenticated server already withholds exactly those, so the wait report
+follows the residency rule rather than leaking around it; for criterion 6, that
+a bound on how many requests may WAIT had become a bound on how many may be
+SERVED, and a caller needing nothing unloaded costs the machine nothing. The
+alternative the review offered for criterion 3 — keep the headers open and
+record the widened disclosure — stays rejected.
+
+The cost is accepted with the adoption and is stated here so it is not
+rediscovered as a defect: on the shipping default, which has no key, the press
+release's promise that the answer tells Carol she waited does not hold. It holds
+once a key is set. An independent review (receipt rcp-5c77e5d702ce) confirmed
+both narrowings from the code first, at `internal/gateway/gateway.go:565` and
+`internal/runtime/pool.go:1176`.
 ## Grounds
 
 - pursued: we expect a shared Mac to serve several agents without their models evicting each other once the operator can pin, budget and grace, and once keyed clients can see what is warm; we are wrong if model swaps stay as frequent with those controls set as they were without them, measured by the statistics store

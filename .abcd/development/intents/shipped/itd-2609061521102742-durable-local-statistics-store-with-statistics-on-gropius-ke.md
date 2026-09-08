@@ -162,6 +162,20 @@ not resolved here.
 Both findings come from an independent fidelity review (receipt
 rcp-799061841f58) that reached them from the code before weighing this section.
 
+
+2026-09-08 — **Adopted, in the corrected scope only.** The maintainer adopts
+the divergence over a load event carrying no reason, as it stands against THIS
+intent's Open Questions — the scope the correction above establishes. Nothing
+in the pool knows why a model was loaded beyond something having asked for it,
+so a reason on a load could only have been invented; what a load carries is
+`duration_ms` and `failed`.
+
+The separate divergence from adr-2609061610107154 over the record kind
+(`removed`, covering seven reasons, against the ADR's "eviction event") is NOT
+adopted here and is NOT rejected. It was found only while correcting the
+misquote above, has had no independent review of its own, and is a divergence
+from a ratified decision record rather than from an intent. It is captured as
+an open issue and is to be decided on its own evidence.
 ## Grounds
 
 - pursued: we want to learn how local models are actually used on this Mac, which models, how many tokens, what latencies, and we expect a month of records to change which models we keep and how we set the memory budget; we are wrong if, after a month with the dashboard, no such decision has changed

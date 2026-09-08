@@ -140,6 +140,19 @@ pinned model is the *least* recently used and is still not evicted — by
 `runtime.TestEvictionSkipsThePinnedModelEvenWhenItIsTheLeastRecentlyUsed`. The
 criterion is left as written; this note and that test say what holds.
 
+
+2026-09-08 — **Adopted.** The maintainer adopts criterion 5 as diverged, on
+the anti-wedge argument this note sets out: a pinned set inherited from another
+Mac, or one applied where RAM detection fell back to its default, is applied
+with a warning rather than refusing every settings save over a set the operator
+never chose here. An independent fidelity review (receipt rcp-4d0d60cfdaf8)
+reached the same reading of the code before weighing this section, and located
+the narrowing at `internal/app/app.go:622`, held by
+`TestAnInheritedOverBudgetPinnedSetDoesNotBlockAnUnrelatedSave`. The criterion
+stays as written; what shipped is what this note and that test describe.
+
+Criterion 2 needs no adoption: it shipped STRONGER than written, and the note
+above already records that the stronger case is the one held.
 ## Grounds
 
 - pursued: we expect a shared Mac to serve several agents without their models evicting each other once the operator can pin, budget and grace, and once keyed clients can see what is warm; we are wrong if model swaps stay as frequent with those controls set as they were without them, measured by the statistics store
