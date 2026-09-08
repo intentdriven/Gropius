@@ -6,10 +6,11 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
-	"path/filepath"
 	"time"
 
 	"github.com/intentdriven/Gropius/internal/config"
@@ -84,24 +85,95 @@ func acquireListener(addr string, wait time.Duration, holder func() portHolder) 
 // our root (our own server, a restart-in-progress, or a shared-cache peer). A
 // mismatch — or a server that will not identify itself — is treated as foreign.
 func probePortHolder(paths config.Paths, port int) portHolder {
-	served, ok := fetchInstanceToken(port)
+	name, answer, err := writeChallenge(paths)
+	if err != nil {
+		// The root cannot be written, so no proof can be constructed. Refuse
+		// rather than defer: an unprovable holder is exactly the case this
+		// function exists to catch.
+		return holderForeign
+	}
+	defer removeChallenge(paths, name)
+
+	served, ok := fetchChallengeAnswer(port, name)
 	if !ok {
 		return holderNone
 	}
-	ours := readInstanceToken(paths)
-	if ours != "" && served != "" &&
-		subtle.ConstantTimeCompare([]byte(served), []byte(ours)) == 1 {
+	if subtle.ConstantTimeCompare([]byte(served), []byte(answer)) == 1 {
 		return holderOurs
 	}
 	return holderForeign
 }
 
-// fetchInstanceToken reads the token a running Gropius publishes on its
-// loopback-only control plane. ok=false means nothing that looks like a Gropius
-// answered (connection refused, non-200, or unparseable).
-func fetchInstanceToken(port int) (token string, ok bool) {
+// writeChallenge drops a single-use nonce file in the data root and returns its
+// name and the answer a holder must echo back.
+//
+// The file is written through a random O_EXCL temp and renamed, for the reason
+// the token write did: in shared mode the root is group-writable, so a direct
+// write to a predictable name could follow a symlink a peer pre-planted and
+// truncate a file this account owns. A rename replaces the final component
+// without following a link there.
+//
+// Mode 0640 rather than 0600 on purpose. The point of the probe is to let a
+// process that can read this ROOT prove it, and under a shared root that is a
+// peer account in the same group — the case a 0600 token could never serve,
+// which is why cross-account client mode never worked. In a per-user root the
+// group cannot traverse the directory, so 0640 grants nothing there.
+func writeChallenge(paths config.Paths) (name, answer string, err error) {
+	if err := os.MkdirAll(paths.Root, 0o755); err != nil {
+		return "", "", err
+	}
+	n := make([]byte, 16)
+	if _, err := rand.Read(n); err != nil {
+		return "", "", err
+	}
+	a := make([]byte, 32)
+	if _, err := rand.Read(a); err != nil {
+		return "", "", err
+	}
+	name, answer = hex.EncodeToString(n), hex.EncodeToString(a)
+
+	tmp, err := os.CreateTemp(paths.Root, ".challenge-*.tmp")
+	if err != nil {
+		return "", "", err
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName) // no-op once the rename succeeds
+	if err := tmp.Chmod(0o640); err != nil {
+		tmp.Close()
+		return "", "", err
+	}
+	if _, err := tmp.WriteString(answer); err != nil {
+		tmp.Close()
+		return "", "", err
+	}
+	if err := tmp.Close(); err != nil {
+		return "", "", err
+	}
+	if err := os.Rename(tmpName, config.ChallengePath(paths.Root, name)); err != nil {
+		return "", "", err
+	}
+	return name, answer, nil
+}
+
+// removeChallenge deletes a spent nonce, tolerating the failure.
+//
+// A shared root carries the sticky bit, so a delete can fail with EPERM on a
+// file another account owns — and the previous scheme's stale-token cleanup
+// failing that way is what left one account's server permanently misread as
+// foreign. A leftover challenge is harmless: it is single-use, its answer is
+// never reused, and nothing consults it again.
+func removeChallenge(paths config.Paths, name string) {
+	if p := config.ChallengePath(paths.Root, name); p != "" {
+		_ = os.Remove(p)
+	}
+}
+
+// fetchChallengeAnswer asks the process on the port to read back the nonce.
+// ok=false means nothing that looks like a Gropius answered (connection
+// refused, non-200, or unparseable).
+func fetchChallengeAnswer(port int, name string) (answer string, ok bool) {
 	c := &http.Client{Timeout: 500 * time.Millisecond}
-	resp, err := c.Get(fmt.Sprintf("http://127.0.0.1:%d/api/instance", port))
+	resp, err := c.Get(fmt.Sprintf("http://127.0.0.1:%d/api/instance?challenge=%s", port, url.QueryEscape(name)))
 	if err != nil {
 		return "", false
 	}
@@ -110,73 +182,10 @@ func fetchInstanceToken(port int) (token string, ok bool) {
 		return "", false
 	}
 	var body struct {
-		Token string `json:"token"`
+		Answer string `json:"answer"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, config.MaxChallengeBytes)).Decode(&body); err != nil {
 		return "", false
 	}
-	return body.Token, true
-}
-
-// instanceTokenPath is where a server records its per-run identity token.
-func instanceTokenPath(paths config.Paths) string {
-	return filepath.Join(paths.Root, "instance.token")
-}
-
-// newInstanceToken returns a fresh random identity token for this server run.
-func newInstanceToken() (string, error) {
-	b := make([]byte, 32)
-	if _, err := rand.Read(b); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(b), nil
-}
-
-// writeInstanceToken records the token 0600 in the data root. 0600 is the crux of
-// the anti-impersonation check: in a per-user root another account cannot read it,
-// so it cannot forge a matching token when it tries to hold the port.
-//
-// The write goes through a random O_EXCL temp then rename, not straight to the
-// predictable instance.token path. In shared mode the data root is
-// group-writable, so a direct write could follow a symlink another account
-// pre-planted at instance.token and truncate a file the server user owns. A
-// rename replaces the final component without following a link there.
-func writeInstanceToken(paths config.Paths, token string) error {
-	if err := os.MkdirAll(paths.Root, 0o755); err != nil {
-		return err
-	}
-	tmp, err := os.CreateTemp(paths.Root, ".instance-*.token")
-	if err != nil {
-		return err
-	}
-	tmpName := tmp.Name()
-	defer os.Remove(tmpName) // no-op once the rename succeeds
-	if err := tmp.Chmod(0o600); err != nil {
-		tmp.Close()
-		return err
-	}
-	if _, err := tmp.WriteString(token); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	return os.Rename(tmpName, instanceTokenPath(paths))
-}
-
-// maxInstanceTokenBytes caps the token read; a real token is 64 hex chars.
-const maxInstanceTokenBytes = 4096
-
-// readInstanceToken returns the recorded token, or "" if none — including when
-// the file is not a regular file this account can read: in a shared root a
-// peer can plant a FIFO under this name (turning the probe's fast "foreign
-// holder" refusal into a silent hang) or a symlink, so the read is hardened
-// (see config.OpenRegular) and any refusal reads as "no token".
-func readInstanceToken(paths config.Paths) string {
-	b, err := config.ReadRegular(instanceTokenPath(paths), maxInstanceTokenBytes)
-	if err != nil {
-		return ""
-	}
-	return string(b)
+	return body.Answer, true
 }

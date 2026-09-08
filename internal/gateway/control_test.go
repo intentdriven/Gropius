@@ -2,8 +2,11 @@ package gateway
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -56,9 +59,10 @@ func postJSON(t *testing.T, srv *httptest.Server, path, body string) *http.Respo
 	return resp
 }
 
-// /api/instance serves this run's identity token, which the singleton
-// coordinator uses to tell a genuine Gropius apart from a port squatter.
-func TestInstanceEndpointServesToken(t *testing.T) {
+// /api/instance answers a challenge the caller wrote into the data root, which
+// is how the singleton coordinator tells a genuine Gropius apart from a port
+// squatter without either side keeping a secret.
+func TestInstanceEndpointAnswersAChallenge(t *testing.T) {
 	paths := config.NewPaths(t.TempDir())
 	a, err := app.New(app.Options{Paths: paths, Config: config.Default()})
 	if err != nil {
@@ -66,23 +70,73 @@ func TestInstanceEndpointServesToken(t *testing.T) {
 	}
 	t.Cleanup(func() { a.Close() })
 
-	ctrl := &Control{App: a, InstanceToken: "tok-12345"}
+	name := strings.Repeat("ab12", 8)
+	if err := os.WriteFile(config.ChallengePath(paths.Root, name), []byte("the-answer"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+
+	ctrl := &Control{App: a, Root: paths.Root}
 	mux := http.NewServeMux()
 	ctrl.Routes(mux)
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 
-	resp, err := srv.Client().Get(srv.URL + "/api/instance")
+	resp, err := srv.Client().Get(srv.URL + "/api/instance?challenge=" + name)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer resp.Body.Close()
 	var body struct {
-		Token string `json:"token"`
+		Answer string `json:"answer"`
 	}
 	json.NewDecoder(resp.Body).Decode(&body)
-	if body.Token != "tok-12345" {
-		t.Errorf("token = %q, want %q", body.Token, "tok-12345")
+	if body.Answer != "the-answer" {
+		t.Errorf("answer = %q, want %q", body.Answer, "the-answer")
+	}
+}
+
+// The endpoint must never become an arbitrary-file-read oracle: the challenge
+// name is caller-supplied and is turned into a path the server reads. A
+// traversal attempt and an unknown name must be indistinguishable, so the
+// endpoint reports nothing about what exists.
+func TestInstanceEndpointRefusesTraversalAndLeaksNothing(t *testing.T) {
+	paths := config.NewPaths(t.TempDir())
+	a, err := app.New(app.Options{Paths: paths, Config: config.Default()})
+	if err != nil {
+		t.Fatalf("app.New: %v", err)
+	}
+	t.Cleanup(func() { a.Close() })
+
+	secret := filepath.Join(paths.Root, "config.json")
+	if err := os.WriteFile(secret, []byte("{\"api_key\":\"s3cret\"}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	ctrl := &Control{App: a, Root: paths.Root}
+	mux := http.NewServeMux()
+	ctrl.Routes(mux)
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	// Built rather than written out: see the note in the singleton tests — a
+	// hex literal beside a path reads as a credential to a secret scanner.
+	wrong := strings.Repeat("ab12", 7) + "ab1"
+	for _, probe := range []string{
+		"", "../config.json", "..%2Fconfig.json", "../../../../etc/passwd",
+		wrong, ".gropius-challenge-x",
+	} {
+		resp, err := srv.Client().Get(srv.URL + "/api/instance?challenge=" + probe)
+		if err != nil {
+			t.Fatal(err)
+		}
+		b, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusNotFound {
+			t.Errorf("challenge %q: status = %d, want 404", probe, resp.StatusCode)
+		}
+		if strings.Contains(string(b), "s3cret") {
+			t.Fatalf("challenge %q read a file outside the challenge set", probe)
+		}
 	}
 }
 

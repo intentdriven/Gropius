@@ -172,13 +172,6 @@ func runServer(ln net.Listener, paths config.Paths, cfg config.Config, headless 
 
 	mux := http.NewServeMux()
 
-	// A LAN-bound listener with no key is open to the whole network. The control
-	// panel warns about this, but a user running headless never sees it — say so
-	// on stderr too.
-	if cfg.ExposedToLAN() && cfg.APIKey == "" {
-		log.Warn("SECURITY: bound to a LAN address with no API key — anyone on your network can use this server; set a key in Settings or bind to 127.0.0.1")
-	}
-
 	// OpenAI-compatible API — LAN-facing, guarded by the optional API key. The
 	// gateway reads the key live (a.Config) so setting one in the control panel
 	// takes effect without a restart.
@@ -188,23 +181,10 @@ func runServer(ln net.Listener, paths config.Paths, cfg config.Config, headless 
 		mux.Handle(p, apiHandler)
 	}
 
-	// A per-run identity token, recorded 0600 in the data root and served on the
-	// loopback-only control plane. It lets a future launch tell OUR server (or a
-	// shared-root peer) apart from a process merely squatting on the port, so it
-	// never silently hands local model traffic to an impostor. Best-effort: if the
-	// token cannot be written the check simply degrades to "unidentified".
-	instanceToken, err := newInstanceToken()
-	if err != nil {
-		return err
-	}
-	if err := writeInstanceToken(paths, instanceToken); err != nil {
-		log.Warn("could not record the instance identity token", "err", err)
-	}
-
 	// Control plane + web UI — administrative, so loopback-only (Control.Handler
 	// enforces it). Mounted at "/" as the catch-all for everything that is not a
 	// /v1 or /health request.
-	ctrl := &gateway.Control{App: a, UI: ui.Handler(), InstanceToken: instanceToken}
+	ctrl := &gateway.Control{App: a, UI: ui.Handler(), Root: paths.Root}
 	mux.Handle("/", ctrl.Handler())
 
 	srv := &http.Server{
