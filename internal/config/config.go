@@ -1057,3 +1057,59 @@ func GenerateAPIKey() (string, error) {
 	}
 	return base64.RawURLEncoding.EncodeToString(b), nil
 }
+
+// Challenge coordination: how a starting Gropius proves the process already on
+// its port shares its data root, without either side keeping a secret.
+//
+// The prober writes a random answer into a random-named file in the data root
+// and asks the holder, over loopback, to read that file back. Only a process
+// that can read this root can answer, which is exactly the claim being tested.
+// Nothing is stored between probes and nothing replayable crosses the wire: the
+// file is single-use and deleted, so a peer who observes one answer learns
+// nothing about the next.
+//
+// This replaces a durable per-run token, which failed in both directions. It
+// could not authenticate a peer account (each root holds a different token), and
+// it was replayable: the token was published to every loopback caller, survived
+// shutdown on disk, and was read by the next start before a fresh one was
+// written — so a local account could harvest it, wait, squat the port, and have
+// the real server adopt it as its own.
+const (
+	// ChallengeFilePrefix names a challenge file. The leading dot keeps it out
+	// of ordinary listings; the name after it is the caller's nonce.
+	ChallengeFilePrefix = ".gropius-challenge-"
+	// MaxChallengeBytes caps the answer read. A real answer is 64 hex chars.
+	MaxChallengeBytes = 4096
+	// challengeNameLen is the nonce length in hex characters (16 random bytes).
+	challengeNameLen = 32
+)
+
+// ValidChallengeName reports whether name is a well-formed nonce.
+//
+// This is a path-traversal guard, not a formatting nicety: the name is supplied
+// by the caller and used to build a path the server then READS. Without it,
+// "../../../etc/passwd" would turn the control plane into an arbitrary-file-read
+// oracle for anything the server's uid can open. Exactly 32 lowercase hex
+// characters admits no separator, no dot, and no escape.
+func ValidChallengeName(name string) bool {
+	if len(name) != challengeNameLen {
+		return false
+	}
+	for i := 0; i < len(name); i++ {
+		c := name[i]
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+// ChallengePath returns the file a challenge name refers to under root, or ""
+// when the name is not well-formed. Callers must treat "" as a refusal: it is
+// the single point where an untrusted name is turned into a path.
+func ChallengePath(root, name string) string {
+	if !ValidChallengeName(name) {
+		return ""
+	}
+	return filepath.Join(root, ChallengeFilePrefix+name)
+}
