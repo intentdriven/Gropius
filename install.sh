@@ -57,7 +57,7 @@ die() {
 
 # Both bundles declare macOS 26 as their minimum, so Launch Services refuses
 # them on anything older. Refuse here instead — before the download, before the
-# sudo prompt, and before /Applications and the firewall are touched — so an
+# authorization panel, and before /Applications and the firewall are touched — so an
 # unsupported Mac is turned away rather than half-installed. The major lives in
 # this one variable; build/Info.plist is the value it must match.
 MIN_MACOS_MAJOR=26
@@ -77,6 +77,80 @@ macos_major="${macos_version%%.*}"
 if [ "$mode" = "server" ] && [ "$(uname -m)" != "arm64" ] &&
 	[ "$(sysctl -n hw.optional.arm64 2>/dev/null)" != "1" ]; then
 	die "the Gropius server needs Apple Silicon (this Mac is $(uname -m)). The GropiusChat client is universal: rerun with 'client'."
+fi
+
+# Elevation, for the firewall grant the server needs (applied at the end of this
+# script). Both helpers below raise the native macOS authentication panel rather
+# than prompting on the terminal, and the difference is not cosmetic: sudo can
+# only ever accept the invoking user's own password, and a standard account is
+# not in the sudoers set at all, so the old terminal prompt was unsatisfiable on
+# exactly the accounts that most need this. The authentication panel asks for an
+# administrator's name AND password, so a standard user can have an
+# administrator enter theirs.
+#
+# Neither helper builds its root command by string interpolation. Every -e
+# argument is single-quoted, so bash expands nothing into the AppleScript; the
+# binary path travels as an osascript argument and is escaped for the root shell
+# by `quoted form of`. Interpolating a path into a command that runs as root
+# would be a local privilege-escalation surface in the one script users are told
+# to pipe into bash.
+#
+# Nothing here reads standard input, which under `curl | bash` is the remaining
+# text of this script.
+#
+# osascript is invoked by absolute path, and that is load-bearing rather than
+# tidiness. `curl | bash` runs with the invoking user's PATH, which routinely
+# puts user-writable directories ahead of /usr/bin — a plain `~/.local/bin` needs
+# no privileges to write at all. Unprivileged code already running as the user
+# could otherwise drop an `osascript` shim there, and this script would hand it
+# the elevation: the shim draws its own authentication panel and harvests the
+# administrator password.
+#
+# That risk is created by this block, not inherited. A counterfeit terminal
+# password prompt is something a wary user might distrust; asking through the
+# system authentication panel teaches them that a panel is the expected,
+# legitimate part of installing, which makes a fake one more convincing. Pinning
+# the interpreter is the cost of that trade. `quoted form of` escapes the
+# argument; it cannot help when the interpreter itself is attacker-supplied.
+
+# admin_authorize: raise the authentication panel and do nothing with the result.
+# Used as a gate: it proves an administrator is present before any work starts.
+admin_authorize() {
+	/usr/bin/osascript -e 'do shell script "/usr/bin/true" with administrator privileges' >/dev/null 2>&1
+}
+
+# firewall_grant BINARY: allow BINARY through the macOS Application Firewall.
+# Both socketfilterfw calls share one `do shell script`, so this is one panel and
+# not two.
+firewall_grant() {
+	/usr/bin/osascript \
+		-e 'on run argv' \
+		-e 'set fw to "/usr/libexec/ApplicationFirewall/socketfilterfw"' \
+		-e 'set p to quoted form of (item 1 of argv)' \
+		-e 'do shell script fw & " --add " & p & " && " & fw & " --unblockapp " & p with administrator privileges' \
+		-e 'end run' \
+		-- "$1" >/dev/null 2>&1
+}
+
+# Ask for that authorization HERE — before the download, before /Applications is
+# touched, before anything is written. Failing at this point costs the user
+# nothing; failing at the end (where the prompt used to live) left the app
+# installed and quietly unable to serve the LAN, which is the bug this fixes.
+#
+# The panel is raised whenever the server is being installed, without first
+# reading the firewall's state to decide. A grant can be recorded while the
+# firewall is switched off and survives the user switching it on later, so
+# inspecting the state would only buy a skipped prompt today at the cost of a
+# silently missing grant tomorrow.
+#
+# CI never has a console to answer the panel, and the release gate installs the
+# server to check the script still works. Skip the gate there: the grant at the
+# end already tolerates failure, and a runner has no firewall to grant through.
+if [ "$mode" = "server" ] && [ "${GITHUB_ACTIONS:-}" != "true" ]; then
+	echo "$APP needs administrator rights to allow itself through the macOS firewall."
+	echo "If this account is not an administrator, one can enter their name and password."
+	admin_authorize ||
+		die "administrator authorization was declined or failed. Nothing has been downloaded or installed. Re-run this command with an administrator's credentials to hand."
 fi
 
 tmp="$(mktemp -d)"
@@ -152,10 +226,11 @@ echo "Checksum OK."
 # without admin rights. ~/Applications is the per-user location macOS already
 # understands: Spotlight and Launchpad index it, and it needs no privileges.
 #
-# Preferred over prompting for sudo on purpose. Asking a standard user for an
-# admin password they may not have turns a working install into a dead end, and
-# asking an admin to elevate for a per-user app installs it for everyone when
-# only one account wanted it.
+# Chosen over elevating on purpose, and the firewall grant above is not a
+# precedent for doing so here. That grant is a system-wide setting with no
+# per-user equivalent, so it has to be made as an administrator. A destination
+# does have a per-user equivalent, and elevating to write /Applications would
+# install the app for every account when only one asked for it.
 if [ -w /Applications ]; then
 	DEST="/Applications"
 else
@@ -177,7 +252,7 @@ xattr -dr com.apple.quarantine "$tmp/extract/$APP.app" 2>/dev/null || true
 # would report success while the old version keeps running.
 if pgrep -qf "$DEST/$APP.app/Contents/MacOS/" 2>/dev/null; then
 	echo "Quitting the running ${APP}…"
-	osascript -e "quit app \"$APP\"" >/dev/null 2>&1 || true
+	/usr/bin/osascript -e "quit app \"$APP\"" >/dev/null 2>&1 || true
 	for _ in $(seq 1 20); do
 		pgrep -qf "$DEST/$APP.app/Contents/MacOS/" || break
 		sleep 0.5
@@ -214,15 +289,29 @@ fi
 
 # Server: allow it through the macOS Application Firewall so other machines on the
 # LAN can reach it. Without this the firewall accepts the handshake but drops the
-# data — loopback works, the LAN sees an empty response. This needs sudo.
+# data — loopback works, the LAN sees an empty response. This needs administrator
+# rights, which were already authorized at the top of this script.
+#
+# macOS caches that authorization for about five minutes, so this second panel is
+# usually collapsed into the first and the user sees no prompt here. A slow
+# download can outlive the cache, in which case the panel appears once more —
+# hence the line below, so a returning prompt is expected rather than alarming.
+#
+# The grant is keyed to the binary's code identity, and the bundle is ad-hoc
+# signed, so its identity changes with every build. Re-running this script for an
+# update therefore has to make the grant again; it is not a one-off.
+#
+# Skipped in CI along with the gate above: a runner has no console to answer a
+# panel, and an authentication prompt with nobody to answer it would hang the
+# release gate rather than fail it.
 BIN="$DEST/$APP.app/Contents/MacOS/gropius"
-echo "Allowing $APP through the macOS firewall (needs your password)…"
-if sudo /usr/libexec/ApplicationFirewall/socketfilterfw --add "$BIN" >/dev/null &&
-	sudo /usr/libexec/ApplicationFirewall/socketfilterfw --unblockapp "$BIN" >/dev/null; then
+if [ "${GITHUB_ACTIONS:-}" = "true" ]; then
+	echo "Skipping the firewall grant: no console to authorize it in CI."
+elif firewall_grant "$BIN"; then
 	echo "Firewall configured."
 else
 	echo "warning: could not configure the firewall automatically." >&2
-	echo "Other machines may see an empty response until you run:" >&2
+	echo "Other machines may see an empty response until an administrator runs:" >&2
 	echo "  sudo /usr/libexec/ApplicationFirewall/socketfilterfw --add '$BIN'" >&2
 	echo "  sudo /usr/libexec/ApplicationFirewall/socketfilterfw --unblockapp '$BIN'" >&2
 fi
