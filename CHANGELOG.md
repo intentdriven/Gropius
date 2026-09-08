@@ -44,6 +44,47 @@ GitHub release notes.
   proves where a build came from is the published release and
   `gh attestation verify`.
 
+### Fixed
+
+- **A standard account can install the server.** The installer asked for
+  administrator rights with `sudo`, at the very end of its work. `sudo` can
+  only ever accept the invoking user's own password, and a standard
+  (non-administrator) account is not in the sudoers set at all, so no password
+  that person could type would do — and they found out only after the download
+  and after the app had been placed. The request now comes through the standard
+  macOS authentication panel, which takes an administrator's name **and**
+  password, so someone else can enter theirs. It is raised before anything is
+  downloaded or written, so declining costs nothing and leaves nothing behind.
+  The firewall grant is keyed to the bundle's code identity, and the bundle is
+  ad-hoc signed, so the panel appears again on every update rather than once.
+- **A failed rename no longer leaves the Mac with no application.** The staged
+  swap deleted the installed bundle before moving the new one into place and,
+  if that move failed, deleted the staged copy too — the exact outcome staging
+  exists to prevent, reachable by one ordinary rename failure with no attacker
+  involved. The old bundle is now renamed aside, the new one moved in, and the
+  set-aside copy deleted last; a failure puts the old bundle back. The staging
+  directory also takes an unguessable name instead of one built from the
+  process id.
+- **A failed checksum says what went wrong.** The verification's output went to
+  `/dev/null`, so a corrupt download, a truncated checksums file and an HTML
+  error page were reported identically. The output is now printed.
+
+### Security
+
+- **The installer no longer trusts `PATH` for the commands it depends on.**
+  `curl | bash` runs with the invoking user's `PATH`, and an ordinary
+  developer `PATH` puts user-writable directories ahead of `/usr/bin`. Every
+  command the installer resolved by name was therefore substitutable by
+  unprivileged code already running as that user. `shasum` is the sharp one:
+  that call is the only integrity control in the whole install path, so a
+  planted shim defeated the verification silently. `osascript` is the other,
+  because a shim there receives the elevation and can draw its own
+  authentication panel to harvest an administrator password — a risk the move
+  to a system panel creates rather than inherits, since it teaches the reader
+  that a panel is the legitimate way to install. `shasum`, `osascript`,
+  `ditto`, `xattr`, `mktemp` and `pgrep` are now invoked by absolute path, and
+  a test refuses a bare invocation of any of them.
+
 ## [0.3.1] - 2026-09-08
 
 ### Fixed
