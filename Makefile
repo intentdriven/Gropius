@@ -5,6 +5,22 @@ PKG     := ./cmd/gropius
 
 .PHONY: all test build app icon install run clean fmt vet lint allow-firewall install-shared site
 
+## Every goal in this file runs serially, even under `make -j`.
+##
+## `build` and `app` both write $(BIN), and `app` copies it into the bundle.
+## Under `-j` those are three unordered writers of one path: measured, `make
+## -j8 build app` left bin/gropius as the 13.8 MB untagged dev binary while
+## the bundle carried the 9.0 MB prod one — the `cp` at the end of `app` is
+## ordered against neither `go build`, and it happened to win. It is the same
+## untagged-binary hazard the sub-make in `app` exists to close (a bundle
+## assembled from a binary carrying netshape.SetEnumerator), reintroduced by a
+## flag rather than by a goal ordering.
+##
+## Nothing here is slow enough for parallelism to be worth a race: the one
+## expensive step is `go build`, which already parallelises internally.
+## release.yml is unaffected either way — it names one goal and passes no -j.
+.NOTPARALLEL:
+
 all: test build
 
 ## test: unit tests with the race detector

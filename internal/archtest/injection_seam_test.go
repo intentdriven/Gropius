@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -81,6 +82,43 @@ var bundleGoals = [][]string{
 	{"all", "app"},
 	{"run", "app"},
 	{"app", "build"},
+}
+
+// The goal orderings above are a rule about ORDER, and `make -j` is the flag
+// that removes order. Under it `build` and `app` run concurrently, both write
+// bin/gropius, and the `cp` that feeds the bundle is ordered against neither.
+//
+// Measured on this Makefile before `.NOTPARALLEL:` was added, three
+// consecutive runs of `make -j8 build app` from a removed bin/ and dist/ left
+// bin/gropius as the 13,826,866-byte untagged dev binary while the bundle
+// carried the 9,031,200-byte prod one: two writers of one path, and a `cp`
+// that won a race it is not ordered to win. It is the same untagged-binary
+// hazard the sub-make in `app` exists to close, reintroduced by a flag rather
+// than by a goal ordering — and had the `cp` lost instead, the bundle would
+// have been the dev binary, seam and all. With `.NOTPARALLEL:` the same three
+// runs, and a serial `make build app`, all produce a byte-identical
+// bin/gropius.
+//
+// This assertion is TEXTUAL, and that is a limit rather than a preference.
+// `make -n` cannot see the fault: it prints the recipes in dependency order
+// whether or not -j is passed, so the -n runs above are identical with and
+// without it. Reproducing the race needs two real Go compiles racing on a
+// removed bin/, which is minutes of wall clock and writes into the working
+// tree, and neither belongs in the unit suite. What is checked here is that
+// the declaration is present; the measurement above is the evidence that it
+// is the right declaration.
+func TestTheMakefileRefusesToRunItsGoalsInParallel(t *testing.T) {
+	root, err := filepath.Abs("../..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	makefile, err := os.ReadFile(filepath.Join(root, "Makefile"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !regexp.MustCompile(`(?m)^\.NOTPARALLEL:`).Match(makefile) {
+		t.Error("the Makefile does not declare .NOTPARALLEL:, so `make -j8 build app` runs the untagged top-level `build` concurrently with `app`'s tagged sub-make — both write bin/gropius, and the cp into the bundle is ordered against neither")
+	}
 }
 
 func assertEveryBundlePathCarriesTheTag(t *testing.T, root string) {
