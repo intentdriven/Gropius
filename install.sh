@@ -146,11 +146,23 @@ firewall_grant() {
 # CI never has a console to answer the panel, and the release gate installs the
 # server to check the script still works. Skip the gate there: the grant at the
 # end already tolerates failure, and a runner has no firewall to grant through.
-if [ "$mode" = "server" ] && [ "${GITHUB_ACTIONS:-}" != "true" ]; then
-	echo "$APP needs administrator rights to allow itself through the macOS firewall."
-	echo "If this account is not an administrator, one can enter their name and password."
-	admin_authorize ||
-		die "administrator authorization was declined or failed. Nothing has been downloaded or installed. Re-run this command with an administrator's credentials to hand."
+if [ "$mode" = "server" ]; then
+	if [ "${GITHUB_ACTIONS:-}" = "true" ]; then
+		# Say so, loudly, rather than passing silently. The release gate runs
+		# this script to prove the installer works against the artefacts just
+		# built; with both privileged steps skipped it proves the installer
+		# works APART FROM the two steps that need privilege — which are the
+		# steps that broke, that are keyed to a code identity changing on every
+		# build, and that this script has most recently rewritten. A green run
+		# that does not say what it did not look at is a false green.
+		echo "warning: skipping the administrator authorization gate and the firewall grant — CI has no console to answer an authentication panel." >&2
+		echo "warning: a green result from this run therefore says NOTHING about either privileged step. They are exercised only by a real install on a Mac." >&2
+	else
+		echo "$APP needs administrator rights to allow itself through the macOS firewall."
+		echo "If this account is not an administrator, one can enter their name and password."
+		admin_authorize ||
+			die "administrator authorization was declined or failed. Nothing has been downloaded or installed. Re-run this command with an administrator's credentials to hand."
+	fi
 fi
 
 tmp="$(/usr/bin/mktemp -d)"
@@ -351,7 +363,7 @@ fi
 # release gate rather than fail it.
 BIN="$DEST/$APP.app/Contents/MacOS/gropius"
 if [ "${GITHUB_ACTIONS:-}" = "true" ]; then
-	echo "Skipping the firewall grant: no console to authorize it in CI."
+	echo "warning: firewall grant NOT attempted (CI) — this run does not exercise firewall_grant." >&2
 elif firewall_grant "$BIN"; then
 	echo "Firewall configured."
 else
