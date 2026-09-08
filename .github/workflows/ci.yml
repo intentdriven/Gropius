@@ -7,7 +7,16 @@ name: ci
 # workflow self-audit.
 on:
   push:
-    branches: ['**']
+    # The merge queue's own refs are excluded. A queue entry is pushed to
+    # gh-readonly-queue/<base>/pr-N-<sha>, which matches '**' — so the queue ref
+    # raised BOTH a push run and a merge_group run, they shared a concurrency
+    # group (same workflow, same ref), and the push run cancelled the
+    # merge_group one. The queue then saw its required checks cancelled, waited,
+    # and dropped the entry. Testing a queue ref is merge_group's job; a push
+    # run on it is a duplicate that also breaks the thing it duplicates.
+    branches:
+      - '**'
+      - '!gh-readonly-queue/**'
   pull_request:
   # The merge queue. A queued entry is built on its own temporary ref carrying
   # the candidate merged with everything ahead of it, and the queue waits for
