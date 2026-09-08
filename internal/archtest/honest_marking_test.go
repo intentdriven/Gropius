@@ -33,13 +33,28 @@ import (
 // it because no claim pattern matches it. If one ever did, the fix is a better
 // pattern and not a list of blessed sentences.
 //
-// WHERE THIS SCAN STOPS, measured rather than assumed. A claim in a passage
-// that never names the mark, and is not beside one or under a heading that
-// does, is not found — and cannot be, because scanning unscoped prose fires on
-// "a model is protected", "files only your account can open" and a README line
-// about being tested end-to-end. TestTheClaimScanCatchesWhatItSaysItCatches
-// plants a claim in every surface and every scope this does cover, so the edge
-// is a measurement.
+// WHERE THIS SCAN STOPS. It stops in three places, and this list is the whole
+// of what the scan is worth — a clean run means "none of these patterns
+// appears in a passage this scans", and it does not mean the prose claims
+// nothing.
+//
+//  1. SCOPE. A claim in a passage that never names the mark, and is not beside
+//     one or under a heading that does, is not found — and cannot be, because
+//     scanning unscoped prose fires on "a model is protected", "files only
+//     your account can open" and a README line about being tested end-to-end.
+//     TestTheClaimScanCatchesWhatItSaysItCatches plants a claim in every
+//     surface and every scope this does cover, so this edge is a measurement.
+//  2. VOCABULARY. exposureClaims is a closed list of wordings, and a
+//     paraphrase outside it passes. Its comment says which synonyms were added
+//     because a review wrote past it, and which one is left off on purpose.
+//  3. SUPPRESSION. A negator in the same clause as a claim disarms it, which
+//     is what lets an honest denial through and is also how a claim can be
+//     dressed as one. cancelledNegations lists the shapes that get past the
+//     cancellation.
+//
+// Each of the three has been narrower than the comment describing it at least
+// once. TestANegatorDoesNotDisarmAClaimItDoesNotNegate holds the sentences
+// that proved it, so the same wordings cannot come back.
 
 // vendorNames are never right anywhere in any surface, in prose or in markup or
 // in a script. The classifier cannot tell one product on the range from
@@ -55,11 +70,29 @@ var vendorNames = []string{
 // to survive the transitions Gropius cannot see — the network published to the
 // internet, shared with machines the operator does not own, logged out from —
 // and none of these does.
+//
+// This is a CLOSED LIST OF WORDINGS, not a test for the idea. It catches the
+// phrasings someone has written down; a paraphrase nobody has thought of goes
+// straight through, and every widening of it so far has come from a reviewer
+// writing a sentence it missed rather than from the list being complete. Six
+// of the entries below arrived exactly that way — "is kept private", "is
+// unreachable from the internet", "is reachable only by you", "is
+// confidential", "is invisible to everyone else", "is tamper-proof" — each of
+// which asserted what the first eight patterns refuse, in words none of them
+// held. Treat a clean run as "no wording on this list appears", never as "the
+// prose claims nothing".
+//
+// One synonym is deliberately absent. "is authenticated" is a true statement
+// about Gropius — it checks a bearer token — so a pattern for it would refuse
+// honest prose about the API key written near the mark, and a scan that
+// refuses honest prose gets switched off. "A private network connection is
+// authenticated." therefore passes; "authenticated and tamper-proof" is caught
+// by the second half of the phrase.
 var exposureClaims = []*regexp.Regexp{
 	// "the connection is encrypted", "your traffic stays private". Negated and
 	// disclaiming forms ("is not encrypted", "says nothing about how safe it
 	// is") do not match, which is the point.
-	regexp.MustCompile(`(?i)\b(is|are|stays?|remains?|will be)\s+(safe|secure|private|encrypted|protected)\b`),
+	regexp.MustCompile(`(?i)\b(is|are|stays?|remains?|will be)\s+(safe|secure|private|encrypted|protected|confidential|invisible|hidden)\b`),
 	regexp.MustCompile(`(?i)\b(safely|securely|privately)\b`),
 	// The exact wording adr-2609081118587999 rule 1 names as refused.
 	regexp.MustCompile(`(?i)\bprivate and\b`),
@@ -70,6 +103,17 @@ var exposureClaims = []*regexp.Regexp{
 	regexp.MustCompile(`(?i)\bonly be (reached|seen|read|used)\b`),
 	// An encrypted tunnel, a secure path: a claim without a verb.
 	regexp.MustCompile(`(?i)\b(encrypted|secure) (tunnel|path|connection|link|network|channel)\b`),
+	// The paraphrases a review wrote past the eight above. Each is anchored on
+	// a verb so it cannot fire on the same word used honestly elsewhere:
+	// docs/ says a summary "is kept in their" account and the statistics
+	// reference lists an "unreachable" outcome class, and neither matches.
+	regexp.MustCompile(`(?i)\b(is|are|stays?|remains?|will be)\s+kept\s+(safe|secure|private|confidential)\b`),
+	regexp.MustCompile(`(?i)\b(is|are|stays?|remains?|will be)\s+(unreachable|inaccessible)\b`),
+	// "tamper-proof" needs no verb in front of it: it has no honest use in
+	// this repository's prose, unlike "kept" or "unreachable".
+	regexp.MustCompile(`(?i)\btamper[\s-]?proof\b`),
+	regexp.MustCompile(`(?i)\b(reachable|visible|readable|usable)\s+only\b`),
+	regexp.MustCompile(`(?i)\bonly\s+by\s+(you|your|machines you)\b`),
 }
 
 // theMark is what a passage about the mark says, and it is the mark's own
@@ -361,6 +405,44 @@ func TestTheClaimScanCatchesWhatItSaysItCatches(t *testing.T) {
 	}
 }
 
+// A negator suppresses a claim, so a negator is the way to smuggle one past.
+// Each sentence below names the mark, sits in scope, makes a claim in the
+// scan's own vocabulary, and was measured to pass — the whole set was watched
+// to return "" before the patterns and the scope of the suppression were
+// changed.
+//
+// The first four are double negatives the cancellation list did not spell:
+// "nobody"/"none" are one word rather than "no" plus a head, and a negator can
+// stand three words away from the head it negates. The fifth is the general
+// case and the one that mattered: the suppression was scoped to the SENTENCE,
+// so a negator anywhere earlier in it disarmed an independent later clause,
+// and "…, and is encrypted" is a claim standing on its own.
+//
+// The last six are the other half — the claim vocabulary is a closed list, and
+// a closed list is evaded by synonym. These are the paraphrases that were
+// found; the ones that have not been thought of still pass, which is what the
+// comment on exposureClaims now says instead of implying otherwise.
+func TestANegatorDoesNotDisarmAClaimItDoesNotNegate(t *testing.T) {
+	for _, s := range []string{
+		"Nobody doubts that a private network connection is encrypted.",
+		"None dispute that a private network address is secure.",
+		"No sane person doubts that a private network address is secure.",
+		"It is not in doubt that a private network connection is encrypted.",
+		"A private network address can never be reached by anyone but you, and is encrypted.",
+
+		"A private network address is kept private.",
+		"A private network address is unreachable from the internet.",
+		"A private network address is reachable only by you.",
+		"A private network connection is confidential.",
+		"A private network address is invisible to everyone else.",
+		"A private network connection is authenticated and tamper-proof.",
+	} {
+		if claimIn(s) == "" {
+			t.Errorf("the claim scan misses %q — it states what the network is worth, which is what adr-2609081118587999 rule 1 refuses", s)
+		}
+	}
+}
+
 // And the other half: the scan must leave honest prose alone. A rule that
 // refuses the disclaimer docs/ already carries is a rule somebody switches off.
 //
@@ -463,22 +545,42 @@ func copyTree(t *testing.T, src, dst string) {
 // asserts the claim, and walked past the negator check — a review planted it
 // and it passed.
 //
-// This is a list and not a rule, and it is a speed bump rather than a barrier:
-// "no doubt" and "not deny" are negative-polarity heads, and a double negative
-// built from a head that is not here still gets through. The general form needs
-// to know which words are themselves negative, which a regular expression is
-// not. What it must not do is break a plain denial — "does not claim that the
+// WHAT THIS DOES NOT CATCH, stated as measured rather than as intended. Three
+// earlier versions of this comment each named a narrower limit than the one
+// that held, so this one names the shape rather than an instance:
+//
+//   - The negative-polarity HEADS are a closed list — doubt, question, deny,
+//     dispute, and "not un-". A double negative built on a head that is not
+//     here ("it is beyond argument that…", "few would deny…") is not
+//     cancelled. When the head is missing the negator is also usually missing,
+//     so the claim tends to fire anyway; "few", "hardly" and "scarcely" are
+//     the cases where it does not, and they get through.
+//   - The negator has to stand within three words of its head. "No engineer
+//     who has looked at the protocol doubts that…" is further than that and is
+//     not cancelled, so the claim it carries is suppressed.
+//   - A negator in the SAME CLAUSE as the claim still suppresses it, and that
+//     is deliberate: it is what lets "Gropius does not claim that a private
+//     network connection is encrypted" through. "It is not true that a private
+//     network address is encrypted" reads the same way to this scan, and so
+//     does the pathological "is never not encrypted".
+//
+// What it must not do is break a plain denial — "does not claim that the
 // connection is encrypted" has the same shape and asserts the opposite — which
 // is why the fix is to cancel these phrases rather than to stop looking behind
 // a subordinating "that".
-var cancelledNegations = regexp.MustCompile(`(?i)\b(no|not|never|cannot|can't)\s+(one\s+)?(doubt|doubts|doubted|question|questions|questioning|deny|denies|denied|denying|dispute|disputes|disputing)\b|\bnot un`)
+var cancelledNegations = regexp.MustCompile(`(?i)\b(no|not|never|nobody|none|nothing|cannot|can't)\b(\s+\w+){0,3}?\s+(doubt|doubts|doubted|question|questions|questioned|questioning|deny|denies|denied|denying|dispute|disputes|disputed|disputing)\b|\bnot un`)
 
 // negators are the words a sentence denying a claim is built from. A doc that
 // says "nothing it sends is encrypted" contains "is encrypted" and asserts its
 // opposite, and a scan that cannot tell the two apart is a scan somebody
-// switches off. The check is sentence-scoped: only what stands between the last
-// sentence break and the match counts, so a denial in one sentence does not
-// excuse a claim in the next.
+// switches off.
+//
+// The check is CLAUSE-scoped, not sentence-scoped, and the difference is a
+// hole a review walked through: "A private network address can never be
+// reached by anyone but you, and is encrypted." denies one thing and asserts
+// another, and while the scope was the sentence the "never" in the first
+// clause disarmed the claim in the second. Only what stands between the last
+// clause boundary and the match counts now.
 var negators = regexp.MustCompile(`(?i)\b(no|not|nothing|never|nor|none|nobody|without|cannot|can't)\b`)
 
 // claimIn returns the first claim a passage makes, or "" when it makes none.
@@ -486,7 +588,7 @@ func claimIn(para string) string {
 	para = collapse(para)
 	for _, claim := range exposureClaims {
 		for _, loc := range claim.FindAllStringIndex(para, -1) {
-			clause := cancelledNegations.ReplaceAllString(sentenceBefore(para, loc[0]), " ")
+			clause := cancelledNegations.ReplaceAllString(clauseBefore(para, loc[0]), " ")
 			if negators.MatchString(clause) {
 				continue
 			}
@@ -496,11 +598,17 @@ func claimIn(para string) string {
 	return ""
 }
 
-// sentenceBefore is the text from the last sentence break up to an offset.
-func sentenceBefore(s string, at int) string {
+// clauseBoundary is what ends the span a negator reaches across: sentence
+// punctuation, a comma, or a coordinating conjunction. A subordinating "that"
+// is deliberately not here — "does not claim that X is encrypted" has to stay
+// suppressed, and it is one clause for this purpose.
+var clauseBoundary = regexp.MustCompile(`(?i)[.:;!?,]|\s(and|but|or|nor|yet|while|whereas|although|though)\s`)
+
+// clauseBefore is the text from the last clause boundary up to an offset.
+func clauseBefore(s string, at int) string {
 	head := s[:at]
-	if i := strings.LastIndexAny(head, ".:;!?"); i >= 0 {
-		head = head[i+1:]
+	if all := clauseBoundary.FindAllStringIndex(head, -1); len(all) > 0 {
+		head = head[all[len(all)-1][1]:]
 	}
 	return head
 }
