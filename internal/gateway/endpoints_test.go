@@ -442,10 +442,39 @@ func TestABindHostBecomesAWellFormedURLOrNoURLAtAll(t *testing.T) {
 		want   []string
 	}{
 		{
-			name:   "a bracketed IPv6 loopback bind is not bracketed twice",
+			// A "[::1]" bind is loopback, and the loopback it answers on is
+			// ::1 — not 127.0.0.1, which it refuses. ExposedToLAN read the
+			// bracketed spelling as LAN-exposed, so the machine's addresses
+			// were enumerated for a server nothing off this Mac can reach.
+			name:   "a bracketed IPv6 loopback bind lists the loopback it answers on",
 			host:   "[::1]",
-			ifaces: []netshape.Interface{testIface("lo0", "127.0.0.1", "::1")},
-			want:   []string{"http://[::1]:11535/v1", loopback},
+			ifaces: []netshape.Interface{testIface("lo0", "127.0.0.1", "::1"), testIface("en0", "192.168.1.5")},
+			want:   []string{"http://[::1]:11535/v1"},
+		},
+		{
+			name:   "and unbracketed, which config.json may still carry",
+			host:   "::1",
+			ifaces: []netshape.Interface{testIface("lo0", "127.0.0.1", "::1"), testIface("en0", "192.168.1.5")},
+			want:   []string{"http://[::1]:11535/v1"},
+		},
+		{
+			// The name resolves to both loopback addresses for a client on
+			// this Mac, so the IPv4 spelling is the one to hand out.
+			name:   "the loopback bind by name stays 127.0.0.1",
+			host:   "localhost",
+			ifaces: laptopOnAMeshVPN(),
+			want:   []string{loopback},
+		},
+		{
+			// URLHost refuses a zone — "%" introduces an escape in a URL — so
+			// the bound address is one this list cannot describe truthfully
+			// and is left off. What is left is the same divergence
+			// TestLoopbackIsListedUnderEveryBindIncludingOneItDoesNotAnswerOn
+			// records: loopback listed in an IPv4 spelling the bind refuses.
+			name:   "a zoned loopback bind is loopback, and its address is not listable",
+			host:   "[::1%lo0]",
+			ifaces: []netshape.Interface{testIface("lo0", "127.0.0.1", "::1"), testIface("en0", "192.168.1.5")},
+			want:   []string{loopback},
 		},
 		{
 			name:   "a bracketed IPv6 address bind is not bracketed twice",
@@ -474,6 +503,17 @@ func TestABindHostBecomesAWellFormedURLOrNoURLAtAll(t *testing.T) {
 		{
 			name:   "a host that is not an address or a name is listed as nothing",
 			host:   "not an ip",
+			ifaces: laptopOnAMeshVPN(),
+			want:   []string{loopback},
+		},
+		{
+			// getaddrinfo reads "0" as 0.0.0.0, so this bound every interface
+			// while the panel offered "http://0:11535/v1" and nothing else — a
+			// wildcard under-reported. config.ValidBindHost now refuses a name
+			// whose top label carries no letter, so it never reaches a
+			// listener; here it is the host no listener would take.
+			name:   "a name that is really an address is listed as nothing",
+			host:   "0",
 			ifaces: laptopOnAMeshVPN(),
 			want:   []string{loopback},
 		},

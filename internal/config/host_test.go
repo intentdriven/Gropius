@@ -102,3 +102,103 @@ func TestURLHostStripsTheBracketsABindNeeds(t *testing.T) {
 		}
 	}
 }
+
+// ExposedToLAN is read by everything that decides how open this server is: the
+// generate-a-key-or-drop-to-loopback branch in cmd/gropius, the eviction-grace
+// key requirement, the panel's warning, whether Bonjour advertises the service
+// at all, and whether the endpoint list enumerates this machine's addresses.
+// It string-compared Host, so it never saw the bracketed spelling of an IPv6
+// address — the spelling that is the only one a listener actually takes.
+//
+// A "[::1]" bind is loopback. It was read as LAN-exposed: an API key was
+// generated and persisted for a server nothing off this Mac can reach, the log
+// told the operator "this server binds a LAN address", and Bonjour advertised a
+// service no machine on the LAN could connect to. It errs closed, and telling
+// an operator on a loopback bind that they are exposed is a false statement
+// about their exposure — exactly the class adr-2609081118587999 exists to
+// refuse, on the surface where it does the most damage.
+//
+// The direction of the risk runs the other way, so the matrix is exhaustive:
+// every value that must still read as exposed is here beside every value that
+// must not.
+func TestExposedToLANReadsEverySpellingOfALoopbackBind(t *testing.T) {
+	cases := []struct {
+		host string
+		want bool
+		why  string
+	}{
+		// Not exposed: loopback, in every spelling that binds.
+		{"127.0.0.1", false, "the loopback bind"},
+		{"127.0.0.53", false, "the whole 127/8 is loopback"},
+		{"localhost", false, "loopback by name"},
+		{"::1", false, "IPv6 loopback unbracketed, which config.json may carry"},
+		{"[::1]", false, "IPv6 loopback in the form that actually binds"},
+		{"[::1%lo0]", false, "and with the zone a link-local spelling carries"},
+		{"[localhost]", false, "a bracketed name is the same bind as the bare one"},
+
+		// Exposed: everything else, including everything malformed.
+		{"", true, "empty is the wildcard"},
+		{"0.0.0.0", true, "the shipping default"},
+		{"::", true, "the IPv6 wildcard"},
+		{"[::]", true, "and bracketed"},
+		{"192.168.1.10", true, "a specific LAN address is as reachable as the wildcard"},
+		{"10.0.0.5", true, "so is this one"},
+		{"fe80::1", true, "link-local is not loopback"},
+		{"[fe80::1]", true, "nor bracketed"},
+		{"[fe80::1%en0]", true, "nor with a zone"},
+		{"[fd00::1]", true, "a routable IPv6 address"},
+		{"mac-studio.local", true, "a name resolves to who knows what: fail closed"},
+		{"0", true, "the resolver reads this as the unspecified address, so the listener takes every interface"},
+		{"192.168.1.5:8080", true, "not bindable at all, and must not read as safe"},
+		{"[::1", true, "an unclosed bracket is not a loopback bind"},
+		{"::1]", true, "nor an unopened one"},
+		{"[]", true, "nor brackets around nothing"},
+		{"127.0.0.1\r\nX-Injected: yes", true, "loopback with a payload stapled to it is not loopback"},
+		{"localhost.evil.example", true, "a name that merely starts with localhost is not loopback"},
+	}
+	for _, c := range cases {
+		cfg := Default()
+		cfg.Host = c.host
+		if got := cfg.ExposedToLAN(); got != c.want {
+			t.Errorf("Host %q: ExposedToLAN() = %v, want %v — %s", c.host, got, c.want, c.why)
+		}
+	}
+}
+
+// A value that no DNS name can be is a legacy IPv4 spelling, and the resolver
+// treats it as one. Measured: net.Listen("tcp", "0:0") returns a listener on
+// "[::]" — every interface — while boundAddr read "0" as a name, so the panel
+// offered "http://0:11535/v1" and listed nothing else: a wildcard bind
+// under-reported, which is the inverse of the dead-address fault this branch
+// exists to close. "127.1", "2130706433" and "0x7f.1" all resolve to
+// 127.0.0.1, where the error runs the other way: a loopback bind that
+// ExposedToLAN reads as a name and reports as LAN-exposed.
+//
+// RFC 1123 has the answer already: the top label of a host name is alphabetic.
+// A value that does not satisfy that is not a name, and if it is not an address
+// either it is refused — which fails closed, since Load then refuses the file
+// and cmd/gropius locks the bind down to loopback.
+func TestABindHostThatIsSecretlyAnAddressIsRefused(t *testing.T) {
+	for _, host := range []string{"0", "127.1", "2130706433", "0x7f.1", "0177.0.0.1", "10.1"} {
+		if ValidBindHost(host) {
+			t.Errorf("ValidBindHost(%q) accepted it — getaddrinfo resolves it as an IPv4 literal, so the listener binds an address this value does not name and the panel reports the name instead", host)
+		}
+		c := Default()
+		c.Host = host
+		if err := c.Validate(); err == nil {
+			t.Errorf("Validate() accepted Host %q — the bind and the endpoint list then disagree about which addresses answer", host)
+		}
+	}
+	// Names whose top label carries a letter are names, and stay bindable.
+	for _, host := range []string{"alices-mac", "alices-mac.local", "mac-0", "0a", "x0.y1.local", "srv01"} {
+		if !ValidBindHost(host) {
+			t.Errorf("ValidBindHost(%q) refused it — this is a host name, and refusing it stops a working install from starting", host)
+		}
+	}
+	// And addresses are still addresses, whatever their labels look like.
+	for _, host := range []string{"0.0.0.0", "127.0.0.1", "192.168.1.5", "::1", "[::1]"} {
+		if !ValidBindHost(host) {
+			t.Errorf("ValidBindHost(%q) refused an address", host)
+		}
+	}
+}

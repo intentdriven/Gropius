@@ -574,9 +574,9 @@ type Endpoint struct {
 // network call and no subprocess, so it can stay on that path.
 func Endpoints(cfg config.Config) []Endpoint {
 	var out []Endpoint
+	bound, wildcard := boundAddr(cfg.Host)
 	if cfg.ExposedToLAN() {
 		addrs := netshape.Addrs()
-		bound, wildcard := boundAddr(cfg.Host)
 		switch {
 		case wildcard:
 			// The wildcard: every address answers, so the list is as it was.
@@ -615,8 +615,30 @@ func Endpoints(cfg config.Config) []Endpoint {
 			// URL the panel, the menu bar and the clipboard hand out.
 		}
 	}
-	out = appendEndpoint(out, "127.0.0.1", cfg.Port, "")
+	out = appendEndpoint(out, loopbackHost(bound, wildcard), cfg.Port, "")
 	return out
+}
+
+// loopbackHost is the loopback address this server answers on.
+//
+// It is 127.0.0.1 everywhere except under a bind that took IPv6 loopback and
+// nothing else: "[::1]" listens on ::1, refuses 127.0.0.1, and listing the one
+// it refuses while omitting the one it answers on is the dead-address fault in
+// both directions at once. A name — "localhost" — stays 127.0.0.1, because
+// that is what the name resolves to for a client on this Mac.
+//
+// This is not the whole of the loopback entry's honesty. Under a specific
+// non-loopback bind the server does not answer on loopback at all and the
+// entry is listed anyway; that divergence from the intent's fourth criterion is
+// recorded in TestLoopbackIsListedUnderEveryBindIncludingOneItDoesNotAnswerOn
+// and belongs to iss-7.
+func loopbackHost(bound string, wildcard bool) string {
+	if !wildcard && bound != "" {
+		if ip := net.ParseIP(bound); ip != nil && ip.IsLoopback() && ip.To4() == nil {
+			return bound
+		}
+	}
+	return "127.0.0.1"
 }
 
 // boundAddr is the one address this server answers on, and whether the bind is
