@@ -139,6 +139,29 @@ thousand requests a day rather than over four, and a single pass over a full
 store answers the dashboard's aggregates in 1.4 s. The arithmetic is corrected
 in the 2026-09-07 ledger lines and in the documentation.
 
+2026-09-08 — **Correction to the 2026-09-07 divergence note above: it misquotes
+the ADR, and the ADR is diverged from on a different point.** The note says
+adr-2609061610107154 requires load and eviction events "each carrying their
+reason". The ADR does not say that. It says the record kinds are "a request
+line (model, …), a load or eviction event with its reason, and a startup
+record" — one noun phrase whose "its reason" reads collectively, which the
+shipped reference page adopts. So the divergence over a load carrying no reason
+holds against **this intent's own Open Questions**, which do say "each", and
+not against the ADR. The earlier note is left standing because the reading it
+records is why this item was first ranked the heaviest of the shipped
+divergences, and that ranking rested on the misquote.
+
+The ADR **is** diverged from, on a point the earlier note does not reach: it
+reserves the record kinds to itself and names an "eviction event", while the
+shipped kind is `removed`, covering seven reasons (`evicted`, `idle`,
+`unloaded`, `abandoned`, `load-failed`, `crashed`, `shutdown` —
+`internal/stats/stats.go:101`). That is a divergence from a ratified decision
+record and is captured separately for the maintainer to adopt or reject; it is
+not resolved here.
+
+Both findings come from an independent fidelity review (receipt
+rcp-799061841f58) that reached them from the code before weighing this section.
+
 ## Grounds
 
 - pursued: we want to learn how local models are actually used on this Mac, which models, how many tokens, what latencies, and we expect a month of records to change which models we keep and how we set the memory budget; we are wrong if, after a month with the dashboard, no such decision has changed

@@ -148,6 +148,20 @@ inherited set, which is what this is. Held by
 `app.TestSetConfigRefusesABudgetBelowThePinnedSum` holding the criterion's own
 case.
 
+2026-09-08 — **Correction: no adoption has happened.** The 2026-09-07 note on
+criterion 3 above says the anti-wedge principle is the one "criterion 5 of
+itd-2609061441241254 was adopted as diverged under on 2026-09-07". No such
+adoption was made. That intent's own Audit Notes ask, in terms, that the
+fidelity audit "record criterion 5 as diverged, for the maintainer to adopt or
+reject", and that decision is still open. The sentence above describes a shared
+argument, not a settled precedent, and a reader meeting this record before its
+sibling could reasonably conclude the question is closed. It is not.
+
+The same correction applies to every criterion in this family. Criterion 5 of
+itd-2609061441241254 and criteria 3 and 4 here are all awaiting the maintainer's
+adopt-or-reject; none of them has been adopted, and none may be cited as
+precedent for the others until one is.
+
 ## Grounds
 
 - pursued: we expect a shared Mac to serve several agents without their models evicting each other once the operator can pin, budget and grace, and once keyed clients can see what is warm; we are wrong if model swaps stay as frequent with those controls set as they were without them, measured by the statistics store
