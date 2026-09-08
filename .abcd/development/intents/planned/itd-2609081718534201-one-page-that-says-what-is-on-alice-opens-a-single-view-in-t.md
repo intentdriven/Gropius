@@ -1,8 +1,8 @@
 ---
 id: itd-2609081718534201
 slug: one-page-that-says-what-is-on-alice-opens-a-single-view-in-t
-spec_id: null
-kind: null
+spec_id: spc-2609081750377336
+kind: standalone
 suggested_kind: null
 reclassification_history: []
 builds_on: []
@@ -120,11 +120,11 @@ all, and so is also what the falsification is read against.
 
 ## Scope Conditions
 
-- An operator who has chosen to run a server and wants to know its posture. Not
+- An operator who has chosen to run a server and wants to know its posture. Not <!-- cond: cond-2609081750374720 -->
   a first-run tutorial, and not a substitute for refusing a dangerous
   configuration — anything Gropius should prevent it must still prevent, and
   this page never becomes the place a hazard is disclosed instead of stopped.
-- Facts Gropius can observe on this Mac. State held by another product, another
+- Facts Gropius can observe on this Mac. State held by another product, another <!-- cond: cond-2609081750370330 -->
   machine, or a remote service is out of scope except as a stated limit. So is a
   static fact about the source dressed as an observation: Gropius can name the
   hosts its own code contacts, but that is true of the binary rather than of
@@ -199,3 +199,7 @@ all, and so is also what the falsification is read against.
 ## Audit Notes
 
 _Empty. Populated by intent-auditor when intent moves to shipped/._
+
+## Grounds
+
+- pursued: the four facts an operator needs have no home. adr-2609081118587999 routed them to documentation, that documentation does not exist, and itd-2609081015545349 deliberately makes the endpoint mark say the minimum an app can honestly say — which is right and leaves the question it raises unanswered anywhere. So the operator who wants to know where they stand has nowhere to look, and the only surface that speaks is a banner that fires after something is already wrong. Shown wrong if, once the page ships, those facts still have to be repeated in the banner and in the docs to reach anyone: that would mean the page did not become the single place they live, and the information had to be in the operator's way after all.
