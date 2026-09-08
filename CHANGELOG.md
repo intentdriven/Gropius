@@ -70,15 +70,31 @@ GitHub release notes.
   bind.** A server bound to `[::1]` is reachable from this Mac and nowhere
   else, and Gropius told the operator it bound a LAN address, generated an API
   key for it, and advertised it over Bonjour where nothing could reach it.
+- **`localhost` is recognised however it is spelled.** `LOCALHOST`,
+  `LocalHost` and `localhost.` each bind this Mac's loopback address and
+  nothing else, and each was read as a LAN bind — so an API key was generated
+  and saved, the log printed it under a security warning, Bonjour advertised a
+  service nothing on the network could reach, and the panel said the server
+  was reachable by anyone on your network. None of that was true.
 - **A hand-edited bind address that is refused no longer discards the rest of
   your settings.** A `host` Gropius cannot bind used to send the whole of
   `config.json` back to the shipping defaults — your API key, port, pinned
   models, memory budget and statistics retention with it — under a message
   saying the file could not be read. The bind is narrowed to loopback and
   everything else is kept, and the message says what actually happened.
-- **A `host` that is a number rather than a name is refused.** `"host": "0"`
-  bound every interface on the Mac while the Connect tab offered a single
-  address nothing could use.
+- **A `host` that is a number rather than a name is refused, in every way a
+  number can be written.** `"host": "0"` bound every interface on the Mac while
+  the Connect tab offered a single address nothing could use. So did `"0x0"`
+  and `"0.0.0.0x0"`: an address in hexadecimal has letters in it, and the first
+  version of this check asked only whether the value contained a letter, so the
+  hexadecimal spellings walked straight through it. Decimal, octal and
+  hexadecimal are all refused now, in every position.
+- **A `host` written as an IPv6 address without its brackets is refused rather
+  than left to fail at start-up.** `"host": "::1"` is not a bind Gropius can
+  make — the address it builds is `::1:11535`, which is not an address — so the
+  server logged "cannot listen" and quit. A hand-edited typo now narrows the
+  bind to loopback and says so, and the app starts. Write `"[::1]"`, which
+  binds.
 
 - **A standard account can install the server.** The installer asked for
   administrator rights with `sudo`, at the very end of its work. `sudo` can

@@ -429,6 +429,12 @@ func TestLoopbackIsListedUnderEveryBindIncludingOneItDoesNotAnswerOn(t *testing.
 // brackets it a second time, and the first entry of this list is the menu-bar
 // title, the clipboard, and the panel's curl and Python base URL.
 //
+// Only the bracketed spellings appear below. This table used to carry a case
+// for Host "::1" asserting "http://[::1]:11535/v1", which was an assertion
+// about a bind that cannot exist: measured, net.Listen("tcp", "::1:11535")
+// fails with "too many colons in address", so no running server ever has that
+// Host, and config.ValidBindHost now refuses it before Load will keep it.
+//
 // The rest of the table is the same fault seen from the other side: boundAddr
 // passed anything net.ParseIP refused through verbatim, so a host that cannot
 // be bound at all still became a URL — including one carrying CR or LF, which
@@ -448,12 +454,6 @@ func TestABindHostBecomesAWellFormedURLOrNoURLAtAll(t *testing.T) {
 			// were enumerated for a server nothing off this Mac can reach.
 			name:   "a bracketed IPv6 loopback bind lists the loopback it answers on",
 			host:   "[::1]",
-			ifaces: []netshape.Interface{testIface("lo0", "127.0.0.1", "::1"), testIface("en0", "192.168.1.5")},
-			want:   []string{"http://[::1]:11535/v1"},
-		},
-		{
-			name:   "and unbracketed, which config.json may still carry",
-			host:   "::1",
 			ifaces: []netshape.Interface{testIface("lo0", "127.0.0.1", "::1"), testIface("en0", "192.168.1.5")},
 			want:   []string{"http://[::1]:11535/v1"},
 		},

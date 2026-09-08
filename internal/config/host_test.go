@@ -24,11 +24,9 @@ func TestValidBindHostAcceptsWhatCanBeBoundAndRefusesWhatCannot(t *testing.T) {
 		{"127.0.0.1", true, "the loopback bind"},
 		{"localhost", true, "the loopback bind by name"},
 		{"192.168.1.5", true, "a specific LAN address"},
-		{"::", true, "the IPv6 wildcard"},
-		{"::1", true, "IPv6 loopback"},
+		{"[::]", true, "the IPv6 wildcard in the form that actually binds"},
 		{"[::1]", true, "IPv6 loopback in the form that actually binds"},
 		{"[fd00::1]", true, "a specific IPv6 address in the form that actually binds"},
-		{"fd00::1", true, "and unbracketed, which config.json may still carry"},
 		{"[fe80::1%en0]", true, "a link-local bind carries a zone and binds"},
 		{"alices-mac.local", true, "a name is a bind too"},
 		{"alices-mac", true, "an unqualified name"},
@@ -45,6 +43,10 @@ func TestValidBindHostAcceptsWhatCanBeBoundAndRefusesWhatCannot(t *testing.T) {
 		{"-leading-dash.local", false, "not a legal label"},
 		{"trailing-dash-.local", false, "nor is this one"},
 		{"a..b", false, "an empty label"},
+		{"::", false, "the IPv6 wildcard unbracketed: \"::\" + \":11535\" is not an address"},
+		{"::1", false, "nor is IPv6 loopback unbracketed — measured, the listen fails"},
+		{"fd00::1", false, "nor a routable one"},
+		{"fe80::1%en0", false, "nor a zoned one"},
 	}
 	for _, c := range cases {
 		if got := ValidBindHost(c.host); got != c.want {
@@ -118,9 +120,14 @@ func TestURLHostStripsTheBracketsABindNeeds(t *testing.T) {
 // about their exposure — exactly the class adr-2609081118587999 exists to
 // refuse, on the surface where it does the most damage.
 //
-// The direction of the risk runs the other way, so the matrix is exhaustive:
-// every value that must still read as exposed is here beside every value that
-// must not.
+// The matrix below is not exhaustive, and calling it that was itself a claim
+// that did not hold: it said so through three reviews, and each of the three
+// found a spelling it did not contain — first "[::1]", then "0", then
+// "LOCALHOST", "LocalHost" and "localhost.", every one of them a loopback bind
+// reported as a LAN one. What it is, instead, is a regression table: every
+// spelling any review has found is kept here, on both sides of the answer, so
+// that none of them comes back. A spelling not listed has not been ruled out;
+// it has not been looked at.
 func TestExposedToLANReadsEverySpellingOfALoopbackBind(t *testing.T) {
 	cases := []struct {
 		host string
@@ -135,6 +142,11 @@ func TestExposedToLANReadsEverySpellingOfALoopbackBind(t *testing.T) {
 		{"[::1]", false, "IPv6 loopback in the form that actually binds"},
 		{"[::1%lo0]", false, "and with the zone a link-local spelling carries"},
 		{"[localhost]", false, "a bracketed name is the same bind as the bare one"},
+		{"LOCALHOST", false, "the resolver is case-insensitive and this binds 127.0.0.1 only"},
+		{"LocalHost", false, "so is this one"},
+		{"localhost.", false, "a fully qualified name is the same name"},
+		{"LOCALHOST.", false, "and both at once"},
+		{"[LocalHost.]", false, "and bracketed, which is how an operator writes a bind"},
 
 		// Exposed: everything else, including everything malformed.
 		{"", true, "empty is the wildcard"},
@@ -179,7 +191,15 @@ func TestExposedToLANReadsEverySpellingOfALoopbackBind(t *testing.T) {
 // either it is refused — which fails closed, since Load then refuses the file
 // and cmd/gropius locks the bind down to loopback.
 func TestABindHostThatIsSecretlyAnAddressIsRefused(t *testing.T) {
-	for _, host := range []string{"0", "127.1", "2130706433", "0x7f.1", "0177.0.0.1", "10.1"} {
+	for _, host := range []string{
+		"0", "127.1", "2130706433", "0x7f.1", "0177.0.0.1", "10.1",
+		// Hex, which "the top label carries a letter" read as a name because
+		// "x", "a"-"f" are letters. Measured: every one of these binds, and
+		// the first five bind "[::]" — every interface on the Mac — while
+		// nothing downstream enumerates a single address of it.
+		"0x0", "0X0", "0x00000000", "0x0.0x0.0x0.0x0", "0.0.0.0x0",
+		"0x7f000001", "0x7f.0x0.0x0.0x1", "127.0.0.0x1",
+	} {
 		if ValidBindHost(host) {
 			t.Errorf("ValidBindHost(%q) accepted it — getaddrinfo resolves it as an IPv4 literal, so the listener binds an address this value does not name and the panel reports the name instead", host)
 		}
@@ -196,7 +216,9 @@ func TestABindHostThatIsSecretlyAnAddressIsRefused(t *testing.T) {
 		}
 	}
 	// And addresses are still addresses, whatever their labels look like.
-	for _, host := range []string{"0.0.0.0", "127.0.0.1", "192.168.1.5", "::1", "[::1]"} {
+	// (An IPv6 literal appears here only bracketed: unbracketed it is not a
+	// bind at all — see the table above.)
+	for _, host := range []string{"0.0.0.0", "127.0.0.1", "192.168.1.5", "[::1]", "[fd00::1]"} {
 		if !ValidBindHost(host) {
 			t.Errorf("ValidBindHost(%q) refused an address", host)
 		}
