@@ -123,7 +123,7 @@ else
 	echo "No write access to /Applications (this account is not an administrator) — installing to $DEST instead."
 fi
 
-echo "Installing $APP.app to $DEST…"
+echo "Installing ${APP}.app to ${DEST}…"
 ditto -x -k "$zip" "$tmp/extract" || die "could not unpack $ASSET."
 [ -d "$tmp/extract/$APP.app" ] || die "$ASSET did not contain $APP.app."
 # Safe to clear the quarantine now: we have cryptographically verified this .app
