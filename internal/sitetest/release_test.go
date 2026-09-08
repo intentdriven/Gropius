@@ -182,9 +182,14 @@ func TestTheReleaseSectionMatchesTheRecordFieldByField(t *testing.T) {
 			t.Errorf("the region does not show %s as %q:\n%s", want.name, want.size, region)
 		}
 	}
+	// The assets are named and sized from the record, but NOT linked: a
+	// browser-fetched .app.zip arrives quarantined, and an ad-hoc signed bundle
+	// is then refused by Gatekeeper. The region states what a release contains;
+	// the install command is how a user gets it. The checksums file below is
+	// still linked, because it is text and nothing launches it.
 	for _, a := range record.Assets {
-		if !strings.Contains(region, a.URL) {
-			t.Errorf("the region does not link %s at the record's URL %q", a.Name, a.URL)
+		if strings.HasSuffix(a.Name, ".app.zip") && strings.Contains(region, a.URL) {
+			t.Errorf("the region links %s at %q; an application bundle must not be offered as a direct download", a.Name, a.URL)
 		}
 	}
 
@@ -199,8 +204,8 @@ func TestTheReleaseSectionMatchesTheRecordFieldByField(t *testing.T) {
 	// button is still the forge's latest-release redirect, which carries no
 	// version, so the two cannot disagree.
 	button := attr(t, p, `<a class="btn btn-primary" href="([^"]+)"`)
-	if !strings.HasSuffix(button, "/releases/latest/download/Gropius.app.zip") {
-		t.Errorf("the download button is %q; the release facts must not rewrite it to a versioned URL", button)
+	if button != "#install" {
+		t.Errorf("the primary action is %q; the release facts must not rewrite it", button)
 	}
 	for _, m := range regexp.MustCompile(`v[0-9]+\.[0-9]+\.[0-9]+`).FindAllString(strip(p), -1) {
 		t.Errorf("the page names the version %q outside the release region; only the region may", m)
@@ -303,8 +308,8 @@ func TestThePageRendersWithoutAReleaseRecord(t *testing.T) {
 
 	// The download button is untouched by the record's absence.
 	href := attr(t, page, `<a class="btn btn-primary" href="([^"]+)"`)
-	if !strings.HasSuffix(href, "/releases/latest/download/Gropius.app.zip") {
-		t.Errorf("the download button is %q without a release record; it must be unchanged", href)
+	if href != "#install" {
+		t.Errorf("the primary action is %q without a release record; it must be unchanged", href)
 	}
 }
 

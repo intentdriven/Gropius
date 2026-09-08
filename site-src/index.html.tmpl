@@ -24,7 +24,6 @@
       <circle cx="27" cy="27" r="8" fill="var(--mark-red)"/>
     </svg>{{ .Identity.Title }}</a>
     <nav aria-label="{{ .UI.NavLabel }}">
-      <a href="#download">{{ .UI.NavDownload }}</a>
       <a href="#install">{{ .UI.NavInstall }}</a>
       <a href="{{ .Links.Repository }}">{{ .UI.NavSource }}</a>
       <a href="{{ .Links.GettingStarted }}">{{ .UI.NavGettingStarted }}</a>
@@ -46,14 +45,14 @@
     </svg>
   </section>
 
-  <section class="actions" id="download">
+  <section class="actions" id="get">
     <div>
       <div class="cta-row">
-        <a class="btn btn-primary" href="{{ .Links.Download }}">
+        <a class="btn btn-primary" href="#install">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="square" aria-hidden="true">
-            <path d="M12 3v13M6 10l6 6 6-6M4 21h16"/>
+            <path d="M4 17l6-5-6-5M12 19h8"/>
           </svg>
-          <span>{{ .UI.DownloadLabel }}<small>{{ .UI.DownloadNote }}</small></span>
+          <span>{{ .UI.InstallLabel }}<small>{{ .UI.InstallNote }}</small></span>
         </a>
         <a class="btn" href="{{ .Links.Repository }}">
           <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
@@ -96,7 +95,7 @@
       <p class="release-line"><a class="mono" href="{{ .Release.HTMLURL }}">{{ .Release.Version }}</a><span>{{ .UI.ReleasePublished }} {{ .Release.Published }}</span></p>
       <ul class="assets">
         {{- range .Release.Assets }}
-        <li><a class="mono" href="{{ .URL }}">{{ .Name }}</a><span>{{ .Size }}</span></li>
+        <li><span class="mono">{{ .Name }}</span><span>{{ .Size }}</span></li>
         {{- end }}
       </ul>
       <p class="release-note"><a href="{{ .Release.ChecksumsURL }}">{{ $.UI.ChecksumsLabel }}</a></p>
