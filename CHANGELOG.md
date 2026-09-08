@@ -82,13 +82,14 @@ GitHub release notes.
   models, memory budget and statistics retention with it — under a message
   saying the file could not be read. The bind is narrowed to loopback and
   everything else is kept, and the message says what actually happened.
-- **A `host` that is a number rather than a name is refused, in every way a
-  number can be written.** `"host": "0"` bound every interface on the Mac while
+- **A `host` that is a number rather than a name is refused, in decimal, octal
+  and hexadecimal alike.** `"host": "0"` bound every interface on the Mac while
   the Connect tab offered a single address nothing could use. So did `"0x0"`
   and `"0.0.0.0x0"`: an address in hexadecimal has letters in it, and the first
   version of this check asked only whether the value contained a letter, so the
-  hexadecimal spellings walked straight through it. Decimal, octal and
-  hexadecimal are all refused now, in every position.
+  hexadecimal spellings walked straight through it. Those are the three ways
+  macOS reads a number as an address, and a value written in any of them, in
+  any position, is now refused.
 - **A `host` written as an IPv6 address without its brackets is refused rather
   than left to fail at start-up.** `"host": "::1"` is not a bind Gropius can
   make — the address it builds is `::1:11535`, which is not an address — so the
