@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -41,8 +42,38 @@ func TestAppIconIsCommittedAndBuildable(t *testing.T) {
 	if strings.Contains(string(target), "mkicon") {
 		t.Error("the app target runs mkicon.sh; building the bundle must not need librsvg — `make icon` regenerates the art by hand")
 	}
-	if regexp.MustCompile(`(?m)^app:.*\bicon\b`).Match(makefile) {
-		t.Error("the app target depends on `icon`; the committed AppIcon.icns is what the bundle copies")
+
+	// And ask make, rather than reading the Makefile, whether anything on the
+	// way to the bundle rasterizes the art.
+	//
+	// The check this replaces was `^app:.*\bicon\b` over the Makefile. It
+	// tested the app target's PREREQUISITE LIST, and the restructure that put
+	// the tagged build behind a sub-make left `app` with no prerequisites at
+	// all, so it could not fire whatever the Makefile said — a passing
+	// assertion that had stopped asserting anything. Neither it nor the
+	// textual mkicon check above would have caught the shape that same
+	// restructure made available: `$(MAKE) icon` inside the recipe, which
+	// reaches mkicon.sh through a target no regexp over the `app:` line looks
+	// at.
+	//
+	// `make -n` recurses into $(MAKE) lines with -n passed down, so a
+	// sub-make's recipes are visible here. What to look for is "mkicon" and
+	// not "make icon": the recipe's own error message names `make icon` as
+	// the by-hand remedy, and that sentence must not fail this.
+	if _, err := exec.LookPath("make"); err != nil {
+		t.Skip("make is not on PATH; the textual checks above still ran")
+	}
+	cmd := exec.Command("make", "-n", "app")
+	cmd.Dir = repoRoot
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("make -n app: %v\n%s", err, out)
+	}
+	if !strings.Contains(string(out), "AppIcon.icns") {
+		t.Fatalf("`make -n app` never mentions AppIcon.icns, so this rule is asserting nothing about the icon\n%s", out)
+	}
+	if strings.Contains(string(out), "mkicon") {
+		t.Errorf("`make -n app` reaches mkicon.sh — building the bundle then needs librsvg, which no workflow installs and the GitHub macOS runner does not carry, so the release goes red AFTER the tag is pushed\n%s", out)
 	}
 }
 
