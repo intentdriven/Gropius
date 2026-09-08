@@ -141,4 +141,21 @@ CI (`.github/workflows/ci.yml`) gates on: `gofmt -l .` (must be empty),
   (`feat`/`fix`/`chore`/`refactor`/`docs`/`test`), body explains why. Never
   force-push, never `--no-verify`. New dependencies need explicit sign-off
   before they are added.
+- **Releases and tags are kept on different terms.** Only the current release
+  stays published; an older one is deleted once it is superseded, and its TAG
+  is kept. The tag is what makes a previous version investigable — it can be
+  checked out, diffed and rebuilt — while a published release exists to be
+  installed, and only the current one needs to be. Deleting a release destroys
+  its built assets permanently, so it is deliberate and never takes the tag
+  with it (`--cleanup-tag=false`). Never delete the current release:
+  `install.sh` resolves `releases/latest`, so the documented install command
+  stops working the moment none is published.
+- **A merged branch is deleted, locally and on the forge.** What survives a
+  branch is its commits on `main`; the branch itself is a handle that has done
+  its job. Check content rather than the merged flag before deleting: a
+  squash-merged branch is not an ancestor of `main` even though its work is in
+  it, and a record that moved folder — an issue from `open/` to `resolved/` —
+  reads as a file the branch has and `main` lacks. Never delete a branch a
+  worktree holds.
+
 <!-- /working-conventions -->
