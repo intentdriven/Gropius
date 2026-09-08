@@ -383,6 +383,26 @@ func TestTheClaimScanCatchesWhatItSaysItCatches(t *testing.T) {
 			"\n<p>An address on a private network is protected.</p>\n",
 		},
 		{
+			"a claim in the landing page's template, which is scanned by nothing",
+			"site-src/index.html.tmpl",
+			"\n<p>An address on a private network is encrypted.</p>\n",
+		},
+		{
+			"a claim in a label the landing page renders",
+			"site-src/ui.json",
+			"\n{\"mark_note\": \"A private network address is safe to hand out.\"}\n",
+		},
+		{
+			"a vendor named in the landing page's template",
+			"site-src/index.html.tmpl",
+			"\n<p>Gropius marks the address Tailscale gave this Mac.</p>\n",
+		},
+		{
+			"a vendor named in a landing page label",
+			"site-src/ui.json",
+			"\n{\"mark_note\": \"Your tailnet address\"}\n",
+		},
+		{
 			"a vendor named in a subdirectory of docs/",
 			"docs/guides/mesh-networks.md",
 			"# Mesh networks\n\nGropius marks the address your tailnet gave this Mac.\n",
@@ -481,7 +501,12 @@ func plantedTree(t *testing.T, where, plant string) string {
 		t.Fatal(err)
 	}
 	dst := t.TempDir()
-	for _, rel := range []string{"docs", "README.md", filepath.FromSlash("internal/ui/static")} {
+	for _, rel := range []string{
+		"docs", "README.md",
+		filepath.FromSlash("internal/ui/static"),
+		filepath.FromSlash("site-src/index.html.tmpl"),
+		filepath.FromSlash("site-src/ui.json"),
+	} {
 		copyTree(t, filepath.Join(src, rel), filepath.Join(dst, rel))
 	}
 	target := filepath.Join(dst, filepath.FromSlash(where))
@@ -632,6 +657,13 @@ type docSurface struct {
 // and a page in docs/guides/ was scanned by nothing at all. README.md is here
 // because it is the first page anybody reads and it was scanned by nothing
 // either.
+//
+// site-src/index.html.tmpl and site-src/ui.json are here for the same reason,
+// found by the review after the one that added the README: they render into
+// the landing page that is publicly deployed, which is the most read prose
+// this project has and was scanned by nothing at all. Neither carries claim
+// vocabulary today, which is what "scanned by nothing" costs — it costs
+// nothing until it does.
 func proseSurfaces(t *testing.T, root string) []docSurface {
 	t.Helper()
 	var out []docSurface
@@ -653,7 +685,12 @@ func proseSurfaces(t *testing.T, root string) []docSurface {
 	if err != nil {
 		t.Fatalf("walking docs/: %v", err)
 	}
-	for _, rel := range []string{"README.md", "internal/ui/static/index.html"} {
+	for _, rel := range []string{
+		"README.md",
+		"internal/ui/static/index.html",
+		"site-src/index.html.tmpl",
+		"site-src/ui.json",
+	} {
 		out = append(out, docSurface{name: rel, text: readText(t, filepath.Join(root, filepath.FromSlash(rel)))})
 	}
 	return out
