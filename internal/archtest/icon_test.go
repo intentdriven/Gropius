@@ -34,9 +34,9 @@ func TestAppIconIsCommittedAndBuildable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	target := regexp.MustCompile(`(?ms)^app: build.*?(?:\n[a-z][a-zA-Z-]*:|\z)`).Find(makefile)
+	target := regexp.MustCompile(`(?ms)^app:.*?(?:\n[a-z][a-zA-Z-]*:|\z)`).Find(makefile)
 	if target == nil {
-		t.Fatal("the Makefile has no `app: build` target; if it was renamed, this test needs updating")
+		t.Fatal("the Makefile has no `app` target; if it was renamed, this test needs updating")
 	}
 	if strings.Contains(string(target), "mkicon") {
 		t.Error("the app target runs mkicon.sh; building the bundle must not need librsvg — `make icon` regenerates the art by hand")

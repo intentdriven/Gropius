@@ -74,6 +74,22 @@ jobs:
       - name: Vet
         run: go vet ./...
 
+      # The configuration that actually ships. `make app` builds with
+      # `-tags prod`, which compiles netshape.SetEnumerator — exported test-only
+      # API — out of the binary; nothing above builds with the tag, so until
+      # this step existed the shipped configuration was first exercised by the
+      # release job, after the tag was already pushed. `vet` rather than `build`
+      # alone because vet type-checks the test files too, which is where it
+      # broke: two test packages called SetEnumerator unconditionally.
+      - name: Build (release configuration)
+        run: go build -tags prod ./...
+
+      - name: Vet (release configuration)
+        run: go vet -tags prod ./...
+
+      - name: Test (release configuration)
+        run: go test -tags prod ./...
+
       - name: Test
         run: go test ./...
 

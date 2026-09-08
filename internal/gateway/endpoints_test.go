@@ -1,3 +1,11 @@
+//go:build !prod
+
+// Every test here fixes this machine's interface list through
+// netshape.SetEnumerator, which the release build compiles out, so this file
+// is compiled out with it. Without the constraint `go vet -tags prod ./...`
+// and `go test -tags prod ./...` do not build, and the configuration Gropius
+// ships is first exercised by the release job, after the tag is pushed.
+
 package gateway
 
 import (

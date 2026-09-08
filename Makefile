@@ -33,7 +33,7 @@ site:
 ## TAGS is empty for dev builds and for every `go build ./...` and `go test`,
 ## which is what keeps netshape.SetEnumerator — the seam the private-network
 ## classifier's tests drive from other packages — available to them. The `app`
-## target sets it to `prod`, which builds that seam out: exported test-only API
+## target passes `prod`, which builds that seam out: exported test-only API
 ## in the shipped binary is a supported way for anything linked in to make the
 ## classifier say whatever it likes. internal/archtest holds both halves.
 LDFLAGS ?=
@@ -51,9 +51,19 @@ build:
 ## would fail `make app` on a clean checkout and turn the release red after the
 ## tag was already pushed. Regeneration is `make icon`, run by hand when the art
 ## changes. internal/archtest holds both halves of that.
-app: LDFLAGS = -s -w
-app: TAGS = prod
-app: build
+##
+## The binary is built by a sub-make rather than by naming `build` as a
+## prerequisite. A target-specific variable (`app: TAGS = prod`) reaches only
+## the prerequisites make rebuilds FOR THIS target, and make builds each target
+## once per invocation: `make build app`, `make all app` and `make run app`
+## each built bin/gropius as a goal in its own right first — no tag, no strip —
+## and `app`'s dependency on it was then already satisfied. The bundle was
+## assembled from a dev binary carrying the classifier's injection seam. The
+## recursion pins the tag and the strip to the bundle instead of to the
+## invocation, and `internal/archtest` asks make what each of those orderings
+## would run.
+app:
+	$(MAKE) build TAGS=prod LDFLAGS="-s -w"
 	@test -s build/AppIcon.icns || { \
 		echo "build/AppIcon.icns is missing or empty; it is committed art — restore it, or run 'make icon' (needs librsvg)" >&2; \
 		exit 1; \
