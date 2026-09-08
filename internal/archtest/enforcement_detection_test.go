@@ -23,12 +23,26 @@ import (
 // those transitions, silently, on a machine already reachable by anyone on the
 // network.
 //
-// The ADR records that the rule is NOT mechanically enforced, and that remains
-// true: these tests are the mechanical part of a rule whose whole cannot be
-// mechanised, and the honest statement of where they stop is in
-// TestTheDetectionCanStillBeReadThroughTheWholeValue below. What they do close
-// is every route that names the detection in the source — which is every route
-// a maintainer takes by accident, and most of the routes one takes on purpose:
+// WHAT THESE TESTS ARE. They catch a maintainer coupling enforcement to the
+// app's own classifier BY ACCIDENT. That is their whole value, and it is worth
+// having: the accident is the likely failure, and it is the one a reviewer
+// skimming a diff is most likely to wave through.
+//
+// They are not, and cannot become, a barrier against code that means to read
+// the classification, for a reason that has nothing to do with how tight the
+// scan is: THE CLASSIFICATION IS NOT SECRET. Anything linked into this process
+// can call net.Interfaces() and re-derive it in three lines — walk the
+// interfaces, look for a name starting "utun" carrying an address in
+// 100.64.0.0/10 — without touching internal/netshape, gateway.Endpoint or the
+// word "network" at all. No scan over identifiers can prevent that, and none of
+// what follows tries to.
+//
+// So the ADR's closing sentence is exact and stays: the rule is not
+// mechanically enforced. It is a design constraint enforced by review, and
+// these tests are the accidents review does not have to catch.
+//
+// WHAT THEY CLOSE. Routes that name the detection in Go source, in the packages
+// scanned below:
 //
 //   - the classifier package, closed by an import rule wherever an import rule
 //     can reach, and by name where it cannot;
@@ -40,7 +54,31 @@ import (
 //     Network;
 //   - cmd/gropius, which no dependency rule can cover (it imports the gateway,
 //     which imports the classifier) and which holds the strongest enforcement
-//     decision in the app: the generate-a-key-or-drop-to-loopback branch.
+//     decision in the app: the generate-a-key-or-drop-to-loopback branch;
+//   - internal/ui, which imports nothing of ours today and is therefore free to
+//     import the gateway tomorrow, while cmd/gropius already imports IT. A
+//     helper there reading Endpoint.Network and returning a bool is a route
+//     into the enforcement path that no rule saw. It is scanned for the same
+//     names as the gateway, with nothing allowlisted.
+//
+// WHAT THEY DO NOT CLOSE, in full, because a list that says "and some other
+// things" is the overclaim this comment exists to retire. Every one of these
+// compiles, reads the classification, and leaves this file green:
+//
+//  1. a JSON round-trip over an Endpoint, testing the bytes for a needle built
+//     at runtime;
+//  2. a struct comparison — `e != Endpoint{URL: e.URL}` — whose
+//     composite-literal key is an Ident and never a SelectorExpr (closed by
+//     name, not by shape: spell the type differently and it is back);
+//  3. fmt's %v, encoding/gob, or reflect over the same value;
+//  4. anything in a package these rules do not scan;
+//  5. a package-level variable written from inside an allowlisted declaration
+//     and read from anywhere;
+//  6. net.Interfaces(), re-deriving the classification from scratch;
+//  7. the endpoint list's own SHAPE — see
+//     TestTheDetectionIsCarriedByTheShapeOfTheListItself below, which is the
+//     one that cannot be fixed even in principle;
+//  8. anything at all, once the scan's own file is edited.
 const (
 	detectionPkg  = "github.com/intentdriven/Gropius/internal/netshape"
 	detectionName = "netshape"
@@ -88,7 +126,7 @@ var notEnforcement = map[string]string{
 	"github.com/intentdriven/Gropius/internal/gateway":  "holds the endpoint list, so it must see the classifier; covered by the source-scoped rule below instead",
 	"github.com/intentdriven/Gropius/cmd/gropius":       "reaches the endpoint list through the gateway, so no import rule can cover it; covered by its own source-scoped rule below",
 	"github.com/intentdriven/Gropius/internal/netshape": "is the classifier",
-	"github.com/intentdriven/Gropius/internal/ui":       "serves the control panel's assets and decides nothing about who may reach the server; presentation is what rule 1 allows",
+	"github.com/intentdriven/Gropius/internal/ui":       "serves the control panel's assets and decides nothing about who may reach the server; presentation is what rule 1 allows. It imports nothing of ours and so could import the gateway, while cmd/gropius already imports it — a helper here reading Endpoint.Network is a route into the enforcement path, which is why TestThePanelPackageDoesNotReadTheDetectionEither scans it with nothing allowlisted",
 	"github.com/intentdriven/Gropius/internal/archtest": "is these rules",
 	"github.com/intentdriven/Gropius/internal/mlxtest":  "test helpers; nothing ships in the binary",
 	"github.com/intentdriven/Gropius/internal/sitetest": "test helpers for the landing-page renderer",
@@ -186,6 +224,28 @@ func TestOnlyTheEndpointListReadsTheDetection(t *testing.T) {
 	}
 }
 
+// internal/ui is scanned for the same names, with nothing allowlisted.
+//
+// It was scanned by nothing, and it is the one package in the module that is
+// blessed as pure presentation, imports nothing of ours, and is imported by
+// cmd/gropius. That combination is a laundry: internal/ui may import the
+// gateway without a cycle, and a helper here taking a gateway.Endpoint and
+// returning a bool would put the classification in cmd/gropius's hands with no
+// rule anywhere objecting. It renders the mark from a JSON field in the
+// browser and needs none of these names in Go.
+//
+// This closes the route that NAMES the field. It does not stop internal/ui
+// calling net.Interfaces() itself, and nothing can: see the header.
+func TestThePanelPackageDoesNotReadTheDetectionEither(t *testing.T) {
+	for _, r := range scanForDetection(t, filepath.Join("..", "ui")) {
+		t.Errorf("%s: %s reads the detection (%s) — internal/ui serves the panel's assets, is imported by cmd/gropius, and imports nothing of ours; a helper here reading the classification hands it to the enforcement path with no import rule in the way (adr-2609081118587999 rule 2)",
+			r.file, r.where, r.what)
+	}
+	for file, name := range detectionImports(t, filepath.Join("..", "ui")) {
+		t.Errorf("%s imports %s (as %q) — the panel renders the mark from a JSON field in the browser and has no business with the classifier in Go", file, detectionPkg, name)
+	}
+}
+
 // cmd/gropius is where the app decides, before serving anything, whether an
 // exposed bind may run at all: it generates and persists an API key or drops
 // to loopback. That is enforcement in its purest form and it is the one place
@@ -194,9 +254,16 @@ func TestOnlyTheEndpointListReadsTheDetection(t *testing.T) {
 //
 // Nothing here may read the detection by any route the source can name — not
 // the classifier, not the field, and not the Endpoint type, whose value
-// carries the field. What cmd/gropius legitimately needs is the URL of the
-// first entry, for the menu-bar title and the clipboard, and reading `.URL` off
-// a value it never names is untouched by any of this.
+// carries the field.
+//
+// What cmd/gropius legitimately needs is the URL of the first entry, for the
+// menu-bar title and the clipboard, and reading `.URL` off a value it never
+// names is untouched by any of this. That is NOT the same as `.URL` being safe,
+// and an earlier version of this comment said it was. The presence of the
+// .local entry is a function of the classification — it is suppressed on a
+// machine holding no local-network address, which is exactly the machine whose
+// only address is on a private network — so eps[0].URL and len(eps) both carry
+// the answer. See TestTheDetectionIsCarriedByTheShapeOfTheListItself.
 func TestTheCommandCannotSeeTheDetection(t *testing.T) {
 	dir := filepath.Join("..", "..", "cmd", "gropius")
 	for _, r := range scanForDetection(t, dir) {
@@ -257,30 +324,47 @@ func TestTheDetectionsSpellingIsNotWrittenDownOutsideTheEndpointList(t *testing.
 	}
 }
 
-// The honest statement of where the mechanical part stops.
+// The honest statement of where the mechanical part stops. There are two
+// limits, and the second is the one that cannot be fixed.
 //
-// Everything above closes the routes that NAME the detection: the package, the
-// field, the type, and the two spellings the answer is serialised under. None
-// of them closes the route that names nothing. An Endpoint value carries
-// Network in its bytes, so anything holding one can recover the answer through
-// encoding/json, fmt's %v, encoding/gob, reflect, or a comparison against a
-// value built without the type — and none of those mentions netshape, Network
-// or Endpoint anywhere in the source. Dropping `omitempty` does not help: the
-// empty and non-empty encodings still differ.
+// FIRST: the routes that name nothing. An Endpoint value carries Network in its
+// bytes, so anything holding one can recover the answer through encoding/json,
+// fmt's %v, encoding/gob, reflect, or a comparison against a value built
+// without the type — and none of those mentions netshape, Network or Endpoint
+// anywhere in the source. Dropping `omitempty` does not help: the empty and
+// non-empty encodings still differ. Closing that would need type-directed taint
+// analysis over every value derived from Endpoints, which a
+// package-name-and-identifier scan is not and cannot become.
 //
-// Closing that would need type-directed taint analysis over every value
-// derived from Endpoints, which a package-name-and-identifier scan is not and
-// cannot become. The only structural close available is to stop handing the
-// enforcement side an Endpoint at all — to give cmd/gropius a []string of URLs
-// instead — which is a change to the gateway's exported API and a decision for
-// whoever owns it, not something to slip in under a test.
+// SECOND, and this one survives every fix to the first: THE LIST'S OWN SHAPE
+// CARRIES THE ANSWER. Endpoints suppresses this Mac's .local name when the
+// machine holds no local-network address — because the name resolves over the
+// local network and nowhere else, so on a machine whose only address is on a
+// private network it resolves to nothing, and listing it would offer an address
+// the server does not answer on. That suppression IS the classification.
+// `len(eps)` and `eps[0].URL` differ between a machine on a private network and
+// the same machine on Wi-Fi, and reading either names nothing at all.
 //
-// This test asserts nothing and cannot fail. It is here so that the next
-// person to read these rules learns their limit from the rules themselves
-// rather than from a reviewer who got past them, and so that the ADR's closing
-// sentence — the rule is not mechanically enforced — stays true of this file.
-func TestTheDetectionCanStillBeReadThroughTheWholeValue(t *testing.T) {
-	t.Log("the routes that name the detection are closed; the routes that read the whole Endpoint value through json, fmt, gob or reflect are not, and cannot be closed by a scan over identifiers")
+// It cannot be removed while the list stays truthful. The intent's fourth
+// criterion is that the list never offers an address the server does not answer
+// on; the list is therefore a function of the machine's network state; the
+// classification is a function of the same state. A list that did not vary
+// would either offer a dead .local name or withhold a working one. Truthfulness
+// and non-disclosure are in direct conflict here, and truthfulness wins: this
+// is a list an operator copies an address out of, and a list that lies to keep
+// a secret from code in its own process is the wrong trade in both directions.
+//
+// Which is the whole point. Anything linked into this process can call
+// net.Interfaces() and re-derive the classification without touching any of
+// this, so there is no secret to keep. What these rules are worth is catching
+// the accidental coupling, and what they are not is a barrier.
+//
+// This test asserts nothing and cannot fail. It is here so that the next person
+// to read these rules learns their limit from the rules themselves rather than
+// from a reviewer who got past them, and so that the ADR's closing sentence —
+// the rule is not mechanically enforced — stays true of this file.
+func TestTheDetectionIsCarriedByTheShapeOfTheListItself(t *testing.T) {
+	t.Log("the routes that name the detection are closed; the routes that read the whole Endpoint value through json, fmt, gob or reflect are not, and cannot be closed by a scan over identifiers; and the endpoint list's own shape carries the classification, which no scan can change because a truthful list has to vary with the network state the classification reads")
 }
 
 // The gateway's own import must stay unaliased: these rules find the

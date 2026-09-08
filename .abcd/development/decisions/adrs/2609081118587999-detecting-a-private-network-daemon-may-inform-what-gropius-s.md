@@ -137,6 +137,15 @@ Detection of a third-party private-network daemon may inform what Gropius
 - Any future integration with another environment-detection signal — a corporate
   VPN, a firewall's state, a network's SSID — inherits this rule. The rule is
   about inferences over state Gropius does not own, not about Tailscale.
-- The rule is not mechanically enforced. There is no test that fails when
-  someone reads a detection result inside `withAuth`; this record and review of
-  the trust-boundary packages are the guard.
+- The rule is not mechanically enforced, and cannot be. `internal/archtest`
+  holds rules that fail when the enforcement path names the classifier, the
+  field its answer travels on, or the type that carries it; those catch a
+  maintainer coupling enforcement to the classifier by accident, which is worth
+  having and is all they are. They are not a barrier against code that means to
+  read the classification, because the classification is not secret information:
+  anything linked into this process can call `net.Interfaces()` and re-derive it
+  in three lines without touching `internal/netshape` at all. No scan over
+  identifiers can prevent that. This record and review of the trust-boundary
+  packages are the guard; the tests are the accidents review need not catch.
+  `internal/archtest/enforcement_detection_test.go` lists in full what they do
+  not close.

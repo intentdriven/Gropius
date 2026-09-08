@@ -115,10 +115,19 @@ behaviour.
    (wildcard, a specific LAN address, a specific tunnel address, loopback),
    asserting membership and, for the marked case, that the mark never lands on
    an address outside the bind.
-5. **Enforcement untouched** — an archtest rule that no package in the
-   enforcement path imports `internal/netshape`, plus the existing gateway
-   tests unchanged. A behavioural assertion is not available here, which is
-   why the import rule carries it.
+5. **Enforcement untouched** — archtest rules that no package in the
+   enforcement path imports `internal/netshape`, and that nothing outside the
+   endpoint list's own declarations names the classifier, the field its answer
+   travels on or the type that carries it; plus the existing gateway tests
+   unchanged. A behavioural assertion is not available here, and neither is a
+   mechanical one: the rules catch an accidental coupling and nothing more,
+   because any code in the process can call `net.Interfaces()` and re-derive
+   the classification without naming anything a scan can see. The criterion is
+   carried by review, with the rules narrowing what review has to find.
+   `internal/archtest/enforcement_detection_test.go` states the limit in full,
+   including the one route that cannot be closed even in principle: the
+   endpoint list's own shape varies with the classification, because criterion
+   4 requires it to.
 6. **Reflects the current state, no caching** — a test that changes the
    injected list between two calls and asserts the second reflects it; and the
    absence of any package-level cache, which the same injection makes visible.

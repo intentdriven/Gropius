@@ -11,7 +11,43 @@ GitHub release notes.
 
 ## [Unreleased]
 
+### Added
+
+- **An endpoint on a private network is marked as one.** The Connect tab lists
+  every address this server answers on, and the one your mesh VPN gave this Mac
+  looked exactly like the one that crosses the café's Wi-Fi. It now carries a
+  mark beside it reading "private network". The mark says which network the
+  address is on and nothing else: it names no product, and it does not say the
+  connection is encrypted, or that only your own devices can reach it, because
+  neither is something Gropius can see. Gropius serves plain HTTP everywhere.
+  A Mac with no such network sees no marks and no change.
+
+### Changed
+
+- **The endpoint list no longer offers addresses the server does not answer
+  on.** It used to list every address on the Mac whenever the bind was not
+  loopback, which is right for the default wildcard bind and wrong for every
+  other one. Under a bind to one specific address, that address is what is
+  listed. This Mac's `.local` name is offered only when it resolves to
+  something the server answers on. A bind that binds IPv6 loopback lists the
+  IPv6 loopback URL rather than `127.0.0.1`, which such a server refuses.
+  **A default install is unaffected.**
+
 ### Fixed
+
+- **A bind address written the way IPv6 requires is no longer treated as a LAN
+  bind.** A server bound to `[::1]` is reachable from this Mac and nowhere
+  else, and Gropius told the operator it bound a LAN address, generated an API
+  key for it, and advertised it over Bonjour where nothing could reach it.
+- **A hand-edited bind address that is refused no longer discards the rest of
+  your settings.** A `host` Gropius cannot bind used to send the whole of
+  `config.json` back to the shipping defaults — your API key, port, pinned
+  models, memory budget and statistics retention with it — under a message
+  saying the file could not be read. The bind is narrowed to loopback and
+  everything else is kept, and the message says what actually happened.
+- **A `host` that is a number rather than a name is refused.** `"host": "0"`
+  bound every interface on the Mac while the Connect tab offered a single
+  address nothing could use.
 
 - **The landing page no longer scrolls sideways.** A grid track held at the
   intrinsic width of the install one-liner — 894 pixels of unbreakable
