@@ -46,7 +46,14 @@ jobs:
   # locally and in the release workflow's gate.
   check:
     timeout-minutes: 20
-    runs-on: macos-latest
+    # Pinned to the same image the release workflow builds and gates on, not
+    # macos-latest. Some guards here only mean anything on a Mac at or above the
+    # bundles' declared floor: the one that executes install.sh skips itself
+    # below it, so a `latest` that lags the floor would drop the installer guard
+    # out of CI silently — and it would go on passing while doing nothing. That
+    # guard now fails rather than skips when it finds itself under-provisioned
+    # in Actions, and this pin is what keeps it provisioned.
+    runs-on: macos-26
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:

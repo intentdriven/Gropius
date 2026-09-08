@@ -217,10 +217,27 @@ jobs:
       # uploads, so the checksum verification, the unpacking, the destination
       # choice and the staged swap all run against the real artefacts.
       #
+      # GROPIUS_ASSET_DIR is a seam install.sh honours ONLY under
+      # GITHUB_ACTIONS, and it voids the script's checksum verification while it
+      # is honoured (the bundle and the SHA256SUMS.txt it is checked against
+      # both come from the named directory). That is sound here — the directory
+      # is this job's own workspace — and it is why the script refuses the seam
+      # anywhere else. What it costs the gate is that "Checksum OK." proves
+      # nothing about WHICH artefacts were installed, so the assertions below
+      # bind the installed executables to the ones this job built.
+      #
       # `open` is stubbed on PATH: the gate installs both apps but must not
       # leave a menu-bar server and a chat client running on the runner. The
       # stub doubles as the probe that the script reached its last step, which
       # is what makes a truncated or silently-short run visible.
+      #
+      # PERMISSIONS. This step executes a script out of the checked-out tree
+      # inside a job holding contents: write, id-token: write and
+      # attestations: write. That is not a new trust boundary — `make app` and
+      # client/build.sh, three steps above, already run tree code in this same
+      # job — but it has never been written down: whoever can land a commit on
+      # a released tag can run code beside those tokens, and what stands
+      # between the two is the review that lands the commit, not this job.
       #
       # FAIL-CLOSED. Any non-zero here fails the job before the attestation and
       # before `gh release create`, so a broken installer yields no Release, no
@@ -248,15 +265,61 @@ jobs:
           chmod +x "$gate_bin/open"
           export PATH="$gate_bin:$PATH"
 
-          # Both documented invocations, piped into bash exactly as the
-          # one-liners in the README are, so the gate meets whatever a script
-          # read from stdin meets.
+          # Both documented invocations. `< ./install.sh` is a REDIRECT, not a
+          # pipe, and the two are not equivalent: bash reads a seekable stdin
+          # in a different pattern from a pipe, so a script truncated past the
+          # read-ahead buffer runs to a different point under each. The
+          # redirect is kept because bash's exit status is then the script's
+          # own, with no pipeline between them.
           bash -s -- < ./install.sh
           bash -s -- client < ./install.sh
 
-          # Each bundle is installed where the script chose to put it, and the
-          # script reached the launch at the end of its own run.
+          # And once through a real pipe, the form the README documents
+          # (`curl … | bash`), so the gate meets what a script read from a pipe
+          # meets rather than assuming the redirect stands in for it. `cat` is
+          # the pipe: replacing it with a redirect is exactly the substitution
+          # this line exists to avoid. `pipefail` is set above, so bash's
+          # status is the pipeline's and a failure here still fails the job.
+          # shellcheck disable=SC2002
+          cat ./install.sh | bash -s --
+
+          # Each bundle is installed where the script chose to put it, it is
+          # byte-for-byte the executable THIS job built, and the script reached
+          # the launch at the end of its own run.
+          #
+          # The binding to dist/ is the load-bearing assertion. Checking only
+          # that some .app exists is satisfied by install.sh falling through to
+          # DOWNLOADING THE PREVIOUS RELEASE — which is what it does if the
+          # asset-directory seam ever stops taking effect while the runner has
+          # network. It would install, launch and pass, the gate green having
+          # never touched the tagged artefacts: this gate's own failure mode,
+          # one level up.
+          #
+          # COVERAGE, stated rather than implied: a runner account is an
+          # administrator, so `[ -w /Applications ]` is true and all three
+          # invocations above take the /Applications branch. The
+          # $HOME/Applications branch — the one every non-admin account takes —
+          # is NOT exercised here. Forcing it would need either a second
+          # override seam in install.sh (the thing being narrowed, not
+          # widened) or a standard user created on the runner. The loop looks
+          # in both places so its failure message stays accurate, not because
+          # both are covered.
           for app in Gropius GropiusChat; do
+            # The executable inside a bundle is not the bundle's name: the
+            # server's is lowercase, from build/Info.plist's CFBundleExecutable
+            # and the Makefile's `cp $(BIN) …/MacOS/gropius`. Spelling it "$app"
+            # only ever passed because the runner's volume is case-insensitive;
+            # on a case-sensitive one every release would fail here.
+            case "$app" in
+              Gropius)
+                built="dist/Gropius.app/Contents/MacOS/gropius"
+                exe="gropius"
+                ;;
+              GropiusChat)
+                built="client/dist/GropiusChat.app/Contents/MacOS/GropiusChat"
+                exe="GropiusChat"
+                ;;
+            esac
             dest=""
             for candidate in "/Applications/$app.app" "$HOME/Applications/$app.app"; do
               if [ -d "$candidate" ]; then dest="$candidate"; break; fi
@@ -265,15 +328,30 @@ jobs:
               echo "the tagged tree's install.sh did not install $app.app" >&2
               exit 1
             fi
-            if [ ! -x "$dest/Contents/MacOS/$app" ]; then
-              echo "$dest carries no executable" >&2
+            installed="$dest/Contents/MacOS/$exe"
+            if [ ! -x "$installed" ]; then
+              echo "$dest carries no executable at Contents/MacOS/$exe" >&2
+              exit 1
+            fi
+            # Fail closed. A missing or unreadable file on either side makes
+            # shasum non-zero; under `set -e` an assignment takes its command
+            # substitution's status, and `pipefail` carries a failing shasum
+            # through the pipe, so there is no path where the comparison is
+            # quietly skipped and the loop carries on.
+            installed_sum="$(shasum -a 256 "$installed" | awk '{print $1}')"
+            built_sum="$(shasum -a 256 "$built" | awk '{print $1}')"
+            if [ "$installed_sum" != "$built_sum" ]; then
+              echo "the installed $app is not the one this job built" >&2
+              echo "  installed: $installed ($installed_sum)" >&2
+              echo "  built:     $built ($built_sum)" >&2
+              echo "install.sh installed something other than the tagged artefacts — most likely by falling through to the previously published Release" >&2
               exit 1
             fi
             if ! grep -Fqx "$dest" "$launched"; then
               echo "install.sh never reached its launch step for ${app} — it stopped early" >&2
               exit 1
             fi
-            echo "installed and launched: $dest"
+            echo "installed this job's own artefact and launched it: $dest ($installed_sum)"
           done
 
       # Build-provenance attestation over exactly the bytes published below.

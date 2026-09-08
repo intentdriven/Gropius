@@ -20,10 +20,20 @@ GitHub release notes.
   both apps. A tag whose installer is broken therefore publishes nothing at
   all. 0.3.0 shipped an installer that stopped on its first line of work
   because the chain built and published it without ever executing it, and the
-  break was reachable only by someone installing from the tag. `install.sh`
-  reads `GROPIUS_ASSET_DIR` so the gate can hand it the artefacts of a release
-  that does not exist yet; every other step of the script, checksum
-  verification included, is the one a user runs.
+  break was reachable only by someone installing from the tag. The gate also
+  checks that what the installer put in place is byte-for-byte what that run
+  built, so an installer that quietly falls back to the previous release cannot
+  pass it.
+- **`install.sh` reads `GROPIUS_ASSET_DIR`, and only inside GitHub Actions.**
+  The seam lets the release gate hand the script the artefacts of a release
+  that does not exist yet. It is refused everywhere else, and the reason is the
+  checksum: while the seam is honoured, the bundle and the `SHA256SUMS.txt` it
+  is verified against both come from the named directory, so the verification
+  shows the directory is self-consistent and says nothing about where its
+  contents came from. Every step of the script still executes — the
+  destination choice, the unpacking, the staged swap — but the integrity check
+  is the CI one, not the one a user gets, and a run that honours the seam says
+  so on stderr before it says `Checksum OK.`
 
 ## [0.3.1] - 2026-09-08
 
