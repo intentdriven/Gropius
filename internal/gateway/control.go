@@ -29,10 +29,10 @@ type Control struct {
 	App *app.App
 	// UI is the embedded web control panel.
 	UI http.Handler
-	// InstanceToken identifies this server run. It is served on the loopback-only
-	// control plane so a future launch can tell this user's server apart from a
+	// Root is this server's data root. The control plane answers challenges
+	// against it so a future launch can tell this user's server apart from a
 	// process squatting on the port (see cmd/gropius singleton coordination).
-	InstanceToken string
+	Root string
 }
 
 // Handler returns the control plane and web UI, restricted to loopback.
@@ -72,11 +72,31 @@ func (c *Control) Routes(mux *http.ServeMux) {
 	}
 }
 
-// handleInstance serves this server run's identity token. It is loopback-only
-// (the whole control plane is), so the token never reaches the LAN; a future
-// launch uses it to confirm the process on the port is this user's Gropius.
+// handleInstance answers a caller's challenge by reading the file the caller
+// wrote into the data root and echoing its contents back.
+//
+// It proves one thing and stores nothing: a process that can read this root is
+// on this port. The caller chose the name and the answer, both random and both
+// used once, so there is no secret here to harvest, replay, or leave behind at
+// shutdown — which is what the identity token this replaces got wrong.
+//
+// The name is untrusted input turned into a path, so it goes through
+// config.ChallengePath, which refuses anything that is not exactly 32 hex
+// characters. Without that this handler would read any file the server's uid
+// can open. A refusal is deliberately indistinguishable from a missing file:
+// both answer 404, so the endpoint reports nothing about what exists.
 func (c *Control) handleInstance(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{"token": c.InstanceToken})
+	path := config.ChallengePath(c.Root, r.URL.Query().Get("challenge"))
+	if path == "" {
+		writeJSON(w, http.StatusNotFound, map[string]any{"error": "no such challenge"})
+		return
+	}
+	b, err := config.ReadRegular(path, config.MaxChallengeBytes)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]any{"error": "no such challenge"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"answer": string(b)})
 }
 
 // loopbackOnly rejects any request that did not originate on this machine, and

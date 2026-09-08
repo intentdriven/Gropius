@@ -78,6 +78,39 @@ func main() {
 	// has no preferences to report.
 	warnDroppedSettings(log, dropped)
 
+	// Fail closed on an exposed bind with no key. A LAN-bound listener with no
+	// API key is reachable, unauthenticated, by everyone on the network, and a
+	// warning is not a control: the operator running headless never reads it,
+	// and the window between first launch and setting a key is exactly when the
+	// machine is undefended. Generate a key, persist it so it survives the
+	// restart, and announce it loudly enough to be used.
+	//
+	// Done before app.New so the gateway never serves a request under the empty
+	// key. A save that fails is fatal to the exposure, not to the process: the
+	// bind drops to loopback rather than continuing open, because a key held
+	// only in memory would vanish on restart and reopen the endpoint.
+	if cfg.ExposedToLAN() && cfg.APIKey == "" {
+		lockDown := func(msg string, args ...any) {
+			log.Error(msg, args...)
+			cfg.APIKey = ""
+			cfg.Host = "127.0.0.1"
+			cfg.Advertise = false
+		}
+		key, err := config.GenerateAPIKey()
+		switch {
+		case err != nil:
+			lockDown("could not generate an API key for a LAN-exposed bind — starting locked down to loopback only", "err", err)
+		default:
+			cfg.APIKey = key
+			if err := config.Save(paths.Config, cfg); err != nil {
+				lockDown("could not save the generated API key — starting locked down to loopback only so the endpoint is not left open", "path", paths.Config, "err", err)
+				break
+			}
+			log.Warn("SECURITY: this server binds a LAN address, so an API key was generated and saved; clients must send it as \"Authorization: Bearer <key>\". Change or clear it in Settings.",
+				"api_key", key)
+		}
+	}
+
 	// Claim the port. Losing this race to a live server is a normal outcome, not
 	// an error: another account (or another copy of the app) is already serving.
 	// A predecessor still shutting down is NOT a loss — acquireListener waits for
@@ -139,13 +172,6 @@ func runServer(ln net.Listener, paths config.Paths, cfg config.Config, headless 
 
 	mux := http.NewServeMux()
 
-	// A LAN-bound listener with no key is open to the whole network. The control
-	// panel warns about this, but a user running headless never sees it — say so
-	// on stderr too.
-	if cfg.ExposedToLAN() && cfg.APIKey == "" {
-		log.Warn("SECURITY: bound to a LAN address with no API key — anyone on your network can use this server; set a key in Settings or bind to 127.0.0.1")
-	}
-
 	// OpenAI-compatible API — LAN-facing, guarded by the optional API key. The
 	// gateway reads the key live (a.Config) so setting one in the control panel
 	// takes effect without a restart.
@@ -155,23 +181,10 @@ func runServer(ln net.Listener, paths config.Paths, cfg config.Config, headless 
 		mux.Handle(p, apiHandler)
 	}
 
-	// A per-run identity token, recorded 0600 in the data root and served on the
-	// loopback-only control plane. It lets a future launch tell OUR server (or a
-	// shared-root peer) apart from a process merely squatting on the port, so it
-	// never silently hands local model traffic to an impostor. Best-effort: if the
-	// token cannot be written the check simply degrades to "unidentified".
-	instanceToken, err := newInstanceToken()
-	if err != nil {
-		return err
-	}
-	if err := writeInstanceToken(paths, instanceToken); err != nil {
-		log.Warn("could not record the instance identity token", "err", err)
-	}
-
 	// Control plane + web UI — administrative, so loopback-only (Control.Handler
 	// enforces it). Mounted at "/" as the catch-all for everything that is not a
 	// /v1 or /health request.
-	ctrl := &gateway.Control{App: a, UI: ui.Handler(), InstanceToken: instanceToken}
+	ctrl := &gateway.Control{App: a, UI: ui.Handler(), Root: paths.Root}
 	mux.Handle("/", ctrl.Handler())
 
 	srv := &http.Server{

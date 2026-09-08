@@ -14,6 +14,9 @@ import (
 func TestStartupAppliesTheStoredEvictionGrace(t *testing.T) {
 	cfg := config.Default()
 	cfg.EvictionGrace = true
+	// Grace on a LAN-exposed server needs a key: the wait queue is shared out
+	// per key, so without one it cannot be shared out at all.
+	cfg.APIKey = "test-key"
 	cfg.EvictionGraceSec = 45
 	cfg.EvictionMaxWaitSec = 90
 
@@ -56,6 +59,9 @@ func TestSetConfigAppliesTheEvictionGraceWithoutARestart(t *testing.T) {
 
 	cfg := a.Config()
 	cfg.EvictionGrace = true
+	// Grace on a LAN-exposed server needs a key: the wait queue is shared out
+	// per key, so without one it cannot be shared out at all.
+	cfg.APIKey = "test-key"
 	cfg.EvictionGraceSec = 30
 	cfg.EvictionMaxWaitSec = 60
 	if err := a.SetConfig(cfg); err != nil {
@@ -84,6 +90,9 @@ func TestSetConfigRefusesAGraceLongerThanTheIdleTimeout(t *testing.T) {
 
 	cfg := a.Config()
 	cfg.EvictionGrace = true
+	// Grace on a LAN-exposed server needs a key: the wait queue is shared out
+	// per key, so without one it cannot be shared out at all.
+	cfg.APIKey = "test-key"
 	cfg.EvictionGraceSec = 300
 	cfg.IdleTimeoutSec = 60
 	if err := a.SetConfig(cfg); err == nil {
@@ -151,6 +160,7 @@ func TestTheEnforcedGraceIsNeverLongerThanTheIdleTimeoutInForce(t *testing.T) {
 	next := a.Config()
 	next.IdleTimeoutSec = 600
 	next.EvictionGrace = true
+	next.APIKey = "test-key"
 	next.EvictionGraceSec = 300
 	if err := a.SetConfig(next); err != nil {
 		t.Fatalf("SetConfig: %v", err)

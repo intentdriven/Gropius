@@ -163,3 +163,42 @@ Grade for the corpus: of fifteen filed intents, eleven survived the
 interview as routed, one was re-homed as a new intent's parent, and three
 changed bucket. The two that fell were both cases where a trust-boundary or
 upstream-behaviour question had been routed forward instead of resolved.
+
+## 2026-09-08 — Tailscale: does a mesh VPN benefit Gropius, and should features key on it?
+
+Proposal as stated: "I have tailscale installed on my machines. Does that
+benefit Gropius? And could we activate certain features when Gropius detects
+Tailscale? The other way around: if not, should certain features be unavailable
+automatically?"
+
+Initial routing proposed: SPLIT — one intent now, one intent later, one ADR,
+docs deferred.
+
+| Part | Type | Home |
+| --- | --- | --- |
+| The endpoint list names a tailnet address as private and encrypted, under the name the tailnet resolves | user-facing capability | intent (itd-2609081015545349), filed |
+| A "tailnet only" bind the local network cannot reach | user-facing capability, later | intent, deferred to a separate filing by the human |
+| Detection may inform what the app reports, never what it enforces | trust-boundary rule | adr-2609081118587999 |
+| How-to for serving over a tailnet, and the standing warning against public funnelling | docs | follows whichever intent ships; not a record of its own |
+| mDNS does not traverse a tailnet | verified fact | stated inside the intent, no record of its own |
+
+Typed links: both intents `refine` adr-2609081118587999; the later bind intent
+`builds_on` the filed one. Nothing superseded. No reversal — the filed intent
+changes no enforcement, which is the ADR's rule applied to itself.
+
+The reversal that was *not* filed is the interesting part: the obvious feature
+("a tailnet is present, so waive the API key") reverses the exposure rule in
+`config.validate` and the warning in the control panel's status. It was routed
+to the ADR as a rejected alternative rather than to an intent. That is the
+routing the earlier telemetry-pack run got wrong in the opposite direction —
+there a trust-boundary conflict was routed forward to a future ADR and only
+caught at planning.
+
+Verdict adopted by the human: SPLIT, with the later bind intent explicitly
+deferred to its own filing and the ADR requested by name. Grade: routing
+survived. Calibration caveat, the same one the 2026-09-06 shipped-divergences
+run carries — the options were put in prose a turn before the table existed and
+the human adopted them as a batch, so this is weaker evidence than a table
+confirmed part by part. The acceptance criteria on the filed intent are
+agent-seeded and marked as such in its Open Questions; the planning interview
+has not run.

@@ -6,6 +6,8 @@
 package config
 
 import (
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -113,13 +115,44 @@ func writableDir(dir string) bool {
 	return true
 }
 
+// ExecRoot is where this account's EXECUTABLES live for a data root: uv, the
+// virtualenv, and the uv-managed CPython tree.
+//
+// Everywhere but the shared root that is the root itself. The shared root is
+// the exception, and the executables go under this account's own Application
+// Support directory instead, for a reason the data does not share: models are
+// inert bytes every account may read, while these are programs every account
+// EXECUTES. One shared copy means whichever account provisioned it owns those
+// files and can rewrite them at any time, and every other account then runs
+// the result under its own uid — an owner-trust residue no mode check can
+// remove, because the owner is legitimately allowed to write their own files.
+// Per-account executables remove it by construction: no account ever executes
+// another account's binaries. Models stay shared, which is what the shared
+// root exists for; a 70 GB model is not duplicated to buy this.
+//
+// Follows StatsDir's rule and its fallback: a home directory that cannot be
+// resolved falls back to the root, where the provisioner's own refusal to run
+// an interpreter that is not owned by this account or root is what stops it.
+// This function decides where to look, never whether the place is safe.
+func ExecRoot(root string) string {
+	if !sameDir(root, SharedRoot) {
+		return root
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return root
+	}
+	return filepath.Join(home, "Library", "Application Support", "Gropius")
+}
+
 // NewPaths derives the layout from a root directory.
 func NewPaths(root string) Paths {
+	exec := ExecRoot(root)
 	return Paths{
 		Root:    root,
-		Bin:     filepath.Join(root, "bin"),
-		Venv:    filepath.Join(root, "venv"),
-		Python:  filepath.Join(root, "python"),
+		Bin:     filepath.Join(exec, "bin"),
+		Venv:    filepath.Join(exec, "venv"),
+		Python:  filepath.Join(exec, "python"),
 		Models:  filepath.Join(root, "models"),
 		HFCache: filepath.Join(root, "hf", "hub"),
 		Logs:    filepath.Join(root, "logs"),
@@ -356,6 +389,22 @@ type Config struct {
 	// APIKey, when non-empty, requires "Authorization: Bearer <key>" on /v1
 	// requests. Empty (the default) means the LAN endpoint is open.
 	APIKey string `json:"api_key"`
+
+	// UpstreamHeaderTimeoutSec bounds how long the gateway waits for a model
+	// server to return response headers, i.e. to finish prefill.
+	//
+	// Zero means automatic: the bound is derived from the prompt's size, which
+	// is what actually decides prefill time. A fixed bound cannot be right for
+	// both a 4K prompt and a 256K one — measured prefill on this hardware falls
+	// from about 1,300 tokens per second at 8K to under 200 at the largest
+	// verified sizes, so a bound sized from small prompts is wrong by two to
+	// four times exactly where it matters.
+	//
+	// A positive value overrides the derivation with a fixed number of seconds.
+	// It exists because the derivation encodes a measurement, and a measurement
+	// can be wrong for hardware or a model nobody tested: an operator who finds
+	// it so must be able to say so without waiting for a release.
+	UpstreamHeaderTimeoutSec int `json:"upstream_header_timeout_sec"`
 
 	// Advertise the service over Bonjour/mDNS so other machines can find it.
 	Advertise bool `json:"advertise"`
@@ -815,14 +864,15 @@ func (c *Config) sanitizeGrace() []string {
 // Default returns the shipping defaults: LAN-exposed, unauthenticated.
 func Default() Config {
 	return Config{
-		Host:              "0.0.0.0",
-		Port:              11535,
-		APIKey:            "",
-		Advertise:         true,
-		IdleTimeoutSec:    0,
-		DecodeConcurrency: 4,
-		StatsMonths:       DefaultStatsMonths,
-		StatsMaxBytes:     DefaultStatsMaxBytes,
+		Host:                     "0.0.0.0",
+		Port:                     11535,
+		APIKey:                   "",
+		UpstreamHeaderTimeoutSec: 0,
+		Advertise:                true,
+		IdleTimeoutSec:           0,
+		DecodeConcurrency:        4,
+		StatsMonths:              DefaultStatsMonths,
+		StatsMaxBytes:            DefaultStatsMaxBytes,
 		// Stored even though the feature is off, so that switching it on in
 		// Settings is one tick rather than one tick and two numbers.
 		EvictionGraceSec:   DefaultEvictionGraceSec,
@@ -865,6 +915,16 @@ func (c Config) Validate() error {
 	}
 	if err := c.validatePinned(); err != nil {
 		return err
+	}
+	// Eviction grace on an open endpoint is a denial-of-service lever: a parked
+	// waiter that cannot progress blocks every cold load needing an eviction
+	// for as long as the maximum wait allows, and the queue is shared out per
+	// API key — which means it cannot be shared out at all when there is no key
+	// to tell callers apart. Loopback-only installs are unaffected: there is no
+	// network caller to defend against, and the check turns on exposure rather
+	// than on the key alone.
+	if c.EvictionGrace && c.ExposedToLAN() && c.APIKey == "" {
+		return errors.New("eviction grace needs an API key on a LAN-exposed server: without one the wait queue cannot be shared out between callers, and one client can hold up model loading for everyone")
 	}
 	if c.StatsMonths < 1 || c.StatsMonths > MaxStatsMonths {
 		return fmt.Errorf("keep statistics for between 1 and %d months, got %d", MaxStatsMonths, c.StatsMonths)
@@ -1006,4 +1066,77 @@ func Save(path string, c Config) error {
 		return err
 	}
 	return os.Rename(tmpName, path)
+}
+
+// GenerateAPIKey returns a fresh random API key, 32 bytes of crypto/rand
+// rendered as URL-safe base64 without padding.
+//
+// Used to fail closed rather than open: a server that binds a LAN address with
+// no key configured is reachable, unauthenticated, by everyone on the network,
+// and the warning that said so was the only thing standing between a fresh
+// install and an open endpoint. A generated key is announced loudly, persisted,
+// and shown in the control panel, so the operator can use it or replace it —
+// but there is no window in which the endpoint is open by default.
+func GenerateAPIKey() (string, error) {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return "", fmt.Errorf("generate api key: %w", err)
+	}
+	return base64.RawURLEncoding.EncodeToString(b), nil
+}
+
+// Challenge coordination: how a starting Gropius proves the process already on
+// its port shares its data root, without either side keeping a secret.
+//
+// The prober writes a random answer into a random-named file in the data root
+// and asks the holder, over loopback, to read that file back. Only a process
+// that can read this root can answer, which is exactly the claim being tested.
+// Nothing is stored between probes and nothing replayable crosses the wire: the
+// file is single-use and deleted, so a peer who observes one answer learns
+// nothing about the next.
+//
+// This replaces a durable per-run token, which failed in both directions. It
+// could not authenticate a peer account (each root holds a different token), and
+// it was replayable: the token was published to every loopback caller, survived
+// shutdown on disk, and was read by the next start before a fresh one was
+// written — so a local account could harvest it, wait, squat the port, and have
+// the real server adopt it as its own.
+const (
+	// ChallengeFilePrefix names a challenge file. The leading dot keeps it out
+	// of ordinary listings; the name after it is the caller's nonce.
+	ChallengeFilePrefix = ".gropius-challenge-"
+	// MaxChallengeBytes caps the answer read. A real answer is 64 hex chars.
+	MaxChallengeBytes = 4096
+	// challengeNameLen is the nonce length in hex characters (16 random bytes).
+	challengeNameLen = 32
+)
+
+// ValidChallengeName reports whether name is a well-formed nonce.
+//
+// This is a path-traversal guard, not a formatting nicety: the name is supplied
+// by the caller and used to build a path the server then READS. Without it,
+// "../../../etc/passwd" would turn the control plane into an arbitrary-file-read
+// oracle for anything the server's uid can open. Exactly 32 lowercase hex
+// characters admits no separator, no dot, and no escape.
+func ValidChallengeName(name string) bool {
+	if len(name) != challengeNameLen {
+		return false
+	}
+	for i := 0; i < len(name); i++ {
+		c := name[i]
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+// ChallengePath returns the file a challenge name refers to under root, or ""
+// when the name is not well-formed. Callers must treat "" as a refusal: it is
+// the single point where an untrusted name is turned into a path.
+func ChallengePath(root, name string) string {
+	if !ValidChallengeName(name) {
+		return ""
+	}
+	return filepath.Join(root, ChallengeFilePrefix+name)
 }
