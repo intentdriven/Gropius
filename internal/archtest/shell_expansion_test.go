@@ -29,6 +29,13 @@ import (
 //
 // The fix is always the same: brace the expansion, `${APP}…`, which terminates
 // the identifier explicitly.
+//
+// Shell does not only live in .sh files. A workflow's `run:` block is shell
+// too, runs under `set -u` by the same convention, and is read by exactly the
+// same byte-wise identifier scan — and the release workflow's installer gate is
+// a long one. Those blocks are scanned here as well; scanning only files with a
+// shell extension or a shebang left them out, which is where the next instance
+// of this failure would have landed unseen.
 func TestShellVariablesAreBracedBeforeNonASCII(t *testing.T) {
 	root := repoRootDir(t)
 	var offences []string
@@ -44,17 +51,14 @@ func TestShellVariablesAreBracedBeforeNonASCII(t *testing.T) {
 			}
 			return nil
 		}
-		if !isShellScript(path) {
-			return nil
-		}
 		b, err := os.ReadFile(path)
 		if err != nil {
 			return err
 		}
 		rel, _ := filepath.Rel(root, path)
-		for i, line := range strings.Split(string(b), "\n") {
-			if col := unbracedBeforeNonASCII(line); col >= 0 {
-				offences = append(offences, rel+":"+itoa(i+1)+": "+strings.TrimSpace(line))
+		for _, line := range shellLines(path, string(b)) {
+			if col := unbracedBeforeNonASCII(line.text); col >= 0 {
+				offences = append(offences, rel+":"+itoa(line.number)+": "+strings.TrimSpace(line.text))
 			}
 		}
 		return nil
@@ -66,6 +70,73 @@ func TestShellVariablesAreBracedBeforeNonASCII(t *testing.T) {
 	for _, o := range offences {
 		t.Errorf("unbraced expansion immediately before a non-ASCII byte — brace it as ${VAR}: %s", o)
 	}
+}
+
+// shellLine is one line of shell, with its 1-based number in the file it came
+// from — which is not the line's position in the shell, once a workflow's
+// `run:` block is what supplied it.
+type shellLine struct {
+	number int
+	text   string
+}
+
+// shellLines returns the shell a file contains, in file order: every line of a
+// shell script, or the `run:` bodies of a YAML file.
+func shellLines(path, src string) []shellLine {
+	if isShellScript(path, src) {
+		lines := strings.Split(src, "\n")
+		out := make([]shellLine, 0, len(lines))
+		for i, line := range lines {
+			out = append(out, shellLine{i + 1, line})
+		}
+		return out
+	}
+	if strings.HasSuffix(path, ".yml") || strings.HasSuffix(path, ".yaml") {
+		return yamlRunLines(src)
+	}
+	return nil
+}
+
+// yamlRunLines returns the body of every `run:` block scalar in a YAML file,
+// plus any single-line `run:`. A block scalar's body is the run of lines
+// indented deeper than the `run:` key that opened it; blank lines belong to it
+// but carry no shell.
+func yamlRunLines(src string) []shellLine {
+	var out []shellLine
+	opened := -1 // indent of the `run:` key whose body we are in, or -1
+	for i, line := range strings.Split(src, "\n") {
+		if opened >= 0 {
+			if strings.TrimSpace(line) == "" {
+				continue
+			}
+			if leadingSpaces(line) > opened {
+				out = append(out, shellLine{i + 1, line})
+				continue
+			}
+			opened = -1
+		}
+		// `run:` is a step's own key, so it appears either on its own or as the
+		// key that opens the step's sequence entry.
+		key := strings.TrimPrefix(strings.TrimLeft(line, " \t"), "- ")
+		if !strings.HasPrefix(key, "run:") {
+			continue
+		}
+		switch value := strings.TrimSpace(strings.TrimPrefix(key, "run:")); {
+		case strings.HasPrefix(value, "|"), strings.HasPrefix(value, ">"):
+			opened = leadingSpaces(line)
+		default:
+			out = append(out, shellLine{i + 1, line})
+		}
+	}
+	return out
+}
+
+func leadingSpaces(line string) int {
+	n := 0
+	for n < len(line) && (line[n] == ' ' || line[n] == '\t') {
+		n++
+	}
+	return n
 }
 
 // unbracedBeforeNonASCII returns the byte offset of the first `$name` that is
@@ -99,20 +170,18 @@ func isNameByte(c byte) bool {
 		unicode.IsLetter(rune(c)) && c < utf8.RuneSelf
 }
 
-func isShellScript(path string) bool {
+func isShellScript(path, src string) bool {
 	if strings.HasSuffix(path, ".sh") || strings.HasSuffix(path, ".bash") {
 		return true
 	}
 	// A hook or a script with no extension still counts: read the shebang.
-	b, err := os.ReadFile(path)
-	if err != nil || len(b) < 2 || b[0] != '#' || b[1] != '!' {
+	if len(src) < 2 || src[0] != '#' || src[1] != '!' {
 		return false
 	}
-	nl := strings.IndexByte(string(b), '\n')
-	if nl < 0 {
-		nl = len(b)
+	first := src
+	if nl := strings.IndexByte(src, '\n'); nl >= 0 {
+		first = src[:nl]
 	}
-	first := string(b[:nl])
 	return strings.Contains(first, "sh")
 }
 
