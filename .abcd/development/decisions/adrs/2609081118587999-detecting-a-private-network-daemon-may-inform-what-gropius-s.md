@@ -149,3 +149,58 @@ Detection of a third-party private-network daemon may inform what Gropius
   packages are the guard; the tests are the accidents review need not catch.
   `internal/archtest/enforcement_detection_test.go` lists in full what they do
   not close.
+
+## Amendment (2026-09-08): the classifier may choose a bind address, under two conditions
+
+Rule 2 above closes every enforcement decision to the detection. That was
+written against the case where the detection *relaxes* something — waive the
+key, admit a peer, soften a warning — and it is right for every one of those.
+
+It also closed a case nobody had in view when it was written: an operator who
+asks to serve **only** over their private network. That mode has to resolve an
+address from the classification, and resolving it is choosing what to bind,
+which is enforcement. So the rule as written forbids the one feature that uses
+the detection to narrow rather than to widen.
+
+The maintainer amended it rather than route around it. The route around was
+available and was declined with the reasoning recorded: the operator could pick
+the address herself from the panel's marked list, which keeps rule 2 whole,
+costs one choice, and costs a second choice every time the private network hands
+out a different address.
+
+**The carve-out.** When the operator has explicitly chosen the
+private-network-only mode, the classifier may resolve the address that mode
+binds. Nothing else changes: the mode is still a bind, still the narrowing rule
+3 blesses, and every other enforcement decision named in rule 2 stays closed to
+the detection.
+
+**Condition 1 — ambiguity is refused, never resolved.** If more than one address
+matches the private-network shape, Gropius does not choose between them. It
+refuses to start the mode and says why. The classifier cannot tell one product
+on that address range from another — its own comment concedes that other VPN
+clients take `utun` and some hand out addresses from the same range — so an
+arbitrary pick between a mesh VPN and a corporate VPN would bind the operator to
+their employer's network while they believed they had narrowed to their own.
+That is a fail-open reached through the door this ADR calls fail-closed, and
+refusing is what keeps the door shut.
+
+**Condition 2 — the choice is always shown.** The mode names the address it
+selected, in Settings and on the posture page, so a wrong selection is visible
+rather than inferred. This costs nothing under rule 1: saying which network an
+address sits on is an observation, and it is the observation the operator needs
+in order to notice that the classifier picked the wrong network.
+
+Together the two turn the accepted risk from "it may pick the wrong network and
+nothing says so" into "it picks only when there is one answer, and it always
+shows which."
+
+**What this costs, stated plainly.** A rule that was absolute is now a rule with
+an exception, and an exception is a thing future work will reason from. The
+boundary is deliberately narrow — one mode, chosen by a person, resolving one
+address, under two conditions — and anything wider is a new decision, not an
+extension of this one. `internal/archtest/enforcement_detection_test.go`
+currently refuses `cmd/gropius` from naming the detection at all, on the ground
+that it "decides whether an exposed bind may run at all"; that test must state
+this carve-out explicitly rather than quietly widen, because a guard that grows
+a silent exception is the failure this repository spent a day correcting
+elsewhere.

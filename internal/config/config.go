@@ -1098,9 +1098,16 @@ func validHostName(s string) bool {
 //
 // It is deliberately this grammar rather than strconv.ParseUint(label, 0, 64),
 // which also reads Go's own "0b"/"0o" prefixes and digit-separating
-// underscores. Those are not spellings getaddrinfo accepts, and an underscore
-// is legal inside a label here, so borrowing Go's parser would refuse a name
-// like "1_0.2_0" that resolves perfectly well.
+// underscores — spellings getaddrinfo does not accept, so a value Go's parser
+// calls numeric is not necessarily an address this platform would resolve as
+// one. Borrowing it would decide the question by a different language's
+// literal syntax than the one the resolver speaks.
+//
+// The earlier version of this comment justified that with "1_0.2_0", a name it
+// claimed resolves perfectly well and Go's parser would refuse. That example
+// is wrong about this code: validHostName refuses "1_0.2_0" above, on the rule
+// that the top label must carry a letter, and refused it before this grammar
+// existed. The reasoning stands; the example never did.
 func numericLabel(s string) bool {
 	if s == "" {
 		return false

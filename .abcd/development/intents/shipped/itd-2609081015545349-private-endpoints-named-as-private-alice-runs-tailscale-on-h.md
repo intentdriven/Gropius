@@ -114,7 +114,8 @@ information was not what was stopping them, and marking is not the fix.
 
 ## Audit Notes
 
-_Empty. Populated by intent-auditor when intent moves to shipped/._
+<!-- abcd-review: OWED receipt=rcp-8d69ca307ea9 -->
+Fidelity review OWED (receipt rcp-8d69ca307ea9).
 
 ## Grounds
 
