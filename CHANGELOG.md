@@ -13,6 +13,25 @@ GitHub release notes.
 
 ### Fixed
 
+- **The one-line install runs again.** `install.sh` read `$DEST…` as the
+  variable name plus the first byte of the ellipsis that follows it, so under
+  `set -u` it stopped with `DEST?: unbound variable` after reporting where it
+  would install and before copying anything. The line runs on every path, so
+  this affected every user rather than only the non-administrator case it was
+  written for. Shipped in 0.3.0 and fixed immediately afterwards; the install
+  command on the website fetches the script from the default branch, so it was
+  serving the fixed script from the moment it merged.
+
+- **The website no longer offers a download that macOS refuses.** Following the
+  download button produced "Apple could not verify Gropius is free of malware",
+  whose only offered action is Move to Bin: a browser download is quarantined,
+  and the bundles are ad-hoc signed rather than notarized. The page now leads
+  with the install command, which verifies the archive against the published
+  checksums and clears the quarantine, and keeps the link to the repository
+  beside it. Release assets are still named with their sizes; none is linked.
+
+### Fixed
+
 - **The landing page no longer scrolls sideways.** A grid track held at the
   intrinsic width of the install one-liner — 894 pixels of unbreakable
   command — and pushed the column beside it off the page, so the release list
