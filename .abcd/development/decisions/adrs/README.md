@@ -26,3 +26,4 @@ index below is a hand edit.
 | [adr-2609061503319212](2609061503319212-no-public-telemetry-local-telemetry-only-as-a-strict-opt-in.md) | No public telemetry; local telemetry only, as a strict opt-in | accepted | 2026-09-06 |
 | [adr-2609061610102325](2609061610102325-the-gateway-may-rewrite-prompt-content-only-to-merge-system.md) | The gateway may rewrite prompt content only to merge system messages, per model, opt-in, and never logs, retains or counts what it reads | accepted | 2026-09-06 |
 | [adr-2609061610107154](2609061610107154-statistics-store-format-json-lines-size-rotated-per-account.md) | Statistics store format: JSON Lines, size-rotated, per account, with months and size caps in Settings | accepted | 2026-09-06 |
+| [adr-2609081118587999](2609081118587999-detecting-a-private-network-daemon-may-inform-what-gropius-s.md) | Detecting a private-network daemon may inform what Gropius says, never what it enforces | accepted | 2026-09-08 |
