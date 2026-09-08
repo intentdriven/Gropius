@@ -15,6 +15,37 @@ package archtest_test
 // tagged tree between building the artefacts and publishing them, and that the
 // installer really does install from the directory that gate hands it rather
 // than reaching for a Release that does not exist yet.
+//
+// WHAT THESE TESTS CLAIM, AND WHAT THEY DO NOT.
+//
+// Everything below except TestTheInstallerInstallsFromTheAssetDirectoryAndNot-
+// TheNetwork and TestTheInstallerRefusesTheAssetDirectorySeamOutsideCI reads
+// workflow YAML. Reading YAML cannot establish that a step executes, or that
+// executing it can fail the job: those are properties of what GitHub's runner
+// does with the file, and nothing in a Go test observes that. Three rounds of
+// adversarial review have now found, each time, a further way to write a step
+// that satisfies every assertion here and installs nothing —
+// `continue-on-error`, an `if:` on the gate, a decoy step with the same name,
+// an echo-only body, `exit 0`, `set +e`, `|| true`, a heredoc swallowing the
+// whole body, an `if` wrapping it, a `trap … exit 0` on ERR, `{ … } &`, a
+// sibling job that publishes, and a whitespace variant defeating a substring
+// match. Each round closed what was named; the next found more. That pattern is
+// the signature of a syntactic check standing in for a semantic property, and
+// it does not terminate.
+//
+// So these tests are stated as what they are: they REFUSE THE KNOWN WAYS to
+// neuter the gate. They are a hurdle in front of an edit that would remove the
+// gate's effect, and a place to record each defeat as it is found. They are not
+// a proof that the gate runs, and not a proof that it is fatal. A body can
+// still be made inert by a form nobody has named yet.
+//
+// The one assertion here that is not syntactic is the digest binding
+// (TestTheGateBindsTheBytesItExercisedToTheBytesPublished): the gate records
+// the digests of the three assets it exercised and the publish step re-verifies
+// them before its first upload, so if the gate did not run, or ran on other
+// bytes, the publish step fails in Actions rather than in a Go test. That is
+// the shape to prefer whenever a property can be moved into the workflow
+// itself.
 
 import (
 	"os"
@@ -46,9 +77,17 @@ const (
 
 // TestTheReleaseGateRunsTheTaggedTreesInstallerBeforeItPublishes holds the
 // gate's POSITION, which is the whole of its value (a gate after the publish is
-// a report, not a gate), and holds that it is still a GATE: a step carrying
-// `continue-on-error: true`, or an `if:` that can turn it off, is a report too,
-// and both of those mutations passed the position-only version of this test.
+// a report, not a gate), and refuses the known ways of writing a step that
+// occupies that position while doing nothing: `continue-on-error: true`, an
+// `if:` that can turn it off, a duplicate name shadowing the real step, an
+// echo-only body, `exit 0`, `set +e`, `|| true`, a `trap … exit 0`, a
+// backgrounded body, a heredoc that swallows the invocations, and a
+// conditional wrapping them. Every one of those was reproduced against an
+// earlier version of this test and left it green.
+//
+// It does NOT prove the gate runs, and does not prove the gate is fatal — see
+// the note at the top of this file. It is a list of refusals, and the list is
+// open.
 func TestTheReleaseGateRunsTheTaggedTreesInstallerBeforeItPublishes(t *testing.T) {
 	root := repoRootDir(t)
 	// Comments are stripped before the ordering below reads positions: this
@@ -127,15 +166,30 @@ func TestTheReleaseGateRunsTheTaggedTreesInstallerBeforeItPublishes(t *testing.T
 	// — which was reproduced against the substring version of this guard and
 	// left it green while the gate installed nothing. An anchored line is the
 	// difference between "the text appears" and "the command runs".
+	// The body arrives DEDENTED — the block scalar's common indentation
+	// removed, which is what bash is handed — so a line at column 0 below is a
+	// line at the body's top level, and an anchored `^` means "run by the body
+	// itself" rather than "run somewhere inside something".
 	body := stepRunBody(t, step, gateStepName)
+
+	// …and with every heredoc's CONTENT blanked. `cat >/dev/null <<'NOTES'`
+	// opened at the top of the body, the whole real body inside it, then the
+	// closing `NOTES` and an `echo`, is valid YAML, `bash -n` clean, and leaves
+	// every anchored assertion below matching text that never executes —
+	// reproduced. Reading the heredoc-blanked body means those assertions can
+	// only be satisfied by lines bash would actually run. The gate writes one
+	// legitimate heredoc (the `open` stub), which carries none of the text
+	// asserted on here.
+	live := stripHeredocs(body)
 
 	// The body's own fatality. `set -euo pipefail` is the first thing it does,
 	// so nothing runs unguarded ahead of it; and nothing later may take the
-	// guard back off, stop early with a success, or swallow a failure. Each of
-	// `exit 0` after the `set` line, `set +e`, and `|| true` on an invocation
-	// was reproduced and left the step green having installed and verified
-	// nothing.
-	if first := firstCommand(body); first != "set -euo pipefail" {
+	// guard back off, stop early with a success, swallow a failure, hand the
+	// failure to a handler that exits 0, or fork the work into a child the step
+	// never waits for. Each of `exit 0` after the `set` line, `set +e`, `|| true`
+	// on an invocation, `trap … exit 0` on ERR, and `{ … } &` was reproduced and
+	// left the step green having installed and verified nothing.
+	if first := firstCommand(live); first != "set -euo pipefail" {
 		t.Errorf("the gate's first command is %q, want %q: the body has to be under -e, -u and pipefail before "+
 			"it does anything, and a command ahead of the `set` line runs unguarded", first, "set -euo pipefail")
 	}
@@ -146,28 +200,59 @@ func TestTheReleaseGateRunsTheTaggedTreesInstallerBeforeItPublishes(t *testing.T
 			"the step then succeeds having installed and verified however little ran before it, and the release publishes"},
 		{`(?m)\|\|[ \t]*(true|:)\b`, "`|| true`",
 			"it swallows the failure of whatever it is attached to, which is the one thing this step exists to surface"},
+		{`(?m)^[ \t]*trap[ \t]`, "a `trap`",
+			"`trap 'echo …; exit 0' ERR` after the `set` line makes the body exit 0 on the first failing command — " +
+				"verified directly: `bash -c 'set -euo pipefail; trap \"exit 0\" ERR; false'` exits 0, because the " +
+				"handler runs before -e can take the shell down"},
+		{`(?m)(^|[^&|>])&[ \t]*$`, "a backgrounded command",
+			"`{ … } &` runs the work in a child the step never waits for, so the step's status is the fork's rather " +
+				"than the installer's and a broken installer leaves the step green"},
 	} {
-		if regexp.MustCompile(neuter.pattern).MatchString(body) {
+		if regexp.MustCompile(neuter.pattern).MatchString(live) {
 			t.Errorf("the gate's body contains %s: %s", neuter.what, neuter.why)
 		}
 	}
 
-	// The work itself, matched as whole lines. Both documented invocations plus
-	// the piped form, and the asset directory that points all three at the
-	// artefacts THIS job built rather than a published Release — of which there
-	// is none yet, which is the point of gating here.
+	// The work itself, matched as whole lines AT THE BODY'S TOP LEVEL. Both
+	// documented invocations plus the piped form, and the asset directory that
+	// points all three at the artefacts THIS job built rather than a published
+	// Release — of which there is none yet, which is the point of gating here.
+	lastInvocation := -1
 	for _, run := range []struct{ pattern, why string }{
-		{`(?m)^[ \t]*export GROPIUS_ASSET_DIR="\$PWD"[ \t]*$`,
+		{`(?m)^export GROPIUS_ASSET_DIR="\$PWD"[ \t]*$`,
 			"the gate does not point install.sh at the artefacts it built; it would install the PREVIOUS release and pass while the tagged one is broken"},
-		{`(?m)^[ \t]*bash -s -- < \./install\.sh[ \t]*$`,
+		{`(?m)^bash -s -- < \./install\.sh[ \t]*$`,
 			"the gate never runs the checked-out install.sh in its documented server form"},
-		{`(?m)^[ \t]*bash -s -- client < \./install\.sh[ \t]*$`,
+		{`(?m)^bash -s -- client < \./install\.sh[ \t]*$`,
 			"the gate never runs the checked-out install.sh in its documented client form"},
-		{`(?m)^[ \t]*cat \./install\.sh \| bash -s --[ \t]*$`,
+		{`(?m)^cat \./install\.sh \| bash -s --[ \t]*$`,
 			"the gate never runs install.sh through a real pipe, which is the form the README documents (`curl … | bash`)"},
 	} {
-		if !regexp.MustCompile(run.pattern).MatchString(body) {
-			t.Errorf("no line of the gate's body matches %s: %s", run.pattern, run.why)
+		loc := regexp.MustCompile(run.pattern).FindStringIndex(live)
+		if loc == nil {
+			t.Errorf("no top-level line of the gate's body matches %s: %s", run.pattern, run.why)
+			continue
+		}
+		if loc[0] > lastInvocation {
+			lastInvocation = loc[0]
+		}
+	}
+
+	// A conditional wrapping the body is the remaining named way to keep every
+	// line above matching while none of it runs: `if [ "${SOME_FLAG:-0}" = "1" ];
+	// then` … `fi` around the preserved body was reproduced, valid YAML and
+	// `bash -n` clean. Two things refuse it. An INDENTED wrapper is refused by
+	// the `^` anchors above, which require the invocations at the body's top
+	// level. An UNINDENTED one is refused here: no compound statement may OPEN
+	// at the top level before the last of those invocations. The gate's own
+	// `for app in …` loop opens after them, which is why this is bounded rather
+	// than blanket — and why moving that loop ahead of the invocations would
+	// (correctly) fail.
+	if lastInvocation >= 0 {
+		if openers := topLevelCompoundOpeners(live, lastInvocation); len(openers) > 0 {
+			t.Errorf("the gate's body opens a compound statement at its top level before it runs the installer: %q. "+
+				"A conditional, a `{ … }` group or a function definition wrapping the invocations leaves every "+
+				"assertion above satisfied while the body runs nothing", openers)
 		}
 	}
 
@@ -181,7 +266,7 @@ func TestTheReleaseGateRunsTheTaggedTreesInstallerBeforeItPublishes(t *testing.T
 		{`(?m)^[ \t]*built="dist/Gropius\.app/Contents/MacOS/gropius"[ \t]*$`, "the built server executable"},
 		{`(?m)^[ \t]*built="client/dist/GropiusChat\.app/Contents/MacOS/GropiusChat"[ \t]*$`, "the built client executable"},
 	} {
-		if !regexp.MustCompile(bind.pattern).MatchString(body) {
+		if !regexp.MustCompile(bind.pattern).MatchString(live) {
 			t.Errorf("the installer gate never binds what it installed to %s (no line matching %s); "+
 				"a fall-through to the PREVIOUS release would install, launch and pass", bind.why, bind.pattern)
 		}
@@ -256,11 +341,147 @@ func TestNothingAfterTheInstallerGatePublishesOnAFailedRun(t *testing.T) {
 			t.Errorf("the step %q runs after the installer gate under `always()`; that condition is true on a run "+
 				"the gate failed, so nothing about the gate's fatality survives it", s.name)
 		}
-		for _, marker := range []string{"gh release create", "gh release upload", "attest-build-provenance"} {
-			if strings.Contains(s.block, marker) {
-				t.Errorf("the step %q runs %s after the installer gate and declares an `if:`; a conditional publish "+
-					"is a publish that can outlive the gate's failure", s.name, marker)
+		if routes := publishRoutesIn(s.block); len(routes) > 0 {
+			t.Errorf("the step %q runs %s after the installer gate and declares an `if:`; a conditional publish "+
+				"is a publish that can outlive the gate's failure", s.name, strings.Join(routes, ", "))
+		}
+	}
+}
+
+// TestNoJobOutsideTheReleaseJobPublishes holds the guard's FIELD OF VIEW.
+//
+// Both tests above are scoped to the `release` job, and a guard that reads one
+// job is blind to the job added beside it. A second job with `needs: verify`,
+// `if: ${{ always() }}`, `contents: write` and a `gh release create` leaves the
+// `release` job untouched — every assertion above stays green — and publishes a
+// Release the installer gate never gated. Reproduced.
+//
+// So the whole workflow is read here, not one job of it, and two things are
+// held. TEXT: no job but `release` may carry a publish route. CAPABILITY: no
+// job but `release` may be granted `contents: write`, which is what a Release
+// takes; that also bounds the `site` job, whose work lives in another file this
+// guard does not read — a called workflow can never exceed the permissions its
+// caller grants, so `contents: read` there is a cap, not a promise.
+//
+// "No job may publish without depending on `release`" is the same property
+// stated the other way round and is subsumed: only `release` may publish, and
+// `release` is the job the gate sits inside.
+func TestNoJobOutsideTheReleaseJobPublishes(t *testing.T) {
+	root := repoRootDir(t)
+	wf := withoutComments(readRepoFile(t, root, filepath.Join(".github", "workflows", "release.yml")))
+	jobs := workflowJobs(t, wf)
+	if len(jobs) < 2 {
+		t.Fatalf("release.yml declares %d jobs; this guard exists to read the ones BESIDE `release`, and reading "+
+			"fewer than two means the job splitter stopped working", len(jobs))
+	}
+
+	var release string
+	for _, job := range jobs {
+		if job.name == "release" {
+			release = job.block
+			continue
+		}
+		if routes := publishRoutesIn(job.block); len(routes) > 0 {
+			t.Errorf("the job %q publishes (%s). Every assertion about the installer gate is scoped to the `release` "+
+				"job, so a sibling job publishes outside all of them — with `needs: verify` it does not even wait "+
+				"for the gate's job to finish", job.name, strings.Join(routes, ", "))
+		}
+		if regexp.MustCompile(`(?m)^      contents:[ \t]*write\b`).MatchString(job.block) {
+			t.Errorf("the job %q is granted `contents: write`; only the gated `release` job may hold the permission "+
+				"a Release takes, whatever it does with it", job.name)
+		}
+	}
+
+	// And the release job really does hold the routes named above: if the
+	// markers drift, this guard reads a workflow it no longer understands and
+	// every assertion in it passes vacuously.
+	if release == "" {
+		t.Fatal("release.yml declares no `release` job")
+	}
+	for _, want := range []string{"`gh release create`", "`gh release upload`", "the build-provenance attestation"} {
+		found := false
+		for _, got := range publishRoutesIn(release) {
+			if got == want {
+				found = true
 			}
+		}
+		if !found {
+			t.Errorf("the release job carries no %s; this guard recognises publishing by that route, so if it moved "+
+				"or was renamed the checks above pass while saying nothing", want)
+		}
+	}
+}
+
+// TestTheGateBindsTheBytesItExercisedToTheBytesPublished closes the gap between
+// "the gate ran first" and "the gate ran on THESE bytes".
+//
+// The gate validates dist/Gropius.app/Contents/MacOS/gropius; the publish step
+// uploads Gropius.app.zip. Nothing in the ordering assertions stops a
+// "Re-package after the gate" step inserted between the two: the gate passes,
+// the artefacts are rebuilt, and the Release ships bytes the gate never saw.
+// Reproduced.
+//
+// BOTH available fixes are taken, because they close different halves.
+//
+//  1. The DIGEST BINDING, which is the real one and the only assertion in this
+//     file that is not a statement about YAML text: the gate records the sha256
+//     of the three assets it exercised, and the publish step re-verifies them
+//     before its first upload. If the assets changed after the gate ran — or if
+//     the gate never ran, so the digest file does not exist — the publish step
+//     fails in Actions. That is checked by a runner, not by this test.
+//
+//  2. NO `run:` BETWEEN THEM. The attestation is a `uses:` step and cannot
+//     verify anything itself, so it would attest re-packaged bytes before the
+//     publish step got the chance to refuse them. A re-packaging step is a
+//     `run:` step, so no step between the gate and the publish may declare one.
+//     This half IS a statement about YAML text, and a `uses:` action that
+//     re-packages defeats it.
+func TestTheGateBindsTheBytesItExercisedToTheBytesPublished(t *testing.T) {
+	root := repoRootDir(t)
+	job := withoutComments(workflowJob(t, readRepoFile(t, root, filepath.Join(".github", "workflows", "release.yml")), "release"))
+	gateStep, gate := workflowStep(t, job, gateStepName)
+	pubStep, publish := workflowStep(t, job, publishStepName)
+
+	const digests = `shasum -a 256 Gropius.app.zip GropiusChat.app.zip SHA256SUMS.txt | tee "$RUNNER_TEMP/gate-verified-assets.txt"`
+	const verify = `shasum -a 256 -c "$RUNNER_TEMP/gate-verified-assets.txt"`
+
+	gateBody := normalisedShellLines(stripHeredocs(stepRunBody(t, gateStep, gateStepName)))
+	if !containsLine(gateBody, digests) {
+		t.Errorf("the installer gate records no digests of the assets it exercised (no line %q); without them the "+
+			"publish step has nothing to compare against, and a step that re-packages dist/ after the gate ships "+
+			"artefacts the gate never saw", digests)
+	}
+
+	pubBody := normalisedShellLines(stripHeredocs(stepRunBody(t, pubStep, publishStepName)))
+	verifiedAt, publishesAt := -1, -1
+	for i, line := range pubBody {
+		if verifiedAt < 0 && line == verify {
+			verifiedAt = i
+		}
+		if publishesAt < 0 && len(publishRoutesIn(line)) > 0 {
+			publishesAt = i
+		}
+	}
+	switch {
+	case verifiedAt < 0:
+		t.Errorf("the publish step does not re-verify the gate's digests (no line %q); the ordering assertions say "+
+			"the gate ran BEFORE this step, and nothing says it ran on the bytes this step uploads", verify)
+	case publishesAt < 0:
+		t.Errorf("the publish step %q carries no publish route at all; this guard reads its ordering against one, "+
+			"so it no longer says anything", publishStepName)
+	case verifiedAt > publishesAt:
+		t.Errorf("the publish step uploads (line %d) before it re-verifies the gate's digests (line %d); a check "+
+			"after the upload reports on bytes that have already shipped", publishesAt, verifiedAt)
+	}
+
+	for _, s := range workflowSteps(job) {
+		if s.at <= gate || s.at >= publish {
+			continue
+		}
+		if hasStepKey(s.block, "run") {
+			t.Errorf("the step %q runs shell between the installer gate and the publish; a step there is where a "+
+				"re-packaging of dist/, client/dist/ or SHA256SUMS.txt would go, and the attestation immediately "+
+				"below it would then attest bytes the gate never exercised", s.name)
 		}
 	}
 }
@@ -320,8 +541,19 @@ func TestTheInstallerInstallsFromTheAssetDirectoryAndNotTheNetwork(t *testing.T)
 // with a matching checksums file installs, has its quarantine cleared, gets a
 // firewall rule and is launched, printing "Checksum OK." with nothing in the
 // output to distinguish it from a genuine download. That is the whole of this
-// script's integrity control, substituted by one environment variable. It is
-// reachable only from the release workflow's gate, and refused everywhere else.
+// script's integrity control, substituted by two environment variables.
+//
+// TWO, and both are ordinary environment variables: GROPIUS_ASSET_DIR names the
+// directory, and GITHUB_ACTIONS=true is what makes the script honour it. A
+// caller who can set one can set the other — install.sh:107 says so in as many
+// words — and TestTheInstallerInstallsFromTheAssetDirectoryAndNotTheNetwork,
+// forty lines above, is that caller: it sets GITHUB_ACTIONS=true from an
+// ordinary `go test` on a developer's Mac and the seam is honoured end to end.
+// So this is not a control that makes the seam unreachable outside the release
+// workflow. What it does is stop the seam being reached by ACCIDENT — a stray
+// export, a copied tutorial line — and make the substitution loud when it does
+// happen, which is the claim install.sh:26-33 and :107-108 make and the one to
+// keep making here. The test below holds the refusal, not the unreachability.
 func TestTheInstallerRefusesTheAssetDirectorySeamOutsideCI(t *testing.T) {
 	fx := installerFixture(t)
 
@@ -518,6 +750,171 @@ func workflowJob(t *testing.T, wf, name string) string {
 	return rest
 }
 
+// workflowJobBlock is one job of a workflow: its name and everything under it.
+type workflowJobBlock struct{ name, block string }
+
+// workflowJobs returns every job of a workflow in file order, splitting the
+// `jobs:` mapping on its keys at two spaces of indent. Reading one job by name
+// — which is what every other helper here does — is blind to a job added beside
+// it, and a sibling job with its own publish route was reproduced defeating
+// this file's whole first two tests.
+func workflowJobs(t *testing.T, wf string) []workflowJobBlock {
+	t.Helper()
+	start := regexp.MustCompile(`(?m)^jobs:$`).FindStringIndex(wf)
+	if start == nil {
+		t.Fatal("the workflow declares no `jobs:` mapping; this guard reads every job of it")
+	}
+	rest := wf[start[1]:]
+	heads := regexp.MustCompile(`(?m)^  ([A-Za-z0-9_-]+):$`).FindAllStringSubmatchIndex(rest, -1)
+	out := make([]workflowJobBlock, 0, len(heads))
+	for i, h := range heads {
+		end := len(rest)
+		if i+1 < len(heads) {
+			end = heads[i+1][0]
+		}
+		out = append(out, workflowJobBlock{name: rest[h[2]:h[3]], block: rest[h[1]:end]})
+	}
+	return out
+}
+
+// ghAPIWritesReleases matches a `gh api` invocation that WRITES: an explicit
+// write method, or the field flags that make gh send a POST on their own.
+var ghAPIWritesReleases = regexp.MustCompile(`(-X|--method) (POST|PATCH|PUT)|(^| )(-f|-F|--field|--raw-field|--input)[ =]`)
+
+// shellScriptPath matches a path ending in `.sh`. The final segment excludes
+// `.` so `github.sha` is not a script.
+var shellScriptPath = regexp.MustCompile(`((?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_-]+\.sh)\b`)
+
+// publishRoutesIn names every way the given workflow text puts bytes in front
+// of a user, or hands the job to something this guard cannot read.
+//
+// It replaced three literal `strings.Contains` markers, which were defeated two
+// ways, both reproduced creating a real published Release on a run the gate had
+// failed: `gh  release  create` with two spaces, and
+// `gh api -X POST "repos/${GITHUB_REPOSITORY}/releases" …`, which never spells
+// the words at all. Whitespace is normalised before matching, the REST shape is
+// recognised, and an invocation of a shell script other than the two this
+// workflow is known to run counts as a route on its own — the guard cannot see
+// inside a script, so it must not pretend the script is harmless.
+//
+// This is a list of recognised routes, not a definition of publishing. A route
+// nobody has written down yet passes.
+func publishRoutesIn(block string) []string {
+	var found []string
+	seen := map[string]bool{}
+	add := func(what string) {
+		if !seen[what] {
+			seen[what] = true
+			found = append(found, what)
+		}
+	}
+	for _, line := range normalisedShellLines(block) {
+		for _, r := range []struct{ needle, what string }{
+			{"gh release create", "`gh release create`"},
+			{"gh release upload", "`gh release upload`"},
+			{"gh release edit", "`gh release edit`"},
+			{"gh release delete-asset", "`gh release delete-asset`"},
+			{"attest-build-provenance", "the build-provenance attestation"},
+			{"softprops/action-gh-release", "the action-gh-release publishing action"},
+		} {
+			if strings.Contains(line, r.needle) {
+				add(r.what)
+			}
+		}
+		if strings.Contains(line, "gh api") && strings.Contains(line, "releases") && ghAPIWritesReleases.MatchString(line) {
+			add("`gh api` writing to the releases endpoint")
+		}
+		for _, m := range shellScriptPath.FindAllStringSubmatch(line, -1) {
+			switch strings.TrimPrefix(m[1], "./") {
+			case "install.sh", "client/build.sh":
+				continue
+			}
+			add("an invocation of " + m[1] + ", which this guard cannot read")
+		}
+	}
+	return found
+}
+
+// normalisedShellLines joins line continuations and collapses every run of
+// whitespace to a single space, so `gh  release  create` reads as
+// `gh release create`. A two-space variant defeated a substring check here, and
+// a backslash-newline defeats one just as cheaply.
+func normalisedShellLines(block string) []string {
+	joined := strings.ReplaceAll(block, "\\\n", " ")
+	lines := strings.Split(joined, "\n")
+	out := make([]string, 0, len(lines))
+	for _, line := range lines {
+		out = append(out, strings.Join(strings.Fields(line), " "))
+	}
+	return out
+}
+
+func containsLine(lines []string, want string) bool {
+	for _, line := range lines {
+		if line == want {
+			return true
+		}
+	}
+	return false
+}
+
+// stripHeredocs blanks the CONTENT of every heredoc in a shell body, leaving
+// the redirection line, the delimiter line and the line count in place. Text
+// inside a heredoc is data, not commands: `cat >/dev/null <<'NOTES'` around the
+// whole gate leaves every anchored assertion matching while the body runs
+// nothing.
+func stripHeredocs(body string) string {
+	opener := regexp.MustCompile(`<<(-?)[ \t]*(?:'([^']*)'|"([^"]*)"|\\?([A-Za-z_][A-Za-z0-9_]*))`)
+	lines := strings.Split(body, "\n")
+	out := make([]string, 0, len(lines))
+	for i := 0; i < len(lines); i++ {
+		out = append(out, lines[i])
+		m := opener.FindStringSubmatch(lines[i])
+		if m == nil {
+			continue
+		}
+		delim, stripTabs := m[2]+m[3]+m[4], m[1] == "-"
+		for i+1 < len(lines) {
+			i++
+			end := lines[i]
+			if stripTabs {
+				end = strings.TrimLeft(end, "\t")
+			}
+			if end == delim {
+				out = append(out, lines[i])
+				break
+			}
+			out = append(out, "")
+		}
+	}
+	return strings.Join(out, "\n")
+}
+
+// topLevelCompoundOpeners returns the lines of a dedented shell body that OPEN
+// a compound statement at its top level — `if`, `while`, `until`, `for`,
+// `case`, `select`, a `{` or `(` group, or a function definition — and start
+// before the given offset. A body whose work is wrapped in one of these runs
+// none of it unless the wrapper says so.
+func topLevelCompoundOpeners(body string, before int) []string {
+	opener := regexp.MustCompile(`^(if|while|until|for|case|select)\b|^[{(]|^[A-Za-z_][A-Za-z0-9_]*[ \t]*\([ \t]*\)`)
+	var out []string
+	off := 0
+	for _, line := range strings.Split(body, "\n") {
+		start := off
+		off += len(line) + 1
+		if start >= before {
+			break
+		}
+		if line == "" || line[0] == ' ' || line[0] == '\t' {
+			continue
+		}
+		if opener.MatchString(line) {
+			out = append(out, line)
+		}
+	}
+	return out
+}
+
 // workflowStep returns one named step's block from a job, and the offset of its
 // `- name:` line within that job. A step starts at `      - ` and runs to the
 // next sequence entry at that indent, so the block holds the step's own keys
@@ -585,9 +982,11 @@ func workflowSteps(job string) []jobStep {
 }
 
 // stepRunBody returns the body of a step's `run:` block scalar: the lines
-// indented deeper than the step's own mapping. Assertions read this rather than
-// the step block so that a step's other keys — and its name — cannot satisfy a
-// claim about what the step RUNS.
+// indented deeper than the step's own mapping, DEDENTED by the block scalar's
+// common indentation, which is what YAML hands the shell. Assertions read this
+// rather than the step block so that a step's other keys — and its name —
+// cannot satisfy a claim about what the step RUNS; and dedenting is what lets
+// an assertion say "at the body's top level" rather than "somewhere in it".
 func stepRunBody(t *testing.T, step, name string) string {
 	t.Helper()
 	loc := regexp.MustCompile(`(?m)^        run: [|>][-+]?\s*$`).FindStringIndex(step)
@@ -606,7 +1005,31 @@ func stepRunBody(t *testing.T, step, name string) string {
 		}
 		body = append(body, line)
 	}
-	return strings.Join(body, "\n")
+	return dedent(body)
+}
+
+// dedent removes the common leading indentation of a block scalar's lines,
+// which is exactly what YAML strips before the shell sees them: a heredoc
+// terminator written flush with the rest of the body is at column 0 for bash,
+// and so is the body's top level.
+func dedent(lines []string) string {
+	common := -1
+	for _, line := range lines {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		if n := leadingSpaces(line); common < 0 || n < common {
+			common = n
+		}
+	}
+	out := make([]string, len(lines))
+	for i, line := range lines {
+		if common > 0 && len(line) >= common {
+			line = line[common:]
+		}
+		out[i] = line
+	}
+	return strings.Join(out, "\n")
 }
 
 // firstCommand returns the first line of a shell body that does anything.
