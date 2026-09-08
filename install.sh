@@ -91,7 +91,7 @@ fetch() {
 	fi
 }
 
-echo "Downloading $APP…"
+echo "Downloading ${APP}…"
 fetch "$ASSET" "$zip"
 
 # Verify the download is exactly what the release workflow built, BEFORE
@@ -116,7 +116,7 @@ xattr -dr com.apple.quarantine "$tmp/extract/$APP.app" 2>/dev/null || true
 # process instead of launching the new binary, so an upgrade over a live app
 # would report success while the old version keeps running.
 if pgrep -qf "/Applications/$APP.app/Contents/MacOS/" 2>/dev/null; then
-	echo "Quitting the running $APP…"
+	echo "Quitting the running ${APP}…"
 	osascript -e "quit app \"$APP\"" >/dev/null 2>&1 || true
 	for _ in $(seq 1 20); do
 		pgrep -qf "/Applications/$APP.app/Contents/MacOS/" || break
