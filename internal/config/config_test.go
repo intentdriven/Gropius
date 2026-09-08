@@ -750,3 +750,39 @@ func TestLoadDropsAnUnusableMemoryBudget(t *testing.T) {
 		t.Errorf("the loaded config does not validate: %v", err)
 	}
 }
+
+// TestExecRootIsPerAccountUnderTheSharedRoot pins the security property the
+// shared-runtime decision rests on: models may be shared, executables never
+// are. Under the shared root the interpreter, venv and uv must resolve to this
+// account's own directory, so no account ever executes a binary another
+// account owns and can rewrite.
+func TestExecRootIsPerAccountUnderTheSharedRoot(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Skip("no home directory")
+	}
+	p := NewPaths(SharedRoot)
+	if p.Models != filepath.Join(SharedRoot, "models") {
+		t.Errorf("models should stay shared, got %q", p.Models)
+	}
+	for name, got := range map[string]string{"Bin": p.Bin, "Venv": p.Venv, "Python": p.Python} {
+		if strings.HasPrefix(got, SharedRoot) {
+			t.Errorf("%s must not live under the shared root: %q", name, got)
+		}
+		if !strings.HasPrefix(got, home) {
+			t.Errorf("%s should be under this account's home, got %q", name, got)
+		}
+	}
+}
+
+// TestExecRootIsTheRootEverywhereElse keeps the per-user and explicit-root
+// layouts as one folder to delete.
+func TestExecRootIsTheRootEverywhereElse(t *testing.T) {
+	root := t.TempDir()
+	p := NewPaths(root)
+	for name, got := range map[string]string{"Bin": p.Bin, "Venv": p.Venv, "Python": p.Python} {
+		if !strings.HasPrefix(got, root) {
+			t.Errorf("%s should be under %q, got %q", name, root, got)
+		}
+	}
+}
