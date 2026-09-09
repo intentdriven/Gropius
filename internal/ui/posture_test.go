@@ -163,7 +163,9 @@ func TestThePostureLinesStateWhatIsOn(t *testing.T) {
 	wants(t, lines, "announce",
 		"Gropius is announcing this server to every machine on the local network, as a Bonjour service named after this Mac's name, alices-mac,",
 		"this Mac's addresses", "port 11535", "no model names and no key")
-	wants(t, lines, "log", "Each request to the API's endpoints", "method, path, status and duration", "no client address")
+	wants(t, lines, "log", "Each request to the API's endpoints", "method, path, status and duration", "no client address",
+		"at the sparse level", "logs folder")
+	wants(t, posture(t, edited(t, `{"config":{"log_level":"detailed"}}`)), "log", "at the detailed level")
 	wants(t, lines, "stats", "Request statistics are off: no request is recorded.")
 	wants(t, lines, "transport", "plain HTTP")
 	wants(t, lines, "panel", "answer on this Mac alone")
@@ -349,13 +351,13 @@ func TestTheAnnouncementLineNamesWhyItIsOff(t *testing.T) {
 // Criterion 3, mechanised as far as it can be: every line names the snapshot
 // fields it read, each of those fields exists on the Go type the control
 // plane publishes, each is actually read by the code that builds the line,
-// and the lines that read nothing are exactly the three constants — the
-// transport, the panel's own bind and the request log — which are facts about
-// the binary that no snapshot field could carry. A line that read a field the
+// and the lines that read nothing are exactly the two constants — the
+// transport and the panel's own bind — which are facts about the binary that
+// no snapshot field could carry. A line that read a field the
 // snapshot does not have would render a blank or "undefined" as if it were an
 // observation.
 func TestEveryPostureLineTracesToTheSnapshot(t *testing.T) {
-	constants := map[string]bool{"transport": true, "panel": true, "log": true}
+	constants := map[string]bool{"transport": true, "panel": true}
 	// The most fully populated snapshot: every line present.
 	lines := posture(t, edited(t, priv(`{
 		"config": {"statistics":true,"bind_mode":"private-network"},
@@ -425,7 +427,7 @@ func TestThePostureReadsConfigFieldsUnderTheirStoredNames(t *testing.T) {
 	cfg := reflect.TypeOf(config.Config{})
 	src := readPanelSource(t)
 	code := extractFunction(t, src, "postureLines") + extractFunction(t, src, "advertising")
-	for _, field := range []string{"api_key", "statistics", "stats_months", "stats_max_bytes"} {
+	for _, field := range []string{"api_key", "statistics", "stats_months", "stats_max_bytes", "log_level"} {
 		if !jsonPathExists(cfg, field) {
 			t.Errorf("config.Config has no json field %q", field)
 		}

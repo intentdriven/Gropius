@@ -469,7 +469,7 @@ print(resp.choices[0].message.content)`;
 // second reading, no new way to be wrong. Each line names the snapshot fields
 // it read in `reads`, which internal/ui's tests hold to the Go type the
 // control plane publishes; a line with no fields is a fact about the binary
-// rather than an observation of this server, and there are three of those.
+// rather than an observation of this server, and there are two of those.
 //
 // What the RUNNING bind is — whether it reaches another machine, which mode
 // is in force, whether it is the wildcard — is read from state.bind, which
@@ -617,9 +617,17 @@ function postureLines(state) {
   lines.push({ id: 'announce', heading: 'The local network', text: announce,
     reads: ['bind.advertising', 'bind.port', 'bind.mode_in_force', 'bind.reaches_other_machines', 'hostname'] });
 
-  lines.push({ id: 'log', heading: 'The request log', reads: [],
+  // The level is applied live — a save moves it on the next line — so the
+  // stored setting is the level in force, unlike the bind and the advert.
+  const level = c.log_level || 'sparse';
+  lines.push({ id: 'log', heading: 'The request log', reads: ['config.log_level'],
     text: "Each request to the API's endpoints is written to the server log as its method, path, status and " +
-      'duration. The line carries no client address, no prompt, no answer and no key.' });
+      'duration. The line carries no client address, no prompt, no answer and no key. The log is at the ' +
+      `${level} level` + (level === 'detailed'
+        ? ', which adds to each line the figures the sparse level leaves out'
+        : ', one line for each thing that mattered') +
+      ", and is kept in the logs folder of this account's Gropius data folder, in a file created for this " +
+      'account alone.' });
 
   // What is recorded, where, and for how long. The store's figures ride the
   // snapshot while recording is on, so their absence is the observation — and
