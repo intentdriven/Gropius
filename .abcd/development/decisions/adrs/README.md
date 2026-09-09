@@ -13,11 +13,14 @@ An ADR is filed only when all three hold:
 Otherwise the rationale lives inline, or as a dated line in
 `.abcd/work/DECISIONS.md`. User-facing capability is an intent, not an ADR.
 
-Records are minted with `abcd decide "<title>"`, which allocates the id
-(`adr-<yymmddHHMMSS><rrrr>`), the date and the filename, and writes the four
-sections empty. The author writes the sections and sets `status: accepted`
-in the same change that puts the decision in force. Appending the row to the
-index below is a hand edit.
+Records are minted with `abcd decide "<title>"` from v0.8 of the tool
+onward, which allocates the id (`adr-<yymmddHHMMSS><rrrr>`), the date and the
+filename, and writes the four sections empty. An older binary has no `decide`
+command; a record minted by hand follows the shape of the file beside it —
+the same filename form, the same frontmatter keys, the same four sections.
+The author writes the sections and sets `status: accepted` in the same change
+that puts the decision in force. Appending the row to the index below is a
+hand edit.
 
 ## Index
 
