@@ -11,18 +11,19 @@ GitHub release notes.
 
 ## [Unreleased]
 
-### Fixed
+### Changed
 
-- **A request waiting for memory looks again while the model it is waiting on
-  is busy.** The pool wakes a waiting request whenever something changes, and
-  sleeps in between only for as long as it can prove nothing can have changed.
-  It counted a model with a request in flight as a model that cannot change,
-  which is the opposite of true — busy is the most fleeting state a model has —
-  so a request that had already waited out the grace, behind a single busy
-  model, could go to sleep for the whole maximum eviction wait. It now looks
-  again once per grace period instead. Nothing is served differently on a Mac
-  where requests keep arriving, which is what kept this rare; what it removes is
-  the reliance on someone else's request finishing to prod the queue awake.
+- **A request waiting for memory now looks again by itself, rather than only
+  when something wakes it.** The pool wakes every waiting request whenever room
+  might have appeared, and each request sleeps in between for as long as it can
+  work out that nothing can have changed on its own. Those two together were
+  correct — no wake-up was being missed — but the second had gaps in it: behind
+  a model that was busy serving someone else, a request could work out a sleep
+  of the whole maximum eviction wait, and was then relying entirely on being
+  woken. It now also looks again once per grace period regardless, so the
+  waiting is no longer answered by the wake-ups alone. **No request is served
+  differently.** This is one less thing that has to hold for the queue to
+  behave, not a stall anyone was hitting.
 
 ## [0.4.0] - 2026-09-08
 

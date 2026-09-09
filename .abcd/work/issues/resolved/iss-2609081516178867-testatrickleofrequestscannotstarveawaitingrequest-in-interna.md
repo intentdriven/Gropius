@@ -146,6 +146,33 @@ The sequential-loop observation and the corrected timeline came from the peer
 session that hit the failure; the loop shape, the `wakeDelayLocked` terms and
 the line references were checked here against the tree.
 
+## Resolution note, 2026-09-09: the mechanism is real and it is not what failed
+
+Both halves of the amendments above need correcting where they join.
+
+The `wakeDelayLocked` arithmetic is exactly as described and is fixed. But it
+could not have stalled anything on its own: every exit from in flight or from
+loading calls `wakeWaitersLocked` — a release, a stop, a failed load, a crashed
+process — and, as the amendment itself notes, the waiter is queued and its delay
+computed under `p.mu` with a buffered signal channel, so no wake is lost. A
+waiter behind a busy model was therefore always woken when that request ended.
+The defect was that the delay RESTED on that wake rather than standing on its
+own, which is a missing backstop and not a starvation. It is fixed as hardening.
+
+The CI failure was the test blocking on itself. It read the service time AFTER
+`close(stop); <-trickled`, while the trickle's `Acquire` ran on
+`context.Background()` and so could not see `stop`; once the waiter had taken
+the room, the trickle's next request wanted room held by a model the test
+goroutine was still holding in flight, which can only end at `MaxEvictionWait`.
+Reproduced at a 2s maximum: refusal at `waited=2.001111333s`, the waiter
+actually served after `301.413417ms`, the old shape reporting `2.302508292s` —
+the same 0.3s pairing as `20.003911208s` / `20.311390083s` above, scaled. The
+waiter-age clause fired at the grace in every run. See iss-2609081020327017 and
+the two dated lines of 2026-09-09 in `.abcd/work/DECISIONS.md`.
+
+All three probes the amendments ask for are now in the test's failure message,
+and the first is in the pool's debug logging.
+
 ## Grounds
 
 - pursued: a waiter past its grace behind a single busy model re-checks within the grace, shown by TestAWaiterPastItsGraceDoesNotParkToTheMaximumBehindAnInFlightModel computing 19.4s before and under 300ms after; wrong if a pool with a very small grace and a large maximum wait shows the re-check cadence costing measurable contention on p.mu, in which case the fix is a floor under the re-check rather than a return to the fallback.

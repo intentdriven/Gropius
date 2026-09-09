@@ -1241,43 +1241,54 @@ func (p *Pool) waitedBy(w *loadWaiter) time.Duration {
 	return time.Since(w.arrived)
 }
 
-// wakeDelayLocked is how long a waiter may sleep before something could have
-// changed that nothing will signal. Callers must hold p.mu.
+// wakeRecheckFloor is the shortest interval wakeDelayLocked will impose as its
+// unconditional re-check. The re-check tracks the grace, and EvictionGrace is
+// an operator setting with no lower bound: a grace of a millisecond would
+// otherwise have every parked waiter taking the pool's one lock a thousand
+// times a second. A quarter-second is far below any wait a person notices and
+// far above any rate that matters. It bounds only the re-check — a real
+// deadline this function can compute, an idle model's grace running out or the
+// waiter's own age reaching it, is still slept to exactly.
+const wakeRecheckFloor = 250 * time.Millisecond
+
+// wakeDelayLocked is how long a waiter may sleep before it looks again.
+// Callers must hold p.mu.
 //
-// Releases, stops, budget and pin changes all signal, so this covers only the
-// passage of time: the waiter's own age reaching the grace, the oldest
-// protected candidate's grace running out, and the maximum wait expiring. The
-// floor keeps a stopped clock from spinning.
+// Three of its terms are moments this function can compute, and it sleeps to
+// the nearest: the waiter's own age reaching the grace, an idle candidate's
+// grace running out, and the maximum wait expiring.
 //
-// A signal is not what this is for, though — it is the backstop for a change
-// that nothing signals, so no term of it may rest on one arriving. That is why
-// a model with a request in flight, or one still loading, bounds the delay by
-// the grace rather than dropping out of it: those states end when a request or
-// a load ends, which is an event and not a moment this function can compute, so
-// there is no deadline to sleep to and skipping them left the fallback — the
-// whole maximum wait — as the answer. A waiter already past its own grace,
-// behind a single busy candidate, then parked for twenty seconds on a state
-// that lasts as long as one request (iss-2609081516178867). Re-checking at the
-// grace is the cadence the rest of this function already runs at and costs a
-// parked waiter one locked look per grace, not a spin.
+// The fourth is a bound rather than a moment, and it is why this is not simply
+// a deadline calculator. Every change that could free room does signal — a
+// release, a stop, a failed load, a crashed process, a budget or pin change —
+// and the waiter is queued and its delay computed under p.mu with a buffered
+// signal channel, so a wake arriving between the unlock and the select is taken
+// rather than lost. That is the mechanism, and this is its backstop. A backstop
+// whose own terms rest on the mechanism it backs up is not one, so a parked
+// waiter also looks again at least once per grace whatever the entries look
+// like (iss-2609081516178867).
+//
+// The sharpest case for that, and the one that found it, is a candidate with a
+// request in flight or still loading: those states end on an event, not at a
+// moment, so the loop below rightly reads no deadline from them — and a waiter
+// past its own grace behind a single busy candidate was then left with no term
+// at all and fell back to the whole maximum wait. It was woken in practice,
+// by that request ending; it was one missing signal away from not being.
+//
+// wakeRecheckFloor keeps the re-check from becoming a spin on a very short
+// grace, and the millisecond floor keeps a stopped clock from spinning.
 func (p *Pool) wakeDelayLocked(w *loadWaiter) time.Duration {
 	waited := time.Since(w.arrived)
 	delay := p.maxWait - waited
 	if own := p.grace - waited; own > 0 && own < delay {
 		delay = own
 	}
+	if recheck := max(p.grace, wakeRecheckFloor); recheck < delay {
+		delay = recheck
+	}
 	now := p.opts.now()
 	for _, e := range p.entries {
-		// A pinned model is not a candidate however long anyone waits, so it
-		// bounds nothing. Checked first, ahead of the transient states below,
-		// because those are transient only for a model that could be taken.
-		if p.isPinnedLocked(e.repoID) {
-			continue
-		}
-		if e.inFlight > 0 || !isReady(e) {
-			if p.grace < delay {
-				delay = p.grace
-			}
+		if e.inFlight > 0 || !isReady(e) || p.isPinnedLocked(e.repoID) {
 			continue
 		}
 		if left := p.grace - now.Sub(e.lastUsed); left > 0 && left < delay {
