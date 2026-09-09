@@ -51,6 +51,7 @@
   <button class="tab" data-tab="search">Find Models</button>
   <button class="tab" data-tab="stats">Statistics</button>
   <button class="tab" data-tab="connect">Connect</button>
+  <button class="tab" data-tab="posture">Posture</button>
   <button class="tab" data-tab="settings">Settings</button>
 </nav>
 
@@ -182,6 +183,23 @@
 
   <h3>Python</h3>
   <pre id="pyExample" class="code"></pre>
+</section>
+
+<!-- ── Posture ───────────────────────────────────────────── -->
+<!-- One page that says what is on (itd-2609081718534201). Every line is
+     derived from the state snapshot and from no other source, in postureLines; the
+     page reports and changes nothing, and nothing brings a reader here but the
+     tab. -->
+<section id="tab-posture" class="panel">
+  <h2>Where this server stands</h2>
+  <p class="hint">Each line says what is, as Gropius sees it now, and says where its view
+    stops. Nothing here is a warning and nothing here changes a setting; the warning for
+    an exposed server with no key still appears at the top of this panel, and Settings
+    is where a setting changes.</p>
+  <div id="posture"></div>
+  <p class="hint">What each line is read from, and what none of them can see, is on the
+    <a href="https://github.com/intentdriven/Gropius/blob/main/docs/posture-reference.md">posture
+    page reference</a>.</p>
 </section>
 
 <!-- ── Settings ──────────────────────────────────────────── -->
