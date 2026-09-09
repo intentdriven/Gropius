@@ -25,6 +25,21 @@ import (
 	"github.com/intentdriven/Gropius/internal/stats"
 )
 
+// LoadingComment is the SSE comment line a streaming response carries, about
+// once a second, while the model it asked for is still being loaded.
+//
+// A colon starts a comment in the SSE format, so the signal rides the response
+// the client is already reading without changing its content type or its status
+// code, and a client that knows nothing about it skips the line as the format
+// requires. That is what lets it be added to a stream nobody has to opt into.
+//
+// NOTE: the emitter is a separate change and nothing writes this yet. It is
+// declared here, in the package that will send it, because the chat client
+// already watches for it and one of the two halves has to name the wire form
+// for the other to be held to — see the client pins in internal/archtest. When
+// the emitter lands it writes this constant rather than a literal of its own.
+const LoadingComment = ": loading"
+
 // Pool is the subset of runtime.Pool the gateway needs.
 type Pool interface {
 	Acquire(ctx context.Context, repoID string) (*runtime.Upstream, func(), error)

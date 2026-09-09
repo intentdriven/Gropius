@@ -5,6 +5,7 @@ import (
 	"regexp"
 	"testing"
 
+	"github.com/intentdriven/Gropius/internal/gateway"
 	"github.com/intentdriven/Gropius/internal/runtime"
 )
 
@@ -39,10 +40,17 @@ var gatewayResidencyField = regexp.MustCompile(
 var clientLoadingComment = regexp.MustCompile(
 	`(?m)^\s*let\s+modelLoadingComment\s*=\s*"([^"]*)"`)
 
-// clientChattableDefault matches the client's default for a models-list entry
-// that carries no chat capability at all.
+// clientChattableDefault matches the client's verdict on a models-list entry.
+// Both spellings of the same rule are accepted -- "yes unless the field is
+// present and false" -- because the rule is what matters and neither phrasing
+// can express the opposite default.
 var clientChattableDefault = regexp.MustCompile(
-	`var\s+chattable\s*:\s*Bool\s*\{\s*chat\s*\?\?\s*true\s*\}`)
+	`var\s+chattable\s*:\s*Bool\s*\{\s*(?:chat\s*\?\?\s*true|chat\s*!=\s*false)\s*\}`)
+
+// clientPickerFiltersOnChattable matches the picker's list being derived
+// through that verdict rather than from the served list directly.
+var clientPickerFiltersOnChattable = regexp.MustCompile(
+	`filter\(\\\.chattable\)`)
 
 // TestChatClientReadsTheResidencyTheGatewayPublishes holds the client's reading
 // of a model's residency to the field and the value the server writes.
@@ -62,8 +70,8 @@ func TestChatClientReadsTheResidencyTheGatewayPublishes(t *testing.T) {
 			t.Fatal("client/GropiusChat/GropiusChat.swift declares no `let state: String?` on its " +
 				"models decoder; the field the residency arrives under is unchecked")
 		}
-		gateway := readRepoFile(t, root, filepath.Join("internal", "gateway", "gateway.go"))
-		if !gatewayResidencyField.MatchString(gateway) {
+		gatewaySource := readRepoFile(t, root, filepath.Join("internal", "gateway", "gateway.go"))
+		if !gatewayResidencyField.MatchString(gatewaySource) {
 			t.Error(`internal/gateway/gateway.go no longer writes entry["state"] onto a models-list ` +
 				"entry; the chat client decodes the residency under that name")
 		}
@@ -85,13 +93,14 @@ func TestChatClientReadsTheResidencyTheGatewayPublishes(t *testing.T) {
 // TestChatClientRecognizesTheGatewaysLoadingComment holds the client's reading
 // of the streaming load signal to the wire form the gateway sends.
 //
-// While a streaming request waits for its model to load, the gateway emits SSE
-// comment lines -- lines beginning with a colon, which the SSE format defines
-// as comments and every conforming client already ignores -- reading
-// ": loading", about one a second, until the first data frame. That choice is
-// what lets the signal be added without changing the response's content type,
-// its status code, or what a client that knows nothing about it does with the
-// stream.
+// While a streaming request waits for its model to load, the gateway is to emit
+// SSE comment lines -- lines beginning with a colon, which the SSE format
+// defines as comments and every conforming client already ignores -- carrying
+// gateway.LoadingComment, about one a second, until the first data frame. That
+// choice is what lets the signal be added without changing the response's
+// content type, its status code, or what a client that knows nothing about it
+// does with the stream. The emitter is a separate change; the constant it will
+// write is already declared, and this is the client held to it.
 //
 // The client must recognize the same words. A client looking for another prefix
 // treats the comments as unknown lines and shows the ordinary generation
@@ -106,12 +115,14 @@ func TestChatClientRecognizesTheGatewaysLoadingComment(t *testing.T) {
 		t.Fatal("client/GropiusChat/GropiusChat.swift declares no modelLoadingComment; " +
 			"the comment the client watches the stream for is unchecked")
 	}
-	// The protocol's wire form, written out here rather than referenced from
-	// the gateway: the emitter is a separate change, and this is the contract
-	// it will be built to. When it lands, this literal becomes its constant.
-	if want := ": loading"; m[1] != want {
+	// gateway.LoadingComment, not a literal repeated here: a test that compares
+	// one spelling of the protocol against another spelling in its own file
+	// pins nothing, since both move together in one edit. The wire form has one
+	// home, in the package that sends it, and this is the client being held to
+	// it. The emitter is still to be written; the constant is not waiting on it.
+	if m[1] != gateway.LoadingComment {
 		t.Errorf("the chat client watches for the SSE comment %q; the gateway sends %q",
-			m[1], want)
+			m[1], gateway.LoadingComment)
 	}
 }
 
@@ -127,8 +138,16 @@ func TestChatClientOffersEveryModelAServerDoesNotRuleOut(t *testing.T) {
 	root := repoRootDir(t)
 	source := readRepoFile(t, root, filepath.Join("client", "GropiusChat", "GropiusChat.swift"))
 
+	// Two halves of the one behavior: the verdict defaults to yes, and the
+	// picker's list is actually derived through it. Either alone passes while
+	// the feature is broken -- a correct default nothing consults hides
+	// nothing, and a filter over a wrong default hides everything.
 	if !clientChattableDefault.MatchString(source) {
-		t.Error("client/GropiusChat/GropiusChat.swift does not derive its picker list with " +
-			"`chat ?? true`; a models list that publishes no chat capability must offer every model")
+		t.Error("client/GropiusChat/GropiusChat.swift does not decide chattable as `chat ?? true` " +
+			"(or `chat != false`); a models list that publishes no chat capability must offer every model")
+	}
+	if !clientPickerFiltersOnChattable.MatchString(source) {
+		t.Error("client/GropiusChat/GropiusChat.swift does not build its picker list with " +
+			`filter(\.chattable); a model a server rules out would be offered anyway`)
 	}
 }
