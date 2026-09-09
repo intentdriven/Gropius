@@ -104,6 +104,14 @@ type App struct {
 	// belongs to, so Close cannot see an empty map and a zero counter while a
 	// download is on its way in.
 	dlWG sync.WaitGroup
+
+	// measureDir sums a model directory's bytes. New sets it to dirSize and
+	// nothing else changes it in a running app; it is a seam because where
+	// this walk happens is the property, not an implementation detail. It has
+	// to finish before dlMu is taken, since the pool waits on that lock for
+	// every load, and only a test that can hold the walk still can tell the
+	// order the code is in from the order the machine happened to run it in.
+	measureDir func(string) int64
 }
 
 // download is one in-flight fetch.
@@ -198,6 +206,7 @@ func New(opts Options) (*App, error) {
 		startup:     opts.Config,
 		downloads:   map[string]*download{},
 		deleting:    map[string]bool{},
+		measureDir:  dirSize,
 	}
 
 	launcher := opts.Launcher
@@ -1209,7 +1218,7 @@ func (a *App) Download(repoID string) error {
 			// carries its context length from the moment it is ready, not only
 			// after the next startup rescan. Both touch the disk, so both are
 			// done here, before the lock.
-			bytes := dirSize(dest)
+			bytes := a.measureDir(dest)
 			contextLength := registry.ReadContextLength(dest)
 			// And what the Hub says this model is. It is the one reading here
 			// that is not on the disk — nothing in a model directory says

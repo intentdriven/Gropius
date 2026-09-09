@@ -105,6 +105,13 @@ GitHub release notes.
 
 ### Security
 
+- **The model actions bound the body they read.** Loading, unloading,
+  downloading, cancelling and deleting a model each take one model name, but
+  the body carrying it was read without a limit, so a local caller — or a page
+  in a browser reaching loopback — could make the server buffer as much as it
+  cared to send; the body is now capped at the same size the settings save
+  uses, and one over it is refused as too large.
+
 - **A page in a browser can no longer reach the control panel blind.** The
   panel refuses any request that did not come from this machine, and one of the
   things it looked at was the `Origin` header a cross-site request carries. A
