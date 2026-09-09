@@ -263,6 +263,42 @@ func (c *Client) Search(ctx context.Context, q SearchQuery) ([]Model, error) {
 	return models, nil
 }
 
+// RepoInfo returns one repo's summary, in the same shape a search result
+// carries: what the Hub says this model is.
+//
+// It exists for the download path, which needs the repo's pipeline tag and tags
+// and cannot get them any other way — a search result is not in hand when a
+// download is started by name, and nothing in the downloaded files says what
+// kind of model they are. One request, to the host the download is already
+// talking to, bounded by the same maxJSONBody every other decode here is.
+//
+// The caller decides what a failure means. For a download it means no category,
+// which is the same state as a repo the Hub does not tag; it never means the
+// model is unusable.
+func (c *Client) RepoInfo(ctx context.Context, repoID string) (Model, error) {
+	if repoID == "" {
+		return Model{}, errors.New("repo info: repoID is required")
+	}
+	u := c.baseURL() + "/api/models/" + escapePathSegments(repoID)
+	req, err := c.newRequest(ctx, http.MethodGet, u)
+	if err != nil {
+		return Model{}, err
+	}
+	resp, err := c.httpClient().Do(req)
+	if err != nil {
+		return Model{}, fmt.Errorf("read repo info for %s: %w", repoID, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return Model{}, apiError(resp, u)
+	}
+	var m Model
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxJSONBody)).Decode(&m); err != nil {
+		return Model{}, fmt.Errorf("decode repo info for %s: %w", repoID, err)
+	}
+	return m, nil
+}
+
 // maxJSONBody caps how large a Hub JSON response we will buffer/decode. Search
 // results and a single tree page are at most a few MB; a body near this limit is
 // a broken or hostile endpoint, not a real repo listing.

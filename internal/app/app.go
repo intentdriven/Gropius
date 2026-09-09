@@ -1186,6 +1186,12 @@ func (a *App) Download(repoID string) error {
 			// done here, before the lock.
 			bytes := dirSize(dest)
 			contextLength := registry.ReadContextLength(dest)
+			// And what the Hub says this model is. It is the one reading here
+			// that is not on the disk — nothing in a model directory says
+			// whether it transcribes speech or holds a conversation — so it is
+			// read from the Hub, once, at the only moment we are certain to be
+			// talking to it about this repo.
+			pipelineTag, tags := a.repoCategory(ctx, repoID)
 			var perr error
 			a.finishDownload(dl, func() {
 				perr = a.Registry.Put(registry.Model{
@@ -1193,6 +1199,8 @@ func (a *App) Download(repoID string) error {
 					Path:          dest,
 					Bytes:         bytes,
 					ContextLength: contextLength,
+					PipelineTag:   pipelineTag,
+					Tags:          tags,
 					State:         registry.StateReady,
 					Progress:      100,
 					AddedAt:       addedAt,
@@ -1253,6 +1261,36 @@ func (a *App) Download(repoID string) error {
 	return nil
 }
 
+// repoCategoryTimeout bounds the metadata request. The download it follows has
+// already succeeded, and the model is on disk: a Hub that has gone slow between
+// the last file and this call must not hold a finished download open, so the
+// wait is short and the answer optional.
+const repoCategoryTimeout = 15 * time.Second
+
+// repoCategory reads what HuggingFace says a model is: its pipeline tag and its
+// tags, as the Hub spells them.
+//
+// Best-effort by design. A failure — the Hub unreachable, the repo gated to a
+// token that lists files but not metadata, a body that will not decode —
+// records no category, which is exactly the state of a repo the Hub does not
+// tag: the model is ready, it is served, and a client is told nothing about its
+// kind rather than told something wrong. It is never an error a download fails
+// on, because the download has already succeeded by the time it is asked.
+//
+// Called before the registry write and outside dlMu, like the two readings
+// beside it: dlMu is on the model-load path, and a network request under it
+// would let a slow Hub decide how long every other model's load waits.
+func (a *App) repoCategory(ctx context.Context, repoID string) (string, []string) {
+	ctx, cancel := context.WithTimeout(ctx, repoCategoryTimeout)
+	defer cancel()
+	info, err := a.Hub.RepoInfo(ctx, repoID)
+	if err != nil {
+		a.Log.Info("the hub did not say what kind of model this is", "model", repoID, "err", err)
+		return "", nil
+	}
+	return info.PipelineTag, info.Tags
+}
+
 // canRestoreReady answers the disk half of the question restoreReady acts on:
 // was this model ready before the attempt, and do its files still validate?
 //
@@ -1284,6 +1322,8 @@ func (a *App) restoreReady(repoID, dest string, prior registry.Model) bool {
 		Path:          dest,
 		Bytes:         prior.Bytes,
 		ContextLength: prior.ContextLength,
+		PipelineTag:   prior.PipelineTag,
+		Tags:          prior.Tags,
 		State:         registry.StateReady,
 		Progress:      100,
 		AddedAt:       prior.AddedAt,

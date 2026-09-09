@@ -599,6 +599,17 @@ type Config struct {
 	StatsMonths   int   `json:"stats_months,omitempty"`
 	StatsMaxBytes int64 `json:"stats_max_bytes,omitempty"`
 
+	// ChatRule decides which models are published on the models list as able
+	// to hold a conversation, from the Hub's own words for what a model is.
+	// Absent — the default, and what a fresh install stores — means the rule
+	// Gropius ships (DefaultChatRule). It is not a second representation of
+	// that rule: a rule whose two lists are present and empty tests nothing,
+	// which is how an operator says "offer every model for chat".
+	//
+	// It filters nothing. Every model stays callable by name over the API
+	// whatever the rule says about it.
+	ChatRule ChatRule `json:"chat_rule,omitzero"`
+
 	// PerModel holds the per-model settings that are not sampling parameters,
 	// keyed by the registry's canonical repo id. A model with no entry runs on
 	// the machine-wide settings above, which is what every model does until the
@@ -913,6 +924,16 @@ func (c Config) Clone() Config {
 		for k, v := range c.PerModel {
 			out.PerModel[k] = v
 		}
+	}
+	// Both halves of the rule, and each only when it was set: the settings
+	// write path decodes a posted body into a clone, and a shared backing
+	// array would land a caller's words in the live rule before Validate had
+	// looked at them. A nil half stays nil, which is what "never set" is.
+	if c.ChatRule.PipelineTags != nil {
+		out.ChatRule.PipelineTags = append([]string(nil), c.ChatRule.PipelineTags...)
+	}
+	if c.ChatRule.RequiredTags != nil {
+		out.ChatRule.RequiredTags = append([]string(nil), c.ChatRule.RequiredTags...)
 	}
 	return out
 }
@@ -1447,6 +1468,7 @@ func Load(path string) (Config, Notices, error) {
 	n.Repaired = append(n.Repaired, cfg.sanitizeBudget()...)
 	n.Repaired = append(n.Repaired, cfg.sanitizeGrace()...)
 	n.Repaired = append(n.Repaired, cfg.sanitizeAPIKey()...)
+	n.Repaired = append(n.Repaired, cfg.sanitizeChatRule()...)
 	if err := cfg.Validate(); err != nil {
 		return Default(), Notices{}, &InvalidError{Path: path, Err: err, Parsed: cfg, Notices: n}
 	}
