@@ -11,6 +11,16 @@ GitHub release notes.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A model server that stops mid-sentence no longer grows the gateway's
+  memory.** A streamed answer is relayed a line at a time, and a server that
+  hung without finishing its line made that line grow for as long as it kept
+  writing. One line is now bounded by the same figure that bounds a whole
+  non-streamed answer, which no real chunk comes anywhere near: past it, the
+  answer ends, the reason is logged once, and the connection to the model
+  server is closed.
+
 ## [0.4.0] - 2026-09-08
 
 ### Added

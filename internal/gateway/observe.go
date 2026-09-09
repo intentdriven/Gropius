@@ -172,8 +172,14 @@ type relayOutcome struct {
 	upstreamCut bool
 	// clientGone is a write to the client that failed part-way.
 	clientGone bool
-	firstToken time.Time
-	usage      *usageCounts
+	// oversizeLine is an upstream line that reached maxStreamLine without a
+	// newline, which is the one way the relay itself ends an answer. It is a
+	// fact about this Gropius rather than about either side, so it is carried
+	// separately and logged once by the caller; the answer is cut short, so
+	// upstreamCut is set with it and the recorder needs nothing new.
+	oversizeLine bool
+	firstToken   time.Time
+	usage        *usageCounts
 }
 
 // relayOptions tell the relay what the observer needs and what the client

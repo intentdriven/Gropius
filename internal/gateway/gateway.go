@@ -332,6 +332,20 @@ const maxRequestBody = 32 << 20
 // hazard maxRequestBody exists to prevent on the request side.
 const maxResponseBody = 64 << 20
 
+// maxStreamLine caps one line of a streamed answer, which is the unit
+// streamRewriteSSE buffers before it can rewrite and relay it. A model server
+// that never emits a newline — hung mid-event, or writing something that is
+// not SSE at all — would otherwise grow that buffer without limit, the same
+// hazard the two caps above exist to prevent, on the third and last body the
+// gateway reads.
+//
+// Set to the whole-answer cap rather than to a figure of its own: one event of
+// a streamed answer is a fragment of the answer a non-streamed request returns
+// in one object, so a streamed line cannot legitimately be larger than
+// maxResponseBody, and anything the two caps share stays a single number to
+// change. A real chunk is a few hundred bytes.
+const maxStreamLine = maxResponseBody
+
 // bodyReadTimeout bounds how long a client may take to send its request body.
 // The server has no WriteTimeout (a generation legitimately streams for minutes),
 // which would otherwise leave a slow-uploading client holding a connection and a
@@ -555,7 +569,16 @@ func (g *Gateway) handleCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	copyResponseHeaders(w.Header(), resp.Header)
 	w.WriteHeader(resp.StatusCode)
-	obs.relayed(relayRewritingModel(w, resp, up.ModelArg, requested, relay))
+	out := relayRewritingModel(w, resp, up.ModelArg, requested, relay)
+	if out.oversizeLine {
+		// Once per answer, and only for the relay's own refusal: the status
+		// line has already gone out, so this is the only place the operator
+		// can be told why a stream stopped. Nothing of the line is logged —
+		// what it carries is the answer being generated.
+		g.log.Error("ended a streamed answer: the model server sent a line beyond the relay's limit",
+			"model", model, "limit", maxStreamLine)
+	}
+	obs.relayed(out)
 }
 
 // gropiusHeaders are the response headers Gropius writes itself, which an
@@ -804,8 +827,17 @@ func streamRewriteSSE(w http.ResponseWriter, src io.Reader, modelArg, requested 
 	// not the stream it would have got.
 	dropBlank := false
 	for {
-		line, err := br.ReadBytes('\n')
-		// ReadBytes returns the bytes it did read alongside the error that
+		line, err := readBoundedLine(br, maxStreamLine)
+		if errors.Is(err, errLineTooLong) {
+			// Nothing of this line is relayed and nothing more is read. The
+			// answer stops here, which is what upstreamCut says; the caller
+			// logs the reason once and its deferred Close on the upstream body
+			// ends that connection rather than leaving it to drain.
+			out.upstreamCut = true
+			out.oversizeLine = true
+			return out
+		}
+		// readBoundedLine returns the bytes it did read alongside the error that
 		// stopped it, so a line and the failure that truncated it can arrive
 		// together. Every path through the body below therefore falls out to
 		// the one error check at the bottom rather than continuing the loop:
@@ -862,6 +894,36 @@ func streamRewriteSSE(w http.ResponseWriter, src io.Reader, modelArg, requested 
 			out.upstreamCut = !errors.Is(err, io.EOF)
 			return out
 		}
+	}
+}
+
+// errLineTooLong reports a streamed line that reached maxStreamLine without a
+// newline in it.
+var errLineTooLong = errors.New("the model server sent a line beyond the relay's limit")
+
+// readBoundedLine reads one newline-terminated line, buffering no more than
+// limit bytes of it.
+//
+// bufio.Reader.ReadBytes would grow its buffer for as long as the model server
+// keeps writing, so a server hung mid-event — or writing something that is not
+// SSE at all — is the whole of what this bounds. What was read before the
+// limit is discarded rather than returned: it is half an event, and half an
+// event is not one; relaying it would hand a client a fragment of JSON as if
+// it were a chunk of the answer.
+func readBoundedLine(br *bufio.Reader, limit int) ([]byte, error) {
+	var line []byte
+	for {
+		// ReadSlice returns a view of the reader's own buffer, valid only
+		// until the next read, so each fragment is copied out as it is taken.
+		frag, err := br.ReadSlice('\n')
+		if len(line)+len(frag) > limit {
+			return nil, errLineTooLong
+		}
+		line = append(line, frag...)
+		if errors.Is(err, bufio.ErrBufferFull) {
+			continue
+		}
+		return line, err
 	}
 }
 
