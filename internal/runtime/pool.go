@@ -179,6 +179,10 @@ type PoolOptions struct {
 	HTTP *http.Client
 	// now is injectable for tests.
 	now func() time.Time
+	// drainWait replaces maxDrainWait, so a test can exercise the bound on
+	// waiting for a stopped model server without waiting it out in real time.
+	// Zero means maxDrainWait.
+	drainWait time.Duration
 }
 
 // Pool runs one model server process per model and routes to them.
@@ -208,6 +212,19 @@ type Pool struct {
 	// holds mu. A zero grace is the feature switched off.
 	grace   time.Duration
 	maxWait time.Duration
+	// drainBytes is the charged size of the model servers that have left the
+	// pool but whose processes have not exited yet. A stopped server holds its
+	// memory until the kernel reclaims it — up to the SIGTERM grace and the
+	// SIGKILL that follows — so crediting the budget at the moment the entry is
+	// deleted would let a replacement load on top of a victim that has released
+	// nothing. Guarded by mu, and given back in drainLocked's goroutine when
+	// the process's Done fires.
+	drainBytes int64
+	// drained is closed and replaced each time one of those processes exits. A
+	// replaced channel rather than a condition variable, so a load waiting for
+	// that memory can select on it alongside its own context. Guarded by mu;
+	// read it under the lock and wait on the value, never on the field.
+	drained chan struct{}
 	// waiters are the loads parked for want of room, oldest first. Guarded by
 	// mu; a waiter is never parked while holding it. Serving the head first is
 	// the whole fairness rule: serving whichever load is quickest would starve
@@ -291,6 +308,9 @@ func NewPool(opts PoolOptions) *Pool {
 		// mid-load and force wasteful re-probing.
 		opts.HTTP = &http.Client{}
 	}
+	if opts.drainWait <= 0 {
+		opts.drainWait = maxDrainWait
+	}
 	if opts.now == nil {
 		opts.now = time.Now
 	}
@@ -324,6 +344,7 @@ func NewPool(opts PoolOptions) *Pool {
 		pinned:      pinnedSet(opts.Pinned),
 		grace:       opts.EvictionGrace,
 		maxWait:     opts.MaxEvictionWait,
+		drained:     make(chan struct{}),
 		stopIdle:    make(chan struct{}),
 		idleDone:    make(chan struct{}),
 	}
@@ -518,6 +539,25 @@ func (p *Pool) isPinnedLocked(repoID string) bool {
 // ErrClosed is returned once the pool is shut down.
 var ErrClosed = errors.New("pool is closed")
 
+// errDraining marks the one refusal a caller answers by waiting rather than by
+// giving up: the room this load needs exists, but a model server that has been
+// stopped is still holding it. It is wrapped around the ordinary no-room
+// refusal, so a caller that stops waiting reports what every other full machine
+// reports and says nothing on the wire about what the pool is doing.
+//
+// Unexported: it never leaves this package. Acquire either waits it out or
+// returns the *NoRoomError beside it.
+var errDraining = errors.New("a stopped model server has not exited yet")
+
+// maxDrainWait bounds how long one acquisition waits for stopped model servers
+// to exit before it gives up and takes the no-room refusal.
+//
+// stopEntryLocked allows a stop 20 seconds, which is the SIGTERM grace and the
+// SIGKILL that follows it; a process still holding memory past this is one the
+// kernel has not reclaimed, and the client is owed an answer rather than an
+// open connection.
+const maxDrainWait = 25 * time.Second
+
 // Acquire returns a ready upstream for repoID, loading the model if necessary
 // and evicting others to make room.
 //
@@ -539,6 +579,12 @@ func (p *Pool) Acquire(ctx context.Context, repoID string) (*Upstream, func(), e
 // start by one maximum wait per model — and at start-up there is nobody to
 // protect, since no client has been served yet. Everything a client can reach
 // goes through Acquire.
+//
+// It still waits for a model server it has evicted to exit before starting its
+// own. That is not a grace: nothing is being protected and no policy is being
+// applied, the machine simply has not handed the memory back yet, and starting
+// a second server on top of the first is the overlap the budget exists to
+// prevent. The wait is bounded by maxDrainWait.
 func (p *Pool) AcquireNow(ctx context.Context, repoID string) (*Upstream, func(), error) {
 	return p.acquire(ctx, repoID, false)
 }
@@ -552,6 +598,10 @@ func (p *Pool) acquire(ctx context.Context, repoID string, mayWait bool) (*Upstr
 	var (
 		w      *loadWaiter
 		waited time.Duration
+		// drainUntil is when this acquisition stops waiting for a stopped model
+		// server to exit. Set on the first such wait, so the bound is on the
+		// acquisition and not on each pass round the loop.
+		drainUntil time.Time
 	)
 
 	p.mu.Lock()
@@ -607,6 +657,44 @@ func (p *Pool) acquire(ctx context.Context, repoID string, mayWait bool) (*Upstr
 			// still worth re-checking (can this ever fit now, is it still
 			// inside its maximum) needs only what the waiter already carries.
 			err = p.noRoomLocked(w.need)
+		}
+		// A load whose room is being handed back by an exiting model server
+		// waits for that exit, whatever else this caller is or is not allowed
+		// to wait for. It is not an eviction grace — nothing is being protected
+		// and no policy is being applied — it is the machine physically not
+		// having given the memory back yet, so even a caller that honours no
+		// grace waits it out. Whatever queue place this caller holds it keeps.
+		if errors.Is(err, errDraining) {
+			if drainUntil.IsZero() {
+				drainUntil = time.Now().Add(p.opts.drainWait)
+			}
+			if left := time.Until(drainUntil); left > 0 {
+				drained := p.drained
+				p.mu.Unlock()
+				timer := time.NewTimer(left)
+				select {
+				case <-drained:
+				case <-timer.C:
+				case <-ctx.Done():
+					timer.Stop()
+					p.mu.Lock()
+					p.leaveQueueLocked(w)
+					p.mu.Unlock()
+					return nil, nil, ctx.Err()
+				}
+				timer.Stop()
+				p.mu.Lock()
+				continue
+			}
+			// Waited the maximum. Drop the sentinel and be refused the way
+			// every other load on a full machine is: the gateway writes a pool
+			// error's text verbatim into the 503 body every LAN client reads,
+			// and what this machine is doing with its own memory is not a
+			// client's business.
+			var noRoom *NoRoomError
+			if errors.As(err, &noRoom) {
+				err = noRoom
+			}
 		}
 		verdict := p.waitVerdictLocked(mayWait, w, src, err)
 		if verdict != waitYes {
@@ -807,6 +895,14 @@ func (p *Pool) startLocked(repoID string, waited time.Duration, adm admission) (
 	if !enough {
 		return nil, p.noRoomLocked(need)
 	}
+	// The victims stopped just above — and any model another caller stopped a
+	// moment ago — are out of the pool but not out of memory. Launching now is
+	// exactly the overlap the budget exists to prevent, so this load waits for
+	// those processes to go instead. Bounded: the caller gives up after
+	// maxDrainWait and takes the ordinary no-room refusal.
+	if p.residentChargeLocked()+need > p.maxResident {
+		return nil, fmt.Errorf("%w: %w", errDraining, p.noRoomLocked(need))
+	}
 
 	port, err := freePort()
 	if err != nil {
@@ -986,14 +1082,33 @@ func allows(adm admission, victims []*entry) bool {
 	}
 }
 
-// evictionPlanLocked names the models that would have to go for need bytes to
-// fit, least recently used first, and says whether taking them all is enough.
-// Callers must hold p.mu.
-func (p *Pool) evictionPlanLocked(need int64, waited time.Duration) ([]*entry, bool) {
+// liveChargeLocked is what the models the pool is holding are charged against
+// the memory budget. Callers must hold p.mu.
+func (p *Pool) liveChargeLocked() int64 {
 	var used int64
 	for _, e := range p.entries {
 		used += capability.LoadCost(e.bytes)
 	}
+	return used
+}
+
+// residentChargeLocked is what this machine's memory is actually spoken for:
+// every model the pool is holding, plus every one it has stopped that has not
+// exited yet. It is what a launch is measured against, because a victim told to
+// go a moment ago is still holding its weights. Callers must hold p.mu.
+func (p *Pool) residentChargeLocked() int64 {
+	return p.liveChargeLocked() + p.drainBytes
+}
+
+// evictionPlanLocked names the models that would have to go for need bytes to
+// fit, least recently used first, and says whether taking them all is enough.
+// Callers must hold p.mu.
+func (p *Pool) evictionPlanLocked(need int64, waited time.Duration) ([]*entry, bool) {
+	// Live entries only. The models on their way out are counted where the
+	// launch is decided (residentChargeLocked), not here: a plan that counted
+	// them would name victims to free room that an exiting process is about to
+	// hand back, killing a healthy model to cover a wait of a few seconds.
+	used := p.liveChargeLocked()
 	if used+need <= p.maxResident {
 		return nil, true
 	}
@@ -1258,18 +1373,42 @@ func (p *Pool) wakeDelayLocked(w *loadWaiter) time.Duration {
 
 // stopEntryLocked removes an entry and stops its process, reporting why it
 // went. Callers must hold p.mu.
+//
+// The entry leaves the pool at once — it must never serve another request, and
+// it must not be a candidate for a second stop — but its memory does not come
+// back until the process does. Until then the charge sits in the drain tally,
+// where every admission decision still counts it.
 func (p *Pool) stopEntryLocked(e *entry, reason StopReason) {
 	delete(p.entries, config.FoldRepoID(e.repoID))
 	p.notify(func(o PoolObserver) { o.EntryStopped(e.repoID, reason) })
-	// Room has just appeared, whatever took it away.
-	p.wakeWaitersLocked()
 	proc := e.proc
+	if proc == nil {
+		// Nothing is holding the memory, so nothing has to be waited for.
+		p.wakeWaitersLocked()
+		return
+	}
+	charge := capability.LoadCost(e.bytes)
+	p.drainBytes += charge
+	// A prod, not a promise of room: a waiter re-reads the pool when it comes
+	// back and will find this charge still counted until the process exits.
+	p.wakeWaitersLocked()
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-		defer cancel()
-		if proc != nil {
-			_ = proc.Stop(ctx)
-		}
+		_ = proc.Stop(ctx)
+		cancel()
+		// Stop returning is not the process being gone: it gives up on a server
+		// that will not die even after SIGKILL, and such a server is still
+		// holding its memory. Done is the only honest signal.
+		<-proc.Done()
+
+		p.mu.Lock()
+		p.drainBytes -= charge
+		// Closing and replacing the channel is the broadcast: every load parked
+		// for this memory wakes and re-reads the pool under the lock.
+		close(p.drained)
+		p.drained = make(chan struct{})
+		p.wakeWaitersLocked()
+		p.mu.Unlock()
 	}()
 }
 

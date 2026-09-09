@@ -11,6 +11,20 @@ GitHub release notes.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A swapped-out model keeps its share of the memory budget until it is
+  really gone.** Evicting a model handed its memory back on paper the moment it
+  left the pool, and the replacement was started straight away — while the
+  first server was still shutting down and still holding its weights. On a
+  server that does not stop at once the two overlapped by the whole of the
+  first one's footprint, which is the memory blowup the budget exists to
+  prevent. The model being replaced is now told to go at once, as before, but
+  the request that wanted its room waits for the process to actually exit
+  before its own model is started. A stopped server that will not go at all no
+  longer holds the machine indefinitely either: the waiting request is refused
+  the way any other request that cannot be served is.
+
 ## [0.4.0] - 2026-09-08
 
 ### Added

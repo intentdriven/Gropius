@@ -52,9 +52,10 @@ the one thing they were not asking for. The new figure governs the next load
 instead, and the panel reports the machine as over its budget until the models
 resident at the time go by the usual rules.
 
-The budget is also not a hard ceiling in the seconds around a swap: a model
-being replaced is credited its memory as the replacement starts, so the two
-overlap while the first exits.
+A swap does not lift the ceiling either. A model being replaced keeps its share
+of the budget until its server process has actually gone, so the request that
+needed the room waits out those seconds rather than starting a second server on
+top of the first.
 
 ## Choosing a figure
 

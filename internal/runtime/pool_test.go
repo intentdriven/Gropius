@@ -41,7 +41,13 @@ type fakeProc struct {
 	done    chan struct{}
 	stopped chan struct{}
 	once    sync.Once
-	err     error
+	exited  sync.Once
+	// holdExit keeps Done() open after Stop returns, so a test can hold a
+	// server in the state a real one is in between being told to go and the
+	// kernel actually reclaiming its memory: told to stop, still resident.
+	// exit() ends it.
+	holdExit bool
+	err      error
 }
 
 func (p *fakeProc) Done() <-chan struct{} { return p.done }
@@ -50,11 +56,16 @@ func (p *fakeProc) Pid() int              { return 4242 }
 func (p *fakeProc) Stop(ctx context.Context) error {
 	p.once.Do(func() {
 		p.srv.Close()
-		close(p.done)
 		close(p.stopped)
+		if !p.holdExit {
+			p.exit()
+		}
 	})
 	return nil
 }
+
+// exit closes Done, as the operating system does when the process finally goes.
+func (p *fakeProc) exit() { p.exited.Do(func() { close(p.done) }) }
 
 // fakeLauncher stands up a fake mlx server per model, and records launches.
 type fakeLauncher struct {
@@ -67,6 +78,10 @@ type fakeLauncher struct {
 	// dieAfter makes the process exit on its own shortly after launch, as a
 	// real model server does when the weights are corrupt.
 	dieAfter map[string]bool
+	// holdExitFor names a model whose process does not exit when it is stopped
+	// until the test says so, which is what a real server does for the length
+	// of its SIGTERM grace: out of the pool, still holding its memory.
+	holdExitFor string
 
 	mu        sync.Mutex
 	prechecks int
@@ -120,7 +135,12 @@ func (l *fakeLauncher) Launch(ctx context.Context, spec Spec) (Process, error) {
 	// The pool addresses the server by port, so the fake must answer there. We
 	// cheat by rewriting the pool's expected port to the httptest port via a
 	// custom HTTP client in the tests below.
-	p := &fakeProc{srv: srv, done: make(chan struct{}), stopped: make(chan struct{})}
+	p := &fakeProc{
+		srv:      srv,
+		done:     make(chan struct{}),
+		stopped:  make(chan struct{}),
+		holdExit: l.holdExitFor == spec.RepoID,
+	}
 
 	l.launched = append(l.launched, spec.RepoID)
 	l.specs[spec.RepoID] = spec
@@ -131,7 +151,7 @@ func (l *fakeLauncher) Launch(ctx context.Context, spec Spec) (Process, error) {
 		p.err = errors.New("exit status 1")
 		go func() {
 			time.Sleep(20 * time.Millisecond)
-			p.once.Do(func() { srv.Close(); close(p.done); close(p.stopped) })
+			p.once.Do(func() { srv.Close(); close(p.stopped); p.exit() })
 		}()
 	}
 	return p, nil
