@@ -11,6 +11,18 @@ GitHub release notes.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A streamed answer the client hung up on is no longer recorded as
+  cancelled.** An SSE client that treats `data: [DONE]` as the end of the
+  answer — most of them do — closes its socket on that line, without reading
+  the blank line after it. That close made the last two steps of relaying fail:
+  writing the terminator, and reading the model server's body to its end. The
+  request was then filed as cancelled and its token counts thrown away, so the
+  usage figures were short by exactly the requests that went best. An answer
+  that reached its terminal event is now recorded as delivered, with its
+  counts, whatever happens to the tidying-up after it.
+
 ## [0.4.0] - 2026-09-08
 
 ### Added

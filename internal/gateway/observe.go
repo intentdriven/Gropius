@@ -107,8 +107,15 @@ func (o *observation) relayed(out relayOutcome) {
 	// and the status line has already gone out saying it was. Which of the two
 	// it was is read off the side that actually failed, not off a cancellation
 	// that may or may not have been delivered yet.
-	o.delivered = !out.clientGone && !out.upstreamCut
-	if o.record.Class != stats.ClassOK {
+	//
+	// An answer that reached its terminal event stopped nowhere: it was
+	// delivered in full, and the failure the relay reports is a failure of the
+	// tidying-up after it. Recording that as a cut answer would throw the
+	// request's token counts away, which is to say the dashboard would
+	// undercount exactly the requests whose clients hung up the moment they
+	// had the whole answer.
+	o.delivered = out.complete || (!out.clientGone && !out.upstreamCut)
+	if o.record.Class != stats.ClassOK || out.complete {
 		return
 	}
 	switch {
@@ -172,6 +179,14 @@ type relayOutcome struct {
 	upstreamCut bool
 	// clientGone is a write to the client that failed part-way.
 	clientGone bool
+	// complete reports that the answer's terminal "[DONE]" event reached the
+	// client. Past that point there is no more answer: the blank line that
+	// ends the event, and the read that finds the model server's EOF, are
+	// bookkeeping the client has already stopped waiting for. A client that
+	// hangs up on "[DONE]" — which is what an SDK treating it as the end does
+	// — makes both of them fail, so the two flags above are read in its light
+	// rather than on their own.
+	complete   bool
 	firstToken time.Time
 	usage      *usageCounts
 }
