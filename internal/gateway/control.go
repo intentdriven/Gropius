@@ -318,8 +318,6 @@ func residentCharge(resident []runtime.Resident) int64 {
 func (c *Control) handleStats(w http.ResponseWriter, r *http.Request) {
 	view := c.App.Stats.View()
 	if view.Enabled {
-		status := c.App.StatsStore.Status()
-		view.Store = &status
 		// And what is left of the days the store no longer holds in detail. A
 		// month whose records retention has dropped still has its per-model
 		// totals, and the view says so rather than showing a gap where the
@@ -331,19 +329,35 @@ func (c *Control) handleStats(w http.ResponseWriter, r *http.Request) {
 				view.Summaries = append(view.Summaries, d)
 				return true
 			}); err != nil {
-			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			switch {
+			case errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded):
 				// The reader went away. There is no socket left to answer, and
 				// logging it at Warn would let anyone who can open this
 				// endpoint write an unbounded run of failure lines into the
 				// operator's log.
 				c.App.Log.Debug("a reading of the request statistics summary was abandoned", "err", err)
 				return
+			case errors.Is(err, stats.ErrFlushTimedOut):
+				// A store that has stopped answering rather than one that is
+				// broken. This endpoint is what the panel polls, so it is
+				// answered rather than refused — the live figures are in
+				// memory and are worth showing — and the store status below
+				// carries Stalled, which is what the panel says it out loud
+				// from. Debug, not Warn: the store logs the spell once, and a
+				// line per poll would be an unbounded run of them.
+				c.App.Log.Debug("the request statistics summary was read without a flush the writer answered", "err", err)
+			default:
+				// Logged, not returned: the live figures are worth showing even
+				// when the summary cannot be read, and the reason names the store's
+				// directory, which the control plane must not publish.
+				c.App.Log.Warn("the request statistics summary could not be read", "err", err)
 			}
-			// Logged, not returned: the live figures are worth showing even
-			// when the summary cannot be read, and the reason names the store's
-			// directory, which the control plane must not publish.
-			c.App.Log.Warn("the request statistics summary could not be read", "err", err)
 		}
+		// After the reading, not before it: the figures the panel is handed
+		// have to describe the reading it was handed them with — the lines it
+		// could not use, and a writer it waited on and gave up.
+		status := c.App.StatsStore.Status()
+		view.Store = &status
 	}
 	writeJSON(w, http.StatusOK, view)
 }

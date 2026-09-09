@@ -119,6 +119,32 @@ GitHub release notes.
   address itself, so the pane shows the address Gropius is serving on and saves
   it back unchanged.
 
+
+- **A disk that has stopped answering no longer holds the usage dashboard
+  open.** Every reading of the statistics store starts by flushing the writer,
+  so that it shows what has been recorded rather than what happened to have
+  reached the disk. That flush waited with nothing to interrupt it: closing the
+  panel did not stop it, and while it waited it held one of the two readings the
+  store allows at once, so a stalled disk could leave the dashboard unable to
+  answer anyone. The wait now ends with the reader — closing the panel stops the
+  work — and, for a panel left open, after ten seconds. The two views say so in
+  the two ways that suit them: the historical tables report a reading that
+  failed, and the live figures, which are in memory, are still shown, with
+  Settings saying beside them that the disk did not answer in time and that they
+  may not include the newest records. Either way it is said out loud rather than
+  left as a figure quietly missing part of the story, and it clears itself as
+  soon as the disk answers again.
+
+- **A streamed answer the client hung up on is no longer recorded as
+  cancelled.** An SSE client that treats `data: [DONE]` as the end of the
+  answer — most of them do — closes its socket on that line, without reading
+  the blank line after it. That close made the last two steps of relaying fail:
+  writing the terminator, and reading the model server's body to its end. The
+  request was then filed as cancelled and its token counts thrown away, so the
+  usage figures were short by exactly the requests that went best. An answer
+  that reached its terminal event is now recorded as delivered, with its
+  counts, whatever happens to the tidying-up after it.
+
 ## [0.4.0] - 2026-09-08
 
 ### Added

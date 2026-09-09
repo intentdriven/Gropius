@@ -893,6 +893,12 @@ func streamRewriteSSE(w http.ResponseWriter, src io.Reader, modelArg, requested 
 						return out
 					}
 					_ = rc.Flush()
+					// Written and flushed: if that was the terminal event, the
+					// client has the whole answer, whatever becomes of the two
+					// lines that follow it.
+					if isTerminalEvent(payload) {
+						out.complete = true
+					}
 				}
 			} else if isBlankLine(line) && dropBlank {
 				dropBlank = false
@@ -938,6 +944,14 @@ func cutDataPrefix(line []byte) (prefix, payload []byte, ok bool) {
 		rest = after
 	}
 	return prefix, rest, true
+}
+
+// isTerminalEvent reports whether an event's payload is the "[DONE]" sentinel
+// that ends an OpenAI-compatible stream. It is not JSON and never parses, so
+// it is recognized as the text it is, allowing for whitespace a server may
+// pad it with.
+func isTerminalEvent(payload []byte) bool {
+	return bytes.Equal(bytes.TrimSpace(payload), []byte("[DONE]"))
 }
 
 // isBlankLine reports whether a line read off an SSE body is the empty line
