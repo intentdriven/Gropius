@@ -359,6 +359,33 @@
     </fieldset>
 
     <fieldset class="group">
+      <legend>Server log</legend>
+      <label>
+        <span>How much the log says</span>
+        <select id="setLogLevel">
+          <option value="sparse">Sparse — one line per event that mattered</option>
+          <option value="detailed">Detailed — the figures behind each one</option>
+        </select>
+      </label>
+      <p class="hint">Gropius keeps its own log in your account's data folder, beside the
+        model servers' logs. <strong>Sparse</strong>, the default, writes a line for each
+        thing that mattered: a request refused and which refusal it was, a model loading or
+        leaving memory, a model server that would not start, the server starting and
+        stopping, and a save on this page. <strong>Detailed</strong> keeps those lines and
+        adds the figures they leave out — how long a load took, how many requests were
+        already in flight, the memory budget, how long a request waited, and the error
+        behind a launch that failed. Neither level ever writes a prompt, an answer, an API
+        key, a HuggingFace token or the address of the client that sent a request. Changing
+        this takes effect on the next line; nothing needs restarting. The log is kept to a
+        fixed size and the oldest file is removed as it grows. This is Gropius's own log
+        level and never the model servers', which are always run at their INFO level — at
+        their debug level they write prompts and answers to their own logs, and no setting
+        here can ask for that. The
+        <a href="https://github.com/intentdriven/Gropius/blob/main/docs/logging.md">logging
+        page</a> says what each level writes and where the file is.</p>
+    </fieldset>
+
+    <fieldset class="group">
       <legend>Merge system messages</legend>
       <p class="hint">Some models refuse a conversation whose instructions are not all at
         the top, so an assistant that repeats its instructions mid-conversation gets an

@@ -647,6 +647,9 @@ function renderSettings() {
   // this panel is shown.
   $('setStatsMB').value = Math.round((c.stats_max_bytes || 0) / (1024 * 1024));
   renderStatsStore();
+  // An absent value is the default, not a blank: a settings file written
+  // before this field existed, and a fresh install, both mean sparse.
+  $('setLogLevel').value = c.log_level || 'sparse';
   writeSampling('input', c.sampling);
   overrides = {};
   Object.entries(c.models || {}).forEach(([id, ms]) => {
@@ -1117,6 +1120,7 @@ $('settingsForm').addEventListener('submit', async (e) => {
     statistics:         $('setStats').checked,
     stats_months:       parseInt($('setStatsMonths').value, 10) || 6,
     stats_max_bytes:    (parseInt($('setStatsMB').value, 10) || 200) * 1024 * 1024,
+    log_level:          $('setLogLevel').value,
     // A blank sampling field is sent as null, not as zero: the model server is
     // handed a flag only for a parameter that has a value.
     sampling:           readSampling('input'),
