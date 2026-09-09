@@ -192,8 +192,15 @@
       <select id="setHost">
         <option value="0.0.0.0">0.0.0.0 — reachable from your whole network</option>
         <option value="127.0.0.1">127.0.0.1 — this Mac only</option>
+        <!-- Labeled from the live state: the address it would bind, or why it
+             cannot be chosen. -->
+        <option value="private-network">A private network</option>
       </select>
     </label>
+    <p id="bindNotice" class="hint" hidden></p>
+    <p class="hint">The server takes its addresses once, at startup, so a change
+      here applies when Gropius next starts. Until then the Connect tab lists
+      what it is answering on.</p>
     <label>
       <span>Port</span>
       <input id="setPort" type="number" min="1" max="65535">

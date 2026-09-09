@@ -161,7 +161,7 @@ func TestSetConfigRefusesABudgetBelowThePinnedSum(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	sum := 2 * runtime.LoadCost(20*gb)
+	sum := 2 * capability.LoadCost(20*gb)
 	lower := base.Clone()
 	lower.MaxResidentBytes = sum - 1
 	err = a.SetConfig(lower)
@@ -432,13 +432,13 @@ func TestABudgetTooSmallForAnyModelIsWarnedAbout(t *testing.T) {
 	if w == "" {
 		t.Fatal("a budget too small to hold any model on this Mac draws no warning")
 	}
-	if !strings.Contains(w, runtime.HumanBytes(runtime.LoadCost(2*gb))) {
+	if !strings.Contains(w, runtime.HumanBytes(capability.LoadCost(2*gb))) {
 		t.Errorf("warning = %q, want it to name what the smallest model on this Mac costs", w)
 	}
 
 	// A budget that holds the smallest model is not warned about, even though
 	// it cannot hold the largest: what to keep is the operator's business.
-	c.MaxResidentBytes = runtime.LoadCost(2 * gb)
+	c.MaxResidentBytes = capability.LoadCost(2 * gb)
 	if err := a.SetConfig(c); err != nil {
 		t.Fatal(err)
 	}
