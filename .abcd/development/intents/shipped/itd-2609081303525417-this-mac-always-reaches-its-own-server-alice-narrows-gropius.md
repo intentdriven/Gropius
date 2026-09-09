@@ -109,7 +109,8 @@ unbracketed IPv6 fault is closed by building every address with JoinHostPort.
 
 ## Audit Notes
 
-_Empty. Populated by intent-auditor when intent moves to shipped/._
+<!-- abcd-review: OWED receipt=rcp-adf339cc8e59 -->
+Fidelity review OWED (receipt rcp-adf339cc8e59).
 
 ## Grounds
 

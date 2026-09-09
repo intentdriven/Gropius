@@ -149,3 +149,33 @@ func write(t *testing.T, path, body string) {
 		t.Fatal(err)
 	}
 }
+
+// The lockdown narrows the bind, and the bind is not only the Host field any
+// more. A configuration that fails Validate for any reason must not go on
+// resolving a private-network address: the mode is part of what "locked down
+// to loopback" locks down, or the narrowing is a bind the operator cannot see
+// in the field it was written in (adr-2609091123526871 rule 6).
+func TestALockedDownConfigurationDropsThePrivateNetworkMode(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	write(t, path, `{
+	  "host": "not an ip",
+	  "bind_mode": "private-network",
+	  "port": 12345,
+	  "api_key": "a-key-the-operator-chose"
+	}`)
+
+	got := loadStartupConfig(path)
+
+	if got.Config.BindMode != config.BindModeHost {
+		t.Errorf("BindMode = %q, want the default — a locked-down bind is loopback, and a mode that still resolves an address is not that", got.Config.BindMode)
+	}
+	if got.Config.Host != loopbackBind {
+		t.Errorf("Host = %q, want %q", got.Config.Host, loopbackBind)
+	}
+	if got.Config.APIKey != "a-key-the-operator-chose" {
+		t.Errorf("APIKey = %q — locking the bind down still keeps everything else", got.Config.APIKey)
+	}
+	if got.Config.ExposedToLAN() {
+		t.Error("ExposedToLAN() is true on a locked-down configuration — the mode is what makes it true, and it was supposed to be gone")
+	}
+}
