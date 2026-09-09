@@ -90,7 +90,8 @@ All four resolved on 2026-09-09 at interview: the prompt's size is estimated fro
 
 ## Audit Notes
 
-_Empty. Populated by intent-auditor when intent moves to shipped/._
+<!-- abcd-review: OWED receipt=rcp-2d5e0677298b -->
+Fidelity review OWED (receipt rcp-2d5e0677298b).
 
 ## Grounds
 
