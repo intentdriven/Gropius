@@ -508,10 +508,49 @@ function describeSampling(values) {
     .join(' · ');
 }
 
+// extraBindOption reports the bind address the select has to be given an
+// option for before the stored host can be assigned to it, or null when it
+// already offers that address.
+//
+// HTMLSelectElement.value has no notion of a value the element does not carry:
+// assigning one sets selectedIndex to -1 and leaves .value the empty string. A
+// host config.json accepts and this select never offered — "localhost", "[::1]",
+// one specific address — was therefore posted back as "" on every save, a save
+// that changed nothing about the bind included, and refused with "host must not
+// be empty": a field the pane never showed the operator as wrong, and nothing
+// on the pane saveable again until they edited config.json by hand.
+function extraBindOption(host, offered) {
+  if (!host || offered.includes(host)) return null;
+  return host;
+}
+
+// renderBindOptions makes the bind-address select offer the host in force,
+// labeled with the address itself, so the value round-trips and the pane shows
+// the bind Gropius is actually serving on rather than a blank control.
+//
+// The option added last time is dropped first. renderSettings runs on every
+// live update, so without that a pane left open across a bind change would
+// collect one option per address it has held, and offer the operator addresses
+// this Mac no longer serves on.
+function renderBindOptions(select, host) {
+  for (const opt of Array.from(select.options)) {
+    if (opt.dataset.extraBind) opt.remove();
+  }
+  const extra = extraBindOption(host, Array.from(select.options, (o) => o.value));
+  if (extra === null) return;
+  const opt = document.createElement('option');
+  opt.value = extra;
+  opt.textContent = extra;
+  opt.dataset.extraBind = 'true';
+  select.appendChild(opt);
+}
+
 function renderSettings() {
   // Don't stomp on what the user is typing while live updates arrive.
   if (settingsTouched) return;
   const c = state.config;
+  // Before the assignment, never after: an unoffered value assigns as "".
+  renderBindOptions($('setHost'), c.host);
   $('setHost').value = c.host;
   $('setPort').value = c.port;
   $('setKey').value  = c.api_key || '';

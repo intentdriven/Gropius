@@ -114,25 +114,33 @@ func (c *Control) handleInstance(w http.ResponseWriter, r *http.Request) {
 //   - Origin allow-list: a cross-site POST from evil.com carries its origin. The
 //     real UI is same-origin (a loopback origin), so any other origin is refused.
 //     This blocks classic CSRF, which needs no rebinding.
+//
+// The three checks are fromThisMachine, which is where the rule lives: the
+// models list admits a keyless install's loopback client on exactly the same
+// terms, and two spellings of "came from this machine" would be two things to
+// keep right. Only the refusal message is the control plane's own.
 func loopbackOnly(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !isLoopback(r.RemoteAddr) {
-			writeError(w, http.StatusForbidden,
-				"the Gropius control panel is only reachable from the computer it runs on")
-			return
-		}
-		if !isLoopbackHost(r.Host) {
-			writeError(w, http.StatusForbidden,
-				"unrecognized Host header — the control panel only answers to localhost")
-			return
-		}
-		if origin := r.Header.Get("Origin"); origin != "" && !isLoopbackOrigin(origin) {
-			writeError(w, http.StatusForbidden,
-				"cross-origin request to the control panel refused")
+		if !fromThisMachine(r) {
+			writeError(w, http.StatusForbidden, loopbackRefusal(r))
 			return
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// loopbackRefusal says which of fromThisMachine's checks refused r, so the
+// operator reading a 403 learns what to change. Evaluated only on the refusal
+// path, and it enumerates the same checks in the same order.
+func loopbackRefusal(r *http.Request) string {
+	switch {
+	case !isLoopback(r.RemoteAddr):
+		return "the Gropius control panel is only reachable from the computer it runs on"
+	case !isLoopbackHost(r.Host):
+		return "unrecognized Host header — the control panel only answers to localhost"
+	default:
+		return "cross-origin request to the control panel refused"
+	}
 }
 
 // isLoopbackHost reports whether an HTTP Host header (with or without a port)
