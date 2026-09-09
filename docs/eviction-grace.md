@@ -109,8 +109,8 @@ A client that would rather not wait at all can read residency from
 
 ## What this costs you
 
-Switching this on means a request that used to be served immediately, by
-evicting somebody else's model, may now wait instead. The control panel's
+Switching this on means a request that would otherwise be served immediately, by
+evicting somebody else's model, may wait instead. The control panel's
 **My Models** tab says how many requests are waiting for memory, so a queue
 that is not draining is visible rather than inferred. See
 [Why a request waits instead of taking the memory](eviction-grace-explained.md)

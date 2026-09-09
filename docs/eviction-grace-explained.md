@@ -65,8 +65,8 @@ admitted to anything.
 
 ## What it costs
 
-Switching this on means a request that used to be served immediately, by
-evicting somebody else's model, may now wait instead. That is the trade: the
+Switching this on means a request that would otherwise be served immediately, by
+evicting somebody else's model, may wait instead. That is the trade: the
 model in memory keeps it, and the request that wanted the room pays. On a Mac
 with one user and models that all fit the budget, nothing ever waits and nothing
 changes.
