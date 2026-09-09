@@ -13,6 +13,25 @@ GitHub release notes.
 
 ### Changed
 
+- **A loaded model is charged the memory its context window really costs, not a
+  flat fifth over its weights.** A model in memory now costs the budget its
+  weights, a fifth of them for the working set, and the attention cache the
+  window it serves will build — once for every sequence its server may decode
+  at once — with the per-token figure read from the model's own configuration
+  and multiplied by a safety factor of seven. Measuring four models on a 128 GB
+  Mac showed the old flat charge wrong in both directions and wrong by a lot:
+  it budgeted 35 GB for a model that took 49 GB at the largest prompt it could
+  serve, and 38 GB for one that took 59 GB, while over-charging a model whose
+  architecture makes its cache nearly free. What changes for you is **which
+  models load together**: a long-context model can now cost several times what
+  it used to, so a pair that used to co-reside may not any more, and a pinned
+  set that used to save may be refused. A model whose window costs more than
+  the whole budget is charged the budget rather than refused — it loads, and it
+  loads alone — and a model whose configuration cannot be read keeps the flat
+  charge. Lowering **Batched requests (decode concurrency)** lowers the charge
+  in proportion. The control panel, the pinned-set check and the pool all read
+  the one figure, as before.
+
 - **The chat client reads as a Mac app, and says when it is waiting on a
   model.** The message box is a real multi-line control — bordered, with focused
   and disabled states you can see, growing with what you type and scrolling once

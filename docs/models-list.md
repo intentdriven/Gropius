@@ -208,11 +208,15 @@ rules.
   this Mac's memory is held down to it. See
   [Set how much memory models may use](memory-budget.md) and
   [Why there is a memory budget](memory-budget-explained.md).
-- Each loaded model is charged 1.2 times its size on disk, the weights plus
-  headroom for the cache and activations a running model needs. The cache a
-  request builds as it works through a long prompt is not counted, so a machine
-  loaded to its budget can still run out of memory under long prompts served
-  concurrently.
+- Each loaded model is charged its weights plus a fifth for the working set a
+  running model needs, plus the attention cache its context window costs —
+  worked out from the model's own configuration, once for every sequence its
+  server may decode at once. That cache is what makes a long-context model
+  expensive: the cost per token is a property of the architecture and varies
+  more than thirtyfold between models. One model is never charged more than the
+  whole budget, so a model whose window fills the budget by itself loads alone
+  rather than not at all. A model whose configuration cannot be read is charged
+  the flat 1.2 times its size, as every model was before this.
 - A request for a model that does not fit in what is left unloads the
   least-recently-used idle model, at once, to make room. The memory is not free
   until that model's server process has gone, so the request waits those
