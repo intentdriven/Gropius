@@ -13,7 +13,10 @@ import (
 // loopback locally — so the bug is invisible when testing on the same Mac — and
 // fails to resolve from every other machine on the network.
 func TestLocalHostNameMatchesBonjourNotBSDHostname(t *testing.T) {
-	out, err := exec.Command("scutil", "--get", "LocalHostName").Output()
+	// The same absolute path the code under test uses: an oracle resolved
+	// through PATH could answer from a different binary than the one Gropius
+	// asks, and this test would then be comparing two machines' answers.
+	out, err := exec.Command("/usr/sbin/scutil", "--get", "LocalHostName").Output()
 	if err != nil {
 		t.Skip("scutil unavailable")
 	}

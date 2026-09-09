@@ -364,8 +364,13 @@ func panelURL(cfg config.Config) string {
 
 // openBrowser opens the control panel. Reap the child in the background: a
 // Start without Wait leaves one zombie per menu click for the app's lifetime.
+//
+// /usr/bin/open by absolute path, not by name: the URL handed over carries
+// this server's address, and on a Mac shared by several accounts a directory
+// another account writes can sit ahead of /usr/bin on this one's PATH. Same
+// rule as internal/capability's /usr/sbin/sysctl.
 func openBrowser(url string) {
-	cmd := exec.Command("open", url)
+	cmd := exec.Command("/usr/bin/open", url)
 	if cmd.Start() == nil {
 		go cmd.Wait()
 	}

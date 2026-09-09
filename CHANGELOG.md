@@ -11,6 +11,19 @@ GitHub release notes.
 
 ## [Unreleased]
 
+### Security
+
+- **Every command Gropius runs is now named by its full path.** Reading this
+  Mac's Bonjour name, opening the control panel in a browser and copying the
+  endpoint each started a small system command by bare name, so the one that
+  ran was whichever the account's `PATH` pointed at first. Gropius is built for
+  a Mac shared by several accounts, and a directory another account can write
+  is a normal thing to find on a developer's `PATH` ahead of the system ones —
+  which made those three commands a way into the account running the server.
+  The Bonjour lookup was the one that mattered: it runs once, early, in every
+  account that launches Gropius, with no click to invite it. A test now holds
+  the rule for any command added later.
+
 ## [0.4.0] - 2026-09-08
 
 ### Added
