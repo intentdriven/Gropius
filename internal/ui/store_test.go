@@ -37,7 +37,7 @@ func TestSettingsOffersTheRetentionFiguresAndClear(t *testing.T) {
 // not keep up with.
 func TestThePanelSaysHowFarBackTheStoreReaches(t *testing.T) {
 	src := readPanelSource(t)
-	for _, field := range []string{"stats_store", "oldest", "dropped", "bytes", "skipped", "refused"} {
+	for _, field := range []string{"stats_store", "oldest", "dropped", "bytes", "skipped", "refused", "stalled"} {
 		if !strings.Contains(src, field) {
 			t.Errorf("the panel never reads %q, which the store reports — a figure nobody can see", field)
 		}
@@ -49,6 +49,13 @@ func TestThePanelSaysHowFarBackTheStoreReaches(t *testing.T) {
 	// operator would believe records were accumulating.
 	if !strings.Contains(src, "could not open the store") {
 		t.Error("the panel reports a refused store as an empty one")
+	}
+	// Nor must a store that has stopped answering. A reading gives up on a
+	// writer that is stuck and shows what it could get, so the figures are
+	// behind rather than wrong — and a figure quietly behind is the one thing
+	// this store does not do.
+	if !strings.Contains(src, "did not answer in time") {
+		t.Error("the panel never says a reading gave up on the disk, so figures that are behind look current")
 	}
 	// Clear works whether recording is on or off, so what it asks before
 	// removing months of records must not claim anything about the switch.

@@ -20,8 +20,13 @@ GitHub release notes.
   panel did not stop it, and while it waited it held one of the two readings the
   store allows at once, so a stalled disk could leave the dashboard unable to
   answer anyone. The wait now ends with the reader — closing the panel stops the
-  work — and, for a panel left open, after ten seconds, which is reported as a
-  reading that failed rather than as figures that are missing part of the story.
+  work — and, for a panel left open, after ten seconds. The two views say so in
+  the two ways that suit them: the historical tables report a reading that
+  failed, and the live figures, which are in memory, are still shown, with
+  Settings saying beside them that the disk did not answer in time and that they
+  may not include the newest records. Either way it is said out loud rather than
+  left as a figure quietly missing part of the story, and it clears itself as
+  soon as the disk answers again.
 
 - **A streamed answer the client hung up on is no longer recorded as
   cancelled.** An SSE client that treats `data: [DONE]` as the end of the

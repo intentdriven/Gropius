@@ -945,6 +945,10 @@ function renderStatsStore() {
   if (store.unsummarized) {
     parts.push(`${store.unsummarized} removed without a summary`);
   }
+  if (store.stalled) {
+    parts.push('the disk did not answer in time, so these figures may not include the newest records ' +
+      '(its own log says so, and they come back as soon as it does)');
+  }
   if (store.dropped) {
     parts.push(`${store.dropped} not written — the disk could not keep up`);
   }

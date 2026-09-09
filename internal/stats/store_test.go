@@ -986,8 +986,8 @@ func TestAReadingIsNotHeldOpenByAWriterThatHasStopped(t *testing.T) {
 			return err
 		})
 
-		if !errors.Is(err, errFlushTimedOut) {
-			t.Errorf("a reading of a store whose writer has stopped returned %v, want %v", err, errFlushTimedOut)
+		if !errors.Is(err, ErrFlushTimedOut) {
+			t.Errorf("a reading of a store whose writer has stopped returned %v, want %v", err, ErrFlushTimedOut)
 		}
 		// And nothing is wedged by having given up: the abandoned flush left
 		// its slot to the writer rather than to the reader, so the next one is
@@ -995,8 +995,8 @@ func TestAReadingIsNotHeldOpenByAWriterThatHasStopped(t *testing.T) {
 		if err := answered(t, func() error {
 			_, err := s.Read(context.Background(), ReadOptions{}, func(Line) bool { return true })
 			return err
-		}); !errors.Is(err, errFlushTimedOut) {
-			t.Errorf("the reading after a flush that gave up returned %v, want %v", err, errFlushTimedOut)
+		}); !errors.Is(err, ErrFlushTimedOut) {
+			t.Errorf("the reading after a flush that gave up returned %v, want %v", err, ErrFlushTimedOut)
 		}
 		// And a record offered after it is still taken, rather than the store
 		// being left with a queue slot nobody will ever free.
@@ -1004,6 +1004,46 @@ func TestAReadingIsNotHeldOpenByAWriterThatHasStopped(t *testing.T) {
 			t.Errorf("the store refused a record after a flush gave up: %v", err)
 		}
 	})
+}
+
+// A reading that gave up is a reading that may be behind: the newest records
+// are neither on the disk it could not flush to nor in what it returned. A
+// panel showing those figures has to be able to say so, which means the store
+// has to report it — and has to stop reporting it the moment the writer
+// answers again, or a disk that came back would look stuck for ever.
+func TestAReadingThatGaveUpIsReportedInTheStoresStatus(t *testing.T) {
+	held := make(chan struct{})
+	s, _ := newTestStore(t, StoreOptions{FlushWait: 100 * time.Millisecond, beforeWrite: func() { <-held }})
+	released := false
+	t.Cleanup(func() {
+		if !released {
+			close(held)
+		}
+	})
+	on(t, s)
+	if err := s.AppendRequest(Record{Model: "org/a", At: 1, Class: ClassOK}); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := s.Status().Stalled; got {
+		t.Fatal("a store nobody has read yet reports itself stalled")
+	}
+	if err := s.Flush(); !errors.Is(err, ErrFlushTimedOut) {
+		t.Fatalf("the flush returned %v, want %v", err, ErrFlushTimedOut)
+	}
+	if !s.Status().Stalled {
+		t.Error("a reading that gave up on the writer is not reported anywhere; the figures look like a quiet store")
+	}
+
+	// The disk comes back.
+	released = true
+	close(held)
+	if err := s.Flush(); err != nil {
+		t.Fatalf("the flush after the writer came back returned %v", err)
+	}
+	if s.Status().Stalled {
+		t.Error("the store still reports itself stalled after a flush it answered")
+	}
 }
 
 // Rotation starts a new file at the limit rather than one record past it, so
