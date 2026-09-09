@@ -107,7 +107,7 @@ func TestLoadRepairsRetentionRatherThanRefusingTheWholeFile(t *testing.T) {
 		`{"host":"127.0.0.1","port":11535,"decode_concurrency":1,"stats_months":-3,"stats_max_bytes":12}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	c, dropped, err := Load(path)
+	c, notices, err := Load(path)
 	if err != nil {
 		t.Fatalf("the file was refused over a retention figure: %v", err)
 	}
@@ -115,8 +115,8 @@ func TestLoadRepairsRetentionRatherThanRefusingTheWholeFile(t *testing.T) {
 		t.Errorf("loaded %d months / %d bytes, want them repaired to %d / %d",
 			c.StatsMonths, c.StatsMaxBytes, DefaultStatsMonths, DefaultStatsMaxBytes)
 	}
-	if len(dropped) != 2 {
-		t.Errorf("the load reported %v, want both repaired figures named", dropped)
+	if len(notices.Repaired) != 2 {
+		t.Errorf("the load reported %v, want both repaired figures named", notices.Repaired)
 	}
 	if c.Host != "127.0.0.1" {
 		t.Errorf("the rest of the file was discarded: host = %q", c.Host)

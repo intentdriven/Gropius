@@ -1321,29 +1321,65 @@ func (c Config) ExposedToLAN() bool {
 // hang startup before the fail-closed branch in main could ever run, and a
 // symlinked or oversized file is refused rather than applied. Any such refusal
 // is an error, which main treats as "lock down to loopback".
-func Load(path string) (Config, []string, error) {
+func Load(path string) (Config, Notices, error) {
 	cfg := Default()
 	b, err := ReadRegular(path, MaxConfigBytes)
 	if errors.Is(err, fs.ErrNotExist) {
-		return cfg, nil, nil
+		return cfg, Notices{}, nil
 	}
 	if err != nil {
-		return cfg, nil, fmt.Errorf("read config: %w", err)
+		return cfg, Notices{}, fmt.Errorf("read config: %w", err)
 	}
 	if err := json.Unmarshal(b, &cfg); err != nil {
-		return Default(), nil, fmt.Errorf("parse config %s: %w", path, err)
+		return Default(), Notices{}, fmt.Errorf("parse config %s: %w", path, err)
 	}
-	dropped := append(cfg.sanitizeSampling(), cfg.sanitizePerModel()...)
-	dropped = append(dropped, cfg.sanitizePinned()...)
-	dropped = append(dropped, cfg.sanitizeStats()...)
-	dropped = append(dropped, cfg.sanitizeBudget()...)
-	dropped = append(dropped, cfg.sanitizeGrace()...)
-	dropped = append(dropped, cfg.sanitizePreload()...)
-	dropped = append(dropped, cfg.sanitizeAPIKey()...)
+	var n Notices
+	// Ignored: the setting is not in force at all, and setting it again is the
+	// only way to get it.
+	n.Ignored = append(n.Ignored, cfg.sanitizeSampling()...)
+	n.Ignored = append(n.Ignored, cfg.sanitizePerModel()...)
+	n.Ignored = append(n.Ignored, cfg.sanitizePinned()...)
+	n.Ignored = append(n.Ignored, cfg.sanitizePreload()...)
+	// Repaired: the setting IS in force, in a changed form. Telling an
+	// operator to set it again would send them looking for a value that is
+	// working — and for the API key it would be worse than that, because the
+	// trimmed key is the one their clients must now send.
+	n.Repaired = append(n.Repaired, cfg.sanitizeStats()...)
+	n.Repaired = append(n.Repaired, cfg.sanitizeBudget()...)
+	n.Repaired = append(n.Repaired, cfg.sanitizeGrace()...)
+	n.Repaired = append(n.Repaired, cfg.sanitizeAPIKey()...)
 	if err := cfg.Validate(); err != nil {
-		return Default(), nil, &InvalidError{Path: path, Err: err, Parsed: cfg, Dropped: dropped}
+		return Default(), Notices{}, &InvalidError{Path: path, Err: err, Parsed: cfg, Notices: n}
 	}
-	return cfg, dropped, nil
+	return cfg, n, nil
+}
+
+// Notices is what Load had to change about a settings file to make it usable,
+// kept in two lists because the difference is the whole of what an operator
+// needs to hear.
+//
+// A setting in Ignored is not in force at all: it named nothing this build can
+// use, and setting it again is the only way to get it. A setting in Repaired
+// IS in force, in a changed form — trimmed, clamped, or replaced by the
+// default that stands behind it. One message for both said "ignoring settings
+// the model server would not accept — set them again", which is untrue of
+// every repair and dangerous for exactly one of them: a trimmed API key is the
+// key clients must send from that moment on, and an operator told it was
+// ignored has been told the opposite of what happened.
+type Notices struct {
+	Ignored  []string
+	Repaired []string
+}
+
+// Empty reports whether the file needed no changing at all.
+func (n Notices) Empty() bool { return len(n.Ignored) == 0 && len(n.Repaired) == 0 }
+
+// All names everything Load changed, ignored and repaired together, for a
+// caller that wants the fields and not the distinction.
+func (n Notices) All() []string {
+	out := make([]string, 0, len(n.Ignored)+len(n.Repaired))
+	out = append(out, n.Ignored...)
+	return append(out, n.Repaired...)
 }
 
 // InvalidError reports a config.json that read and parsed cleanly and then
@@ -1367,9 +1403,10 @@ type InvalidError struct {
 	// Parsed is the configuration as it was read: sanitized, and invalid in
 	// whatever way Err names. It is not safe to run as it stands.
 	Parsed Config
-	// Dropped names the sampling preferences sanitizeSampling discarded, as
-	// Load's second return value would have carried them.
-	Dropped []string
+	// Notices names what sanitizing changed on the way here, split the way
+	// Load's second return value would have carried it: settings that are not
+	// in force at all, and settings that are in force in a changed form.
+	Notices Notices
 }
 
 func (e *InvalidError) Error() string { return "invalid config " + e.Path + ": " + e.Err.Error() }

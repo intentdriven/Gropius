@@ -448,7 +448,7 @@ func TestLoadDropsAPerModelKeyThatNamesNoModel(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cfg, dropped, err := Load(path)
+	cfg, notices, err := Load(path)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -458,8 +458,8 @@ func TestLoadDropsAPerModelKeyThatNamesNoModel(t *testing.T) {
 	if !cfg.PerModel["mlx-community/Qwen3-8B-4bit"].MergeSystemMessages {
 		t.Errorf("the usable setting beside it was dropped too: %+v", cfg.PerModel)
 	}
-	if len(dropped) != 1 || !strings.Contains(dropped[0], "../../etc") {
-		t.Errorf("dropped = %v, want the one unusable key named", dropped)
+	if len(notices.All()) != 1 || !strings.Contains(notices.All()[0], "../../etc") {
+		t.Errorf("dropped = %v, want the one unusable key named", notices.All())
 	}
 	// The whole point: what loaded is a config that can be saved again.
 	if err := cfg.Validate(); err != nil {
@@ -480,15 +480,15 @@ func TestLoadDropsADuplicatePerModelSpelling(t *testing.T) {
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	cfg, dropped, err := Load(path)
+	cfg, notices, err := Load(path)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
 	if len(cfg.PerModel) != 1 {
 		t.Errorf("per-model settings = %+v, want one of the two spellings", cfg.PerModel)
 	}
-	if len(dropped) != 1 || !strings.Contains(dropped[0], "duplicate") {
-		t.Errorf("dropped = %v, want the duplicate spelling named", dropped)
+	if len(notices.All()) != 1 || !strings.Contains(notices.All()[0], "duplicate") {
+		t.Errorf("dropped = %v, want the duplicate spelling named", notices.All())
 	}
 }
 
@@ -536,12 +536,12 @@ func TestSaveLoadRoundTripKeepsPinnedModels(t *testing.T) {
 	if err := Save(path, c); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
-	got, dropped, err := Load(path)
+	got, notices, err := Load(path)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if len(dropped) != 0 {
-		t.Errorf("dropped = %v, want nothing dropped", dropped)
+	if len(notices.All()) != 0 {
+		t.Errorf("dropped = %v, want nothing dropped", notices.All())
 	}
 	if !reflect.DeepEqual(got.Pinned, c.Pinned) {
 		t.Errorf("Pinned = %v, want %v", got.Pinned, c.Pinned)
@@ -605,21 +605,21 @@ func TestLoadDropsAPinThatNamesNoModel(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cfg, dropped, err := Load(path)
+	cfg, notices, err := Load(path)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
 	if !reflect.DeepEqual(cfg.Pinned, []string{"org/keeper"}) {
 		t.Errorf("Pinned = %v, want only the one usable entry", cfg.Pinned)
 	}
-	if len(dropped) != 2 {
-		t.Fatalf("dropped = %v, want the bad id and the duplicate spelling named", dropped)
+	if len(notices.All()) != 2 {
+		t.Fatalf("dropped = %v, want the bad id and the duplicate spelling named", notices.All())
 	}
-	if !strings.Contains(dropped[0], "../../etc") {
-		t.Errorf("dropped = %v, want the entry that names no model named", dropped)
+	if !strings.Contains(notices.All()[0], "../../etc") {
+		t.Errorf("dropped = %v, want the entry that names no model named", notices.All())
 	}
-	if !strings.Contains(dropped[1], "duplicate") {
-		t.Errorf("dropped = %v, want the duplicate spelling named", dropped)
+	if !strings.Contains(notices.All()[1], "duplicate") {
+		t.Errorf("dropped = %v, want the duplicate spelling named", notices.All())
 	}
 	// The whole point: what loaded is a config that can be saved again.
 	if err := cfg.Validate(); err != nil {
@@ -656,12 +656,12 @@ func TestAFullPinnedListStillFitsTheConfigFile(t *testing.T) {
 	if err := Save(path, c); err != nil {
 		t.Fatalf("Save: %v — a legal pinned list does not fit the file", err)
 	}
-	loaded, dropped, err := Load(path)
+	loaded, notices, err := Load(path)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if len(dropped) != 0 {
-		t.Errorf("dropped %v from a config within every limit", dropped)
+	if len(notices.All()) != 0 {
+		t.Errorf("dropped %v from a config within every limit", notices.All())
 	}
 	if len(loaded.Pinned) != MaxPinned {
 		t.Errorf("loaded %d pins, want %d", len(loaded.Pinned), MaxPinned)
@@ -732,7 +732,7 @@ func TestLoadDropsAnUnusableMemoryBudget(t *testing.T) {
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	cfg, dropped, err := Load(path)
+	cfg, notices, err := Load(path)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -743,8 +743,8 @@ func TestLoadDropsAnUnusableMemoryBudget(t *testing.T) {
 	if cfg.APIKey != "bh_keep" {
 		t.Errorf("APIKey = %q, want the file's key — one bad figure must not reset the install", cfg.APIKey)
 	}
-	if len(dropped) != 1 || !strings.Contains(dropped[0], "max_resident_bytes") {
-		t.Errorf("dropped = %v, want the memory budget named", dropped)
+	if len(notices.All()) != 1 || !strings.Contains(notices.All()[0], "max_resident_bytes") {
+		t.Errorf("dropped = %v, want the memory budget named", notices.All())
 	}
 	if err := cfg.Validate(); err != nil {
 		t.Errorf("the loaded config does not validate: %v", err)
@@ -844,7 +844,7 @@ func TestLoadTrimsAnOverlongAPIKeyRatherThanRefusingTheFile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cfg, dropped, err := Load(path)
+	cfg, notices, err := Load(path)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -854,8 +854,14 @@ func TestLoadTrimsAnOverlongAPIKeyRatherThanRefusingTheFile(t *testing.T) {
 	if cfg.APIKey == "" {
 		t.Error("the key was cleared, which opens a LAN-exposed server to the network")
 	}
-	if len(dropped) != 1 || !strings.Contains(dropped[0], "api_key") {
-		t.Errorf("dropped = %v, want the api_key named", dropped)
+	// Repaired, not ignored: the trimmed key is the key clients must send from
+	// now on, and an operator told it was ignored has been told the opposite of
+	// what happened.
+	if len(notices.Repaired) != 1 || !strings.Contains(notices.Repaired[0], "api_key") {
+		t.Errorf("repaired = %v, want the api_key named", notices.Repaired)
+	}
+	if len(notices.Ignored) != 0 {
+		t.Errorf("ignored = %v, want the trimmed key reported as in force, not as ignored", notices.Ignored)
 	}
 	// The whole point: what loaded is a config that can be saved again.
 	if err := cfg.Validate(); err != nil {
@@ -873,7 +879,7 @@ func TestSanitizeAPIKeyNeverClearsTheKey(t *testing.T) {
 	c := Default()
 	c.APIKey = strings.Repeat("\xff", MaxAPIKeyBytes+88)
 
-	dropped := c.sanitizeAPIKey()
+	repaired := c.sanitizeAPIKey()
 
 	if c.APIKey == "" {
 		t.Fatal("sanitizing cleared the API key, which opens a LAN-exposed server to the network")
@@ -881,8 +887,8 @@ func TestSanitizeAPIKeyNeverClearsTheKey(t *testing.T) {
 	if len(c.APIKey) > MaxAPIKeyBytes {
 		t.Errorf("APIKey is %d bytes, want at most %d", len(c.APIKey), MaxAPIKeyBytes)
 	}
-	if len(dropped) != 1 {
-		t.Errorf("dropped = %v, want the api_key named once", dropped)
+	if len(repaired) != 1 {
+		t.Errorf("repaired = %v, want the api_key named once", repaired)
 	}
 }
 
@@ -900,7 +906,7 @@ func TestLoadTrimsAnOversizePreloadList(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cfg, dropped, err := Load(path)
+	cfg, notices, err := Load(path)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -910,8 +916,10 @@ func TestLoadTrimsAnOversizePreloadList(t *testing.T) {
 	if len(cfg.Preload) > 0 && cfg.Preload[0] != "org/model-0" {
 		t.Errorf("Preload starts at %q, want the list trimmed from the end", cfg.Preload[0])
 	}
-	if len(dropped) != 1 || !strings.Contains(dropped[0], "preload") {
-		t.Errorf("dropped = %v, want the preload list named", dropped)
+	// Ignored, not repaired: the entries beyond the ceiling are not in force in
+	// any form, and setting them again is the only way to get them.
+	if len(notices.Ignored) != 1 || !strings.Contains(notices.Ignored[0], "preload") {
+		t.Errorf("ignored = %v, want the preload list named", notices.Ignored)
 	}
 	if err := cfg.Validate(); err != nil {
 		t.Errorf("the loaded config does not validate: %v", err)

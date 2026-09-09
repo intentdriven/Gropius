@@ -741,6 +741,71 @@ func TestEndpointURLRefusesAHostNoURLCanCarry(t *testing.T) {
 	}
 }
 
+// A setting the file could not carry as written is repaired on load and is in
+// force in a changed form — an API key trimmed to the ceiling is the key
+// clients must send from then on. A log line at startup is not where the
+// operator finds that out: the panel shows the key as asterisks either way, so
+// without a warning on this channel the trim is invisible on the surface the
+// operator is actually looking at.
+func TestStateWarnsAboutASettingRepairedOnLoad(t *testing.T) {
+	srv, _ := newTestControlAppRepaired(t, config.Default(),
+		[]string{"api_key (trimmed to the 512-byte ceiling)"})
+
+	var found string
+	for _, w := range stateOf(t, srv).Warnings {
+		if strings.Contains(w, "api_key") {
+			found = w
+		}
+	}
+	if found == "" {
+		t.Fatalf("no warning named the repaired setting: %v", stateOf(t, srv).Warnings)
+	}
+	if strings.Contains(found, "ignor") {
+		t.Errorf("the warning %q says the setting was ignored; it is in force", found)
+	}
+}
+
+// Saving rewrites config.json from the values in force, so the file no longer
+// carries anything that needed repairing — and a warning that outlives the fix
+// is the same class of untruth as the wording it replaced.
+func TestASuccessfulSaveClearsTheRepairWarning(t *testing.T) {
+	srv, _ := newTestControlAppRepaired(t, config.Default(),
+		[]string{"api_key (trimmed to the 512-byte ceiling)"})
+
+	resp := postJSON(t, srv, "/api/settings", `{"idle_timeout_sec":120}`)
+	defer resp.Body.Close()
+	io.Copy(io.Discard, resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+
+	for _, w := range stateOf(t, srv).Warnings {
+		if strings.Contains(w, "api_key") {
+			t.Errorf("the repair warning survived the save that fixed it: %q", w)
+		}
+	}
+}
+
+// newTestControlAppRepaired is newTestControlApp with the settings the load
+// had to repair, which is what the panel warns about.
+func newTestControlAppRepaired(t *testing.T, cfg config.Config, repaired []string) (*httptest.Server, *app.App) {
+	t.Helper()
+
+	paths := config.NewPaths(t.TempDir())
+	a, err := app.New(app.Options{Paths: paths, Config: cfg})
+	if err != nil {
+		t.Fatalf("app.New: %v", err)
+	}
+	t.Cleanup(func() { a.Close() })
+
+	ctrl := &Control{App: a, Repaired: repaired}
+	mux := http.NewServeMux()
+	ctrl.Routes(mux)
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	return srv, a
+}
+
 // A save reads the current settings, decodes the posted body into a copy of
 // them, and writes the result back — so two saves that overlap each write a
 // configuration that never saw the other's change, and whichever calls

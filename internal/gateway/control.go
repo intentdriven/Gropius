@@ -35,6 +35,18 @@ type Control struct {
 	// process squatting on the port (see cmd/gropius singleton coordination).
 	Root string
 
+	// Repaired names the settings config.Load could not use as written and put
+	// into force in a changed form — a trimmed API key, a clamped grace, a
+	// statistics figure replaced by its default. Set once before serving, and
+	// cleared by a save, which rewrites the file from the values in force.
+	//
+	// It is here because the panel is the surface the operator is looking at.
+	// The startup log says this once, into a stream nobody running the app from
+	// the menu bar ever sees, and the panel shows an API key as asterisks
+	// whether it was trimmed or not — so without this the one setting where the
+	// repair changes what every client must send is invisible.
+	Repaired []string
+
 	// loadMu guards loading, the set of models the Load button already has a
 	// background load running for, keyed by folded repo id.
 	//
@@ -47,6 +59,10 @@ type Control struct {
 	// they drain.
 	loadMu  sync.Mutex
 	loading map[string]bool
+
+	// repairMu guards Repaired, which the snapshot reads on every state request
+	// and a save clears.
+	repairMu sync.Mutex
 
 	// settingsMu serialises the whole settings write path: read the settings
 	// in force, decode the posted body into a copy of them, hand the result to
@@ -304,6 +320,9 @@ func (c *Control) snapshot() State {
 		st.Warnings = append(st.Warnings, w)
 	}
 	if w := c.App.MemoryBudgetWarning(); w != "" {
+		st.Warnings = append(st.Warnings, w)
+	}
+	if w := c.repairWarning(); w != "" {
 		st.Warnings = append(st.Warnings, w)
 	}
 	if !c.App.Provisioner.Installed() {
@@ -1053,6 +1072,35 @@ func (c *Control) handleSetSettings(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, out)
 }
 
+// repairWarning is what the panel says about the settings the file could not
+// carry as written.
+//
+// It says they are in force, because they are, and it names them: an operator
+// who reads "your API key was shortened" can check the key their clients send,
+// which is the only thing they can usefully do about it. Saying "ignored" would
+// send them to set a key that is already working, and blaming the model server
+// would send them to the wrong software entirely.
+func (c *Control) repairWarning() string {
+	c.repairMu.Lock()
+	defer c.repairMu.Unlock()
+	if len(c.Repaired) == 0 {
+		return ""
+	}
+	return "Some settings in config.json could not be used as written and are in force in a changed form: " +
+		strings.Join(c.Repaired, ", ") +
+		". Check them here and save to write the values now in force back to the file."
+}
+
+// clearRepairs drops the notice once a save has rewritten config.json from the
+// values in force: there is nothing left in the file that needed repairing, and
+// a warning that outlives what it warned about is the same untruth from the
+// other side.
+func (c *Control) clearRepairs() {
+	c.repairMu.Lock()
+	defer c.repairMu.Unlock()
+	c.Repaired = nil
+}
+
 // applySettings is the settings write path, from the settings in force to what
 // the save is answered with, run start to finish under settingsMu. It returns
 // what the panel is told, or the refusal to report to the caller — every one of
@@ -1103,6 +1151,9 @@ func (c *Control) applySettings(raw []byte) (map[string]any, error) {
 	if err := c.App.SetConfig(incoming); err != nil {
 		return nil, err
 	}
+	// The file has just been written from the settings in force, repairs and
+	// all, so there is nothing left in it to repair.
+	c.clearRepairs()
 	// Host and port bind the server, decode concurrency and idle timeout are
 	// pool options — all four are consumed only at startup, and SetConfig
 	// cannot apply them live.

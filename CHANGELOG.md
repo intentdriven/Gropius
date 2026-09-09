@@ -21,6 +21,18 @@ GitHub release notes.
   answer ends, the reason is logged once, and the connection to the model
   server is closed.
 
+- **A setting that was repaired is no longer reported as one that was
+  ignored.** Loading `config.json` says what it had to change, and one message
+  covered both cases: "ignoring settings the model server would not accept —
+  set them again in Settings". That is untrue of every setting that is repaired
+  rather than dropped, and actively misleading for an API key trimmed to the
+  new ceiling — the shortened key is the one clients must send, not one to set
+  again. The two are now told apart and worded for what each is, the model
+  server is no longer blamed for a limit Gropius chose, and a repair shows in
+  the control panel's warnings as well as in the log, because the panel shows a
+  key as asterisks whether it was trimmed or not. Saving clears the notice: the
+  file has just been written from the values in force.
+
 - **Two settings saves at once no longer lose one of the changes.** Each save
   read the settings in force, applied what was posted to a copy of them and
   wrote the result back, so two saves that overlapped — two browser tabs, or
