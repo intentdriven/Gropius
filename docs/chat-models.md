@@ -34,6 +34,11 @@ The same rule lives in `config.json`, which is hand-editable:
 
 Delete the `chat_rule` key to go back to the rule Gropius ships.
 
+Each list holds at most 64 words, of at most 128 bytes each. A save that goes
+beyond that is refused and names the field; a `config.json` that does is
+repaired on the next start and the panel says which setting was changed, rather
+than the server refusing to start.
+
 ## In the chat client
 
 GropiusChat applies its own rule to the same words, so the models it offers are

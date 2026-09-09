@@ -183,3 +183,58 @@ func writeReadyModelDir(t *testing.T, dir string) {
 		t.Fatal(err)
 	}
 }
+
+// The Hub's words reach the LAN on the models list, the search card in the
+// control panel and the chat client's Settings, and a repository's tags are
+// typed by whoever owns it. Only the shape a Hub tag actually has is kept:
+// letters, digits and the few separators the vocabulary uses. Anything else is
+// a word that could match no rule anyway, so admitting it buys nothing and
+// hands every surface downstream a string it has to be careful with.
+func TestOnlyHubShapedTagsAreKept(t *testing.T) {
+	dir := t.TempDir()
+	r, err := Open(filepath.Join(dir, "registry.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Real tags, from the vocabulary the Hub uses on model repositories.
+	keep := []string{
+		"text-generation", "mlx", "conversational", "safetensors", "4-bit",
+		"license:apache-2.0", "base_model:Qwen/Qwen3-8B", "arxiv:2501.12948",
+		"region:us", "endpoints_compatible", "Not-For-All-Audiences", "en",
+	}
+	// Words no Hub tag has ever had, and every one of them a string some
+	// surface downstream would have to be careful with.
+	drop := []string{
+		"<script>alert(1)</script>", `"quoted"`, "'quoted'", "a`b", "a b",
+		"tag;drop", "back\\slash", "em—dash", "‮override",
+	}
+	if err := r.Put(Model{
+		RepoID: "org/tagged", Path: dir, State: StateReady,
+		Tags: append(append([]string{}, keep...), drop...),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	m, err := r.Get("org/tagged")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(m.Tags, ",") != strings.Join(keep, ",") {
+		t.Errorf("tags = %v, want exactly the Hub-shaped ones %v", m.Tags, keep)
+	}
+
+	// The pipeline tag is held to the same shape.
+	if err := r.Put(Model{
+		RepoID: "org/piped", Path: dir, State: StateReady,
+		PipelineTag: "<img src=x onerror=alert(1)>",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	piped, err := r.Get("org/piped")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if piped.PipelineTag != "" {
+		t.Errorf("pipeline tag = %q, want it dropped", piped.PipelineTag)
+	}
+}

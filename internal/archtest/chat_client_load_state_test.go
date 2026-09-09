@@ -50,10 +50,13 @@ var clientLoadingComment = regexp.MustCompile(
 var clientChattableDefault = regexp.MustCompile(
 	`var\s+chattable\s*:\s*Bool\s*\{\s*(?:chat\s*\?\?\s*true|chat\s*!=\s*false)\s*\}`)
 
-// clientPickerFiltersOnChattable matches the picker's list being derived
-// through the client's own rule rather than from the served list directly.
+// clientPickerFiltersOnChattable matches the promise rather than one spelling
+// of it: the picker's list is derived by filtering the served list through a
+// call to the rule's verdict, whatever the rule value is called at that point
+// and whether the closure or the method reference is used. What it cannot match
+// is a picker built from the served list directly, which is the failure.
 var clientPickerFiltersOnChattable = regexp.MustCompile(
-	`let\s+rule\s*=\s*chatRule\s*\n\s*chatModels\s*=\s*list\.data\.filter\s*\{\s*rule\.offers\(`)
+	`chatModels\s*=\s*[^\n]*\.filter\s*[({][^\n]*\.offers\b`)
 
 // clientChatRuleDefaults match the two halves of the rule the client ships,
 // each as the stored setting a person can change in its Settings -- so a
@@ -77,12 +80,14 @@ var gatewayPipelineField = regexp.MustCompile(
 var gatewayTagsField = regexp.MustCompile(
 	`(?m)^\s*entry\["tags"\]\s*=`)
 
-// clientRuleIsEditable matches the two fields of the Settings sheet the rule is
-// changed in. A rule with no control is a default nobody can move.
+// clientRuleIsEditable match each half of the rule being handed to a control as
+// a two-way binding -- the `$` projection, which in SwiftUI exists for nothing
+// else -- rather than one spelling of one control. A rule nothing binds is a
+// default nobody can move.
 var clientRuleIsEditable = regexp.MustCompile(
-	`text:\s*\$model\.chatPipelineTags`)
+	`\$(?:model\.|self\.)?chatPipelineTags\b`)
 var clientRequiredIsEditable = regexp.MustCompile(
-	`text:\s*\$model\.chatRequiredTags`)
+	`\$(?:model\.|self\.)?chatRequiredTags\b`)
 
 // TestChatClientReadsTheResidencyTheGatewayPublishes holds the client's reading
 // of a model's residency to the field and the value the server writes.

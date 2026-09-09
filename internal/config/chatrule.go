@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 	"unicode"
 )
@@ -45,21 +46,74 @@ type ChatRule struct {
 func (r ChatRule) IsZero() bool { return r.PipelineTags == nil && r.RequiredTags == nil }
 
 // Equal reports whether two rules say the same thing.
+//
+// A half that was never set is not equal to a half that was set to nothing:
+// the first means the shipped default and the second means "test neither
+// half", and a comparison that could not tell them apart would report no
+// change across exactly the loss Clone exists to prevent.
 func (r ChatRule) Equal(other ChatRule) bool {
 	return equalTagLists(r.PipelineTags, other.PipelineTags) &&
 		equalTagLists(r.RequiredTags, other.RequiredTags)
 }
 
 func equalTagLists(a, b []string) bool {
-	if len(a) != len(b) {
+	if (a == nil) != (b == nil) {
 		return false
 	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
+	return slices.Equal(a, b)
+}
+
+// Clone returns a rule that shares no backing array with this one, keeping each
+// half exactly as it is: nil stays nil, and an empty list stays an empty list.
+//
+// The second half of that is the point. append onto a nil slice returns nil for
+// an empty source, so a clone built that way silently promoted "cleared" to
+// "never set" — and every unrelated settings save decodes into a clone.
+func (r ChatRule) Clone() ChatRule {
+	return ChatRule{PipelineTags: cloneTagList(r.PipelineTags), RequiredTags: cloneTagList(r.RequiredTags)}
+}
+
+func cloneTagList(in []string) []string {
+	if in == nil {
+		return nil
+	}
+	out := make([]string, len(in))
+	copy(out, in)
+	return out
+}
+
+// validate refuses a rule this build cannot hold, naming the half at fault.
+//
+// Refused rather than repaired, unlike the same rule arriving in config.json:
+// this runs on the settings write path, where the rule is a field the caller
+// touched and a person is waiting to be told which one was wrong. Cutting it
+// down silently would leave an oversized rule in the file looking effective
+// until the next start repaired it — a setting in force that nobody agreed to.
+// Load sanitizes before it validates, so a hand-edited or planted file still
+// loads rather than taking the install down to loopback.
+func (r ChatRule) validate() error {
+	for _, half := range []struct {
+		field string
+		words []string
+	}{
+		{"chat_rule.pipeline_tags", r.PipelineTags},
+		{"chat_rule.required_tags", r.RequiredTags},
+	} {
+		if len(half.words) > MaxChatRuleTags {
+			return fmt.Errorf("%s names %d tags, more than the %d this holds",
+				half.field, len(half.words), MaxChatRuleTags)
+		}
+		for _, word := range half.words {
+			if len(word) > MaxChatRuleTagBytes {
+				return fmt.Errorf("%s: %q is longer than the %d bytes a tag may be",
+					half.field, word, MaxChatRuleTagBytes)
+			}
+			if strings.TrimSpace(word) == "" || !printableTag(strings.TrimSpace(word)) {
+				return fmt.Errorf("%s: %q is not a tag", half.field, word)
+			}
 		}
 	}
-	return true
+	return nil
 }
 
 // DefaultChatRule is the rule Gropius ships: a model that generates text, or

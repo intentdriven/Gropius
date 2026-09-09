@@ -18,7 +18,7 @@ import (
 	"strings"
 	"sync"
 	"time"
-	"unicode"
+	"unicode/utf8"
 
 	"github.com/intentdriven/Gropius/internal/config"
 )
@@ -122,20 +122,46 @@ func sanitizeCategory(m Model) Model {
 	return m
 }
 
-// usableTag returns the word if it is one this Mac may keep and republish, and
-// "" otherwise. A control character in a tag is corruption or someone's idea of
-// a payload; either way the Hub does not use one.
+// usableTag returns the word if it has the shape a HuggingFace tag has, and ""
+// otherwise.
+//
+// An allow-list, not a deny-list of the dangerous characters. These words are
+// typed by whoever owns a repository and this Mac republishes them — to the LAN
+// on the models list, to the control panel's search card, to the chat client's
+// picker and Settings — so the question worth answering is not "which
+// characters do we know to fear" but "which characters does the vocabulary
+// actually use". A word outside the set could match no rule anyway, because a
+// rule is made of Hub words too, so keeping one buys nothing and hands every
+// surface downstream a string it has to be careful with.
+//
+// The set is what a Hub tag is made of: ASCII letters and digits, and the five
+// separators the vocabulary uses — "text-generation", "4-bit", "custom_code",
+// "license:apache-2.0", "arxiv:2501.12948", "base_model:Qwen/Qwen3-8B",
+// "endpoints_compatible", "Not-For-All-Audiences", "en". Case is kept because
+// the Hub keeps it; the chat rule folds case when it compares. There is no
+// recorded sample of the whole vocabulary in this repository, so a legitimate
+// tag outside this set would be dropped rather than mangled: the model is
+// listed and served exactly as it is, with one word fewer.
 func usableTag(tag string) string {
 	tag = strings.TrimSpace(tag)
 	if tag == "" || len(tag) > MaxTagBytes {
 		return ""
 	}
 	for _, r := range tag {
-		if r == unicode.ReplacementChar || !unicode.IsPrint(r) {
+		if r >= utf8.RuneSelf || !hubTagRune(byte(r)) {
 			return ""
 		}
 	}
 	return tag
+}
+
+// hubTagRune reports whether one ASCII byte is one a HuggingFace tag is made of.
+func hubTagRune(b byte) bool {
+	switch {
+	case b >= 'a' && b <= 'z', b >= 'A' && b <= 'Z', b >= '0' && b <= '9':
+		return true
+	}
+	return strings.IndexByte("-_.:/", b) >= 0
 }
 
 // MaxContextLength bounds the context length Gropius will believe. A model

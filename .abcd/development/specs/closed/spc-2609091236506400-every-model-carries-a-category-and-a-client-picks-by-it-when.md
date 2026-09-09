@@ -261,3 +261,45 @@ the picker is filtered through the rule rather than from the served list.
   one field would be the wrong place to start.
 - Whether a model's category should be shown on its card in **My Models**. The
   registry carries it, so this is presentation only.
+
+## As built (2026-09-09)
+
+Three things shipped differently from the plan above, all of them from the
+adversarial security review the trust-boundary note commits to. Recorded here
+because a closed spec is the durable claim about what shipped.
+
+**The bounds are on both paths, not only the file's.** The approach says `Load`
+repairs an over-full rule and stops there. It does, and `Validate` now refuses
+one as well, naming the half at fault — so a rule posted to the panel is refused
+while the operator is there to see it, rather than accepted, written to
+`config.json` and cut down at the next restart. The two treatments are the
+repository's existing rule, not a new one: a file is repaired because refusing
+it takes the install down to loopback, and a save is refused because it is a
+field the caller touched. `Load` sanitizes before it validates, so the file path
+still cannot be locked down by this check.
+
+**A cleared rule survives an unrelated save.** `Config.Clone` copied each half
+by appending onto a nil slice, which for an empty half yields nil — so the rule
+of an operator who had cleared both fields read back as a rule never set, and
+the shipped default was reinstated by the next save of any other setting. That
+is the wedge the conventions name, arriving through the copy rather than through
+the decode. `ChatRule.Clone` now copies with make and copy, `Equal` tells a nil
+half from an empty one, and the control-plane test that guards "a save that does
+not name the rule keeps it" carries the cleared case.
+
+**Tags are held to the shape a Hub tag has.** The plan bounded the words by
+length, count and printability. Printability is too weak for a string this Mac
+republishes to the LAN, the control panel and the client: `usableTag` is now an
+allow-list of the characters the Hub's vocabulary actually uses — ASCII letters
+and digits with `-`, `_`, `.`, `:` and `/` — so a word carrying quotes, angle
+brackets or a bidirectional override never enters the registry. A word outside
+the set could match no rule anyway, since a rule is made of Hub words too. There
+is no recorded sample of the whole vocabulary in this repository, so the set is
+read off the tags the Hub is known to use; a legitimate tag outside it is
+dropped rather than mangled, and the model is listed and served as it is.
+
+Two archtest pins on the chat client were also rewritten to match the promise
+rather than the source's spelling: the picker's list is derived through a call
+to the rule's verdict, and each half of the rule is handed to a control as a
+two-way binding. Both were checked in each direction — a rename of the local
+still passes, and a picker built from the served list directly still fails.

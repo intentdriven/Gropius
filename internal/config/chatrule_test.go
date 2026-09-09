@@ -239,3 +239,126 @@ func TestCloneCopiesTheChatRule(t *testing.T) {
 		t.Errorf("writing to the clone's rule changed the original: %+v", c.ChatRule)
 	}
 }
+
+// A rule an operator cleared is a rule they set, and every path that copies a
+// configuration has to keep it. Clone is on the settings write path — a POST is
+// decoded into a clone of what is in force — so a Clone that turned an empty
+// half back into an unset one would reinstate the shipped default at the next
+// save of any other setting, which is the wedge this repository has built three
+// times.
+func TestCloneKeepsAClearedHalfCleared(t *testing.T) {
+	c := Default()
+	c.ChatRule = ChatRule{PipelineTags: []string{}, RequiredTags: []string{}}
+	clone := c.Clone()
+	if clone.ChatRule.IsZero() {
+		t.Fatal("a cleared rule cloned as an unset one; the shipped default is back")
+	}
+	if clone.ChatRule.PipelineTags == nil || clone.ChatRule.RequiredTags == nil {
+		t.Errorf("clone = %#v, want both halves present and empty", clone.ChatRule)
+	}
+	if !clone.EffectiveChatRule().Matches("automatic-speech-recognition", nil) {
+		t.Error("the cloned rule no longer offers everything, which is what clearing both fields means")
+	}
+}
+
+// Equal is what a caller asks whether a rule moved. "Never set" and "set to
+// nothing" are different settings — the first means the shipped default — so a
+// comparison that could not tell them apart would report no change across
+// exactly the loss above.
+func TestEqualTellsAnUnsetRuleFromAClearedOne(t *testing.T) {
+	unset := ChatRule{}
+	cleared := ChatRule{PipelineTags: []string{}, RequiredTags: []string{}}
+	if unset.Equal(cleared) || cleared.Equal(unset) {
+		t.Error("an unset rule compares equal to a cleared one; the two are different settings")
+	}
+	if !cleared.Equal(ChatRule{PipelineTags: []string{}, RequiredTags: []string{}}) {
+		t.Error("two cleared rules do not compare equal")
+	}
+	if !unset.Equal(ChatRule{}) {
+		t.Error("two unset rules do not compare equal")
+	}
+}
+
+// The bounds are enforced on the way in from a person as well as on the way in
+// from the file. A save is a field the caller touched, so an unusable rule is
+// refused and named rather than quietly cut down — and until it is, an
+// oversized rule sits in config.json looking effective until the next restart
+// repairs it.
+func TestValidateRefusesAnUnusableChatRule(t *testing.T) {
+	many := make([]string, MaxChatRuleTags+1)
+	for i := range many {
+		many[i] = fmt.Sprintf("tag-%d", i)
+	}
+	cases := []struct {
+		name string
+		rule ChatRule
+		want string
+	}{
+		{
+			name: "too many pipeline tags",
+			rule: ChatRule{PipelineTags: many},
+			want: "chat_rule.pipeline_tags",
+		},
+		{
+			name: "too many required tags",
+			rule: ChatRule{RequiredTags: many},
+			want: "chat_rule.required_tags",
+		},
+		{
+			name: "a word longer than the bound",
+			rule: ChatRule{PipelineTags: []string{strings.Repeat("x", MaxChatRuleTagBytes+1)}},
+			want: "chat_rule.pipeline_tags",
+		},
+		{
+			name: "a word that is not printable",
+			rule: ChatRule{RequiredTags: []string{"with\x00nul"}},
+			want: "chat_rule.required_tags",
+		},
+		{
+			name: "a word that is nothing but space",
+			rule: ChatRule{RequiredTags: []string{"   "}},
+			want: "chat_rule.required_tags",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			cfg := Default()
+			cfg.ChatRule = c.rule
+			err := cfg.Validate()
+			if err == nil {
+				t.Fatalf("Validate() = nil for %+v, want a refusal", c.rule)
+			}
+			if !strings.Contains(err.Error(), c.want) {
+				t.Errorf("Validate() = %v, want it to name %s", err, c.want)
+			}
+		})
+	}
+
+	// And the two rules that must always pass: the shipped one, and a cleared
+	// one. A save refused over the rule an operator just cleared would be the
+	// same wedge from the other side.
+	for _, r := range []ChatRule{{}, DefaultChatRule(), {PipelineTags: []string{}, RequiredTags: []string{}}} {
+		cfg := Default()
+		cfg.ChatRule = r
+		if err := cfg.Validate(); err != nil {
+			t.Errorf("Validate() = %v for %#v, want nil", err, r)
+		}
+	}
+
+	// A file is repaired rather than refused, so a hand-edited or planted rule
+	// cannot lock the install down to loopback on the way past this check.
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	cfg := Default()
+	cfg.ChatRule = ChatRule{PipelineTags: many}
+	b, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := Load(path); err != nil {
+		t.Errorf("Load() = %v for an oversized rule, want it repaired rather than refused", err)
+	}
+}

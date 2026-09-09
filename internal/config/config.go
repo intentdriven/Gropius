@@ -925,16 +925,15 @@ func (c Config) Clone() Config {
 			out.PerModel[k] = v
 		}
 	}
-	// Both halves of the rule, and each only when it was set: the settings
-	// write path decodes a posted body into a clone, and a shared backing
-	// array would land a caller's words in the live rule before Validate had
-	// looked at them. A nil half stays nil, which is what "never set" is.
-	if c.ChatRule.PipelineTags != nil {
-		out.ChatRule.PipelineTags = append([]string(nil), c.ChatRule.PipelineTags...)
-	}
-	if c.ChatRule.RequiredTags != nil {
-		out.ChatRule.RequiredTags = append([]string(nil), c.ChatRule.RequiredTags...)
-	}
+	// Both halves of the rule: the settings write path decodes a posted body
+	// into a clone, and a shared backing array would land a caller's words in
+	// the live rule before Validate had looked at them.
+	//
+	// ChatRule.Clone copies with make and copy rather than appending onto a nil
+	// slice, which for an empty half would yield nil — turning a rule an
+	// operator cleared back into a rule they never set, and so reinstating the
+	// shipped default at the next save of any unrelated setting.
+	out.ChatRule = c.ChatRule.Clone()
 	return out
 }
 
@@ -1140,6 +1139,9 @@ func (c Config) Validate() error {
 		return fmt.Errorf("preload names %d models, more than the %d this holds", len(c.Preload), MaxPreload)
 	}
 	if err := c.validatePinned(); err != nil {
+		return err
+	}
+	if err := c.ChatRule.validate(); err != nil {
 		return err
 	}
 	// Eviction grace on an open endpoint is a denial-of-service lever: a parked

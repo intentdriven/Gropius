@@ -922,16 +922,80 @@ func TestSavingTheChatRuleTouchesNothingElse(t *testing.T) {
 	}
 }
 
-// And the other direction: a save that says nothing about the rule keeps it.
+// And the other direction: a save that says nothing about the rule keeps it —
+// including the rule of an operator who cleared both fields, which is a rule
+// they set and not a rule they never had. Restoring the shipped default there
+// would mark half their models as unable to chat on the next unrelated save.
 func TestSavingSettingsWithoutNamingTheChatRuleKeepsIt(t *testing.T) {
-	cfg := config.Default()
-	cfg.ChatRule = config.ChatRule{PipelineTags: []string{"text-generation"}, RequiredTags: []string{}}
-	srv, a := newTestControlApp(t, cfg)
+	cases := []struct {
+		name string
+		rule config.ChatRule
+	}{
+		{
+			name: "a rule the operator narrowed",
+			rule: config.ChatRule{PipelineTags: []string{"text-generation"}, RequiredTags: []string{}},
+		},
+		{
+			name: "a rule the operator cleared entirely",
+			rule: config.ChatRule{PipelineTags: []string{}, RequiredTags: []string{}},
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			cfg := config.Default()
+			cfg.ChatRule = c.rule
+			srv, a := newTestControlApp(t, cfg)
 
-	resp := postJSON(t, srv, "/api/settings",
-		`{"host":"0.0.0.0","port":11535,"api_key":"","decode_concurrency":4,"idle_timeout_sec":0}`)
-	resp.Body.Close()
-	if got := a.Config().ChatRule; !got.Equal(cfg.ChatRule) {
-		t.Errorf("chat rule = %+v after an unrelated save, want %+v", got, cfg.ChatRule)
+			resp := postJSON(t, srv, "/api/settings",
+				`{"host":"0.0.0.0","port":11535,"api_key":"","decode_concurrency":4,"idle_timeout_sec":0}`)
+			resp.Body.Close()
+			got := a.Config().ChatRule
+			if !got.Equal(c.rule) {
+				t.Errorf("chat rule = %+v after an unrelated save, want %+v", got, c.rule)
+			}
+			if got.IsZero() {
+				t.Error("the rule read back as unset, so the shipped default is in force again")
+			}
+		})
+	}
+}
+
+// The bounds are the settings path's too. An oversized rule posted to the panel
+// is refused and named, rather than accepted, written to config.json and cut
+// down at the next restart — which would leave a rule in force that nobody
+// agreed to, in a file that says otherwise.
+func TestSavingAnOversizedChatRuleIsRefused(t *testing.T) {
+	srv, a := newTestControlApp(t, config.Default())
+
+	many := make([]string, config.MaxChatRuleTags+1)
+	for i := range many {
+		many[i] = fmt.Sprintf("tag-%d", i)
+	}
+	body, err := json.Marshal(map[string]any{
+		"host": "0.0.0.0", "port": 11535, "api_key": "", "decode_concurrency": 4,
+		"idle_timeout_sec": 0,
+		"chat_rule":        map[string]any{"pipeline_tags": many, "required_tags": []string{}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp := postJSON(t, srv, "/api/settings", string(body))
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", resp.StatusCode)
+	}
+	var out struct {
+		Error struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.Error.Message, "chat_rule.pipeline_tags") {
+		t.Errorf("the refusal reads %q; it must name the field the operator has to fix", out.Error.Message)
+	}
+	if !a.Config().ChatRule.IsZero() {
+		t.Errorf("the refused rule reached the configuration anyway: %+v", a.Config().ChatRule)
 	}
 }
