@@ -174,7 +174,7 @@ func evalBindMode(t *testing.T, snippet string) string {
 	var b strings.Builder
 	b.WriteString("const report = (v) => process.stdout.write(JSON.stringify(v));\n")
 	b.WriteString(constDecl(t, src, "PRIVATE_BIND"))
-	for _, name := range []string{"bindSelectValue", "bindSelectBody", "privateBindLabel", "privateBindDisabled"} {
+	for _, name := range []string{"bindSelectValue", "bindSelectBody", "privateBindLabel", "privateBindDisabled", "bindNoticeText"} {
 		b.WriteString(extractFunction(t, src, name))
 		b.WriteString("\n")
 	}
@@ -221,4 +221,31 @@ func sameJSON(t *testing.T, got, want string) bool {
 		}
 	}
 	return true
+}
+
+// A bind that narrowed says so where the operator changes it. The log is read
+// by whoever runs the server headless; the pane is read by everyone else, and
+// without this the only difference between a mode that is running and one that
+// found nothing to bind is an endpoint that is missing from another tab.
+func TestThePaneSaysWhenTheBindNarrowed(t *testing.T) {
+	cases := []struct{ bind, want string }{
+		{`{"mode":"private-network","candidates":[],"refusal":"no address on this Mac is on a private network"}`, `"no address on this Mac is on a private network"`},
+		{`{"mode":"private-network","candidates":["100.101.102.103"],"selected":"100.101.102.103"}`, `""`},
+		{`{"mode":"","candidates":[]}`, `""`},
+	}
+	for _, c := range cases {
+		if got := evalBindMode(t, "report(bindNoticeText("+c.bind+"));"); got != c.want {
+			t.Errorf("bindNoticeText(%s) = %s, want %s", c.bind, got, c.want)
+		}
+	}
+	if !strings.Contains(extractFunction(t, readPanelSource(t), "renderSettings"), "bindNotice") {
+		t.Error("renderSettings does not render the notice — a bind that narrowed would be silent in the pane")
+	}
+	page, err := assets.ReadFile("static/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(page), `id="bindNotice"`) {
+		t.Error("the pane has no element for the notice")
+	}
 }

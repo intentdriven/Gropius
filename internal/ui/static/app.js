@@ -570,6 +570,12 @@ function privateBindDisabled(bind) {
   return found.length === 0 && (!bind || bind.mode !== PRIVATE_BIND);
 }
 
+// bindNoticeText is what the pane says when the bind narrowed: the reason the
+// server gave, or nothing at all when nothing was refused.
+function bindNoticeText(bind) {
+  return (bind && bind.refusal) || '';
+}
+
 // renderBindMode labels the third choice with what it would bind, and takes it
 // away when there is nothing to bind.
 function renderBindMode(select, bind) {
@@ -608,6 +614,9 @@ function renderSettings() {
   // Before the assignment, never after: an unoffered value assigns as "".
   renderBindOptions($('setHost'), c.host);
   renderBindMode($('setHost'), state.bind);
+  const notice = bindNoticeText(state.bind);
+  $('bindNotice').textContent = notice;
+  $('bindNotice').hidden = notice === '';
   $('setHost').value = bindSelectValue(c);
   $('setPort').value = c.port;
   $('setKey').value  = c.api_key || '';
