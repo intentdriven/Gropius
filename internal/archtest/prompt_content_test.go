@@ -54,25 +54,13 @@ func TestOnlyTheMergeReadsPromptContent(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	err = filepath.WalkDir(repoRoot, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if d.IsDir() {
-			// Dot-directories hold no shipping Go source, and one of them can
-			// hold a whole second copy of the tree: a git worktree checked out
-			// under .claude/ would otherwise be scanned as if its files were
-			// this module's, so a branch someone else is working on could fail
-			// this test here.
-			if path != repoRoot && strings.HasPrefix(d.Name(), ".") {
-				return fs.SkipDir
-			}
-			switch d.Name() {
-			case "bin", "dist", "client", "build":
-				return fs.SkipDir
-			}
-			return nil
-		}
+	// walkRepoFiles owns the skip rule, including the dot-directory rule this
+	// scan used to carry in its own body: a git worktree checked out under
+	// .claude/ holds a whole second copy of the tree, and scanning it would
+	// fail this test for a branch someone else is working on. client/ and
+	// build/ are this scan's own subject matter — Swift and packaging assets
+	// hold no Go.
+	walkRepoFiles(t, repoRoot, walkOptions{AlsoSkip: []string{"client", "build"}}, func(path string, d fs.DirEntry) error {
 		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
 			return nil
 		}
@@ -100,9 +88,6 @@ func TestOnlyTheMergeReadsPromptContent(t *testing.T) {
 		}
 		return nil
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 }
 
 // The list above is only a boundary while every entry on it is a file that

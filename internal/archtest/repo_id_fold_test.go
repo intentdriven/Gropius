@@ -1,6 +1,7 @@
 package archtest_test
 
 import (
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -54,12 +55,17 @@ func TestRepoIDFoldHasOneHome(t *testing.T) {
 	anyFold := regexp.MustCompile(`strings\.(ToLower|ToUpper|EqualFold)\(`)
 	repoIDFold := regexp.MustCompile(`strings\.(ToLower|ToUpper|EqualFold)\([^)]*[rR]epo[Ii][dD]`)
 
+	// The root is internal/, which is where this check has looked since it was
+	// written, and the walk goes through walkRepoFiles so that a dot-directory
+	// under it — an agent worktree, or anything else holding a second copy of
+	// the tree — is skipped rather than scanned as this checkout's source.
+	// Whether internal/ is the right SUBJECT is a separate question, filed as
+	// iss-2609081441311030 for the maintainer: cmd/ folds nothing today, so
+	// widening would change no result, and narrowing would change what the
+	// backstop half covers. The scope is deliberately left as it stands here.
 	root := ".." // internal/
-	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if d.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+	walkRepoFiles(t, root, walkOptions{}, func(path string, d fs.DirEntry) error {
+		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
 			return nil
 		}
 		rel, relErr := filepath.Rel(root, path)
@@ -96,9 +102,6 @@ func TestRepoIDFoldHasOneHome(t *testing.T) {
 		}
 		return nil
 	})
-	if err != nil {
-		t.Fatalf("walking internal/: %v", err)
-	}
 }
 
 // An allow-list entry that no longer matches any line is a stale exemption: it
@@ -111,12 +114,12 @@ func TestRepoIDFoldAllowListIsNotStale(t *testing.T) {
 		`if strings.EqualFold(m.Name(), requested) {`,
 	}
 
+	// Same subject and same walker as the check above: internal/, with every
+	// dot-directory skipped, so a worktree's copy of a line cannot hold this
+	// list looking fresh (iss-2609081427104462, iss-2609081441311030).
 	var lines []string
-	err := filepath.WalkDir("..", func(path string, d os.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if d.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+	walkRepoFiles(t, "..", walkOptions{}, func(path string, d fs.DirEntry) error {
+		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
 			return nil
 		}
 		body, readErr := os.ReadFile(path)
@@ -128,9 +131,6 @@ func TestRepoIDFoldAllowListIsNotStale(t *testing.T) {
 		}
 		return nil
 	})
-	if err != nil {
-		t.Fatalf("walking internal/: %v", err)
-	}
 
 	present := make(map[string]bool, len(lines))
 	for _, l := range lines {

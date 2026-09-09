@@ -1,6 +1,7 @@
 package archtest_test
 
 import (
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -233,28 +234,11 @@ func forEachShellScriptLine(t *testing.T, fn func(path string, lineNo int, line 
 	t.Helper()
 	root := repoRootDir(t)
 
-	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if d.IsDir() {
-			// A git worktree checked out under a dot-directory holds a whole
-			// second copy of the tree; scanning it would fail this test for
-			// somebody else's branch. Excluding every dot-directory rather than
-			// naming .claude is what prompt_content_test.go and
-			// statistics_switch_test.go already do, and it is the version that
-			// keeps working when the next tool picks a different directory.
-			// Measured here: 12 shell scripts are visible without it, 8 of them
-			// inside .claude/worktrees/, against 4 the repository tracks.
-			if path != root && strings.HasPrefix(d.Name(), ".") {
-				return filepath.SkipDir
-			}
-			switch d.Name() {
-			case "node_modules", "dist", "bin", "site":
-				return filepath.SkipDir
-			}
-			return nil
-		}
+	// The dot-directory rule this scan carried in its own body now lives in
+	// walkRepoFiles, which every scan of the tree shares: a git worktree
+	// checked out under a dot-directory holds a whole second copy of the tree,
+	// and scanning it fails this test for somebody else's branch.
+	walkRepoFiles(t, root, walkOptions{}, func(path string, _ fs.DirEntry) error {
 		b, err := os.ReadFile(path)
 		if err != nil {
 			return err
@@ -273,7 +257,4 @@ func forEachShellScriptLine(t *testing.T, fn func(path string, lineNo int, line 
 		}
 		return nil
 	})
-	if err != nil {
-		t.Fatalf("walk: %v", err)
-	}
 }
