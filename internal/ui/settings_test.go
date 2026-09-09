@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/intentdriven/Gropius/internal/capability"
+	"github.com/intentdriven/Gropius/internal/config"
 )
 
 // evalPanelValue evaluates one expression against the named functions lifted
@@ -97,7 +98,7 @@ func TestSettingsFormPostsThePerModelMapWhole(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got := evalPanelValue(t, c.expr, "modelSettings", "applyModelSwitch")
+			got := evalPanelValue(t, c.expr, "modelSettings", "applyModelSwitch", "applyModelNumber")
 			if !reflect.DeepEqual(got, c.want) {
 				t.Errorf("%s = %#v, want %#v", c.expr, got, c.want)
 			}
@@ -117,9 +118,11 @@ func TestSettingsFormIsWiredToThePerModelSwitches(t *testing.T) {
 	for _, want := range []*regexp.Regexp{
 		regexp.MustCompile(`models:\s*modelSettings\(\s*state\.config\.models,\s*overrides,\s*` +
 			`listedMergeModels\(\),\s*checkedMergeModels\(\),\s*` +
-			`listedPinModels\(\),\s*checkedPinModels\(\),?\s*\)`),
+			`listedPinModels\(\),\s*checkedPinModels\(\),\s*` +
+			`listedContextModels\(\),\s*typedContextModels\(\),?\s*\)`),
 		regexp.MustCompile(`\brenderMergeSwitches\(\)`),
 		regexp.MustCompile(`\brenderPinSwitches\(\)`),
+		regexp.MustCompile(`\brenderContextFields\(\)`),
 	} {
 		if !want.MatchString(src) {
 			t.Errorf("the control panel no longer matches %s — the per-model switches are then asserted by nothing", want)
@@ -138,15 +141,15 @@ func TestSettingsFormChargesPinnedModelsWhatThePoolCharges(t *testing.T) {
 		expr string
 		want float64
 	}{
-		{fmt.Sprintf(`pinnedCharge(%s, [], 0, 0)`, models), 0},
-		{fmt.Sprintf(`pinnedCharge(%s, ["org/a"], 0, 0)`, models), float64(capability.LoadCost(1000))},
-		{fmt.Sprintf(`pinnedCharge(%s, ["org/a","org/b"], 0, 0)`, models),
+		{fmt.Sprintf(`pinnedCharge(%s, [], {}, 0)`, models), 0},
+		{fmt.Sprintf(`pinnedCharge(%s, ["org/a"], {}, 0)`, models), float64(capability.LoadCost(1000))},
+		{fmt.Sprintf(`pinnedCharge(%s, ["org/a","org/b"], {}, 0)`, models),
 			float64(capability.LoadCost(1000) + capability.LoadCost(500))},
 		// A pinned model this Mac has not downloaded has no size to charge.
-		{fmt.Sprintf(`pinnedCharge(%s, ["org/not-downloaded"], 0, 0)`, models), 0},
+		{fmt.Sprintf(`pinnedCharge(%s, ["org/not-downloaded"], {}, 0)`, models), 0},
 	}
 	for _, tc := range cases {
-		got := evalPanelNumber(t, tc.expr, "foldRepoID", "modelCharge", "pinnedCharge")
+		got := evalPanelNumber(t, tc.expr, "foldRepoID", "servedContext", "modelCharge", "pinnedCharge")
 		if got != tc.want {
 			t.Errorf("%s = %v, want %v", tc.expr, got, tc.want)
 		}
@@ -154,46 +157,95 @@ func TestSettingsFormChargesPinnedModelsWhatThePoolCharges(t *testing.T) {
 }
 
 // And a model that does say — every model downloaded by a build that records
-// the figure — is charged what its own window and cache cost make it, per
-// sequence its server may decode, held at the budget. The panel is the surface
-// an operator picks a pinned set on, so a panel charging the old flat figure
-// would show a set fitting that the pool then refuses to hold.
+// the figure — is charged what the window it is served at and its cache cost
+// make it, once per sequence its server may decode. The panel is the surface
+// an operator picks a pinned set on, so a panel charging anything else would
+// show a set fitting that the pool then refuses to hold.
 func TestSettingsFormChargesTheCacheTheModelsConfigurationImplies(t *testing.T) {
 	const (
 		size      = 1000
 		kv        = 3
-		window    = 200
+		declared  = 200
 		sequences = 4
-		budget    = 1 << 40
 	)
 	models := fmt.Sprintf(
-		`[{"repo_id":"org/a","bytes":%d,"context_length":%d,"kv_bytes_per_token":%d}]`,
-		size, window, kv)
+		`[{"repo_id":"org/a","bytes":%d,"context_length":%d,"kv_charge_per_token":%d}]`,
+		size, declared, kv)
 	want := float64(capability.LoadCostOf(capability.Load{
-		DiskBytes:       size,
-		KVBytesPerToken: kv,
-		Window:          window,
-		Sequences:       sequences,
-		Budget:          budget,
+		DiskBytes:        size,
+		KVChargePerToken: kv,
+		Window:           declared,
+		Sequences:        sequences,
 	}))
-	expr := fmt.Sprintf(`pinnedCharge(%s, ["org/a"], %d, %d)`, models, sequences, int64(budget))
-	if got := evalPanelNumber(t, expr, "foldRepoID", "modelCharge", "pinnedCharge"); got != want {
+	expr := fmt.Sprintf(`pinnedCharge(%s, ["org/a"], {}, %d)`, models, sequences)
+	if got := evalPanelNumber(t, expr, "foldRepoID", "servedContext", "modelCharge", "pinnedCharge"); got != want {
 		t.Errorf("%s = %v, want %v — the panel and the pool charge the same model differently", expr, got, want)
 	}
 }
 
-// The ceiling is part of the charge, and the panel applies it: a model whose
-// window costs more than the whole budget is charged the budget, because that
-// is what the pool charges it — one model, the machine to itself.
-func TestSettingsFormHoldsOneModelsChargeAtTheBudget(t *testing.T) {
-	const budget = 4000
-	models := `[{"repo_id":"org/a","bytes":1000,"context_length":100000,"kv_bytes_per_token":8}]`
+// A model served at a window of the operator's own is charged that window,
+// which is the whole point of the setting: the figure beside the boxes falls
+// when they lower it, and the pinned set they could not save becomes one they
+// can.
+func TestSettingsFormChargesTheServedContext(t *testing.T) {
+	const (
+		size      = 1000
+		kv        = 3
+		declared  = 200000
+		served    = 2000
+		sequences = 1
+	)
+	models := fmt.Sprintf(
+		`[{"repo_id":"org/a","bytes":%d,"context_length":%d,"kv_charge_per_token":%d}]`,
+		size, declared, kv)
+	cfg := fmt.Sprintf(`{"models":{"org/a":{"served_context":%d}}}`, served)
 	want := float64(capability.LoadCostOf(capability.Load{
-		DiskBytes: 1000, KVBytesPerToken: 8, Window: 100000, Sequences: 1, Budget: budget,
+		DiskBytes:        size,
+		KVChargePerToken: kv,
+		Window:           served,
+		Sequences:        sequences,
 	}))
-	expr := fmt.Sprintf(`pinnedCharge(%s, ["org/a"], 1, %d)`, models, budget)
-	if got := evalPanelNumber(t, expr, "foldRepoID", "modelCharge", "pinnedCharge"); got != want {
+	expr := fmt.Sprintf(`pinnedCharge(%s, ["org/a"], %s, %d)`, models, cfg, sequences)
+	if got := evalPanelNumber(t, expr, "foldRepoID", "servedContext", "modelCharge", "pinnedCharge"); got != want {
 		t.Errorf("%s = %v, want %v", expr, got, want)
+	}
+}
+
+// The panel and Go must agree about which window that is, including the two
+// cases where the setting is not honoured: none set, and one larger than the
+// model can address.
+func TestThePanelResolvesTheServedWindowAsGoDoes(t *testing.T) {
+	cfg := config.Config{Models: map[string]config.ModelSettings{
+		"org/set":  {ServedContext: 32768},
+		"org/over": {ServedContext: 300000},
+	}}
+	cases := []struct{ id string }{{"org/set"}, {"org/over"}, {"org/none"}}
+	const declared = 262144
+	js := `{"models":{"org/set":{"served_context":32768},"org/over":{"served_context":300000}}}`
+	for _, c := range cases {
+		expr := fmt.Sprintf(`servedContext(%s, %q, %d)`, js, c.id, declared)
+		want := float64(cfg.ServedContext(c.id, declared))
+		if got := evalPanelNumber(t, expr, "foldRepoID", "servedContext"); got != want {
+			t.Errorf("%s = %v, want %v", expr, got, want)
+		}
+	}
+}
+
+// The window is a per-model setting like the pin and the merging switch, and
+// it posts on the same map: a figure typed into a model's field reaches the
+// save, a blank field means the model's own window and leaves nothing behind,
+// and a model the form does not list keeps what it has.
+func TestSettingsFormPostsTheServedContext(t *testing.T) {
+	got := evalPanelValue(t,
+		`{"out": modelSettings({"org/kept":{"served_context":1000},"org/cleared":{"served_context":2000}}, {},
+			[], [], [], [], ["org/typed","org/cleared"], {"org/typed":4096,"org/cleared":0})}`,
+		"foldRepoID", "modelSettings", "applyModelSwitch", "applyModelNumber")
+	want := map[string]any{"out": map[string]any{
+		"org/kept":  map[string]any{"served_context": float64(1000)},
+		"org/typed": map[string]any{"served_context": float64(4096)},
+	}}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("modelSettings = %v, want %v", got, want)
 	}
 }
 
@@ -222,7 +274,7 @@ func TestSettingsFormDrawsARowForEveryPin(t *testing.T) {
 // the moment the downloads land.
 func TestSettingsFormChargesADownloadItsDeclaredSize(t *testing.T) {
 	const models = `[{"repo_id":"org/incoming","bytes":0,"size_bytes":1000}]`
-	got := evalPanelNumber(t, fmt.Sprintf(`pinnedCharge(%s, ["org/incoming"], 0, 0)`, models), "foldRepoID", "modelCharge", "pinnedCharge")
+	got := evalPanelNumber(t, fmt.Sprintf(`pinnedCharge(%s, ["org/incoming"], {}, 0)`, models), "foldRepoID", "servedContext", "modelCharge", "pinnedCharge")
 	if want := float64(capability.LoadCost(1000)); got != want {
 		t.Errorf("pinnedCharge = %v, want %v", got, want)
 	}
