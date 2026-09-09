@@ -77,7 +77,8 @@ tag, or if the default rule hides models people want to chat with.
 
 ## Audit Notes
 
-_Empty. Populated by intent-auditor when intent moves to shipped/._
+<!-- abcd-review: OWED receipt=rcp-20d902524b1c -->
+Fidelity review OWED (receipt rcp-20d902524b1c).
 
 ## Grounds
 

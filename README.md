@@ -40,6 +40,11 @@ Cross-machine LAN use works; TLS and notarized distribution are not yet included
 - **Context window published** — the models list gives each model's maximum
   context, so a client can size its prompts instead of discovering the limit
   by failure ([reference](docs/models-list.md)).
+- **Model kind published** — each model carries HuggingFace's own pipeline tag
+  and tags, recorded when it was downloaded, plus a `chat` flag from a rule you
+  set: a chat client can offer only the models that can hold a conversation
+  while every model stays callable by name
+  ([how to](docs/chat-models.md), [reference](docs/models-list.md)).
 - **Residency published** — with an API key set, the models list also says which
   models are loaded, how busy each one is and when it was last used, so a client
   picks the warm model instead of triggering a load

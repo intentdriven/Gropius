@@ -22,6 +22,9 @@ curl http://localhost:11535/v1/models
       "object": "model",
       "created": 1757145600,
       "owned_by": "gropius",
+      "pipeline_tag": "text-generation",
+      "tags": ["mlx", "conversational"],
+      "chat": true,
       "context_length": 40960,
       "max_model_len": 40960
     }
@@ -37,12 +40,71 @@ curl http://localhost:11535/v1/models
 | `object` | Always `model`, as the OpenAI schema requires. |
 | `created` | Unix time at which this Mac first recorded the model. A re-download or a retry does not move it. |
 | `owned_by` | Always `gropius`. |
+| `pipeline_tag` | What HuggingFace says the model does — `text-generation`, `automatic-speech-recognition`, and so on. Absent when the Hub has no tag for that repository. See below. |
+| `tags` | The repository's HuggingFace tags, as they are written there. Absent when the Hub has none. See below. |
+| `chat` | Whether the model counts as able to hold a conversation, under the rule this server runs. Always present. See below. |
 | `context_length` | The model's maximum context, in tokens. See below. |
 | `max_model_len` | The same figure again, under the name vLLM-derived clients read. |
 | `state` | Whether the model is loaded, still loading, or not loaded. Only for a client connecting over loopback, or on an install with an API key. See below. |
 | `in_flight` | How many requests that model is already handling. Only for a client connecting over loopback, or on an install with an API key. |
 | `last_used` | Unix time at which Gropius last handled a request for that model. Only for a client connecting over loopback, or on an install with an API key, and only while the model is in memory — `loaded` or `loading`. |
 | `pinned` | Whether the operator has protected the model from eviction. Only for a client connecting over loopback, or on an install with an API key. See below. |
+
+## What kind of model it is
+
+`pipeline_tag` and `tags` are HuggingFace's own words for a model, republished
+as they are. Gropius has no taxonomy of its own: it records the tags the Hub
+carries for a repository at the moment the model is downloaded, and serves them
+back. The vocabulary is HuggingFace's, so it can change without a Gropius
+release.
+
+**When they are absent.** Either field is omitted, rather than sent empty, when:
+
+- The Hub carries no tag of that kind for the repository.
+- The model was downloaded by a Gropius that predates these fields. Nothing on
+  disk says what kind of model it is, so a rescan cannot fill them in —
+  download the model again to give it its words.
+- HuggingFace could not be reached for the repository's metadata when the
+  download finished. The model is complete and served as normal; only the words
+  are missing.
+
+Treat an absent field as "not known", never as an answer about the model.
+
+## The chat flag
+
+`chat` says whether this server counts the model as able to hold a conversation.
+It is on every entry, including entries with no tags at all — the whole value of
+the field is telling one kind of model from another, so an absent key would read
+as a server that cannot say either way.
+
+**It filters nothing.** A model with `"chat": false` is loaded and served like
+any other: name it in a request's `model` field and it answers. The flag exists
+so a chat application can leave a speech or OCR model out of its picker while
+every model stays callable over the API.
+
+**The rule behind it.** A model counts as able to chat when its pipeline tag is
+one of a list, and its tags include every word of a second list. As shipped, the
+lists are `text-generation` and `image-text-to-text`, and `conversational` —
+which makes `chat` false for a model with no tags. Both lists are settings:
+**Settings → Which models can chat** in the control panel, and `chat_rule` in
+`config.json`:
+
+```json
+"chat_rule": {
+  "pipeline_tags": ["text-generation", "image-text-to-text"],
+  "required_tags": ["conversational"]
+}
+```
+
+Comparison folds case and ignores surrounding space. An empty list stops testing
+that half, so a rule with both lists empty marks every model as able to chat; no
+`chat_rule` key at all means the shipped rule. See
+[Choose which models are offered for chat](chat-models.md).
+
+**The flag is this server's answer, not the last word.** A client is free to
+read `pipeline_tag` and `tags` and apply its own rule — which is what the
+GropiusChat client does, with the same rule as its own default, changeable in
+its Settings.
 
 ## The context figure
 
