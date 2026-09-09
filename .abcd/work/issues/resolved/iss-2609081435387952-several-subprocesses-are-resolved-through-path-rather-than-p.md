@@ -8,6 +8,8 @@ source: "user-observation"
 found_during: "manual-capture"
 origin: researcher-authored
 production_mode: hand-written
+resolution: "scutil, open and pbcopy are pinned to /usr/sbin/scutil, /usr/bin/open and /usr/bin/pbcopy, matching internal/capability's /usr/sbin/sysctl, and an architecture test now fails any non-test exec.Command/CommandContext whose program is a string literal not beginning with '/'."
+impact: fix
 ---
 
 Several subprocesses are resolved through PATH rather than pinned to an absolute path, on a product designed for shared multi-account Macs. internal/capability pins /usr/sbin/sysctl; other call sites invoke scutil, open and pbcopy by bare name and take whatever PATH resolves. On a single-user Mac this is hygiene: a shim planted in a PATH directory gains an attacker nothing they did not already have, because it runs as the same user. This product is explicitly not that case. Its design premise is one Mac serving several user accounts — the shared-cache install mode with its deliberate 3775 directory semantics, per-account MLX runtime executables, and the gateway's loopback exemption which exists because requests arrive from other macOS accounts on the same machine. The question is therefore not whether an attacker could already run code as this user, but whether a different account on this Mac can plant something the server account's process will execute; a group-writable directory on that PATH answers yes, and the boundary crossed is account-to-account, which this product claims. Not elevation, and a different class from an installer shim that receives elevation. The fix is to extend the existing precedent rather than to invent one. internal/runtime and internal/capability are both declared trust boundaries. Surfaced while reviewing a peer session's privileged-AppleScript guard.
@@ -60,3 +62,7 @@ fix must not be read as having covered this.
 Verified in this repository and on this machine before being written down; the
 finding arrived from another session and the directory mode, the group size,
 the three call sites and the `sync.Once` were each checked here.
+
+## Grounds
+
+- pursued: no bare-name subprocess remains in shipping code, so another account on this Mac cannot answer for a command this account runs, and a name resolved on a CI runner is no longer ambiguous; we are wrong if a call site assembles a bare name into a variable, which the static check allows by design, or if one of these absolute paths is not where macOS keeps the tool on a supported release.

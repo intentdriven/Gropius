@@ -35,7 +35,16 @@ func LocalHostName() string {
 func resolveLocalHostName() string {
 	// scutil is the authoritative source; it is what System Settings edits and
 	// what mDNSResponder publishes.
-	if out, err := exec.Command("scutil", "--get", "LocalHostName").Output(); err == nil {
+	//
+	// The absolute path, not the name, as internal/capability does for sysctl.
+	// This runs with no user gesture at all — memoized behind the sync.Once
+	// above, reached from the endpoint list the menu bar builds and the control
+	// panel's snapshot re-renders — so it runs once early in every account on
+	// this Mac that launches Gropius. Gropius is built for a Mac shared by
+	// several accounts, where a group-writable directory ahead of /usr/sbin on
+	// this account's PATH is another account's way into this process; and even
+	// with nobody hostile, a bare name is no proof of which tool answered.
+	if out, err := exec.Command("/usr/sbin/scutil", "--get", "LocalHostName").Output(); err == nil {
 		if name := strings.TrimSpace(string(out)); name != "" {
 			return name
 		}

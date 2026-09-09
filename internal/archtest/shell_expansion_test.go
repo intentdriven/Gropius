@@ -1,6 +1,7 @@
 package archtest_test
 
 import (
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -40,17 +41,16 @@ func TestShellVariablesAreBracedBeforeNonASCII(t *testing.T) {
 	root := repoRootDir(t)
 	var offences []string
 
-	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if d.IsDir() {
-			switch d.Name() {
-			case ".git", "node_modules", "dist", "bin", "site":
-				return filepath.SkipDir
-			}
-			return nil
-		}
+	// The walk goes through walkRepoFiles, which skips every dot-directory:
+	// this scan used to exclude only .git, so an agent worktree checked out
+	// under .claude/ was scanned as if it were this checkout — two-thirds of
+	// the shell it saw was another branch's (iss-2609081427104462).
+	//
+	// .github and .githooks are named back in because both hold shell this
+	// repository tracks and this rule applies to: a workflow's `run:` block,
+	// and the commit hooks.
+	shellDotDirs := walkOptions{DotDirs: []string{".github", ".githooks"}}
+	walkRepoFiles(t, root, shellDotDirs, func(path string, _ fs.DirEntry) error {
 		b, err := os.ReadFile(path)
 		if err != nil {
 			return err
@@ -63,9 +63,6 @@ func TestShellVariablesAreBracedBeforeNonASCII(t *testing.T) {
 		}
 		return nil
 	})
-	if err != nil {
-		t.Fatalf("walk: %v", err)
-	}
 
 	for _, o := range offences {
 		t.Errorf("unbraced expansion immediately before a non-ASCII byte — brace it as ${VAR}: %s", o)
