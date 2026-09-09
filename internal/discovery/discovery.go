@@ -4,7 +4,6 @@ package discovery
 
 import (
 	"context"
-	"fmt"
 	"log/slog"
 	"strconv"
 	"strings"
@@ -92,10 +91,21 @@ type Advertiser struct {
 	AuthRequired func() bool
 	Log          *slog.Logger
 
+	// announce registers the service. nil means the real dnssd path; tests
+	// substitute a fake so the lifecycle can be driven without a socket.
+	announce announcer
+	// interval is how often the advertised TXT record is re-derived from the
+	// callbacks. Zero means defaultRefreshInterval.
+	interval time.Duration
+
 	mu     sync.Mutex
 	cancel context.CancelFunc
 	done   chan struct{}
 }
+
+// defaultRefreshInterval is how often the advertised auth/model hints are
+// re-derived from the live callbacks.
+const defaultRefreshInterval = 15 * time.Second
 
 // txtRecord builds the TXT map from the live callbacks.
 func (a *Advertiser) txtRecord() map[string]string {
@@ -131,6 +141,9 @@ func (a *Advertiser) Start(ctx context.Context) error {
 	if a.Log == nil {
 		a.Log = slog.Default()
 	}
+	if a.announce == nil {
+		a.announce = dnssdAnnouncer{}
+	}
 
 	host := config.LocalHostName()
 	if host == "" {
@@ -156,49 +169,75 @@ func (a *Advertiser) Start(ctx context.Context) error {
 		// of <LocalHostName>.local is left completely alone.
 		Host: serviceHost(host),
 		Port: a.Port,
-		Text: a.txtRecord(),
-	}
-	service, err := dnssd.NewService(cfg)
-	if err != nil {
-		return fmt.Errorf("build mDNS service: %w", err)
-	}
-
-	responder, err := dnssd.NewResponder()
-	if err != nil {
-		return fmt.Errorf("create mDNS responder: %w", err)
-	}
-	handle, err := responder.Add(service)
-	if err != nil {
-		return fmt.Errorf("add mDNS service: %w", err)
 	}
 
 	rctx, cancel := context.WithCancel(ctx)
+	ad, err := a.publish(rctx, cfg, a.txtRecord())
+	if err != nil {
+		cancel()
+		return err
+	}
+
 	a.cancel = cancel
 	a.done = make(chan struct{})
-
-	go func() {
-		defer close(a.done)
-		// Respond blocks until the context is cancelled. On darwin it logs a
-		// benign "unable to wait for link updates" (netlink is Linux-only).
-		if err := responder.Respond(rctx); err != nil && rctx.Err() == nil {
-			a.Log.Warn("mDNS advertising stopped", "err", err)
-		}
-	}()
-
-	// Keep the advertised auth/model hints in step with runtime config changes.
-	go a.refresh(rctx, responder, handle, cfg.Text)
+	go a.refresh(rctx, cfg, ad, a.done)
 
 	a.Log.Info("advertising on the local network",
 		"service", ServiceType, "name", cfg.Name, "port", a.Port)
 	return nil
 }
 
+// advertisement is one live registration: a service that has been handed to a
+// responder which is serving it until its context is cancelled.
+type advertisement struct {
+	reg    registration
+	text   map[string]string
+	cancel context.CancelFunc
+	done   chan struct{}
+}
+
+// publish registers the service carrying text and starts responding for it.
+func (a *Advertiser) publish(ctx context.Context, cfg dnssd.Config, text map[string]string) (*advertisement, error) {
+	cfg.Text = text
+	reg, err := a.announce.Register(cfg)
+	if err != nil {
+		return nil, err
+	}
+	rctx, cancel := context.WithCancel(ctx)
+	ad := &advertisement{reg: reg, text: text, cancel: cancel, done: make(chan struct{})}
+	go func() {
+		defer close(ad.done)
+		// Respond blocks until the context is cancelled. On darwin it logs a
+		// benign "unable to wait for link updates" (netlink is Linux-only).
+		if err := reg.Respond(rctx); err != nil && rctx.Err() == nil {
+			a.Log.Warn("mDNS advertising stopped", "err", err)
+		}
+	}()
+	return ad, nil
+}
+
+// withdraw cancels the responder and waits for it to actually exit, so its
+// goodbye is on the wire before anything else touches the same name.
+func (ad *advertisement) withdraw() {
+	ad.cancel()
+	<-ad.done
+}
+
 // refresh periodically re-publishes the TXT record when the advertised auth
 // state or model count changes, so a runtime config change (e.g. setting an API
 // key in the control panel) is reflected to clients rather than left stale.
-func (a *Advertiser) refresh(ctx context.Context, r dnssd.Responder, h dnssd.ServiceHandle, last map[string]string) {
-	tick := time.NewTicker(15 * time.Second)
+func (a *Advertiser) refresh(ctx context.Context, cfg dnssd.Config, ad *advertisement, done chan struct{}) {
+	defer close(done)
+	defer func() { ad.withdraw() }()
+
+	interval := a.interval
+	if interval <= 0 {
+		interval = defaultRefreshInterval
+	}
+	tick := time.NewTicker(interval)
 	defer tick.Stop()
+
+	last := ad.text
 	for {
 		select {
 		case <-ctx.Done():
@@ -208,7 +247,7 @@ func (a *Advertiser) refresh(ctx context.Context, r dnssd.Responder, h dnssd.Ser
 			if sameText(last, cur) {
 				continue
 			}
-			h.UpdateText(cur, r)
+			ad.reg.UpdateText(cur)
 			last = cur
 			a.Log.Info("updated network advertisement",
 				"auth", cur["auth"], "models", cur["models"])
