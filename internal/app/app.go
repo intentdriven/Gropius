@@ -558,7 +558,7 @@ func (a *App) smallestChargeableModel() (int64, string) {
 		if size <= 0 {
 			continue
 		}
-		if cost := capability.LoadCost(size); smallest == 0 || cost < smallest {
+		if cost := a.chargeOf(m, size); smallest == 0 || cost < smallest {
 			smallest, id = cost, m.RepoID
 		}
 	}
@@ -860,9 +860,26 @@ func (a *App) pinnedCharge(pinned []string) (sum int64, unsized []string) {
 			unsized = append(unsized, m.RepoID)
 			continue
 		}
-		sum += capability.LoadCost(size)
+		sum += a.chargeOf(m, size)
 	}
 	return sum, unsized
+}
+
+// chargeOf is what one model costs the memory budget, asked of the one place
+// that answers it. Every figure the pool charges is here too — the model's own
+// window and cache cost, the decode concurrency its server is launched with,
+// and the budget as the ceiling — because a pinned set the app says fits and
+// the pool then refuses is the disagreement this single home exists to
+// prevent. The size is a parameter because a model still downloading is
+// charged the size it declares rather than the bytes so far.
+func (a *App) chargeOf(m registry.Model, size int64) int64 {
+	return capability.LoadCostOf(capability.Load{
+		DiskBytes:       size,
+		KVBytesPerToken: m.KVBytesPerToken,
+		Window:          m.ContextLength,
+		Sequences:       int64(a.Pool.DecodeConcurrency()),
+		Budget:          a.Pool.MemoryBudget(),
+	})
 }
 
 // chargeable reports whether a model could occupy memory at all. Anything the
@@ -993,7 +1010,7 @@ func perModelKeys(in map[string]config.ModelSettings) []string {
 // unlinking the files, and the pool decides to launch inside this call.
 type modelSource struct{ app *App }
 
-func (s modelSource) Resolve(repoID string) (string, int64, error) {
+func (s modelSource) Resolve(repoID string) (runtime.ResolvedModel, error) {
 	// Asked before the index, because the index is not what says whether this
 	// model may be launched. The window is precise: Delete calls Pool.Unload
 	// and then Registry.Remove, and between Unload returning and Remove's index
@@ -1006,16 +1023,21 @@ func (s modelSource) Resolve(repoID string) (string, int64, error) {
 	// through it is a model server answering requests from unlinked files after
 	// every surface that reports what this Mac holds has stopped listing it.
 	if s.app.isDeleting(repoID) {
-		return "", 0, fmt.Errorf("%s is being deleted", repoID)
+		return runtime.ResolvedModel{}, fmt.Errorf("%s is being deleted", repoID)
 	}
 	m, err := s.app.Registry.Get(repoID)
 	if err != nil {
-		return "", 0, fmt.Errorf("%s is not downloaded", repoID)
+		return runtime.ResolvedModel{}, fmt.Errorf("%s is not downloaded", repoID)
 	}
 	if !m.Ready() {
-		return "", 0, fmt.Errorf("%s is not ready (%s)", repoID, m.State)
+		return runtime.ResolvedModel{}, fmt.Errorf("%s is not ready (%s)", repoID, m.State)
 	}
-	return m.Path, m.Bytes, nil
+	return runtime.ResolvedModel{
+		Path:            m.Path,
+		Bytes:           m.Bytes,
+		ContextLength:   m.ContextLength,
+		KVBytesPerToken: m.KVBytesPerToken,
+	}, nil
 }
 
 // ErrAlreadyDownloading is returned when a download is requested twice.
@@ -1185,17 +1207,18 @@ func (a *App) Download(repoID string) error {
 			// after the next startup rescan. Both touch the disk, so both are
 			// done here, before the lock.
 			bytes := dirSize(dest)
-			contextLength := registry.ReadContextLength(dest)
+			facts := registry.ReadModelFacts(dest)
 			var perr error
 			a.finishDownload(dl, func() {
 				perr = a.Registry.Put(registry.Model{
-					RepoID:        repoID,
-					Path:          dest,
-					Bytes:         bytes,
-					ContextLength: contextLength,
-					State:         registry.StateReady,
-					Progress:      100,
-					AddedAt:       addedAt,
+					RepoID:          repoID,
+					Path:            dest,
+					Bytes:           bytes,
+					ContextLength:   facts.ContextLength,
+					KVBytesPerToken: facts.KVBytesPerToken,
+					State:           registry.StateReady,
+					Progress:        100,
+					AddedAt:         addedAt,
 				})
 			})
 			if perr != nil {
@@ -1280,13 +1303,14 @@ func (a *App) canRestoreReady(dest string, wasReady bool) bool {
 // it from the directory that is actually being served.
 func (a *App) restoreReady(repoID, dest string, prior registry.Model) bool {
 	if perr := a.Registry.Put(registry.Model{
-		RepoID:        repoID,
-		Path:          dest,
-		Bytes:         prior.Bytes,
-		ContextLength: prior.ContextLength,
-		State:         registry.StateReady,
-		Progress:      100,
-		AddedAt:       prior.AddedAt,
+		RepoID:          repoID,
+		Path:            dest,
+		Bytes:           prior.Bytes,
+		ContextLength:   prior.ContextLength,
+		KVBytesPerToken: prior.KVBytesPerToken,
+		State:           registry.StateReady,
+		Progress:        100,
+		AddedAt:         prior.AddedAt,
 	}); perr != nil {
 		a.Log.Error("could not restore the ready model record", "model", repoID, "err", perr)
 		return false

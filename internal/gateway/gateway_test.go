@@ -1601,12 +1601,17 @@ func (t composedTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 // registrySource adapts the registry to runtime.ModelSource, as the app does.
 type registrySource struct{ reg *registry.Registry }
 
-func (s registrySource) Resolve(repoID string) (string, int64, error) {
+func (s registrySource) Resolve(repoID string) (runtime.ResolvedModel, error) {
 	m, err := s.reg.Get(repoID)
 	if err != nil {
-		return "", 0, err
+		return runtime.ResolvedModel{}, err
 	}
-	return m.Path, m.Bytes, nil
+	return runtime.ResolvedModel{
+		Path:            m.Path,
+		Bytes:           m.Bytes,
+		ContextLength:   m.ContextLength,
+		KVBytesPerToken: m.KVBytesPerToken,
+	}, nil
 }
 
 // Every other residency test stubs out one half of the path: the gateway tests

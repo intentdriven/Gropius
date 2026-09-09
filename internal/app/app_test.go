@@ -452,22 +452,22 @@ func TestResolveOnlyReturnsReadyModels(t *testing.T) {
 	a.Registry.Put(registry.Model{
 		RepoID: "org/half", Path: "/tmp/x", State: registry.StateDownloading,
 	})
-	if _, _, err := src.Resolve("org/half"); err == nil {
+	if _, err := src.Resolve("org/half"); err == nil {
 		t.Error("a still-downloading model must not be servable")
 	}
-	if _, _, err := src.Resolve("org/absent"); err == nil {
+	if _, err := src.Resolve("org/absent"); err == nil {
 		t.Error("an unknown model must not be servable")
 	}
 
 	a.Registry.Put(registry.Model{
 		RepoID: "org/ok", Path: "/models/org/ok", Bytes: 100, State: registry.StateReady,
 	})
-	path, size, err := src.Resolve("org/ok")
+	got, err := src.Resolve("org/ok")
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
-	if path != "/models/org/ok" || size != 100 {
-		t.Errorf("Resolve = (%q, %d)", path, size)
+	if got.Path != "/models/org/ok" || got.Bytes != 100 {
+		t.Errorf("Resolve = (%q, %d)", got.Path, got.Bytes)
 	}
 }
 
@@ -501,7 +501,7 @@ func TestProgressReachesTheRegistry(t *testing.T) {
 func TestHumanReadableErrorForMissingModel(t *testing.T) {
 	a := newTestApp(t)
 	src := modelSource{a}
-	_, _, err := src.Resolve("org/nope")
+	_, err := src.Resolve("org/nope")
 	if err == nil {
 		t.Fatal("expected an error")
 	}
