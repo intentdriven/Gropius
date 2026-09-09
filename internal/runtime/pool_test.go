@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/intentdriven/Gropius/internal/capability"
 	"github.com/intentdriven/Gropius/internal/mlxtest"
 )
 
@@ -815,9 +816,34 @@ func TestCloseStopsEverything(t *testing.T) {
 	}
 }
 
-func TestLoadCostAddsHeadroom(t *testing.T) {
-	if got := LoadCost(1000); got != 1200 {
-		t.Errorf("LoadCost(1000) = %d, want 1200 (weights + KV-cache headroom)", got)
+// The pool charges a resident model exactly what internal/capability charges
+// it, because that is the figure the "fits" filter hides models against: a
+// second copy here is how the filter came to show models the pool would refuse.
+// Asserted through admission rather than by comparing two functions, so the
+// binding holds on what the pool does and not on what it declares.
+func TestThePoolChargesTheFigureTheFitsFilterUses(t *testing.T) {
+	const size = 1000
+	for _, tc := range []struct {
+		name   string
+		budget int64
+		want   bool
+	}{
+		{"charged exactly the budget loads", capability.LoadCost(size), true},
+		{"one byte of budget short is refused", capability.LoadCost(size) - 1, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			l := newFakeLauncher()
+			src := &fakeSource{models: map[string]int64{"org/a": size}}
+			p := newTestPool(t, l, src, PoolOptions{MaxResidentBytes: tc.budget})
+			_, release, err := p.Acquire(context.Background(), "org/a")
+			if got := err == nil; got != tc.want {
+				t.Errorf("Acquire under a budget of %d: loaded = %v, want %v (err %v)",
+					tc.budget, got, tc.want, err)
+			}
+			if release != nil {
+				release()
+			}
+		})
 	}
 }
 
@@ -1163,7 +1189,7 @@ func TestMemoryBudgetReportsTheCeilingEvictionUses(t *testing.T) {
 	}
 	if _, _, err := p.Acquire(context.Background(), "org/over"); err == nil {
 		t.Errorf("a model charged %d loaded under a budget of %d",
-			LoadCost(205), p.MemoryBudget())
+			capability.LoadCost(205), p.MemoryBudget())
 	}
 	_, release, err := p.Acquire(context.Background(), "org/fits")
 	if err != nil {

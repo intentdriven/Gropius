@@ -286,12 +286,13 @@ func (c *Control) snapshot() State {
 }
 
 // residentCharge is what the models in memory cost the budget: each one's size
-// on disk plus a fifth, which is the figure the pool charges (runtime.LoadCost)
+// on disk plus a fifth, which is the figure the pool charges
+// (capability.LoadCost)
 // and therefore the only one that can be compared with the budget.
 func residentCharge(resident []runtime.Resident) int64 {
 	var sum int64
 	for _, r := range resident {
-		sum += runtime.LoadCost(r.Bytes)
+		sum += capability.LoadCost(r.Bytes)
 	}
 	return sum
 }

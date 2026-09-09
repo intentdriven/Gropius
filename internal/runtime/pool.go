@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/intentdriven/Gropius/internal/capability"
 	"github.com/intentdriven/Gropius/internal/config"
 )
 
@@ -89,8 +90,9 @@ type PoolOptions struct {
 	Launcher Launcher
 	Models   ModelSource
 	// MaxResidentBytes is the pool's memory budget as it starts: the ceiling on
-	// the total charged size (LoadCost, 1.2x the size on disk) of the models
-	// held at once. Zero or less means the default share of this Mac's memory.
+	// the total charged size (capability.LoadCost, 1.2x the size on disk) of the
+	// models held at once. Zero or less means the default share of this Mac's
+	// memory.
 	//
 	// The starting value only. SetMemoryBudget replaces it, and the figure the
 	// pool enforces after that is the one it holds under p.mu — this field is
@@ -771,7 +773,7 @@ func (p *Pool) startLocked(repoID string, waited time.Duration, adm admission) (
 		return nil, err
 	}
 
-	need := LoadCost(size)
+	need := capability.LoadCost(size)
 	if need > p.maxResident {
 		return nil, fmt.Errorf(
 			"%s needs about %s of memory but the limit is %s — raise the memory budget or choose a smaller quantization",
@@ -990,7 +992,7 @@ func allows(adm admission, victims []*entry) bool {
 func (p *Pool) evictionPlanLocked(need int64, waited time.Duration) ([]*entry, bool) {
 	var used int64
 	for _, e := range p.entries {
-		used += LoadCost(e.bytes)
+		used += capability.LoadCost(e.bytes)
 	}
 	if used+need <= p.maxResident {
 		return nil, true
@@ -1025,7 +1027,7 @@ func (p *Pool) evictionPlanLocked(need int64, waited time.Duration) ([]*entry, b
 	victims := make([]*entry, 0, len(candidates))
 	for _, e := range candidates {
 		victims = append(victims, e)
-		used -= LoadCost(e.bytes)
+		used -= capability.LoadCost(e.bytes)
 		if used+need <= p.maxResident {
 			return victims, true
 		}
@@ -1172,7 +1174,7 @@ func (p *Pool) canEverFitLocked(need int64) bool {
 	var protected int64
 	for _, e := range p.entries {
 		if p.isPinnedLocked(e.repoID) {
-			protected += LoadCost(e.bytes)
+			protected += capability.LoadCost(e.bytes)
 		}
 	}
 	return protected+need <= p.maxResident
@@ -1477,14 +1479,6 @@ func isReady(e *entry) bool {
 	default:
 		return false
 	}
-}
-
-// LoadCost estimates the memory a model occupies once loaded: its weights plus
-// headroom for the KV cache and activations. It is what a model is charged
-// against the memory budget, so the check that a pinned set fits has to use
-// this figure and not the size on disk.
-func LoadCost(diskBytes int64) int64 {
-	return diskBytes + diskBytes/5 // 1.2x
 }
 
 // HumanBytes renders a byte count the way the pool's own messages do, so a

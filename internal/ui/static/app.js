@@ -623,7 +623,7 @@ function pinnedModels(current, listed, checked) {
 
 // pinnedCharge is what the pinned models cost against the memory budget: each
 // one's size plus a fifth, which is what the pool charges a loaded model
-// (runtime.LoadCost). A model still downloading is charged the size it
+// (capability.LoadCost). A model still downloading is charged the size it
 // declares, because ticking its box now is a promise about the memory it will
 // take when it lands. A pin naming a model this Mac does not have at all has
 // no size to charge.
