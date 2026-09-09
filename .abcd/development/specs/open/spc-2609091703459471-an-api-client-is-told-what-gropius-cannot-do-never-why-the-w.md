@@ -85,7 +85,7 @@ apart from the rotation, inside the package that holds this repository's
 durable data format — a change far larger than the writer this record needs and
 one that would land in the same diff as a new setting and a new package. So the
 smallest possible rotating writer goes into `internal/applog` instead, and the
-duplication is filed as a capture naming both sites, with a dated line in
+duplication is filed as iss-2609091714393599, naming both sites, with a dated line in
 `.abcd/work/DECISIONS.md`. That is the one-canonical-primitive rule's escape
 hatch used deliberately and recorded, not skipped.
 
