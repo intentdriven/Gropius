@@ -11,6 +11,10 @@ address** binds.
 | `127.0.0.1 — this Mac only` | this Mac | this Mac, including its other user accounts |
 | `A private network` | the one address this Mac holds on a private network, and this Mac | machines on that network, and this Mac |
 
+Gropius takes its addresses once, at startup. A choice saved while the server
+is running applies when it next starts, and until then the **Connect** tab
+lists what the server is answering on.
+
 ## This Mac is always in the bind
 
 Whatever else a choice binds, Gropius also answers on this Mac's loopback

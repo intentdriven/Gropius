@@ -164,6 +164,13 @@ func TestTheMarkupOffersTheThirdChoice(t *testing.T) {
 	if !strings.Contains(string(page), `value="private-network"`) {
 		t.Error("the bind select has no private-network option — a Go capability with no panel equivalent is a gap")
 	}
+	// Nothing re-binds while the server runs, and the Connect tab now lists
+	// what was acquired rather than what is stored — so a bind saved and not
+	// yet in force is a difference the operator can see and has to be able to
+	// explain.
+	if !strings.Contains(string(page), "when Gropius next starts") {
+		t.Error("the pane does not say that a bind change applies at the next start")
+	}
 }
 
 // evalBindMode runs a snippet against the bind-mode functions lifted out of
