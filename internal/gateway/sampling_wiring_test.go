@@ -131,7 +131,7 @@ func TestSavedSamplingReachesTheLaunchedProcess(t *testing.T) {
 
 	resp := postJSON(t, srv, "/api/settings", `{"host":"127.0.0.1","port":11535,"decode_concurrency":4,
 		"sampling":{"temperature":0.7,"max_tokens":8192},
-		"model_sampling":{"org/special":{"temperature":0.1}}}`)
+		"models":{"org/special":{"sampling":{"temperature":0.1}}}}`)
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d", resp.StatusCode)
@@ -163,7 +163,7 @@ func TestSavedSamplingReachesTheLaunchedProcess(t *testing.T) {
 func TestSettingsNamesExactlyTheResidentModelsThatMustLoadAgain(t *testing.T) {
 	cfg := config.Default()
 	cfg.Sampling = config.Sampling{Temperature: f64(0.7)}
-	cfg.ModelSampling = map[string]config.Sampling{"org/pinned": {Temperature: f64(0.1)}}
+	cfg.Models = map[string]config.ModelSettings{"org/pinned": {Sampling: config.Sampling{Temperature: f64(0.1)}}}
 	a, l, mux := newWiredControl(t, cfg, "org/plain", "org/pinned")
 	srv := serve(t, mux)
 
@@ -175,7 +175,7 @@ func TestSettingsNamesExactlyTheResidentModelsThatMustLoadAgain(t *testing.T) {
 	// nothing about how that model is served changes.
 	resp := postJSON(t, srv, "/api/settings", `{"host":"0.0.0.0","port":11535,"decode_concurrency":4,
 		"sampling":{"temperature":1.2},
-		"model_sampling":{"org/pinned":{"temperature":0.1}}}`)
+		"models":{"org/pinned":{"sampling":{"temperature":0.1}}}}`)
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d", resp.StatusCode)
@@ -203,7 +203,7 @@ func TestSettingsNamesExactlyTheResidentModelsThatMustLoadAgain(t *testing.T) {
 	// A save that changes nothing about sampling names nobody.
 	resp2 := postJSON(t, srv, "/api/settings", `{"host":"0.0.0.0","port":11535,"decode_concurrency":4,
 		"sampling":{"temperature":1.2},
-		"model_sampling":{"org/pinned":{"temperature":0.1}}}`)
+		"models":{"org/pinned":{"sampling":{"temperature":0.1}}}}`)
 	defer resp2.Body.Close()
 	var body2 struct {
 		ReloadModels []string `json:"reload_models"`
@@ -222,7 +222,7 @@ func TestSettingsNamesExactlyTheResidentModelsThatMustLoadAgain(t *testing.T) {
 // moment anything loads it.
 func TestUnloadingAPinnedModelLeavesThePinInPlace(t *testing.T) {
 	cfg := config.Default()
-	cfg.Pinned = []string{"org/keeper"}
+	cfg.Models = pinnedModels("org/keeper")
 	a, _, mux := newWiredControl(t, cfg, "org/keeper")
 	srv := serve(t, mux)
 
@@ -240,7 +240,7 @@ func TestUnloadingAPinnedModelLeavesThePinInPlace(t *testing.T) {
 	if got := a.Pool.Resident(); len(got) != 0 {
 		t.Errorf("Resident() = %+v after the unload, want none", got)
 	}
-	if got := a.Config().Pinned; len(got) != 1 || got[0] != "org/keeper" {
+	if got := a.Config().PinnedIDs(); len(got) != 1 || got[0] != "org/keeper" {
 		t.Errorf("Pinned = %v after the unload, want the pin left in place", got)
 	}
 }

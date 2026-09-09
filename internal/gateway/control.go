@@ -16,6 +16,8 @@ import (
 	"time"
 
 	"github.com/intentdriven/Gropius/internal/app"
+	"github.com/intentdriven/Gropius/internal/bind"
+	"github.com/intentdriven/Gropius/internal/bind/private"
 	"github.com/intentdriven/Gropius/internal/capability"
 	"github.com/intentdriven/Gropius/internal/config"
 	"github.com/intentdriven/Gropius/internal/hub"
@@ -35,17 +37,20 @@ type Control struct {
 	// process squatting on the port (see cmd/gropius singleton coordination).
 	Root string
 
-	// Repaired names the settings config.Load could not use as written and put
-	// into force in a changed form — a trimmed API key, a clamped grace, a
-	// statistics figure replaced by its default. Set once before serving, and
-	// cleared by a save, which rewrites the file from the values in force.
+	// Notices is what config.Load had to change about config.json to make it
+	// usable: settings put into force in a changed form (a trimmed API key, a
+	// clamped grace, a statistics figure replaced by its default) and settings
+	// not in force at all (a value this build cannot use, a key it no longer
+	// reads). Set once before serving, and cleared by a save, which rewrites
+	// the file from the settings in force.
 	//
 	// It is here because the panel is the surface the operator is looking at.
-	// The startup log says this once, into a stream nobody running the app from
-	// the menu bar ever sees, and the panel shows an API key as asterisks
-	// whether it was trimmed or not — so without this the one setting where the
-	// repair changes what every client must send is invisible.
-	Repaired []string
+	// The startup log says this once, into a stream nobody running the app
+	// from the menu bar ever sees — so without this, a repair that changes
+	// what every client must send, and a setting silently dropped because this
+	// build no longer reads its key, are both invisible to the person who set
+	// them.
+	Notices config.Notices
 
 	// loadMu guards loading, the set of models the Load button already has a
 	// background load running for, keyed by folded repo id.
@@ -60,9 +65,9 @@ type Control struct {
 	loadMu  sync.Mutex
 	loading map[string]bool
 
-	// repairMu guards Repaired, which the snapshot reads on every state request
+	// noticeMu guards Notices, which the snapshot reads on every state request
 	// and a save clears.
-	repairMu sync.Mutex
+	noticeMu sync.Mutex
 
 	// settingsMu serialises the whole settings write path: read the settings
 	// in force, decode the posted body into a copy of them, hand the result to
@@ -293,7 +298,11 @@ type State struct {
 	// Endpoints are the URLs other machines should use, each with the kind of
 	// network its address sits on.
 	Endpoints []Endpoint `json:"endpoints"`
-	Hostname  string     `json:"hostname"`
+	// Bind is which bind mode is in force and what it selected. Settings reads
+	// it to show the third choice, to name the address that choice would take,
+	// and to say when the mode is on and not running.
+	Bind     BindState `json:"bind"`
+	Hostname string    `json:"hostname"`
 	// Warnings surface things the user should know, e.g. an open LAN endpoint.
 	Warnings []string `json:"warnings"`
 	// Stats is the per-model summary, present only while the operator has
@@ -336,8 +345,21 @@ type Machine struct {
 	// cannot be measured. Advice, not a limit.
 	WarnAbove int64 `json:"warn_above"`
 	// ResidentBytes is what the models in memory are charged against the
-	// budget, the same 1.2x figure eviction uses.
+	// budget, the same 1.2x figure eviction uses — including the servers in
+	// ExitingBytes, because that is the figure the pool admits a load against.
+	// A panel that counted only the models it lists would report room the pool
+	// will not give out.
 	ResidentBytes int64 `json:"resident_bytes"`
+	// ExitingBytes is the part of that charged to model servers which have left
+	// the pool and whose processes have not exited yet. They appear in no
+	// models list — they are nobody's model any more — but their memory is not
+	// back, so a load can be refused while every model on screen fits.
+	ExitingBytes int64 `json:"exiting_bytes"`
+	// StuckServers is how many of those are past the point where stopping them
+	// should have worked: SIGTERM, then SIGKILL, then nothing. Their memory is
+	// held until the kernel lets go, so the budget is smaller than it looks for
+	// as long as this is not zero.
+	StuckServers int `json:"stuck_servers"`
 	// OverBudget says the models in memory cost more than the budget allows.
 	// Lowering the budget unloads nothing, so this stands until they unload by
 	// the usual rules.
@@ -352,18 +374,23 @@ type Machine struct {
 // is fed exclusively by the stream. One builder, one truth.
 func (c *Control) snapshot() State {
 	cfg := c.App.Config()
+	residency := c.App.Pool.Residency()
 	st := State{
 		Models:    c.App.Registry.List(),
-		Resident:  c.App.Pool.Resident(),
+		Resident:  residency.Models,
 		Setup:     c.App.Provisioner.Status(),
 		Config:    redactConfig(cfg),
 		Pinned:    c.App.Pool.Pinned(),
 		Waiting:   c.App.Pool.Waiting(),
-		Endpoints: Endpoints(cfg),
+		Endpoints: Endpoints(cfg, c.App.Bind()),
+		Bind:      bindState(cfg, c.App.Bind()),
 		Hostname:  hostname(),
 	}
 	budget := c.App.Pool.MemoryBudget()
-	resident := residentCharge(st.Resident)
+	// One reading, not two: a stop landing between a models list and a tally
+	// read would count the same server in both, or in neither.
+	exiting, stuck := residency.ExitingBytes, residency.StuckServers
+	resident := residentCharge(st.Resident) + exiting
 	st.Machine = Machine{
 		TotalRAM:        c.App.MachineRAM(),
 		Budget:          budget,
@@ -371,9 +398,23 @@ func (c *Control) snapshot() State {
 		BudgetIsDefault: cfg.MaxResidentBytes == 0,
 		WarnAbove:       c.App.BudgetWarnAbove(),
 		ResidentBytes:   resident,
+		ExitingBytes:    exiting,
+		StuckServers:    stuck,
 		OverBudget:      resident > budget,
 	}
-	if cfg.ExposedToLAN() && cfg.APIKey == "" {
+	if stuck > 0 {
+		st.Warnings = append(st.Warnings, fmt.Sprintf(
+			"%s of memory is held by %d model server(s) that were stopped and have not exited. Until they do, that much of the budget cannot be used.",
+			runtime.HumanBytes(exiting), stuck))
+	}
+	// Asked of the sockets, not of the stored configuration. The endpoint list
+	// beside this warning is derived from what was acquired, and the two have
+	// to read the same source: a bind saved and not yet in force would
+	// otherwise silence the warning while the list went on handing out the LAN
+	// addresses the process is still answering on. It softens only on state
+	// Gropius owns end to end, and never on an inference about another process
+	// (adr-2609081118587999 rule 4).
+	if c.App.Bind().ReachesOtherMachines() && cfg.APIKey == "" {
 		st.Warnings = append(st.Warnings,
 			"This server is reachable by anyone on your network and requires no API key. Set one in Settings to restrict access.")
 	}
@@ -383,9 +424,7 @@ func (c *Control) snapshot() State {
 	if w := c.App.MemoryBudgetWarning(); w != "" {
 		st.Warnings = append(st.Warnings, w)
 	}
-	if w := c.repairWarning(); w != "" {
-		st.Warnings = append(st.Warnings, w)
-	}
+	st.Warnings = append(st.Warnings, c.noticeWarnings()...)
 	if !c.App.Provisioner.Installed() {
 		st.Warnings = append(st.Warnings,
 			"The MLX runtime is not installed yet — models cannot be served until setup finishes.")
@@ -399,12 +438,13 @@ func (c *Control) snapshot() State {
 }
 
 // residentCharge is what the models in memory cost the budget: each one's size
-// on disk plus a fifth, which is the figure the pool charges (runtime.LoadCost)
+// on disk plus a fifth, which is the figure the pool charges
+// (capability.LoadCost)
 // and therefore the only one that can be compared with the budget.
 func residentCharge(resident []runtime.Resident) int64 {
 	var sum int64
 	for _, r := range resident {
-		sum += runtime.LoadCost(r.Bytes)
+		sum += capability.LoadCost(r.Bytes)
 	}
 	return sum
 }
@@ -687,22 +727,70 @@ type Endpoint struct {
 	Network string `json:"network,omitempty"`
 }
 
+// BindState is what the panel says about the bind: which mode is in force,
+// what that mode selected, what it could select right now, and why it narrowed
+// if it did.
+//
+// It exists because the configuration no longer answers those questions on its
+// own. Under the private-network mode the Host field is whatever the operator
+// last set and is not what the server bound, and a mode that found no address
+// is serving this Mac while the setting still says otherwise. Both surfaces
+// the amendment names — Settings and the posture page — read from here.
+type BindState struct {
+	// Mode is config.BindMode: empty for a bind the Host field decides.
+	Mode string `json:"mode"`
+	// Selected is the address the private-network mode bound, empty when it
+	// bound none. It is the amendment's second condition made visible.
+	Selected string `json:"selected,omitempty"`
+	// Candidates is every address on this Mac carrying the private-network
+	// shape RIGHT NOW, under every mode. It is what tells the pane whether the
+	// mode can be chosen at all, and it is read live because a tunnel comes and
+	// goes while the panel is open.
+	Candidates []string `json:"candidates"`
+	// Refusal is why the bind narrowed to this Mac, in the words the resolver
+	// used. Empty when nothing was refused.
+	Refusal string `json:"refusal,omitempty"`
+}
+
+// bindState reads the classifier for the panel's sake, which rule 1 of
+// adr-2609081118587999 permits — it is an observation, and it is the
+// observation an operator needs in order to see that the mode selected the
+// wrong network or has nothing to select. It decides nothing: no key
+// requirement, no admission, no warning's firing condition reads any of it.
+func bindState(cfg config.Config, plan bind.Plan) BindState {
+	st := BindState{Mode: cfg.BindMode, Refusal: plan.Refusal, Candidates: private.Candidates()}
+	// From the plan's mode and not the configuration's. The pane shows the
+	// mode that is CHOSEN, which is the configuration's; a selection is what
+	// the mode that is RUNNING made, and a bind mode saved and not yet in force
+	// has selected nothing at all.
+	if plan.Mode == config.BindModePrivateNetwork {
+		st.Selected = plan.Extra
+	}
+	return st
+}
+
 // Endpoints lists the base URLs clients can point at.
 //
-// It lists only what this server answers on. With a wildcard bind that is
-// every address the machine holds; with a specific bind it is that address
-// alone, because the rest refuse the connection — and an endpoint list that
-// offers a dead address, still worse a marked dead address, is worse than one
-// that offers nothing.
+// It lists what this server ANSWERS on, which is what the bind acquired rather
+// than what the configuration asked for: a mode that narrowed to this Mac
+// because the address it wanted was not there offers loopback and nothing else
+// (adr-2609091123526871 rule 4). An endpoint list that offers a dead address,
+// still worse a marked dead address, is worse than one that offers nothing.
+//
+// Loopback is always in it, because every bind acquires loopback. That is what
+// makes itd-2609081015545349's fourth criterion true by construction instead
+// of by an exception written into the criterion, and it is the fix to iss-7
+// seen from this side: the entry the panel always showed is now one the server
+// answers on.
 //
 // Nothing here is memoized. The private network can appear, disappear or
 // change address while Gropius runs, and the panel rebuilds this list on every
 // snapshot; the classification behind it is interface inspection with no
 // network call and no subprocess, so it can stay on that path.
-func Endpoints(cfg config.Config) []Endpoint {
+func Endpoints(cfg config.Config, plan bind.Plan) []Endpoint {
 	var out []Endpoint
-	bound, wildcard := boundAddr(cfg.Host)
-	if cfg.ExposedToLAN() {
+	bound, wildcard := boundAddr(plan.Extra)
+	if !plan.LoopbackOnly() {
 		addrs := netshape.Addrs()
 		switch {
 		case wildcard:
@@ -720,7 +808,7 @@ func Endpoints(cfg config.Config) []Endpoint {
 			for _, a := range addrs {
 				out = appendEndpoint(out, a.IP, cfg.Port, a.Network)
 			}
-		case bound != "":
+		case bound != "" && stillHeld(addrs, bound):
 			// A specific bind. The .local name resolves to the addresses this
 			// machine holds on the local network, so it answers only when the
 			// bind covers the sole one of those; with others on the machine it
@@ -733,39 +821,42 @@ func Endpoints(cfg config.Config) []Endpoint {
 			}
 			out = appendEndpoint(out, bound, cfg.Port, networkOf(addrs, bound))
 		default:
-			// A Host that is neither a wildcard nor anything a client can be
-			// pointed at. config.Validate refuses it, so reaching here means
-			// the configuration was not loaded through Load; nothing is listed
-			// for it either way. An address the server cannot even bind is the
-			// dead address this list exists to stop offering, and a Host
-			// carrying control characters is worse than dead — it is a base
-			// URL the panel, the menu bar and the clipboard hand out.
+			// Either a bound value a client cannot be pointed at — a zone, or
+			// a Host that was never bindable — or an address this Mac no
+			// longer holds. Both are listed as nothing: an address the server
+			// does not answer on is the dead address this list exists to stop
+			// offering, and a Host carrying control characters is worse than
+			// dead, because it is a base URL the panel, the menu bar and the
+			// clipboard hand out.
 		}
 	}
-	out = appendEndpoint(out, loopbackHost(bound, wildcard), cfg.Port, "")
+	out = appendEndpoint(out, plan.Loopback, cfg.Port, "")
 	return out
 }
 
-// loopbackHost is the loopback address this server answers on.
+// stillHeld reports whether this Mac still holds the acquired address.
 //
-// It is 127.0.0.1 everywhere except under a bind that took IPv6 loopback and
-// nothing else: "[::1]" listens on ::1, refuses 127.0.0.1, and listing the one
-// it refuses while omitting the one it answers on is the dead-address fault in
-// both directions at once. A name — "localhost" — stays 127.0.0.1, because
-// that is what the name resolves to for a client on this Mac.
+// Nothing re-binds, so a listener outlives the address it was taken on: the
+// socket stays open and nothing arrives on it. Going on offering that address
+// is the dead-address fault, so it leaves the list when the machine stops
+// holding it.
 //
-// This is not the whole of the loopback entry's honesty. Under a specific
-// non-loopback bind the server does not answer on loopback at all and the
-// entry is listed anyway; that divergence from the intent's fourth criterion is
-// recorded in TestLoopbackIsListedUnderEveryBindIncludingOneItDoesNotAnswerOn
-// and belongs to iss-7.
-func loopbackHost(bound string, wildcard bool) string {
-	if !wildcard && bound != "" {
-		if ip := net.ParseIP(bound); ip != nil && ip.IsLoopback() && ip.To4() == nil {
-			return bound
+// IPv4 only, because that is all the enumeration covers — an IPv6 bind or a
+// name has nothing to be compared against here, and dropping every one of them
+// would be a worse answer than an unchecked one. That limit is the private
+// mode's third scope condition, stated so a later IPv6 mesh is a visible
+// re-decision rather than a silent miss.
+func stillHeld(addrs []netshape.Addr, bound string) bool {
+	ip := net.ParseIP(bound)
+	if ip == nil || ip.To4() == nil {
+		return true
+	}
+	for _, a := range addrs {
+		if a.IP == bound {
+			return true
 		}
 	}
-	return "127.0.0.1"
+	return false
 }
 
 // boundAddr is the one address this server answers on, and whether the bind is
@@ -1156,33 +1247,45 @@ func (c *Control) handleSetSettings(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, out)
 }
 
-// repairWarning is what the panel says about the settings the file could not
-// carry as written.
+// noticeWarnings is what the panel says about the settings config.json could
+// not be used for as written.
 //
-// It says they are in force, because they are, and it names them: an operator
-// who reads "your API key was shortened" can check the key their clients send,
-// which is the only thing they can usefully do about it. Saying "ignored" would
-// send them to set a key that is already working, and blaming the model server
-// would send them to the wrong software entirely.
-func (c *Control) repairWarning() string {
-	c.repairMu.Lock()
-	defer c.repairMu.Unlock()
-	if len(c.Repaired) == 0 {
-		return ""
+// Two warnings, never one, because the two lists mean opposite things to the
+// person reading them. A REPAIRED setting is in force in a changed form, and
+// naming it is the only thing an operator can act on: someone who reads "your
+// API key was shortened" can check the key their clients send. Saying
+// "ignored" there would send them to set a key that is already working.
+//
+// An IGNORED setting is not in force at all, and that is the half the log
+// alone never reached: a per-model setting whose key this build no longer
+// reads is gone from a running server whose panel showed nothing about it, and
+// the operator finds out when a request is refused for memory a pin was
+// supposed to be holding.
+func (c *Control) noticeWarnings() []string {
+	c.noticeMu.Lock()
+	defer c.noticeMu.Unlock()
+	var out []string
+	if len(c.Notices.Ignored) > 0 {
+		out = append(out, "Some settings in config.json are not in force: "+
+			strings.Join(c.Notices.Ignored, ", ")+
+			". Set them again here and save.")
 	}
-	return "Some settings in config.json could not be used as written and are in force in a changed form: " +
-		strings.Join(c.Repaired, ", ") +
-		". Check them here and save to write the values now in force back to the file."
+	if len(c.Notices.Repaired) > 0 {
+		out = append(out, "Some settings in config.json could not be used as written and are in force in a changed form: "+
+			strings.Join(c.Notices.Repaired, ", ")+
+			". Check them here and save to write the values now in force back to the file.")
+	}
+	return out
 }
 
-// clearRepairs drops the notice once a save has rewritten config.json from the
-// values in force: there is nothing left in the file that needed repairing, and
-// a warning that outlives what it warned about is the same untruth from the
-// other side.
-func (c *Control) clearRepairs() {
-	c.repairMu.Lock()
-	defer c.repairMu.Unlock()
-	c.Repaired = nil
+// clearNotices drops both notices once a save has rewritten config.json from
+// the settings in force: there is nothing left in the file that needed
+// repairing, nothing left in it that this build ignores, and a warning that
+// outlives what it warned about is the same untruth from the other side.
+func (c *Control) clearNotices() {
+	c.noticeMu.Lock()
+	defer c.noticeMu.Unlock()
+	c.Notices = config.Notices{}
 }
 
 // applySettings is the settings write path, from the settings in force to what
@@ -1192,6 +1295,18 @@ func (c *Control) clearRepairs() {
 func (c *Control) applySettings(raw []byte) (map[string]any, error) {
 	c.settingsMu.Lock()
 	defer c.settingsMu.Unlock()
+
+	// A body naming a setting this build no longer reads is refused rather
+	// than half-applied. It would otherwise go wrong in silence — the keys
+	// decode into nothing and the save succeeds — which is exactly the
+	// problem: the caller is a script or a shell of someone's own (the panel
+	// never posts them), and "saved" would tell them their pins and overrides
+	// were stored when the file was written without them.
+	if named := config.SupersededSettings(raw); len(named) > 0 {
+		return nil, fmt.Errorf(
+			"these settings are no longer read: %s — post per-model settings under \"models\"",
+			strings.Join(named, ", "))
+	}
 
 	current := c.App.Config()
 
@@ -1208,17 +1323,17 @@ func (c *Control) applySettings(raw []byte) (map[string]any, error) {
 	incoming := current.Clone()
 	// "Keep what you did not send" is a rule about fields, not about the
 	// members of a collection. encoding/json merges into an existing map, so
-	// decoding a posted model_sampling object into the current one reinstates
-	// every override the object leaves out — which is every override the user
-	// just deleted. Naming the field means "these are the overrides", so start
-	// from nothing; omitting it still keeps what is there. The same holds for
-	// per_model, where leaving a model out is how Settings switches its
-	// merging off.
-	if namesModelSampling(raw) {
-		incoming.ModelSampling = nil
-	}
-	if namesPerModel(raw) {
-		incoming.PerModel = nil
+	// decoding a posted models object into the current one reinstates every
+	// model the object leaves out — its merging switched back on, its pin back
+	// on, its sampling override back. Naming the field means "these are the
+	// models with settings", so start from nothing; omitting it still keeps
+	// what is there.
+	//
+	// One collection, one guard. There were two of these maps and a list
+	// beside them, each of which had to be remembered here
+	// (iss-2609062213413447).
+	if namesModels(raw) {
+		incoming.Models = nil
 	}
 	if err := json.Unmarshal(raw, &incoming); err != nil {
 		return nil, errors.New("settings body is not valid JSON")
@@ -1237,12 +1352,13 @@ func (c *Control) applySettings(raw []byte) (map[string]any, error) {
 	}
 	// The file has just been written from the settings in force, repairs and
 	// all, so there is nothing left in it to repair.
-	c.clearRepairs()
-	// Host and port bind the server, decode concurrency and idle timeout are
-	// pool options — all four are consumed only at startup, and SetConfig
-	// cannot apply them live.
+	c.clearNotices()
+	// Host, the bind mode and the port bind the server; decode concurrency and
+	// idle timeout are pool options — all five are consumed only at startup,
+	// and SetConfig cannot apply them live.
 	restart := incoming.Port != current.Port ||
 		incoming.Host != current.Host ||
+		incoming.BindMode != current.BindMode ||
 		incoming.DecodeConcurrency != current.DecodeConcurrency ||
 		incoming.IdleTimeoutSec != current.IdleTimeoutSec
 	out := map[string]any{
@@ -1259,13 +1375,10 @@ func (c *Control) applySettings(raw []byte) (map[string]any, error) {
 	return out, nil
 }
 
-// namesModelSampling reports whether the posted body carries a model_sampling
-// field at all, however it is spelled — including as null.
-func namesModelSampling(body []byte) bool { return namesField(body, "model_sampling") }
-
-// namesPerModel reports the same for per_model, the other collection a save
+// namesModels reports whether the posted body carries a models field at all,
+// however it is spelled — including as null. It is the one collection a save
 // replaces rather than merges into.
-func namesPerModel(body []byte) bool { return namesField(body, "per_model") }
+func namesModels(body []byte) bool { return namesField(body, "models") }
 
 // namesField reports whether the posted body carries this field at all,
 // however it is spelled — including as null.

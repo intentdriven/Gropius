@@ -369,7 +369,26 @@ func (p *execProcess) Err() error {
 	return p.err
 }
 
+// The one bound on stopping a model server, and the two intervals it is made
+// of. Every caller that has to know how long a server may take to go reads
+// stopBound rather than a figure of its own: the pool's stop context, and the
+// wait for the memory to come back, were three different numbers before this,
+// none of which was what Stop actually did.
+const (
+	// stopTermGrace is how long a model server has to honor SIGTERM.
+	stopTermGrace = 10 * time.Second
+	// stopKillGrace is how long SIGKILL is then given to land.
+	stopKillGrace = 5 * time.Second
+	// stopBound is the longest Stop can take: after it, either the process is
+	// gone or the kernel is not letting go of it.
+	stopBound = stopTermGrace + stopKillGrace
+)
+
 // Stop asks the process group to exit, escalating to SIGKILL if it will not.
+//
+// It returns an error only in the case that matters to a caller accounting for
+// the process's memory: the group was still there after SIGKILL, so its memory
+// is still held.
 func (p *execProcess) Stop(ctx context.Context) error {
 	select {
 	case <-p.done:
@@ -380,7 +399,7 @@ func (p *execProcess) Stop(ctx context.Context) error {
 	pgid := -p.cmd.Process.Pid // negative pid signals the whole group
 	_ = syscall.Kill(pgid, syscall.SIGTERM)
 
-	deadline := 10 * time.Second
+	deadline := stopTermGrace
 	if dl, ok := ctx.Deadline(); ok {
 		if d := time.Until(dl); d < deadline {
 			deadline = d
@@ -397,7 +416,7 @@ func (p *execProcess) Stop(ctx context.Context) error {
 		select {
 		case <-p.done:
 			return nil
-		case <-time.After(5 * time.Second):
+		case <-time.After(stopKillGrace):
 			return errors.New("model server would not die, even after SIGKILL")
 		}
 	}

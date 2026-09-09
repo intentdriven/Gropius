@@ -71,7 +71,10 @@ Cross-machine LAN use works; TLS and notarized distribution are not yet included
 - **Network-shared** — bind the LAN, discoverable over Bonjour (the chat client
   lists the servers it finds, so nobody has to guess an address), optional API
   key. A mesh VPN reaches it from further away, with the same steps and a
-  different address ([how to](docs/mesh-vpn.md)).
+  different address ([how to](docs/mesh-vpn.md)) — or bind that network alone,
+  so the local one cannot reach the server at all. Every bind includes this
+  Mac, so narrowing one never costs you the control panel
+  ([what each choice binds](docs/bind-address.md)).
 - **Multi-account** — other user accounts on the same Mac share one copy of each
   model on disk and on the GPU. The models are shared; each account keeps its
   own settings and its own model list, so no key or token crosses accounts.
