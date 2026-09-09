@@ -966,7 +966,7 @@ func TestListModelsPublishesContextLengthUnderBothNames(t *testing.T) {
 		}
 	}
 	want := map[string]bool{"id": true, "object": true, "created": true, "owned_by": true,
-		"context_length": true, "max_model_len": true}
+		"context_length": true, "max_model_len": true, "served_context": true}
 	for k := range entry {
 		if !want[k] {
 			t.Errorf("unexpected field %q on the models list", k)
@@ -1607,10 +1607,10 @@ func (s registrySource) Resolve(repoID string) (runtime.ResolvedModel, error) {
 		return runtime.ResolvedModel{}, err
 	}
 	return runtime.ResolvedModel{
-		Path:            m.Path,
-		Bytes:           m.Bytes,
-		ContextLength:   m.ContextLength,
-		KVBytesPerToken: m.KVBytesPerToken,
+		Path:             m.Path,
+		Bytes:            m.Bytes,
+		ServedContext:    m.ContextLength,
+		KVChargePerToken: m.KVChargePerToken,
 	}, nil
 }
 

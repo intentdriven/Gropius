@@ -23,7 +23,8 @@ curl http://localhost:11535/v1/models
       "created": 1757145600,
       "owned_by": "gropius",
       "context_length": 40960,
-      "max_model_len": 40960
+      "max_model_len": 40960,
+      "served_context": 40960
     }
   ]
 }
@@ -39,6 +40,7 @@ curl http://localhost:11535/v1/models
 | `owned_by` | Always `gropius`. |
 | `context_length` | The model's maximum context, in tokens. See below. |
 | `max_model_len` | The same figure again, under the name vLLM-derived clients read. |
+| `served_context` | The window this Mac will actually serve the model at, in tokens. A request estimated to be larger is refused. See below. |
 | `state` | Whether the model is loaded, still loading, or not loaded. Only for a client connecting over loopback, or on an install with an API key. See below. |
 | `in_flight` | How many requests that model is already handling. Only for a client connecting over loopback, or on an install with an API key. |
 | `last_used` | Unix time at which Gropius last handled a request for that model. Only for a client connecting over loopback, or on an install with an API key, and only while the model is in memory — `loaded` or `loading`. |
@@ -59,12 +61,9 @@ at the top level, or `text_config.max_position_embeddings` for the multimodal
 and composite architectures that nest the text model's settings — and applies
 no scaling arithmetic of its own.
 
-**What the number is not.** It is not what a given Mac can serve. The usable
-window may be smaller: a long prompt has to fit in memory alongside the
-weights, and a very long one can take minutes to process. Nor is it enforced —
-Gropius refuses no request and trims no prompt because of it. A prompt beyond
-the figure is accepted, and the model's answers degrade outside the range it
-was scaled for.
+**What the number is not.** It is not what this Mac serves: the served window
+may be smaller, and it is `served_context` below that a client is held to. The
+declared figure is enforced nowhere.
 
 **When the fields are absent.** Both are omitted, rather than sent as zero, in
 these cases:
@@ -81,6 +80,30 @@ these cases:
 The model is listed and served exactly as it would be with a figure; only the
 context fields are missing. Treat an absent figure as "unknown", never as "no
 context".
+
+## The served window
+
+`served_context` is the window Gropius serves the model at on this Mac, and it
+is the figure to size prompts to. It is the operator's per-model setting, or
+the declared figure above when they have set none, and it is enforced: a
+request whose prompt plus `max_tokens` is estimated to be larger is refused
+with a 400 in the OpenAI error shape, naming both the window and the estimate,
+before any model is loaded.
+
+The estimate is made from the size of the request body at four bytes to the
+token rather than by tokenising it, so it is approximate and it over-counts:
+the whole body is measured, JSON syntax included. A request close to the
+window may therefore be refused when an exact count would have let it through.
+Send a shorter prompt, a smaller `max_tokens`, or raise the window in
+**Settings**.
+
+Lowering the window is also how a model that will not otherwise fit this Mac's
+memory budget is made to fit: the budget charges the attention cache the served
+window costs, so a smaller window is a smaller charge. See
+[Why there is a memory budget](memory-budget-explained.md).
+
+The field is absent for a model that declares no window and has been given no
+setting — there is nothing to serve it at, and nothing is enforced.
 
 **On the model card.** The control panel shows the figure on each model's
 card, labelled `max context`. From 1,024 tokens upwards the card abbreviates
