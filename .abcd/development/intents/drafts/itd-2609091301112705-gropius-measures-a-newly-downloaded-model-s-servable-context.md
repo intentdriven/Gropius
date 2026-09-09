@@ -12,15 +12,41 @@ origin: researcher-authored
 production_mode: hand-written
 ---
 
-# Gropius measures a newly downloaded model's servable context window on this Mac and records it beside the cap the model's configuration declares, so the window an operator and their clients can rely on is a measured figure rather than an architectural claim. When a download finishes, Gropius probes the model the way the 2026-09-06 campaign did by hand — prompts of growing length at one output token, bisecting between the last success and the first failure, at low load — and stores the verified window with the model, showing it beside the nominal cap wherever the cap is shown today. Alice downloads a model in the evening and finds in the morning that her Mac will serve it to 91,000 tokens and not the 262,144 its configuration advertises; the memory budget charges the window it can actually serve, and the record no longer depends on someone running the probe script by hand.
+# Gropius measures a model's real context window
 
 ## Press Release
 
-> _Seeded from a quoted-text intent capture. Expand into the full press-release narrative before planning._
+Gropius now tells you how long a prompt each model on your Mac can actually
+take. When a download finishes, Gropius measures the model rather than
+believing its configuration: it sends prompts of growing length, bisects
+between the last one that came back and the first that did not, and records
+the window it verified beside the one the model declares.
+
+Alice downloads a 262,144-token model in the evening. In the morning the
+models list tells her that her Mac serves it to about 91,000 tokens — the
+declared window was never reachable here — so her editor's long-file prompts
+are sized to what works instead of failing halfway through the afternoon. The
+memory budget charges the window the machine can serve rather than the one the
+file advertises, and the figure comes from her own Mac rather than from someone
+else's benchmark.
+
+The measurement is not free, and the design has to carry that. Probing one
+model took about forty minutes of GPU time at low load in the 2026-09-06
+campaign, with an unload and a reload between steps so a retained prompt cache
+cannot flatter the next reading, and it needs the machine not to be serving
+anyone: a probe that runs while clients are asking for models measures the
+queue rather than the model. So this runs when the Mac is idle, is
+interruptible, and yields the machine to a real request the moment one arrives.
 
 ## Why This Matters
 
-Gropius measures a newly downloaded model's servable context window on this Mac and records it beside the cap the model's configuration declares, so the window an operator and their clients can rely on is a measured figure rather than an architectural claim. When a download finishes, Gropius probes the model the way the 2026-09-06 campaign did by hand — prompts of growing length at one output token, bisecting between the last success and the first failure, at low load — and stores the verified window with the model, showing it beside the nominal cap wherever the cap is shown today. Alice downloads a model in the evening and finds in the morning that her Mac will serve it to 91,000 tokens and not the 262,144 its configuration advertises; the memory budget charges the window it can actually serve, and the record no longer depends on someone running the probe script by hand.
+The declared window is a claim about the architecture, not about this Mac. The
+2026-09-06 campaign found three of four models bounded by the gateway rather
+than by the model, and one that reached only a third of its declared cap here;
+that record exists because someone ran a script by hand for an evening, and it
+goes stale the moment a model, a runtime or the machine changes. A window
+nobody has measured is a number a client sizes its prompts from and then loses
+an afternoon to.
 
 ## Mechanism
 

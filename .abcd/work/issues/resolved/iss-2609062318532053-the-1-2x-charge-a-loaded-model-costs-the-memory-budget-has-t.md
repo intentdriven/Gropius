@@ -23,6 +23,19 @@ from capability — would create an import cycle. Collapsing the duplicate means
 moving the charge into internal/capability and having internal/runtime call it,
 not the other way round.
 
+Amendment (2026-09-09, iss-3): the charge is no longer one figure that every
+surface can apply. A model Gropius holds is charged by capability.LoadCostOf,
+which needs the model's declared window and the per-token cache cost its
+config.json implies; a model in the search results is not on this Mac and has
+neither, so the fits filter still applies the flat capability.LoadCost. The two
+therefore answer different questions, and they agree on the filter's own
+question — can this model load at all — only because no single model is charged
+more than the whole budget: the ceiling makes the flat charge both the floor
+under LoadCostOf and the test the filter applies. If the maintainer decides
+against that ceiling, this record reopens: the filter would then show models
+the pool refuses outright, and the filter would need the model's configuration,
+which is on the hub and not on disk.
+
 ## Grounds
 
 - pursued: there is exactly one Go definition of the 1.2x charge and internal/capability imports no internal package, so the fits filter and the pool cannot diverge; a second definition of the charge appearing anywhere in Go, or capability gaining an internal import, would show it wrong.
