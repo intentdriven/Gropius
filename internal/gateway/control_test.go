@@ -504,7 +504,7 @@ func TestSavingPinnedModelsNeedsNoRestart(t *testing.T) {
 	srv, a := newTestControlApp(t, config.Default())
 
 	body := `{"host":"0.0.0.0","port":11535,"api_key":"","decode_concurrency":4,` +
-		`"idle_timeout_sec":0,"pinned":["org/keeper"]}`
+		`"idle_timeout_sec":0,"models":{"org/keeper":{"pinned":true}}}`
 	resp := postJSON(t, srv, "/api/settings", body)
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
@@ -529,13 +529,13 @@ func TestSavingPinnedModelsNeedsNoRestart(t *testing.T) {
 // unpin one.
 func TestSavingSettingsWithoutNamingPinnedKeepsThePins(t *testing.T) {
 	cfg := config.Default()
-	cfg.Pinned = []string{"org/keeper"}
+	cfg.Models = pinnedModels("org/keeper")
 	srv, a := newTestControlApp(t, cfg)
 
 	resp := postJSON(t, srv, "/api/settings",
 		`{"host":"0.0.0.0","port":11535,"api_key":"","decode_concurrency":4,"idle_timeout_sec":0}`)
 	resp.Body.Close()
-	if got := a.Config().Pinned; len(got) != 1 || got[0] != "org/keeper" {
+	if got := a.Config().PinnedIDs(); len(got) != 1 || got[0] != "org/keeper" {
 		t.Errorf("Pinned = %v after an unrelated save, want the pin kept", got)
 	}
 }
@@ -553,30 +553,30 @@ func TestSettingsRefusesAPinnedSetLargerThanTheBudget(t *testing.T) {
 
 	resp := postJSON(t, srv, "/api/settings",
 		`{"host":"0.0.0.0","port":11535,"api_key":"","decode_concurrency":4,`+
-			`"idle_timeout_sec":0,"pinned":["org/enormous"]}`)
+			`"idle_timeout_sec":0,"models":{"org/enormous":{"pinned":true}}}`)
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400 for a pinned set that cannot fit", resp.StatusCode)
 	}
-	if got := a.Config().Pinned; len(got) != 0 {
+	if got := a.Config().PinnedIDs(); len(got) != 0 {
 		t.Errorf("the refused pins reached the running configuration: %v", got)
 	}
 }
 
-// A save that names the pinned list replaces it. Unlike the two per-model maps
-// beside it, no guard is needed for that — encoding/json resets a slice's
-// length rather than merging into it — but the difference is subtle enough
-// that removing a pin deserves a test of its own.
+// A save that names the per-model settings replaces them, so a model left out
+// of the posted map is unpinned. encoding/json merges into an existing map
+// rather than replacing it, which is exactly what the handler's one reset
+// guards against — and unpinning is the case that guard is easiest to lose.
 func TestSavingAShorterPinnedListRemovesTheRest(t *testing.T) {
 	cfg := config.Default()
-	cfg.Pinned = []string{"org/one", "org/two"}
+	cfg.Models = pinnedModels("org/one", "org/two")
 	srv, a := newTestControlApp(t, cfg)
 
 	resp := postJSON(t, srv, "/api/settings",
 		`{"host":"0.0.0.0","port":11535,"api_key":"","decode_concurrency":4,`+
-			`"idle_timeout_sec":0,"pinned":["org/one"]}`)
+			`"idle_timeout_sec":0,"models":{"org/one":{"pinned":true}}}`)
 	resp.Body.Close()
-	if got := a.Config().Pinned; len(got) != 1 || got[0] != "org/one" {
+	if got := a.Config().PinnedIDs(); len(got) != 1 || got[0] != "org/one" {
 		t.Errorf("Pinned = %v, want only the model the save named", got)
 	}
 	if got := a.Pool.Pinned(); len(got) != 1 || got[0] != "org/one" {
@@ -587,9 +587,9 @@ func TestSavingAShorterPinnedListRemovesTheRest(t *testing.T) {
 	// are its members" everywhere else in this handler.
 	resp = postJSON(t, srv, "/api/settings",
 		`{"host":"0.0.0.0","port":11535,"api_key":"","decode_concurrency":4,`+
-			`"idle_timeout_sec":0,"pinned":null}`)
+			`"idle_timeout_sec":0,"models":null}`)
 	resp.Body.Close()
-	if got := a.Config().Pinned; len(got) != 0 {
+	if got := a.Config().PinnedIDs(); len(got) != 0 {
 		t.Errorf("Pinned = %v after an explicit null, want none", got)
 	}
 }
@@ -614,7 +614,7 @@ func TestStateWarnsWhenThePinnedSetNoLongerFits(t *testing.T) {
 	// Pinned while the model was not there to be charged, as a delete and a
 	// re-download leave it.
 	cfg := a.Config()
-	cfg.Pinned = []string{"org/gone"}
+	cfg.Models = pinnedModels("org/gone")
 	if err := a.SetConfig(cfg); err != nil {
 		t.Fatal(err)
 	}
@@ -654,7 +654,7 @@ func TestStateCarriesThePinnedSetAndTheMemoryBudget(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfg := a.Config()
-	cfg.Pinned = []string{"org/keeper"}
+	cfg.Models = pinnedModels("org/keeper")
 	if err := a.SetConfig(cfg); err != nil {
 		t.Fatal(err)
 	}
@@ -868,4 +868,15 @@ func TestConcurrentSavesEachKeepTheirOwnField(t *testing.T) {
 				i, got.DecodeConcurrency, decode)
 		}
 	}
+}
+
+// pinnedModels is the per-model settings map that pins exactly these models.
+// Pinning is a field on a model's settings rather than a list of its own
+// (iss-2609062213413447).
+func pinnedModels(ids ...string) map[string]config.ModelSettings {
+	out := make(map[string]config.ModelSettings, len(ids))
+	for _, id := range ids {
+		out[id] = config.ModelSettings{Pinned: true}
+	}
+	return out
 }

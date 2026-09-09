@@ -546,7 +546,7 @@ func (g *Gateway) handleCompletions(w http.ResponseWriter, r *http.Request) {
 	// (adr-2609061610102325). It happens here, on the body already in hand, so
 	// a streamed request takes exactly this path too and the body limit above
 	// is the only one there is. Nothing read is logged, kept or counted.
-	if r.URL.Path == chatCompletionsPath && cfg.PerModel[model].MergeSystemMessages {
+	if r.URL.Path == chatCompletionsPath && cfg.Models[model].MergeSystemMessages {
 		if mergeSystemMessagesInto(payload) == mergeRefused {
 			// The operator switched merging on for this model and is not
 			// getting it, which is worth saying once, here, rather than

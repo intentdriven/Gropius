@@ -1153,17 +1153,17 @@ func (c *Control) applySettings(raw []byte) (map[string]any, error) {
 	incoming := current.Clone()
 	// "Keep what you did not send" is a rule about fields, not about the
 	// members of a collection. encoding/json merges into an existing map, so
-	// decoding a posted model_sampling object into the current one reinstates
-	// every override the object leaves out — which is every override the user
-	// just deleted. Naming the field means "these are the overrides", so start
-	// from nothing; omitting it still keeps what is there. The same holds for
-	// per_model, where leaving a model out is how Settings switches its
-	// merging off.
-	if namesModelSampling(raw) {
-		incoming.ModelSampling = nil
-	}
-	if namesPerModel(raw) {
-		incoming.PerModel = nil
+	// decoding a posted models object into the current one reinstates every
+	// model the object leaves out — its merging switched back on, its pin back
+	// on, its sampling override back. Naming the field means "these are the
+	// models with settings", so start from nothing; omitting it still keeps
+	// what is there.
+	//
+	// One collection, one guard. There were two of these maps and a list
+	// beside them, each of which had to be remembered here
+	// (iss-2609062213413447).
+	if namesModels(raw) {
+		incoming.Models = nil
 	}
 	if err := json.Unmarshal(raw, &incoming); err != nil {
 		return nil, errors.New("settings body is not valid JSON")
@@ -1204,13 +1204,10 @@ func (c *Control) applySettings(raw []byte) (map[string]any, error) {
 	return out, nil
 }
 
-// namesModelSampling reports whether the posted body carries a model_sampling
-// field at all, however it is spelled — including as null.
-func namesModelSampling(body []byte) bool { return namesField(body, "model_sampling") }
-
-// namesPerModel reports the same for per_model, the other collection a save
+// namesModels reports whether the posted body carries a models field at all,
+// however it is spelled — including as null. It is the one collection a save
 // replaces rather than merges into.
-func namesPerModel(body []byte) bool { return namesField(body, "per_model") }
+func namesModels(body []byte) bool { return namesField(body, "models") }
 
 // namesField reports whether the posted body carries this field at all,
 // however it is spelled — including as null.

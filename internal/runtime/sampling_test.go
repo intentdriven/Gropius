@@ -226,8 +226,8 @@ func TestSamplingFlagsWereVerifiedAgainstThePinnedServer(t *testing.T) {
 func TestPoolLaunchesEachModelWithItsOwnSamplingDefaults(t *testing.T) {
 	cfg := config.Default()
 	cfg.Sampling = config.Sampling{Temperature: fptr(0.7)}
-	cfg.ModelSampling = map[string]config.Sampling{
-		"org/special": {Temperature: fptr(0.1)},
+	cfg.Models = map[string]config.ModelSettings{
+		"org/special": {Sampling: config.Sampling{Temperature: fptr(0.1)}},
 	}
 
 	var mu sync.Mutex

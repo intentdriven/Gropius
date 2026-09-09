@@ -36,8 +36,10 @@ func TestSettingsFormOffersEverySamplingParameter(t *testing.T) {
 			t.Errorf("the settings form has no control with id %q", id)
 		}
 	}
-	if !strings.Contains(string(script), "model_sampling") {
-		t.Error("app.js never posts model_sampling, so a per-model override cannot be saved")
+	// The override editor holds the whole sampling set while the form is open
+	// and hands it to the one per-model map the save posts.
+	if !strings.Contains(string(script), "sampling: overrides[id]") {
+		t.Error("app.js never posts a per-model sampling override, so one cannot be saved")
 	}
 	// A blank field must reach the server as null. parseInt(x) || 0 turns a
 	// blank field into a real zero, which is a temperature, not "unset".

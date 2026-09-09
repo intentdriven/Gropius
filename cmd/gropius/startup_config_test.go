@@ -28,7 +28,7 @@ func TestAnInvalidConfigKeepsEverythingButTheBind(t *testing.T) {
 	  "port": 12345,
 	  "api_key": "a-key-the-operator-chose",
 	  "advertise": true,
-	  "pinned": ["mlx-community/Qwen3-8B-4bit"],
+	  "models": {"mlx-community/Qwen3-8B-4bit": {"pinned": true}},
 	  "max_resident_bytes": 8589934592,
 	  "stats_months": 7
 	}`)
@@ -47,8 +47,8 @@ func TestAnInvalidConfigKeepsEverythingButTheBind(t *testing.T) {
 	if got.Config.Port != 12345 {
 		t.Errorf("Port = %d, want 12345 — the port was discarded too", got.Config.Port)
 	}
-	if len(got.Config.Pinned) != 1 || got.Config.Pinned[0] != "mlx-community/Qwen3-8B-4bit" {
-		t.Errorf("Pinned = %#v — the pins were discarded", got.Config.Pinned)
+	if len(got.Config.PinnedIDs()) != 1 || got.Config.PinnedIDs()[0] != "mlx-community/Qwen3-8B-4bit" {
+		t.Errorf("Pinned = %#v — the pins were discarded", got.Config.PinnedIDs())
 	}
 	if got.Config.MaxResidentBytes != 8589934592 {
 		t.Errorf("MaxResidentBytes = %d — the memory budget was discarded", got.Config.MaxResidentBytes)

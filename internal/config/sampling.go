@@ -3,12 +3,10 @@ package config
 import (
 	"fmt"
 	"math"
-	"sort"
-	"strconv"
 )
 
-// Sampling holds machine-wide defaults for the sampling parameters the pinned
-// mlx-lm server takes as start-up options. They are handed to each model
+// Sampling holds defaults for the sampling parameters the pinned mlx-lm
+// server takes as start-up options — machine-wide, or for one model. They are handed to each model
 // server as launch flags, so the server itself owns the default: a request
 // that omits a parameter is served with the value here, and a request that
 // carries its own value replaces it for that request alone. The completion
@@ -343,66 +341,31 @@ func (s Sampling) merge(over Sampling) Sampling {
 // lower case, because HuggingFace resolves ids case-insensitively and two
 // spellings are one model. Entries keep the spelling they were saved under.
 func (c Config) EffectiveSampling(repoID string) Sampling {
-	if len(c.ModelSampling) == 0 {
+	if len(c.Models) == 0 {
 		return c.Sampling.Clone()
 	}
 	want := FoldRepoID(repoID)
-	// Sorted, not a map range: validateSampling and sanitizeSampling both
+	// Sorted, not a map range: validateModels and sanitizeModels both
 	// guarantee at most one entry folds to any one id, and iterating in a
 	// fixed order means a map that somehow held two could still not make one
 	// model load at different temperatures on different starts.
-	for _, k := range sortedKeys(c.ModelSampling) {
+	for _, k := range modelKeys(c.Models) {
 		if FoldRepoID(k) == want {
-			return c.Sampling.merge(c.ModelSampling[k])
+			return c.Sampling.merge(c.Models[k].Sampling)
 		}
 	}
 	return c.Sampling.Clone()
 }
 
-// MaxModelSampling caps how many per-model overrides may be held.
-//
-// Everything saved is written to config.json, which Load refuses above
-// MaxConfigBytes — and a config.json that cannot be read sends the next start
-// into its fail-closed loopback-only branch, taking the LAN endpoint with it.
-// A bounded number of overrides keeps this field from being the lever for
-// that, whether it is filled from the control plane or by another local
-// account editing the file in shared-cache mode. Nobody has hundreds of
-// models on one Mac.
-const MaxModelSampling = 256
-
-// validateSampling checks the machine-wide set and every override, naming the
-// model an offending override belongs to.
+// validateSampling checks the machine-wide set. The per-model overrides are
+// checked with the rest of the per-model settings, in validateModels.
 func (c Config) validateSampling() error {
-	if err := c.Sampling.Validate(); err != nil {
-		return err
-	}
-	if len(c.ModelSampling) > MaxModelSampling {
-		return fmt.Errorf("at most %d per-model sampling overrides are allowed, got %d",
-			MaxModelSampling, len(c.ModelSampling))
-	}
-	seen := map[string]string{}
-	for _, id := range sortedKeys(c.ModelSampling) {
-		if !ValidRepoID(id) {
-			return fmt.Errorf("sampling override %q is not a well-formed model id", id)
-		}
-		// Two spellings of one repo id are two entries in the map but one
-		// model, so the effective set would depend on which the lookup reached
-		// first. sanitizeSampling drops the duplicate on the file path; here,
-		// where a human is waiting for an answer, say so instead.
-		folded := FoldRepoID(id)
-		if first, ok := seen[folded]; ok {
-			return fmt.Errorf("sampling overrides %q and %q name the same model", first, id)
-		}
-		seen[folded] = id
-		if err := c.ModelSampling[id].Validate(); err != nil {
-			return fmt.Errorf("%s: %w", id, err)
-		}
-	}
-	return nil
+	return c.Sampling.Validate()
 }
 
-// sanitizeSampling drops every sampling value the model server would reject,
-// and every override that is not addressable, returning what it dropped.
+// sanitizeSampling drops every machine-wide sampling value the model server
+// would reject, returning what it dropped. The per-model overrides are
+// sanitized with the rest of the per-model settings, in sanitizeModels.
 //
 // This is the file path, not the settings path. A configuration file can be
 // hand-edited (and, in shared-cache mode, is writable by another local
@@ -417,48 +380,5 @@ func (c *Config) sanitizeSampling() []string {
 	for _, n := range names {
 		dropped = append(dropped, "sampling."+n)
 	}
-	if len(c.ModelSampling) == 0 {
-		return dropped
-	}
-	kept := make(map[string]Sampling, len(c.ModelSampling))
-	seen := map[string]string{} // folded id -> the spelling kept
-	for _, id := range sortedKeys(c.ModelSampling) {
-		if !ValidRepoID(id) {
-			dropped = append(dropped, "model_sampling["+id+"]")
-			continue
-		}
-		// Two spellings of one repo id would make the effective set depend on
-		// map iteration order. Keep the first in sorted order so the outcome
-		// is the same on every start.
-		folded := FoldRepoID(id)
-		if first, ok := seen[folded]; ok {
-			dropped = append(dropped, "model_sampling["+id+"] (duplicate of "+first+")")
-			continue
-		}
-		if len(kept) >= MaxModelSampling {
-			dropped = append(dropped, "model_sampling["+id+"] (beyond the "+
-				strconv.Itoa(MaxModelSampling)+"-override ceiling)")
-			continue
-		}
-		seen[folded] = id
-		s, names := c.ModelSampling[id].Sanitized()
-		for _, n := range names {
-			dropped = append(dropped, "model_sampling["+id+"]."+n)
-		}
-		kept[id] = s
-	}
-	if len(kept) == 0 {
-		kept = nil
-	}
-	c.ModelSampling = kept
 	return dropped
-}
-
-func sortedKeys(m map[string]Sampling) []string {
-	out := make([]string, 0, len(m))
-	for k := range m {
-		out = append(out, k)
-	}
-	sort.Strings(out)
-	return out
 }
