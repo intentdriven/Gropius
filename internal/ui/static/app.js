@@ -660,18 +660,39 @@ function pinnedModels(current, listed, checked) {
   return out;
 }
 
-// pinnedCharge is what the pinned models cost against the memory budget: each
-// one's size plus a fifth, which is what the pool charges a loaded model
-// (capability.LoadCost). A model still downloading is charged the size it
-// declares, because ticking its box now is a promise about the memory it will
-// take when it lands. A pin naming a model this Mac does not have at all has
-// no size to charge.
-function pinnedCharge(models, pinned) {
+// modelCharge is what one model costs the memory budget, and it is the Go
+// charge (capability.LoadCostOf) written out again here: the weights plus a
+// fifth for the working set, plus the attention cache the window this model
+// serves will build, once per sequence its server may decode at once, and
+// never more than the whole budget — a model that fills the budget by itself
+// loads alone rather than not at all. A model whose configuration says nothing
+// about its cache is charged the flat figure, as every model was before this.
+// The factor of 7 is capability.KVSafetyFactor: the measured cost per token
+// runs two to seven times what a configuration implies, so the figure read off
+// the configuration is a floor. A test in internal/ui holds this to the Go
+// figure; if you change one, change both.
+function modelCharge(model, sequences, budget) {
+  const m = model || {};
+  // A model still downloading is charged the size it declares, because ticking
+  // its box now is a promise about the memory it will take when it lands.
+  const bytes = m.bytes || m.size_bytes || 0;
+  const flat = bytes + Math.floor(bytes / 5);
+  const perToken = m.kv_bytes_per_token || 0;
+  const window = m.context_length || 0;
+  const seq = sequences || 0;
+  if (perToken <= 0 || window <= 0 || seq <= 0) return flat;
+  const charge = flat + 7 * perToken * window * seq;
+  if (budget > 0 && charge > budget) return flat > budget ? flat : budget;
+  return charge;
+}
+
+// pinnedCharge is what the pinned models cost against the memory budget. A pin
+// naming a model this Mac does not have at all has no size to charge.
+function pinnedCharge(models, pinned, sequences, budget) {
   const want = new Set((pinned || []).map(foldRepoID));
   return (models || []).reduce((sum, m) => {
     if (!want.has(foldRepoID(m.repo_id))) return sum;
-    const b = m.bytes || m.size_bytes || 0;
-    return sum + b + Math.floor(b / 5);
+    return sum + modelCharge(m, sequences, budget);
   }, 0);
 }
 
@@ -765,7 +786,11 @@ function updatePinBudget() {
   const line = $('pinBudget');
   if (!line) return;
   const budget = (state.machine && state.machine.budget) || 0;
-  const charge = pinnedCharge(state.models || [], checkedPinModels());
+  // The decode concurrency is part of the charge: each sequence a server may
+  // run at once holds its own cache, so the panel reads the figure the pool is
+  // running with rather than assuming one.
+  const sequences = (state.config && state.config.decode_concurrency) || 0;
+  const charge = pinnedCharge(state.models || [], checkedPinModels(), sequences, budget);
   if (!budget) {
     line.textContent = charge ? `Pinned models use about ${size(charge)}.` : '';
     line.className = 'hint';

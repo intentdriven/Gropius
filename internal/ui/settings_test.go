@@ -149,25 +149,71 @@ func TestSettingsFormPostsThePinnedListWhole(t *testing.T) {
 
 // The figure beside the field is what makes an impossible pinned set visible
 // at pin time rather than at the first refused request, so it has to charge
-// each model what the pool charges it: its size on disk plus a fifth.
+// each model what the pool charges it. A model whose configuration says
+// nothing about its cache is charged its size on disk plus a fifth, as it
+// always was.
 func TestSettingsFormChargesPinnedModelsWhatThePoolCharges(t *testing.T) {
 	const models = `[{"repo_id":"org/a","bytes":1000},{"repo_id":"org/b","bytes":500}]`
 	cases := []struct {
 		expr string
 		want float64
 	}{
-		{fmt.Sprintf(`pinnedCharge(%s, [])`, models), 0},
-		{fmt.Sprintf(`pinnedCharge(%s, ["org/a"])`, models), float64(capability.LoadCost(1000))},
-		{fmt.Sprintf(`pinnedCharge(%s, ["org/a","org/b"])`, models),
+		{fmt.Sprintf(`pinnedCharge(%s, [], 0, 0)`, models), 0},
+		{fmt.Sprintf(`pinnedCharge(%s, ["org/a"], 0, 0)`, models), float64(capability.LoadCost(1000))},
+		{fmt.Sprintf(`pinnedCharge(%s, ["org/a","org/b"], 0, 0)`, models),
 			float64(capability.LoadCost(1000) + capability.LoadCost(500))},
 		// A pinned model this Mac has not downloaded has no size to charge.
-		{fmt.Sprintf(`pinnedCharge(%s, ["org/not-downloaded"])`, models), 0},
+		{fmt.Sprintf(`pinnedCharge(%s, ["org/not-downloaded"], 0, 0)`, models), 0},
 	}
 	for _, tc := range cases {
-		got := evalPanelNumber(t, tc.expr, "foldRepoID", "pinnedCharge")
+		got := evalPanelNumber(t, tc.expr, "foldRepoID", "modelCharge", "pinnedCharge")
 		if got != tc.want {
 			t.Errorf("%s = %v, want %v", tc.expr, got, tc.want)
 		}
+	}
+}
+
+// And a model that does say — every model downloaded by a build that records
+// the figure — is charged what its own window and cache cost make it, per
+// sequence its server may decode, held at the budget. The panel is the surface
+// an operator picks a pinned set on, so a panel charging the old flat figure
+// would show a set fitting that the pool then refuses to hold.
+func TestSettingsFormChargesTheCacheTheModelsConfigurationImplies(t *testing.T) {
+	const (
+		size      = 1000
+		kv        = 3
+		window    = 200
+		sequences = 4
+		budget    = 1 << 40
+	)
+	models := fmt.Sprintf(
+		`[{"repo_id":"org/a","bytes":%d,"context_length":%d,"kv_bytes_per_token":%d}]`,
+		size, window, kv)
+	want := float64(capability.LoadCostOf(capability.Load{
+		DiskBytes:       size,
+		KVBytesPerToken: kv,
+		Window:          window,
+		Sequences:       sequences,
+		Budget:          budget,
+	}))
+	expr := fmt.Sprintf(`pinnedCharge(%s, ["org/a"], %d, %d)`, models, sequences, int64(budget))
+	if got := evalPanelNumber(t, expr, "foldRepoID", "modelCharge", "pinnedCharge"); got != want {
+		t.Errorf("%s = %v, want %v — the panel and the pool charge the same model differently", expr, got, want)
+	}
+}
+
+// The ceiling is part of the charge, and the panel applies it: a model whose
+// window costs more than the whole budget is charged the budget, because that
+// is what the pool charges it — one model, the machine to itself.
+func TestSettingsFormHoldsOneModelsChargeAtTheBudget(t *testing.T) {
+	const budget = 4000
+	models := `[{"repo_id":"org/a","bytes":1000,"context_length":100000,"kv_bytes_per_token":8}]`
+	want := float64(capability.LoadCostOf(capability.Load{
+		DiskBytes: 1000, KVBytesPerToken: 8, Window: 100000, Sequences: 1, Budget: budget,
+	}))
+	expr := fmt.Sprintf(`pinnedCharge(%s, ["org/a"], 1, %d)`, models, budget)
+	if got := evalPanelNumber(t, expr, "foldRepoID", "modelCharge", "pinnedCharge"); got != want {
+		t.Errorf("%s = %v, want %v", expr, got, want)
 	}
 }
 
@@ -196,7 +242,7 @@ func TestSettingsFormDrawsARowForEveryPin(t *testing.T) {
 // the moment the downloads land.
 func TestSettingsFormChargesADownloadItsDeclaredSize(t *testing.T) {
 	const models = `[{"repo_id":"org/incoming","bytes":0,"size_bytes":1000}]`
-	got := evalPanelNumber(t, fmt.Sprintf(`pinnedCharge(%s, ["org/incoming"])`, models), "foldRepoID", "pinnedCharge")
+	got := evalPanelNumber(t, fmt.Sprintf(`pinnedCharge(%s, ["org/incoming"], 0, 0)`, models), "foldRepoID", "modelCharge", "pinnedCharge")
 	if want := float64(capability.LoadCost(1000)); got != want {
 		t.Errorf("pinnedCharge = %v, want %v", got, want)
 	}
