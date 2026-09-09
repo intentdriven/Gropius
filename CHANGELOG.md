@@ -14,6 +14,25 @@ GitHub release notes.
 
 ### Changed
 
+- **The chat client reads as a Mac app, and says when it is waiting on a
+  model.** The message box is a real multi-line control — bordered, with focused
+  and disabled states you can see, growing with what you type and scrolling once
+  it is about seven lines, **Return** to send and **Shift-Return** for a new
+  line — instead of a plain field on a grey rectangle. Messages are bubbles
+  again: yours on the right tinted with the accent colour you chose, the model's
+  on the left in a neutral one, both drawn from the system's own colours so they
+  follow light and dark, a changed accent and Increase Contrast, rather than the
+  two fixed shades of another chat app they were. And a first message to a model
+  that is not yet in memory now reads **Loading**, with the model's name, rather
+  than showing the same spinner a slow answer shows — a wait that looked like a
+  hang. The client learns it two ways, and needs neither: the server marks the
+  load in the stream it is already sending, and for a server that does not, the
+  client watches the models list while it waits; against a server that says
+  neither, nothing changes. The model menu offers the models that can hold a
+  conversation, and a model a server rules out stays callable over the API by
+  name — a server that says nothing about the matter still offers everything it
+  serves.
+
 - **A request waiting for memory now looks again by itself, rather than only
   when something wakes it.** The pool wakes every waiting request whenever room
   might have appeared, and each request sleeps in between for as long as it can
