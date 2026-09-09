@@ -84,6 +84,11 @@ type Gateway struct {
 	log    *slog.Logger
 	tr     http.RoundTripper
 	stats  *stats.Recorder
+	// refusalLog holds the line written when a client is refused without being
+	// told why, to one per model per minute. A refusal is client-induced, so
+	// the line it produces has to be rate-limited or the log is somewhere a
+	// stranger can write at the rate it can send requests.
+	refusalLog *logEvery
 }
 
 // New builds a Gateway.
@@ -109,12 +114,13 @@ func New(opts Options) *Gateway {
 		}
 	}
 	return &Gateway{
-		cfg:    cfgFn,
-		pool:   opts.Pool,
-		models: opts.Models,
-		log:    opts.Log,
-		tr:     opts.Transport,
-		stats:  opts.Stats,
+		cfg:        cfgFn,
+		pool:       opts.Pool,
+		models:     opts.Models,
+		log:        opts.Log,
+		tr:         opts.Transport,
+		stats:      opts.Stats,
+		refusalLog: newLogEvery(refusalLogEvery),
 	}
 }
 
@@ -234,6 +240,17 @@ func bearerToken(header string) string {
 // is a syntax error if parsed as script. The day any CORS header is added to
 // these routes, that stops being true.
 func fromThisMachine(r *http.Request) bool {
+	return sameMachineConnection(r) && sameOriginFetch(r)
+}
+
+// sameMachineConnection is the first three guards without the fourth: the
+// socket, the Host and the Origin all name this machine.
+//
+// It is separate only because the control plane admits one request the fourth
+// guard would refuse — a person following a link to the panel — and that
+// exception is the control plane's own, not a hole in the rule. Nothing else
+// calls this; everything else wants fromThisMachine.
+func sameMachineConnection(r *http.Request) bool {
 	if !isLoopback(r.RemoteAddr) {
 		return false
 	}
@@ -243,7 +260,7 @@ func fromThisMachine(r *http.Request) bool {
 	if origin := r.Header.Get("Origin"); origin != "" && !isLoopbackOrigin(origin) {
 		return false
 	}
-	return sameOriginFetch(r)
+	return true
 }
 
 // sameOriginFetch reports whether r's Sec-Fetch-Site header, if it sent one,
@@ -530,7 +547,7 @@ func (g *Gateway) handleCompletions(w http.ResponseWriter, r *http.Request) {
 		// asked for: that name is the client's own text, of the client's own
 		// length, and the recorder is never handed either.
 		obs.failed(stats.ClassClientError)
-		writeError(w, http.StatusNotFound, err.Error())
+		writeError(w, http.StatusNotFound, notServedText(err, g.entitled(r)))
 		return
 	}
 	obs.resolved(model)
@@ -570,11 +587,21 @@ func (g *Gateway) handleCompletions(w http.ResponseWriter, r *http.Request) {
 		// they go only to a client this server owes an account of itself; see
 		// genericRefusal. The status code and the wait headers already set
 		// above are the same either way, so a client backing off is unaffected.
-		msg := genericRefusal
 		if g.entitled(r) {
-			msg = err.Error()
+			writeError(w, http.StatusServiceUnavailable, err.Error())
+			return
 		}
-		writeError(w, http.StatusServiceUnavailable, msg)
+		// The operator keeps what the client no longer gets. Without this the
+		// only record of a refusal a LAN client cannot read is a class in the
+		// statistics, which does not say which model or why — and diagnosing
+		// "my clients are being refused" from the machine doing the refusing
+		// is the whole reason the message was informative in the first place.
+		// Rate-limited because the client sets the rate; see logEvery.
+		if g.refusalLog.allow(model) {
+			g.log.Info("refused a request, and told the client only that it could not be served",
+				"model", model, "class", refusalClass(err), "client", "unentitled", "err", err)
+		}
+		writeError(w, http.StatusServiceUnavailable, genericRefusal)
 		return
 	}
 	defer release()
@@ -1138,7 +1165,10 @@ func copyResponseHeaders(dst, src http.Header) {
 func (g *Gateway) resolveModel(requested string) (string, error) {
 	if m, err := g.models.Get(requested); err == nil {
 		if !m.Ready() {
-			return "", fmt.Errorf("model %q is not ready (%s)", requested, m.State)
+			return "", &notServedError{
+				requested: requested,
+				detail:    fmt.Sprintf("model %q is not ready (%s)", requested, m.State),
+			}
 		}
 		return m.RepoID, nil
 	}
@@ -1151,7 +1181,10 @@ func (g *Gateway) resolveModel(requested string) (string, error) {
 	}
 	switch len(matches) {
 	case 0:
-		return "", fmt.Errorf("model %q is not available — download it first", requested)
+		return "", &notServedError{
+			requested: requested,
+			detail:    fmt.Sprintf("model %q is not available — download it first", requested),
+		}
 	case 1:
 		return matches[0], nil
 	default:
@@ -1207,6 +1240,44 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 // withheld here on the same predicate. The status code and every header are
 // unchanged, because a client backing off honestly reads those, not this text.
 const genericRefusal = "cannot serve this model right now"
+
+// notServedError is the 404 for a model this server will not serve, and it
+// carries two texts because the fuller one describes this Mac.
+//
+// "not ready" says the model is here and downloading, which the listing an
+// open server serves the network deliberately does not: only ready models
+// appear there. Answering a network client with it turns the completions
+// endpoint into a way to enumerate what this Mac is fetching, one guessed name
+// at a time. The generic text is therefore the same sentence for a model that
+// is downloading and for one this Mac has never heard of — indistinguishable,
+// which a different-but-vaguer sentence for each would not have been.
+//
+// The ambiguity refusal is not one of these: the repo ids it names are already
+// in the listing every client is served, so there is nothing there to withhold
+// and a client cannot fix an ambiguous name without them.
+type notServedError struct {
+	// requested is the name the client asked for, echoed back to it.
+	requested string
+	// detail is what an entitled client is told, and is today's text.
+	detail string
+}
+
+func (e *notServedError) Error() string { return e.detail }
+
+// notServedText picks the text err's 404 is answered with.
+func notServedText(err error, entitled bool) string {
+	var notServed *notServedError
+	if entitled || !errors.As(err, &notServed) {
+		return err.Error()
+	}
+	return fmt.Sprintf("model %q is not available", notServed.requested)
+}
+
+// refusalLogEvery is how often the line above may be written for one model.
+// Long enough that a client sending continuously writes one line a minute,
+// short enough that an operator watching the log sees the next refusal within
+// a minute of asking themselves what is going on.
+const refusalLogEvery = time.Minute
 
 // writeError renders an OpenAI-shaped error, which is what clients parse.
 func writeError(w http.ResponseWriter, status int, msg string) {

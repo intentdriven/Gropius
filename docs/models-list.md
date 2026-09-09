@@ -138,7 +138,10 @@ A client the listing tells nothing is refused instead with
 `cannot serve this model right now`.
 The status code and every response header are identical
 either way, so a client that backs off on the status keeps working unchanged;
-only the sentence differs.
+only the sentence differs. The same holds for a request naming a model that is
+still downloading: this listing carries ready models only, so a client it tells
+nothing gets the answer it would get for a model this Mac has never heard of.
+The operator's own log keeps the reason in both cases.
 
 The key is also one key, shared by every client that has it. A client holding
 it sees the whole machine's activity — every model's in-flight count and

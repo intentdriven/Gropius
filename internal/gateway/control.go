@@ -167,7 +167,8 @@ func (c *Control) handleInstance(w http.ResponseWriter, r *http.Request) {
 //     request a page makes without reading the answer — carries no Origin at
 //     all, so the allow-list above never runs and the route is executed blind.
 //     The browser states where the request came from in this header instead,
-//     and a page cannot forge it.
+//     and a page cannot forge it. admitToControlPlane below carries the one
+//     exception to this guard: a person following a link to the panel.
 //
 // The four checks are fromThisMachine, which is where the rule lives: the
 // models list admits a keyless install's loopback client on exactly the same
@@ -175,12 +176,54 @@ func (c *Control) handleInstance(w http.ResponseWriter, r *http.Request) {
 // keep right. Only the refusal message is the control plane's own.
 func loopbackOnly(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !fromThisMachine(r) {
+		if !admitToControlPlane(r) {
 			writeError(w, http.StatusForbidden, loopbackRefusal(r))
 			return
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// admitToControlPlane is fromThisMachine, plus the one request the fourth
+// guard refuses that this plane must still serve: a person following a link to
+// the panel.
+//
+// A top-level navigation the operator started somewhere else — a link in a
+// rendered page of this project's own documentation, which autolinks the
+// panel's address — is cross-site to the browser, and refusing it would answer
+// a click with a 403 the reader cannot act on. It is not the request iss-11 is
+// about: what that names is a page reading a route it never shows anyone,
+// which is a subresource fetch. A navigation puts the answer in front of the
+// person who asked for it, in a window they can see, and the page that started
+// it cannot read a line of it back.
+//
+// The exception is bounded twice over, because a navigation is only harmless
+// where the answer is a page:
+//
+//   - Method and destination: a GET or HEAD whose Sec-Fetch-Dest is "document".
+//     An <iframe> is "iframe" and an <img> is "image", so neither borrows this,
+//     and the panel therefore still cannot be framed by a site.
+//   - Path: the panel and its assets only. A navigation to /api/ is a blind
+//     read of a route that answers with JSON, so it is refused exactly as the
+//     fetch would be. The gateway's own /v1 routes never reach here at all.
+func admitToControlPlane(r *http.Request) bool {
+	if !sameMachineConnection(r) {
+		return false
+	}
+	return sameOriginFetch(r) || isPanelNavigation(r)
+}
+
+// isPanelNavigation reports whether r is a browser navigating a window to one
+// of the panel's own pages, rather than a page fetching something.
+func isPanelNavigation(r *http.Request) bool {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		return false
+	}
+	if strings.HasPrefix(r.URL.Path, "/api/") {
+		return false
+	}
+	return r.Header.Get("Sec-Fetch-Mode") == "navigate" &&
+		r.Header.Get("Sec-Fetch-Dest") == "document"
 }
 
 // loopbackRefusal says which of fromThisMachine's checks refused r, so the
