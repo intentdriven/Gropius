@@ -163,17 +163,23 @@ type Load struct {
 // costs.
 func LoadCostOf(l Load) int64 {
 	flat := LoadCost(l.DiskBytes)
-	cache := mulSaturating(mulSaturating(l.KVChargePerToken, l.Window), l.Sequences)
+	cache := MulSaturating(MulSaturating(l.KVChargePerToken, l.Window), l.Sequences)
 	if cache <= 0 {
 		return flat
 	}
-	return addSaturating(flat, cache)
+	return AddSaturating(flat, cache)
 }
 
-// mulSaturating multiplies without wrapping: a product that will not fit is
+// MulSaturating multiplies without wrapping: a product that will not fit is
 // the largest figure there is, which refuses a load rather than admitting one
-// on a negative charge.
-func mulSaturating(a, b int64) int64 {
+// on a negative charge. Either figure being zero or less means the product
+// says nothing, which is 0.
+//
+// Exported with AddSaturating because they are the arithmetic every figure a
+// client can influence has to be done in — the charge here, the pool's "what
+// would fit", the gateway's estimate of a request's size — and a second copy
+// is how one of those comes to wrap while the others do not.
+func MulSaturating(a, b int64) int64 {
 	if a <= 0 || b <= 0 {
 		return 0
 	}
@@ -183,8 +189,8 @@ func mulSaturating(a, b int64) int64 {
 	return a * b
 }
 
-// addSaturating adds without wrapping, for the same reason.
-func addSaturating(a, b int64) int64 {
+// AddSaturating adds without wrapping, for the same reason.
+func AddSaturating(a, b int64) int64 {
 	if a > 0 && b > math.MaxInt64-a {
 		return math.MaxInt64
 	}

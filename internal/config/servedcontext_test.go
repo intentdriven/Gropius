@@ -76,3 +76,27 @@ func TestAnUnusableServedContextIsDroppedFromTheFile(t *testing.T) {
 		t.Errorf("dropped = %v, want it to name the field", dropped)
 	}
 }
+
+// Two spellings of one model id are two keys in the map and one model, so the
+// window they resolve to must not depend on which the map iteration reached
+// first. The file path drops the duplicate and the settings path refuses it,
+// but a map built by neither — a config assembled in Go, a file read by an
+// older build — can still hold both, and this must not be the place that
+// answers differently on different runs.
+func TestServedContextWithTwoCaseVariantKeysIsDeterministic(t *testing.T) {
+	c := Config{Models: map[string]ModelSettings{
+		"org/Model": {ServedContext: 8192},
+		"org/model": {ServedContext: 65536},
+	}}
+	// Asked a hundred times, because one map iteration proves nothing.
+	for i := 0; i < 100; i++ {
+		if got := c.ServedContext("ORG/MODEL", 262144); got != 65536 {
+			t.Fatalf("ServedContext = %d on iteration %d, want the largest of the variants (65536)", got, i)
+		}
+	}
+	// An exact key is the operator's own spelling and wins outright, whatever
+	// the variants say.
+	if got := c.ServedContext("org/Model", 262144); got != 8192 {
+		t.Errorf("ServedContext = %d for the exact key, want its own figure 8192", got)
+	}
+}

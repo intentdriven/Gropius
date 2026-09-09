@@ -56,6 +56,17 @@ process past its charge.
 - The estimate counts the prompt plus max_tokens. <!-- cond: cond-2609091431030215 -->
 - The model server's own rejection remains the backstop. <!-- cond: cond-2609091431033452 -->
 
+Clarification (2026-09-09, from the review of the shipping change; the bullet
+above stands as stamped and this says what was found true of it): there is no
+backstop. mlx-lm was measured accepting an abandoned 256K prompt until the
+machine swapped (iss-3's evidence, research note 2026-09-06-context-windows),
+so nothing rejects an over-long prompt if the gateway's check does not. What
+carries the residual instead is the estimate's direction and the charge's
+margin: the byte estimate over-counts on English text and under-counts by
+about a third on densely packed CJK, the request body is capped, and the
+memory budget charges five to seven times the cache a configuration implies —
+so a prompt a third over the window is inside what the model was charged for.
+
 ## Acceptance Criteria
 
 - Given a model with a served window set, when a prompt plus max_tokens is estimated above it, then a 400 in the OpenAI error shape names the window and the estimated size, for streaming and non-streaming alike.

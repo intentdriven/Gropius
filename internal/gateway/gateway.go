@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net/http"
 	"os"
 	"strconv"
@@ -19,6 +20,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/intentdriven/Gropius/internal/capability"
 	"github.com/intentdriven/Gropius/internal/config"
 	"github.com/intentdriven/Gropius/internal/registry"
 	"github.com/intentdriven/Gropius/internal/runtime"
@@ -1344,12 +1346,21 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 // The size is estimated from the encoded request body rather than counted:
 // tokenising every request on the gateway's hot path would cost more than the
 // check is worth, and the estimator is the one prefillBudget already sizes its
-// deadline with. It over-counts on purpose — the whole body is measured, not
-// only the prompt inside it, and every byte of JSON syntax and role name
-// counts towards the estimate — so a refusal can fire on a prompt that would
-// just have fitted. That is the safe direction: the model server's own
-// rejection is the backstop for what gets through, and there is no backstop
-// for a prompt that fills this Mac's memory.
+// deadline with. On English text it over-counts, because the whole body is
+// measured and every byte of JSON syntax and role name counts towards the
+// estimate, so a request close to the window can be refused when an exact
+// count would have let it through.
+//
+// It under-counts on text whose tokens are shorter in bytes than four —
+// densely packed CJK is about three — so such a prompt can be about a third
+// larger than the window and still pass. What that costs is bounded and
+// accounted for rather than caught later: the body is capped at
+// maxRequestBody, so the overshoot is bounded by the same fraction, and the
+// memory budget charges five to seven times the cache the configuration
+// implies, which is far more than a third of headroom. There is no backstop
+// underneath this: mlx-lm was measured accepting an abandoned 256K prompt
+// until the machine swapped, so nothing rejects an over-long prompt if this
+// does not.
 //
 // max_tokens counts against the same window because generated tokens are
 // written into the same cache. A model that declares no window and has been
@@ -1363,7 +1374,10 @@ func (g *Gateway) overServedContext(cfg config.Config, model string, bodyBytes i
 	if window <= 0 {
 		return ""
 	}
-	estimate := int64(estimatedTokens(bodyBytes)) + requestedMaxTokens(payload)
+	// Saturating, because both terms are the client's to choose: a max_tokens
+	// of the largest integer there is made this sum negative, and a negative
+	// estimate is under every window.
+	estimate := capability.AddSaturating(int64(estimatedTokens(bodyBytes)), requestedMaxTokens(payload))
 	if estimate <= window {
 		return ""
 	}
@@ -1377,6 +1391,12 @@ func (g *Gateway) overServedContext(cfg config.Config, model string, bodyBytes i
 // asked for none. Both spellings are read: max_tokens is what most clients
 // send and what mlx-lm reads, max_completion_tokens what newer OpenAI clients
 // send, and a request carrying both is measured by the larger.
+//
+// Read as a JSON number rather than as an integer. JSON has one number type,
+// so 1e9 and 1000.0 ask for exactly what 1000000000 and 1000 ask for; decoded
+// into an int64 they fail to parse, and a value that failed to parse was
+// silently taken as no answer at all — which is how a request asking for a
+// billion tokens of answer got past a thousand-token window.
 func requestedMaxTokens(payload map[string]json.RawMessage) int64 {
 	var most int64
 	for _, key := range []string{"max_tokens", "max_completion_tokens"} {
@@ -1384,12 +1404,34 @@ func requestedMaxTokens(payload map[string]json.RawMessage) int64 {
 		if !ok {
 			continue
 		}
-		var n int64
-		if err := json.Unmarshal(raw, &n); err == nil && n > most {
+		if n := asTokenCount(raw); n > most {
 			most = n
 		}
 	}
 	return most
+}
+
+// asTokenCount reads one JSON number as a token count: an integer, a float, or
+// a figure larger than any int64, which saturates rather than becoming
+// whatever the conversion happens to produce. Anything that is not a number —
+// a string, null, an object — is 0, which is the request asking for nothing in
+// particular and is what the model server will read too.
+func asTokenCount(raw json.RawMessage) int64 {
+	var n json.Number
+	if err := json.Unmarshal(raw, &n); err != nil {
+		return 0
+	}
+	if i, err := n.Int64(); err == nil {
+		return i
+	}
+	f, err := n.Float64()
+	if err != nil || f <= 0 {
+		return 0
+	}
+	if f >= math.MaxInt64 {
+		return math.MaxInt64
+	}
+	return int64(f)
 }
 
 // humanCount renders a token count with thousands separators, because these

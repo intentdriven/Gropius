@@ -719,11 +719,19 @@ func (c Config) ServedContext(repoID string, declared int64) int64 {
 	if set == 0 {
 		// Folded, because a request resolves to the registry's spelling and
 		// the settings file is written by hand as often as by the panel.
+		//
+		// Every variant is read and the largest kept, rather than the first
+		// the map hands over. Two spellings of one id are refused on the
+		// settings path and dropped on the file path, so a map holding both
+		// reached here some other way — assembled in Go, or written by a build
+		// with different rules — and taking whichever came first would answer
+		// differently on different runs of the same binary. The largest is the
+		// one choice that is both deterministic and no smaller than what the
+		// operator asked for anywhere.
 		folded := FoldRepoID(repoID)
 		for id, ms := range c.Models {
-			if FoldRepoID(id) == folded {
+			if FoldRepoID(id) == folded && ms.ServedContext > set {
 				set = ms.ServedContext
-				break
 			}
 		}
 	}

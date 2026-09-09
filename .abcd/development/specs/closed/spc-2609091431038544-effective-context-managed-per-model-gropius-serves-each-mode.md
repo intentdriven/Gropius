@@ -69,6 +69,17 @@ encoded body at the same four bytes per token `prefillBudget` estimates with
 shape, naming the window and the estimate. Streaming and non-streaming take the
 same line, because the check runs before either path is chosen.
 
+Clarification (2026-09-09, from the review of the shipping change): the intent's
+scope conditions call the model server's own rejection the backstop for what
+gets through. It is not one — mlx-lm was measured accepting an abandoned 256K
+prompt until the machine swapped — so the residual is carried by the estimate's
+direction and the charge's margin instead: the estimate over-counts on English
+text, under-counts by about a third on densely packed CJK, the body is capped at
+32 MiB, and the budget charges five to seven times the cache a configuration
+implies, which covers that third. Both figures the client supplies are added
+saturating, so an absurd `max_tokens` cannot make the estimate negative, and a
+JSON float is read as the number it is.
+
 **The list and the panel.** `GET /v1/models` carries `served_context` beside
 `context_length`. The panel's `modelCharge` drops the ceiling and reads the
 served window from the config it already holds, and the settings pane gains one

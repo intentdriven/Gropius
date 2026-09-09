@@ -126,8 +126,9 @@ func TestWithNoSettingTheDeclaredWindowIsServed(t *testing.T) {
 }
 
 // A model with no declared window and no setting has no window to enforce, so
-// nothing is refused on its account: the model server's own rejection is the
-// backstop, as it always was.
+// nothing is refused on its account. Nothing else refuses it either — such a
+// prompt reaches mlx-lm unbounded, as every prompt did before this — which is
+// why a window is what the memory budget charges.
 func TestAModelWithNoWindowAtAllRefusesNothing(t *testing.T) {
 	srv, _ := servedGateway(t, config.Default(), 0)
 	body := fmt.Sprintf(`{"model":%q,"messages":[{"role":"user","content":%q}]}`,
@@ -169,5 +170,69 @@ func TestModelsListCarriesTheServedContext(t *testing.T) {
 	}
 	if got, want := out.Data[0]["context_length"], float64(262144); got != want {
 		t.Errorf("context_length = %v, want the declared window %v", got, want)
+	}
+}
+
+// The size a request is measured at is arithmetic on figures the client
+// supplies, so it must not wrap. A max_tokens of the largest integer there is
+// used to make the sum negative, which passed the check and reached the pool.
+func TestAnAbsurdMaxTokensDoesNotWrapPastTheWindow(t *testing.T) {
+	cfg := config.Default()
+	cfg.Models = map[string]config.ModelSettings{servedModel: {ServedContext: 1000}}
+	for _, field := range []string{"max_tokens", "max_completion_tokens"} {
+		t.Run(field, func(t *testing.T) {
+			srv, pool := servedGateway(t, cfg, 262144)
+			body := fmt.Sprintf(`{"model":%q,%q:9223372036854775807,"messages":[{"role":"user","content":%q}]}`,
+				servedModel, field, strings.Repeat("a", 40000))
+			resp, err := http.Post(srv+"/v1/chat/completions", "application/json", strings.NewReader(body))
+			if err != nil {
+				t.Fatalf("post: %v", err)
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400: the estimate wrapped negative", resp.StatusCode)
+			}
+			pool.mu.Lock()
+			defer pool.mu.Unlock()
+			if len(pool.acquired) != 0 {
+				t.Errorf("the pool was asked for %v", pool.acquired)
+			}
+		})
+	}
+}
+
+// JSON has one number type, so a client that sends 1e9 or 1000.0 is asking for
+// exactly what 1000000000 and 1000 ask for. Read as an integer only, both were
+// silently ignored and the request was served.
+func TestAFloatMaxTokensCountsAgainstTheWindow(t *testing.T) {
+	cfg := config.Default()
+	cfg.Models = map[string]config.ModelSettings{servedModel: {ServedContext: 1000}}
+	for _, spelling := range []string{"1e9", "1000.0", "1e300"} {
+		t.Run(spelling, func(t *testing.T) {
+			srv, _ := servedGateway(t, cfg, 262144)
+			// A short prompt: what refuses this request is the answer it asks for.
+			body := fmt.Sprintf(`{"model":%q,"max_tokens":%s,"messages":[{"role":"user","content":"hi"}]}`,
+				servedModel, spelling)
+			resp, err := http.Post(srv+"/v1/chat/completions", "application/json", strings.NewReader(body))
+			if err != nil {
+				t.Fatalf("post: %v", err)
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400: %s tokens of answer is past a 1,000-token window", resp.StatusCode, spelling)
+			}
+		})
+	}
+	// And a fractional figure inside the window is still served: the window is
+	// what refuses a request, not the spelling of the number.
+	srv, _ := servedGateway(t, cfg, 262144)
+	body := fmt.Sprintf(`{"model":%q,"max_tokens":10.0,"messages":[{"role":"user","content":"hi"}]}`, servedModel)
+	resp, err := http.Post(srv+"/v1/chat/completions", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
 	}
 }

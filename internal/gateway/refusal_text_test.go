@@ -105,9 +105,25 @@ func poolRefusals() []struct {
 		},
 		{
 			name: "the too-large-to-load refusal names the memory budget",
-			err: fmt.Errorf("org/warm needs about %s of memory but the limit is %s — raise the memory budget or choose a smaller quantization",
+			err: fmt.Errorf("org/warm needs about %s of memory but the budget is %s — raise the memory budget or choose a smaller quantization",
 				runtime.HumanBytes(60<<30), runtime.HumanBytes(41<<30)),
 			private: runtime.HumanBytes(41 << 30),
+		},
+		{
+			// The refusal that says what would fit. It names the budget in
+			// bytes as the one above does, and two more facts about this Mac:
+			// the window this model is served at and how many requests its
+			// server batches. All three are the operator's business.
+			name: "the what-would-fit refusal names the budget, the window and the batch size",
+			err: fmt.Errorf("org/warm needs about %s of memory but the budget is %s at its served context of %d tokens and %d batched requests — lower this model's served context from %d to about %d tokens, lower batched requests from %d to %d, or raise the memory budget",
+				runtime.HumanBytes(60<<30), runtime.HumanBytes(41<<30), 262144, 4, 262144, 96000, 4, 1),
+			private: runtime.HumanBytes(41 << 30),
+		},
+		{
+			name: "the what-would-fit refusal keeps the served window off the network",
+			err: fmt.Errorf("org/warm needs about %s of memory but the budget is %s at its served context of %d tokens and %d batched requests — lower this model's served context from %d to about %d tokens, or raise the memory budget",
+				runtime.HumanBytes(60<<30), runtime.HumanBytes(41<<30), 262144, 1, 262144, 96000),
+			private: "served context",
 		},
 	}
 }

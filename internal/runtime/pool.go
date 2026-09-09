@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"math"
 	"net/http"
 	"sort"
 	"sync"
@@ -997,7 +996,7 @@ func (p *Pool) tooLargeLocked(repoID string, m ResolvedModel, need int64) error 
 	base := fmt.Sprintf("%s needs about %s of memory but the budget is %s",
 		repoID, HumanBytes(need), HumanBytes(p.maxResident))
 	sequences := int64(p.opts.DecodeConcurrency)
-	perToken := mulPositive(m.KVChargePerToken, sequences)
+	perToken := capability.MulSaturating(m.KVChargePerToken, sequences)
 	room := p.maxResident - capability.LoadCost(m.Bytes)
 	if perToken <= 0 || room <= 0 || m.ServedContext <= 0 {
 		// Nothing but the weights to give back: no window and no concurrency
@@ -1007,7 +1006,7 @@ func (p *Pool) tooLargeLocked(repoID string, m ResolvedModel, need int64) error 
 	window := room / perToken
 	fits := fmt.Sprintf("lower this model's served context from %d to about %d tokens",
 		m.ServedContext, window)
-	if perSequence := mulPositive(m.KVChargePerToken, m.ServedContext); perSequence > 0 {
+	if perSequence := capability.MulSaturating(m.KVChargePerToken, m.ServedContext); perSequence > 0 {
 		if n := room / perSequence; n >= 1 && sequences > 1 {
 			fits += fmt.Sprintf(", lower batched requests from %d to %d", sequences, n)
 		}
@@ -1018,18 +1017,6 @@ func (p *Pool) tooLargeLocked(repoID string, m ResolvedModel, need int64) error 
 	}
 	return fmt.Errorf("%s at its served context of %d tokens and %d batched requests — %s, or raise the memory budget",
 		base, m.ServedContext, sequences, fits)
-}
-
-// mulPositive multiplies two figures that must both be positive to mean
-// anything, saturating rather than wrapping.
-func mulPositive(a, b int64) int64 {
-	if a <= 0 || b <= 0 {
-		return 0
-	}
-	if a > math.MaxInt64/b {
-		return math.MaxInt64
-	}
-	return a * b
 }
 
 // chargeLocked is what a model costs the budget in force. Callers must hold
