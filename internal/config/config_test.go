@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -463,11 +464,21 @@ func TestEnsureDirsFollowsSymlinkedLayoutDirOnPerUserRoot(t *testing.T) {
 
 // Per-model settings survive a save and a load, so a switch the operator set in
 // Settings still applies after a restart.
+// One structure holds every per-model setting, so one round trip is what
+// proves the file carries all of them — merging, pinning and a sampling
+// override together on one model, and each of them alone on another.
 func TestSaveLoadRoundTripKeepsPerModelSettings(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
 	want := Default()
-	want.PerModel = map[string]ModelSettings{
-		"mlx-community/Qwen3-8B-4bit": {MergeSystemMessages: true},
+	want.Models = map[string]ModelSettings{
+		"mlx-community/Qwen3-8B-4bit": {
+			MergeSystemMessages: true,
+			Pinned:              true,
+			Sampling:            Sampling{Temperature: f64(0.2), MaxTokens: intp(4096)},
+		},
+		"org/merger":  {MergeSystemMessages: true},
+		"org/pinned":  {Pinned: true},
+		"org/sampled": {Sampling: Sampling{TopK: intp(40)}},
 	}
 
 	if err := Save(path, want); err != nil {
@@ -480,6 +491,9 @@ func TestSaveLoadRoundTripKeepsPerModelSettings(t *testing.T) {
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("round trip mismatch:\n got %+v\nwant %+v", got, want)
 	}
+	if !reflect.DeepEqual(got.PinnedIDs(), []string{"mlx-community/Qwen3-8B-4bit", "org/pinned"}) {
+		t.Errorf("PinnedIDs = %v, want the two pinned models in a stable order", got.PinnedIDs())
+	}
 }
 
 // A per-model entry is settings for one model, so a file written by a newer
@@ -488,7 +502,7 @@ func TestSaveLoadRoundTripKeepsPerModelSettings(t *testing.T) {
 func TestLoadPerModelIgnoresUnknownSettings(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
 	body := `{"port":11535,"host":"0.0.0.0","decode_concurrency":4,` +
-		`"per_model":{"mlx-community/Qwen3-8B-4bit":{"merge_system_messages":true,"temperature":0.7}}}`
+		`"models":{"mlx-community/Qwen3-8B-4bit":{"merge_system_messages":true,"seed":7}}}`
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -496,7 +510,7 @@ func TestLoadPerModelIgnoresUnknownSettings(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if !cfg.PerModel["mlx-community/Qwen3-8B-4bit"].MergeSystemMessages {
+	if !cfg.Models["mlx-community/Qwen3-8B-4bit"].MergeSystemMessages {
 		t.Error("merge_system_messages was lost next to a setting this build does not know")
 	}
 }
@@ -504,7 +518,7 @@ func TestLoadPerModelIgnoresUnknownSettings(t *testing.T) {
 // The keys of the per-model map name models. A key that is not a well-formed
 // repo id names nothing and is refused, so the map cannot fill up with
 // entries no request can ever match.
-func TestValidatePerModelKeys(t *testing.T) {
+func TestValidateModelKeys(t *testing.T) {
 	cases := []struct {
 		name    string
 		key     string
@@ -518,9 +532,9 @@ func TestValidatePerModelKeys(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			err := ValidatePerModelKeys(map[string]ModelSettings{c.key: {MergeSystemMessages: true}})
+			err := ValidateModelKeys(map[string]ModelSettings{c.key: {MergeSystemMessages: true}})
 			if (err != nil) != c.wantErr {
-				t.Errorf("ValidatePerModelKeys(%q) error = %v, want error: %v", c.key, err, c.wantErr)
+				t.Errorf("ValidateModelKeys(%q) error = %v, want error: %v", c.key, err, c.wantErr)
 			}
 		})
 	}
@@ -533,7 +547,7 @@ func TestValidatePerModelKeys(t *testing.T) {
 // dropped and reported, the way an unusable sampling override beside it is.
 func TestLoadDropsAPerModelKeyThatNamesNoModel(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
-	body := `{"port":11535,"host":"0.0.0.0","decode_concurrency":4,"per_model":{` +
+	body := `{"port":11535,"host":"0.0.0.0","decode_concurrency":4,"models":{` +
 		`"../../etc":{"merge_system_messages":true},` +
 		`"mlx-community/Qwen3-8B-4bit":{"merge_system_messages":true}}}`
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
@@ -544,11 +558,11 @@ func TestLoadDropsAPerModelKeyThatNamesNoModel(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if _, bad := cfg.PerModel["../../etc"]; bad {
-		t.Errorf("a key that names no model survived the load: %+v", cfg.PerModel)
+	if _, bad := cfg.Models["../../etc"]; bad {
+		t.Errorf("a key that names no model survived the load: %+v", cfg.Models)
 	}
-	if !cfg.PerModel["mlx-community/Qwen3-8B-4bit"].MergeSystemMessages {
-		t.Errorf("the usable setting beside it was dropped too: %+v", cfg.PerModel)
+	if !cfg.Models["mlx-community/Qwen3-8B-4bit"].MergeSystemMessages {
+		t.Errorf("the usable setting beside it was dropped too: %+v", cfg.Models)
 	}
 	if len(notices.All()) != 1 || !strings.Contains(notices.All()[0], "../../etc") {
 		t.Errorf("dropped = %v, want the one unusable key named", notices.All())
@@ -557,8 +571,92 @@ func TestLoadDropsAPerModelKeyThatNamesNoModel(t *testing.T) {
 	if err := cfg.Validate(); err != nil {
 		t.Errorf("the loaded config does not validate: %v", err)
 	}
-	if err := ValidatePerModelKeys(cfg.PerModel); err != nil {
+	if err := ValidateModelKeys(cfg.Models); err != nil {
 		t.Errorf("the loaded config would be refused by the next settings save: %v", err)
+	}
+}
+
+// The per-model settings a build before this one wrote are not read. They lived
+// in three places — a sampling override map, a per-model settings map and a
+// pinned list — and unifying them is a change to the settings file rather than
+// a tidy-up, so pre-1.0 the operator makes it and no migration code carries it
+// (iss-2609062213413447).
+//
+// What must not happen is silence. A model that was pinned is not pinned any
+// more, and an operator who is not told will find that out when a request is
+// refused. Every superseded key is named as ignored, once, at the start that
+// ignored it — and nothing else in the file is touched.
+func TestLoadReportsTheSupersededPerModelKeysAndKeepsEverythingElse(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	body := `{"port":11535,"host":"0.0.0.0","decode_concurrency":4,` +
+		`"api_key":"bh_kept","preload":["org/warm"],"statistics":true,` +
+		`"model_sampling":{"org/a":{"temperature":0.2}},` +
+		`"per_model":{"org/a":{"merge_system_messages":true}},` +
+		`"pinned":["org/a"]}`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, notices, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	for _, key := range []string{"model_sampling", "per_model", "pinned"} {
+		if !slices.ContainsFunc(notices.Ignored, func(s string) bool { return strings.HasPrefix(s, key+" ") }) {
+			t.Errorf("ignored = %v, want %q named as no longer read", notices.Ignored, key)
+		}
+	}
+	if len(notices.Ignored) != 3 {
+		t.Errorf("ignored = %v, want exactly the three superseded keys", notices.Ignored)
+	}
+	if len(cfg.Models) != 0 {
+		t.Errorf("Models = %+v, want nothing carried over from the old keys", cfg.Models)
+	}
+	// Everything else in the file is untouched: a settings file is not thrown
+	// away because part of it is out of date.
+	if cfg.APIKey != "bh_kept" || cfg.Port != 11535 || cfg.Host != "0.0.0.0" ||
+		!cfg.Statistics || !reflect.DeepEqual(cfg.Preload, []string{"org/warm"}) {
+		t.Errorf("the rest of the file did not survive the superseded keys: %+v", cfg)
+	}
+	// And what loaded saves again, in the new shape, with the old keys gone.
+	if err := Save(path, cfg); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	written, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"model_sampling", "per_model", "\"pinned\""} {
+		if strings.Contains(string(written), key) {
+			t.Errorf("the next save wrote %s again: %s", key, written)
+		}
+	}
+}
+
+// An entry with nothing on it is not settings for a model, it is a name in a
+// map. It is dropped rather than kept — an empty object holds a slot against
+// the ceiling and comes back on the next save — and dropped silently, because
+// nothing was ignored: nothing was asked for.
+func TestLoadDropsAModelEntryWithNoSettingsOnIt(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	body := `{"port":11535,"host":"0.0.0.0","decode_concurrency":4,"models":{` +
+		`"org/empty":{},"org/pinned":{"pinned":true}}}`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, notices, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if _, kept := cfg.Models["org/empty"]; kept {
+		t.Errorf("an entry with no settings on it was kept: %+v", cfg.Models)
+	}
+	if !cfg.Models["org/pinned"].Pinned {
+		t.Errorf("the entry beside it was dropped too: %+v", cfg.Models)
+	}
+	if len(notices.All()) != 0 {
+		t.Errorf("notices = %v, want nothing said about an entry that asked for nothing", notices.All())
 	}
 }
 
@@ -566,7 +664,7 @@ func TestLoadDropsAPerModelKeyThatNamesNoModel(t *testing.T) {
 // map iteration order, so the later one in sorted order is dropped.
 func TestLoadDropsADuplicatePerModelSpelling(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
-	body := `{"port":11535,"host":"0.0.0.0","decode_concurrency":4,"per_model":{` +
+	body := `{"port":11535,"host":"0.0.0.0","decode_concurrency":4,"models":{` +
 		`"MLX-Community/Qwen3-8B-4bit":{"merge_system_messages":true},` +
 		`"mlx-community/Qwen3-8B-4bit":{}}}`
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
@@ -576,8 +674,8 @@ func TestLoadDropsADuplicatePerModelSpelling(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if len(cfg.PerModel) != 1 {
-		t.Errorf("per-model settings = %+v, want one of the two spellings", cfg.PerModel)
+	if len(cfg.Models) != 1 {
+		t.Errorf("per-model settings = %+v, want one of the two spellings", cfg.Models)
 	}
 	if len(notices.All()) != 1 || !strings.Contains(notices.All()[0], "duplicate") {
 		t.Errorf("dropped = %v, want the duplicate spelling named", notices.All())
@@ -623,7 +721,10 @@ func TestStatisticsIsOffByDefaultAndSurvivesARoundTrip(t *testing.T) {
 func TestSaveLoadRoundTripKeepsPinnedModels(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
 	c := Default()
-	c.Pinned = []string{"mlx-community/Qwen3-8B-4bit", "org/reviewer"}
+	c.Models = map[string]ModelSettings{
+		"mlx-community/Qwen3-8B-4bit": {Pinned: true},
+		"org/reviewer":                {Pinned: true},
+	}
 
 	if err := Save(path, c); err != nil {
 		t.Fatalf("Save: %v", err)
@@ -635,8 +736,9 @@ func TestSaveLoadRoundTripKeepsPinnedModels(t *testing.T) {
 	if len(notices.All()) != 0 {
 		t.Errorf("dropped = %v, want nothing dropped", notices.All())
 	}
-	if !reflect.DeepEqual(got.Pinned, c.Pinned) {
-		t.Errorf("Pinned = %v, want %v", got.Pinned, c.Pinned)
+	want := []string{"mlx-community/Qwen3-8B-4bit", "org/reviewer"}
+	if !reflect.DeepEqual(got.PinnedIDs(), want) {
+		t.Errorf("PinnedIDs = %v, want %v", got.PinnedIDs(), want)
 	}
 }
 
@@ -656,7 +758,10 @@ func TestValidateRefusesPinsThatNameNoModel(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			c := Default()
-			c.Pinned = tc.pinned
+			c.Models = map[string]ModelSettings{}
+			for _, id := range tc.pinned {
+				c.Models[id] = ModelSettings{Pinned: true}
+			}
 			err := c.Validate()
 			if err == nil {
 				t.Fatalf("Validate accepted pinned %v", tc.pinned)
@@ -674,14 +779,15 @@ func TestValidateRefusesPinsThatNameNoModel(t *testing.T) {
 // from being the lever for that.
 func TestValidateRefusesMorePinsThanTheCeiling(t *testing.T) {
 	c := Default()
-	for i := 0; i <= MaxPinned; i++ {
-		c.Pinned = append(c.Pinned, fmt.Sprintf("org/m%d", i))
+	c.Models = map[string]ModelSettings{}
+	for i := 0; i <= MaxModels; i++ {
+		c.Models[fmt.Sprintf("org/m%d", i)] = ModelSettings{Pinned: true}
 	}
 	err := c.Validate()
 	if err == nil {
-		t.Fatalf("Validate accepted %d pins, over the %d ceiling", len(c.Pinned), MaxPinned)
+		t.Fatalf("Validate accepted %d pins, over the %d ceiling", len(c.Models), MaxModels)
 	}
-	if !strings.Contains(err.Error(), strconv.Itoa(MaxPinned)) {
+	if !strings.Contains(err.Error(), strconv.Itoa(MaxModels)) {
 		t.Errorf("Validate error = %q, want it to give the ceiling", err)
 	}
 }
@@ -691,8 +797,8 @@ func TestValidateRefusesMorePinsThanTheCeiling(t *testing.T) {
 // send the next start into its fail-closed loopback-only mode over one entry.
 func TestLoadDropsAPinThatNamesNoModel(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
-	body := `{"port":11535,"host":"0.0.0.0","decode_concurrency":4,` +
-		`"pinned":["../../etc","org/keeper","ORG/keeper"]}`
+	body := `{"port":11535,"host":"0.0.0.0","decode_concurrency":4,"models":{` +
+		`"../../etc":{"pinned":true},"org/keeper":{"pinned":true},"ORG/keeper":{"pinned":true}}}`
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -701,8 +807,8 @@ func TestLoadDropsAPinThatNamesNoModel(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if !reflect.DeepEqual(cfg.Pinned, []string{"org/keeper"}) {
-		t.Errorf("Pinned = %v, want only the one usable entry", cfg.Pinned)
+	if !reflect.DeepEqual(cfg.PinnedIDs(), []string{"ORG/keeper"}) {
+		t.Errorf("PinnedIDs = %v, want only the first usable spelling", cfg.PinnedIDs())
 	}
 	if len(notices.All()) != 2 {
 		t.Fatalf("dropped = %v, want the bad id and the duplicate spelling named", notices.All())
@@ -720,15 +826,16 @@ func TestLoadDropsAPinThatNamesNoModel(t *testing.T) {
 }
 
 // Clone exists so a posted body cannot reach the live configuration before
-// Validate has looked at it. A shared backing array would defeat that for the
-// pinned list exactly as it would for the preload list beside it.
-func TestClonePinnedSharesNoStorage(t *testing.T) {
+// Validate has looked at it. A shared map would defeat that for the per-model
+// settings exactly as a shared backing array would for the preload list.
+func TestClonePerModelSharesNoStorage(t *testing.T) {
 	c := Default()
-	c.Pinned = []string{"org/a"}
+	c.Models = map[string]ModelSettings{"org/a": {Pinned: true}}
 	clone := c.Clone()
-	clone.Pinned[0] = "org/b"
-	if c.Pinned[0] != "org/a" {
-		t.Errorf("the clone wrote through to the original: %v", c.Pinned)
+	clone.Models["org/a"] = ModelSettings{}
+	clone.Models["org/b"] = ModelSettings{Pinned: true}
+	if !c.Models["org/a"].Pinned || len(c.Models) != 1 {
+		t.Errorf("the clone wrote through to the original: %v", c.Models)
 	}
 }
 
@@ -737,9 +844,10 @@ func TestClonePinnedSharesNoStorage(t *testing.T) {
 // the file rather than write one the next start cannot read.
 func TestAFullPinnedListStillFitsTheConfigFile(t *testing.T) {
 	c := Default()
-	for i := range MaxPinned {
-		c.Pinned = append(c.Pinned, fmt.Sprintf("%s%03d/%s",
-			strings.Repeat("o", MaxRepoComponent-3), i, strings.Repeat("n", MaxRepoComponent)))
+	c.Models = map[string]ModelSettings{}
+	for i := range MaxModels {
+		c.Models[fmt.Sprintf("%s%03d/%s",
+			strings.Repeat("o", MaxRepoComponent-3), i, strings.Repeat("n", MaxRepoComponent))] = ModelSettings{Pinned: true}
 	}
 	if err := c.Validate(); err != nil {
 		t.Fatalf("Validate: %v", err)
@@ -755,8 +863,8 @@ func TestAFullPinnedListStillFitsTheConfigFile(t *testing.T) {
 	if len(notices.All()) != 0 {
 		t.Errorf("dropped %v from a config within every limit", notices.All())
 	}
-	if len(loaded.Pinned) != MaxPinned {
-		t.Errorf("loaded %d pins, want %d", len(loaded.Pinned), MaxPinned)
+	if len(loaded.PinnedIDs()) != MaxModels {
+		t.Errorf("loaded %d pins, want %d", len(loaded.PinnedIDs()), MaxModels)
 	}
 }
 

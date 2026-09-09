@@ -151,7 +151,7 @@ func TestSetConfigRefusesABudgetBelowThePinnedSum(t *testing.T) {
 	putReady(t, a, "org/reviewer", 20*gb)
 
 	base := a.Config()
-	base.Pinned = []string{"org/writer", "org/reviewer"}
+	base.Models = pinnedModels("org/writer", "org/reviewer")
 	base.APIKey = "bh_before"
 	if err := a.SetConfig(base); err != nil {
 		t.Fatalf("SetConfig: %v", err)
@@ -197,7 +197,7 @@ func TestAnInheritedOverBudgetSetDoesNotBlockABudgetSave(t *testing.T) {
 	a := newBudgetApp(t, 128*gb, config.Config{
 		Host: "127.0.0.1", Port: 11535, DecodeConcurrency: 4,
 		MaxResidentBytes: 2 * gb,
-		Pinned:           []string{"org/writer"},
+		Models:           pinnedModels("org/writer"),
 	})
 	putReady(t, a, "org/writer", 20*gb)
 
@@ -327,7 +327,7 @@ func TestARoundedBudgetDoesNotTurnAWarningIntoARefusal(t *testing.T) {
 	a := newBudgetApp(t, 128*gb, config.Config{
 		Host: "127.0.0.1", Port: 11535, DecodeConcurrency: 4,
 		MaxResidentBytes: 8 * gb,
-		Pinned:           []string{"org/writer"},
+		Models:           pinnedModels("org/writer"),
 	})
 	putReady(t, a, "org/writer", 20*gb) // charged 24 GB: fits neither budget
 
@@ -347,7 +347,7 @@ func TestAnUnmeasurablePinDoesNotBlockALowerBudget(t *testing.T) {
 	putReady(t, a, "org/unmeasured", 0)
 
 	c := a.Config()
-	c.Pinned = []string{"org/unmeasured"}
+	c.Models = pinnedModels("org/unmeasured")
 	if err := a.SetConfig(c); err == nil {
 		t.Fatal("SetConfig accepted a pin on a model of unknown size")
 	}
@@ -355,7 +355,7 @@ func TestAnUnmeasurablePinDoesNotBlockALowerBudget(t *testing.T) {
 	// Same set, arriving from the file rather than added here.
 	b := newBudgetApp(t, 128*gb, config.Config{
 		Host: "127.0.0.1", Port: 11535, DecodeConcurrency: 4,
-		Pinned: []string{"org/unmeasured"},
+		Models: pinnedModels("org/unmeasured"),
 	})
 	putReady(t, b, "org/unmeasured", 0)
 	lower := b.Config()

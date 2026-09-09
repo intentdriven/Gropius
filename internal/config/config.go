@@ -278,7 +278,7 @@ func ValidRepoID(s string) bool {
 }
 
 // MaxRepoComponent bounds each half of a repo id. HuggingFace itself allows no
-// more, and the bound is what turns "at most MaxModelSampling overrides" into a
+// more, and the bound is what turns "at most MaxModels models" into a
 // bound on the size of config.json rather than only on its entry count — an
 // unbounded key would let a legal number of entries write a file Load then
 // refuses to read.
@@ -483,8 +483,24 @@ func (p Paths) EnsureDirs() error {
 // Config is the user-facing settings file.
 type Config struct {
 	// Host to bind the gateway to. 0.0.0.0 exposes it to the LAN.
+	//
+	// It is one of the addresses this server answers on rather than the only
+	// one: loopback is acquired alongside whatever this names, so narrowing
+	// the bind never costs the operator their own control panel
+	// (adr-2609091123526871, iss-7). internal/bind turns this into the set of
+	// addresses actually acquired.
 	Host string `json:"host"`
-	Port int    `json:"port"`
+	// BindMode decides how the bind is worked out. Empty — the default, and
+	// what every configuration written before this field carries — means Host
+	// decides. BindModePrivateNetwork means the address is resolved from this
+	// Mac's interfaces instead, and Host is left as the operator last set it
+	// so that switching back restores their choice.
+	//
+	// Its own field rather than a sentinel in Host, deliberately: a word like
+	// "private" passes host validation as a name, then fails to listen, and
+	// the app exits with no panel and no recovery but editing the file.
+	BindMode string `json:"bind_mode"`
+	Port     int    `json:"port"`
 
 	// APIKey, when non-empty, requires "Authorization: Bearer <key>" on /v1
 	// requests. Empty (the default) means the LAN endpoint is open.
@@ -525,17 +541,6 @@ type Config struct {
 	// best-effort — an invalid or too-large entry is logged and skipped, never
 	// blocking startup.
 	Preload []string `json:"preload,omitempty"`
-
-	// Pinned lists repo ids that stay in memory: a pinned model is never chosen
-	// as an eviction victim and is never unloaded by the idle timeout, so a
-	// request that would need its memory is refused instead.
-	//
-	// Separate from Preload, and the two do different things. Preload loads a
-	// model at startup and leaves it as evictable as any other; pinning
-	// protects a model but loads nothing, so a pinned model is protected from
-	// the moment something loads it. A model named in both is loaded at startup
-	// and protected from then on.
-	Pinned []string `json:"pinned,omitempty"`
 
 	// MaxResidentBytes caps the total charged size of the models that may be
 	// in memory at once. Zero — the default, and what a fresh install stores —
@@ -579,10 +584,6 @@ type Config struct {
 	// launched with, so a request that omits a parameter is served with them.
 	Sampling Sampling `json:"sampling,omitzero"`
 
-	// ModelSampling overrides Sampling for individual models, keyed by repo id.
-	// A model with no entry is served with the machine-wide set.
-	ModelSampling map[string]Sampling `json:"model_sampling,omitempty"`
-
 	// Statistics turns on content-free recording of the requests this Mac
 	// serves: which model, how it ended, how many tokens and how long it took.
 	// It is off until the operator turns it on, and while it is off nothing
@@ -599,15 +600,22 @@ type Config struct {
 	StatsMonths   int   `json:"stats_months,omitempty"`
 	StatsMaxBytes int64 `json:"stats_max_bytes,omitempty"`
 
-	// PerModel holds the per-model settings that are not sampling parameters,
-	// keyed by the registry's canonical repo id. A model with no entry runs on
-	// the machine-wide settings above, which is what every model does until the
-	// operator says otherwise.
-	PerModel map[string]ModelSettings `json:"per_model,omitempty"`
+	// Models holds every setting that belongs to one model rather than to the
+	// machine, keyed by the registry's canonical repo id. A model with no
+	// entry runs on the machine-wide settings above, which is what every model
+	// does until the operator says otherwise.
+	//
+	// One map, and exactly one. Gropius carried three of these — a sampling
+	// override map, a per-model settings map and a pinned list — each with its
+	// own ceiling, its own sanitiser, its own guard in the settings handler
+	// and its own canonicalisation, held to the same rules by prose in three
+	// files (iss-2609062213413447). A new per-model setting is a field on
+	// ModelSettings, and internal/archtest holds the count at one.
+	Models map[string]ModelSettings `json:"models,omitempty"`
 }
 
-// ModelSettings are the settings of a single model that are not sampling
-// parameters, which have their own map above.
+// ModelSettings are the settings of a single model: everything Gropius does
+// differently for one model rather than for the machine.
 //
 // Every field is off or zero by default, so a model gains a behavior only when
 // the operator switches it on for that model in Settings.
@@ -629,64 +637,144 @@ type ModelSettings struct {
 	// reads (adr-2609061610102325). Off unless the operator switches it on for
 	// this model.
 	MergeSystemMessages bool `json:"merge_system_messages,omitempty"`
+
+	// Pinned keeps this model in memory: a pinned model is never chosen as an
+	// eviction victim and is never unloaded by the idle timeout, so a request
+	// that would need its memory is refused instead.
+	//
+	// Separate from Preload, and the two do different things. Preload loads a
+	// model at startup and leaves it as evictable as any other; pinning
+	// protects a model but loads nothing, so a pinned model is protected from
+	// the moment something loads it. A model in both is loaded at startup and
+	// protected from then on.
+	Pinned bool `json:"pinned,omitempty"`
+
+	// Sampling overrides the machine-wide sampling defaults for this model. A
+	// parameter it does not name keeps the machine-wide value, so an override
+	// that says only "temperature 0.2" still gets the machine's token budget.
+	Sampling Sampling `json:"sampling,omitzero"`
 }
 
-// ValidatePerModelKeys reports whether every key of a per-model settings map
+// IsZero reports whether a model's settings say nothing at all. An entry like
+// that is dropped rather than stored — by sanitizeModels on the way in from
+// the file, and by the settings path on the way in from a save — so an empty
+// object neither holds a slot against the ceiling nor reaches config.json.
+//
+// Declared rather than inherited: Sampling has an IsZero of its own, and an
+// embedded or promoted one would report a pinned model with no sampling
+// override as having no settings.
+func (m ModelSettings) IsZero() bool {
+	return !m.MergeSystemMessages && !m.Pinned && m.Sampling.IsZero()
+}
+
+// Clone returns a copy that shares no pointer with the original — the sampling
+// override's fields are pointers, because a blank field and a zero are
+// different answers.
+func (m ModelSettings) Clone() ModelSettings {
+	m.Sampling = m.Sampling.Clone()
+	return m
+}
+
+// ValidateModelKeys reports whether every key of a per-model settings map
 // names a model, i.e. is a well-formed "<org>/<name>" repo id.
 //
 // A key is matched against the id a request resolves to, so a key of any other
 // shape names nothing and would sit in the settings file looking effective
 // while applying to no request ever made. Refusing it at the point of saving
 // is the only moment the operator is there to see it.
-func ValidatePerModelKeys(m map[string]ModelSettings) error {
+func ValidateModelKeys(m map[string]ModelSettings) error {
 	// Sorted, so a file with several unusable keys names the same one every
 	// time it is refused rather than whichever the map iteration reached first.
-	for _, id := range perModelKeys(m) {
+	for _, id := range modelKeys(m) {
 		if !ValidRepoID(id) {
-			return fmt.Errorf("per-model settings for %q: not a model id of the form <org>/<name>", id)
+			return fmt.Errorf("settings for model %q: not a model id of the form <org>/<name>", id)
 		}
 	}
-	if len(m) > MaxPerModel {
-		return fmt.Errorf("per-model settings name %d models, more than the %d this holds", len(m), MaxPerModel)
+	if len(m) > MaxModels {
+		return fmt.Errorf("per-model settings name %d models, more than the %d this holds", len(m), MaxModels)
 	}
 	return nil
 }
 
-// MaxPerModel bounds the per-model settings map for the same reason
-// MaxModelSampling bounds the sampling overrides beside it, and to the same
-// figure: everything saved is written to config.json, which Load refuses above
-// MaxConfigBytes, and a config.json that cannot be read sends the next start
-// into its fail-closed loopback-only branch. Two per-model maps means two
-// levers for that, so both are bounded.
-const MaxPerModel = MaxModelSampling
+// MaxModels bounds the per-model settings map: everything saved is written to
+// config.json, which Load refuses above MaxConfigBytes, and a config.json that
+// cannot be read sends the next start into its fail-closed loopback-only
+// branch, taking the LAN endpoint with it. A bounded map keeps this field from
+// being the lever for that, whether it is filled from the control plane or by
+// another local account editing the file in shared-cache mode. Nobody has
+// hundreds of models on one Mac.
+//
+// The memory budget bounds how many models can usefully be pinned, but
+// Validate is machine-independent, so the count is what is bounded here.
+const MaxModels = 256
 
-// perModelKeys returns a per-model settings map's keys in a stable order, so
-// that a map with more than one problem in it names the same one every time
-// rather than whichever the map iteration reached first.
-func perModelKeys(m map[string]ModelSettings) []string {
+// modelKeys returns a per-model settings map's keys in a stable order, so that
+// a map with more than one problem in it names the same one every time rather
+// than whichever the map iteration reached first.
+func modelKeys(m map[string]ModelSettings) []string {
 	return slices.Sorted(maps.Keys(m))
 }
 
-// sanitizePerModel drops every per-model entry this build cannot use and
-// returns what it dropped, so a settings file written by hand, restored from a
-// backup, or produced by another build still loads.
+// PinnedIDs names the models pinned in memory, in a stable order.
+//
+// The pool, the fit check and the panel all take a list; the settings hold a
+// map, because pinning is a setting of one model like any other. This is the
+// one place the two shapes meet.
+func (c Config) PinnedIDs() []string {
+	var out []string
+	for _, id := range modelKeys(c.Models) {
+		if c.Models[id].Pinned {
+			out = append(out, id)
+		}
+	}
+	return out
+}
+
+// validateModels checks the per-model settings the way the machine-wide ones
+// are checked: this is the settings path, where a human is waiting for an
+// answer, so an entry that names no model is refused rather than dropped.
+func (c Config) validateModels() error {
+	if err := ValidateModelKeys(c.Models); err != nil {
+		return err
+	}
+	seen := map[string]string{}
+	for _, id := range modelKeys(c.Models) {
+		// Two spellings of one repo id are two entries in the map but one
+		// model, so the effective settings would depend on which the lookup
+		// reached first. sanitizeModels drops the duplicate on the file path;
+		// here, where a human is waiting for an answer, say so instead.
+		folded := FoldRepoID(id)
+		if first, ok := seen[folded]; ok {
+			return fmt.Errorf("settings for %q and %q name the same model", first, id)
+		}
+		seen[folded] = id
+		if err := c.Models[id].Sampling.Validate(); err != nil {
+			return fmt.Errorf("%s: %w", id, err)
+		}
+	}
+	return nil
+}
+
+// sanitizeModels drops every per-model entry this build cannot use — and every
+// value inside one the model server would refuse — returning what it dropped,
+// so a settings file written by hand, restored from a backup, or produced by
+// another build still loads.
 //
 // Refusing the file instead would be worse than useless. The panel serves the
 // stored settings into its form and the form posts them back, so one unusable
 // key would return on the next save and be refused there — wedging every
 // settings change there is, the API key included, until someone edited the
-// file by hand. This is the same treatment the sampling overrides beside it
-// get, for the same reason.
-func (c *Config) sanitizePerModel() []string {
-	if len(c.PerModel) == 0 {
+// file by hand.
+func (c *Config) sanitizeModels() []string {
+	if len(c.Models) == 0 {
 		return nil
 	}
 	var dropped []string
-	kept := make(map[string]ModelSettings, len(c.PerModel))
+	kept := make(map[string]ModelSettings, len(c.Models))
 	seen := map[string]string{} // folded id -> the spelling kept
-	for _, id := range perModelKeys(c.PerModel) {
+	for _, id := range modelKeys(c.Models) {
 		if !ValidRepoID(id) {
-			dropped = append(dropped, "per_model["+id+"]")
+			dropped = append(dropped, "models["+id+"]")
 			continue
 		}
 		// Two spellings of one repo id would make the effective settings
@@ -694,41 +782,46 @@ func (c *Config) sanitizePerModel() []string {
 		// outcome is the same on every start.
 		folded := FoldRepoID(id)
 		if first, ok := seen[folded]; ok {
-			dropped = append(dropped, "per_model["+id+"] (duplicate of "+first+")")
+			dropped = append(dropped, "models["+id+"] (duplicate of "+first+")")
 			continue
 		}
-		if len(kept) >= MaxPerModel {
-			dropped = append(dropped, "per_model["+id+"] (beyond the "+
-				strconv.Itoa(MaxPerModel)+"-model ceiling)")
+		if len(kept) >= MaxModels {
+			dropped = append(dropped, "models["+id+"] (beyond the "+
+				strconv.Itoa(MaxModels)+"-model ceiling)")
+			continue
+		}
+		ms := c.Models[id].Clone()
+		sampling, names := ms.Sampling.Sanitized()
+		ms.Sampling = sampling
+		for _, n := range names {
+			dropped = append(dropped, "models["+id+"].sampling."+n)
+		}
+		// An entry that says nothing is not kept, and is not reported either:
+		// nothing was ignored, because nothing was asked for. Keeping it would
+		// let empty objects fill the map to its ceiling and stand between the
+		// operator and a model they do want settings for.
+		if ms.IsZero() {
 			continue
 		}
 		seen[folded] = id
-		kept[id] = c.PerModel[id]
+		kept[id] = ms
 	}
 	if len(kept) == 0 {
 		kept = nil
 	}
-	c.PerModel = kept
+	c.Models = kept
 	return dropped
 }
 
-// MaxPinned bounds the pinned list for the same reason MaxPerModel bounds the
-// per-model settings beside it, and to the same figure: everything saved is
-// written to config.json, which Load refuses above MaxConfigBytes, and a
-// config.json that cannot be read sends the next start into its fail-closed
-// loopback-only branch. The memory budget bounds how many pins can be *useful*,
-// but Validate is machine-independent, so the count is what is bounded here.
-const MaxPinned = MaxPerModel
-
-// MaxPreload bounds the preload list, for the reason MaxPinned bounds the
-// pinned list beside it and to the same figure: a config.json grown without
-// limit is one the next start cannot read, and a start that cannot read it
-// locks the server down to loopback. The list names models to load into memory
-// at startup, so it cannot usefully be longer than the models this Mac can
-// hold — a bound the memory budget puts in the single digits — while Validate
-// has to be machine-independent, so what is bounded here is the count, at the
-// figure the two per-model maps already use.
-const MaxPreload = MaxPinned
+// MaxPreload bounds the preload list, for the reason MaxModels bounds the
+// per-model settings beside it and to the same figure: a config.json grown
+// without limit is one the next start cannot read, and a start that cannot
+// read it locks the server down to loopback. The list names models to load
+// into memory at startup, so it cannot usefully be longer than the models this
+// Mac can hold — a bound the memory budget puts in the single digits — while
+// Validate has to be machine-independent, so what is bounded here is the
+// count, at the figure the per-model settings already use.
+const MaxPreload = MaxModels
 
 // MaxAPIKeyBytes bounds the API key, for the same reason and against the same
 // hazard.
@@ -740,70 +833,6 @@ const MaxPreload = MaxPinned
 // spare, and the field stops being a lever for growing config.json towards
 // MaxConfigBytes from the settings endpoint.
 const MaxAPIKeyBytes = 512
-
-// validatePinned checks the pinned list the way validateSampling checks the
-// sampling overrides: this is the settings path, where a human is waiting for
-// an answer, so an entry that names no model is refused rather than dropped.
-func (c Config) validatePinned() error {
-	if len(c.Pinned) > MaxPinned {
-		return fmt.Errorf("at most %d models may be pinned, got %d", MaxPinned, len(c.Pinned))
-	}
-	seen := map[string]string{}
-	for _, id := range c.Pinned {
-		if !ValidRepoID(id) {
-			return fmt.Errorf("pinned model %q: not a model id of the form <org>/<name>", id)
-		}
-		// Two spellings of one repo id are two entries but one model. The pool
-		// folds its lookup, so the duplicate would protect nothing extra while
-		// counting twice against the fit check the save is about to run.
-		folded := FoldRepoID(id)
-		if first, ok := seen[folded]; ok {
-			return fmt.Errorf("pinned models %q and %q name the same model", first, id)
-		}
-		seen[folded] = id
-	}
-	return nil
-}
-
-// sanitizePinned drops every pinned entry this build cannot use and returns
-// what it dropped, so a settings file written by hand, restored from a backup,
-// or produced by another build still loads.
-//
-// Refusing the file instead would be worse than useless, for the reason
-// sanitizePerModel gives: the panel serves the stored settings into its form
-// and the form posts them back, so one unusable entry would return on the next
-// save and be refused there, wedging every settings change there is.
-func (c *Config) sanitizePinned() []string {
-	if len(c.Pinned) == 0 {
-		return nil
-	}
-	var dropped []string
-	kept := make([]string, 0, len(c.Pinned))
-	seen := map[string]string{} // folded id -> the spelling kept
-	for _, id := range c.Pinned {
-		if !ValidRepoID(id) {
-			dropped = append(dropped, "pinned["+id+"]")
-			continue
-		}
-		folded := FoldRepoID(id)
-		if first, ok := seen[folded]; ok {
-			dropped = append(dropped, "pinned["+id+"] (duplicate of "+first+")")
-			continue
-		}
-		if len(kept) >= MaxPinned {
-			dropped = append(dropped, "pinned["+id+"] (beyond the "+
-				strconv.Itoa(MaxPinned)+"-model ceiling)")
-			continue
-		}
-		seen[folded] = id
-		kept = append(kept, id)
-	}
-	if len(kept) == 0 {
-		kept = nil
-	}
-	c.Pinned = kept
-	return dropped
-}
 
 // sanitizeBudget drops a memory budget this build cannot use and names what it
 // dropped, so a hand-edited file still loads.
@@ -825,7 +854,7 @@ func (c *Config) sanitizeBudget() []string {
 // ceiling and names what it cut, so a hand-edited file, a backup or another
 // build's settings still load.
 //
-// Cut rather than refused, for the reason sanitizePinned gives: the panel
+// Cut rather than refused, for the reason sanitizeModels gives: the panel
 // serves the stored settings into its form and the form posts them back, so a
 // list that is refused rather than trimmed would come back on the next save
 // and be refused there — wedging every settings change there is, the API key
@@ -898,20 +927,11 @@ func (c Config) Clone() Config {
 	if c.Preload != nil {
 		out.Preload = append([]string(nil), c.Preload...)
 	}
-	if c.Pinned != nil {
-		out.Pinned = append([]string(nil), c.Pinned...)
-	}
 	out.Sampling = c.Sampling.Clone()
-	if c.ModelSampling != nil {
-		out.ModelSampling = make(map[string]Sampling, len(c.ModelSampling))
-		for k, v := range c.ModelSampling {
-			out.ModelSampling[k] = v.Clone()
-		}
-	}
-	if c.PerModel != nil {
-		out.PerModel = make(map[string]ModelSettings, len(c.PerModel))
-		for k, v := range c.PerModel {
-			out.PerModel[k] = v
+	if c.Models != nil {
+		out.Models = make(map[string]ModelSettings, len(c.Models))
+		for k, v := range c.Models {
+			out.Models[k] = v.Clone()
 		}
 	}
 	return out
@@ -1105,7 +1125,15 @@ func (c Config) Validate() error {
 	// that repeats it. Load turns a refusal here into a lock-down to loopback,
 	// which is the same fail-closed path a corrupt file takes.
 	if !ValidBindHost(c.Host) {
-		return fmt.Errorf("host %q is neither an IP address (bracketed, as \"[::1]\", for IPv6) nor a host name", c.Host)
+		return fmt.Errorf("host %q is neither an IP address nor a host name", c.Host)
+	}
+	// An unrecognised bind mode decides the bind, and nothing downstream knows
+	// what it decided. Refused rather than repaired, in the direction every
+	// other bind fault runs: Load turns this into a loopback bind with the
+	// rest of the operator's settings kept, and Save turns it into a message
+	// while they are there to read it.
+	if c.BindMode != BindModeHost && c.BindMode != BindModePrivateNetwork {
+		return fmt.Errorf("bind_mode %q is not a bind mode this build has; leave it out for the address in \"host\", or set %q", c.BindMode, BindModePrivateNetwork)
 	}
 	if c.DecodeConcurrency < 1 {
 		return fmt.Errorf("decode_concurrency must be >= 1, got %d", c.DecodeConcurrency)
@@ -1118,7 +1146,7 @@ func (c Config) Validate() error {
 	if len(c.Preload) > MaxPreload {
 		return fmt.Errorf("preload names %d models, more than the %d this holds", len(c.Preload), MaxPreload)
 	}
-	if err := c.validatePinned(); err != nil {
+	if err := c.validateModels(); err != nil {
 		return err
 	}
 	// Eviction grace on an open endpoint is a denial-of-service lever: a parked
@@ -1128,8 +1156,24 @@ func (c Config) Validate() error {
 	// to tell callers apart. Loopback-only installs are unaffected: there is no
 	// network caller to defend against, and the check turns on exposure rather
 	// than on the key alone.
-	if c.EvictionGrace && c.ExposedToLAN() && c.APIKey == "" {
-		return errors.New("eviction grace needs an API key on a LAN-exposed server: without one the wait queue cannot be shared out between callers, and one client can hold up model loading for everyone")
+	// The private-network mode counts as exposed HERE and only here. This runs
+	// on a stored configuration — at a save, and at a load before any socket
+	// exists — so nothing can say what the mode would bind, and "might serve
+	// network callers" is the strongest thing that can be asked of it. Erring
+	// closed costs a key on a feature that is off by default; erring open
+	// costs the queue this rule protects.
+	if c.EvictionGrace && c.APIKey == "" {
+		// Two spellings of one rule, because the operator has to recognise the
+		// server being described. A loopback Host under the private-network
+		// mode is not a LAN-exposed server, and telling them it is sends them
+		// to look at a bind address that is not what fired this.
+		const why = ": without one the wait queue cannot be shared out between callers, and one client can hold up model loading for everyone"
+		switch {
+		case c.ExposedToLAN():
+			return errors.New("eviction grace needs an API key on a LAN-exposed server" + why)
+		case c.BindMode == BindModePrivateNetwork:
+			return errors.New("eviction grace needs an API key on a server that may reach other machines (private-network mode)" + why)
+		}
 	}
 	if c.StatsMonths < 1 || c.StatsMonths > MaxStatsMonths {
 		return fmt.Errorf("keep statistics for between 1 and %d months, got %d", MaxStatsMonths, c.StatsMonths)
@@ -1152,33 +1196,43 @@ func (c Config) Validate() error {
 	return c.validateSampling()
 }
 
+// The two bind modes. A third choice in Settings, never automatic: switching
+// it on changes who can reach an existing install, and a default that moves
+// the day someone installs a VPN is a default change wearing a feature's
+// clothes.
+const (
+	// BindModeHost is the default: Config.Host is the bind.
+	BindModeHost = ""
+	// BindModePrivateNetwork serves on the one address this Mac holds on a
+	// private network, and on this Mac. It fails closed to this Mac alone when
+	// there is no such address, or more than one — it never picks between them
+	// (adr-2609081118587999, amendment condition 1).
+	BindModePrivateNetwork = "private-network"
+)
+
 // ValidBindHost reports whether a value is something cmd/gropius can bind.
 //
 // It is as wide as the listener and no wider, and that is checked rather than
 // asserted: every value the table in host_test.go marks bindable was watched
 // to produce a listener, and every value it refuses was watched to fail.
 //
-// The address is built as "<host>:<port>", so an IPv6 literal binds only when
-// the configuration carries it bracketed. That is a rule about spelling, not
-// about which addresses exist: "[::1]:11535" listens and "::1:11535" is
-// refused by net.SplitHostPort as "too many colons in address" — at every
-// port, for every IPv6 address, on every machine. An earlier version of this
-// comment said both spellings had to stay legal "or a working install stops
-// starting", which had it exactly backwards: an unbracketed IPv6 host is one
-// no working install can be carrying, because main.go logs "cannot listen"
-// and exits 1 before it serves anything. Accepting it turned a hand-edited
-// typo into an app that would not start; refusing it sends Load down the
-// narrow-to-loopback path, and the app starts and says why. A zone
-// ("[fe80::1%en0]") binds and stays legal, even though URLHost refuses to put
-// one in a URL.
+// An IPv6 literal is accepted in either spelling. The listen address is built
+// by internal/bind through net.JoinHostPort (adr-2609091123526871 rule 5),
+// which brackets a host carrying colons itself, so "::1" and "[::1]" name the
+// same bind and both listen. That was not true while the address was built
+// with fmt.Sprintf: "::1:11535" came back from net.SplitHostPort as "too many
+// colons in address" and the app exited before it served anything, which is
+// iss-7's second fault. The bracketed spelling stays accepted because
+// config.json files carry it.
+//
+// What a colon still cannot do is carry a port. "192.168.1.5:8080" parses as
+// no address, and a colon is not legal in a host-name label, so it is refused
+// here rather than bracketed by JoinHostPort into an address no listener
+// takes. A zone ("fe80::1%en0", bracketed or not) binds and stays legal, even
+// though URLHost refuses to put one in a URL.
 func ValidBindHost(host string) bool {
 	bare, ok := unbracket(host)
 	if !ok {
-		return false
-	}
-	// Unbracketed, a colon is the port separator, so no value carrying one is
-	// a host cmd/gropius can bind — neither "::1" nor "192.168.1.5:8080".
-	if !strings.HasPrefix(host, "[") && strings.Contains(bare, ":") {
 		return false
 	}
 	if addr, zone, hasZone := strings.Cut(bare, "%"); hasZone {
@@ -1373,6 +1427,14 @@ func validHostLabel(label string) bool {
 // direction the errors have to run: a name resolves to whatever the resolver
 // says today, and a malformed value binds nothing at all, and neither is a
 // reason to stand down.
+//
+// What it does NOT answer is what the running server is exposed on. A bind is
+// a set of addresses now, the set can be narrower than the configuration asked
+// for, and the bind mode may name no address at all — so everything that
+// decides at startup or reports at runtime asks bind.Plan.ReachesOtherMachines
+// instead, which is a question about sockets (adr-2609091123526871 rule 7).
+// This is the answer about a stored configuration, which is what a stored
+// configuration can be asked, and Validate below is its remaining reader.
 func (c Config) ExposedToLAN() bool {
 	bare, ok := unbracket(c.Host)
 	if !ok {
@@ -1435,9 +1497,9 @@ func Load(path string) (Config, Notices, error) {
 	var n Notices
 	// Ignored: the setting is not in force at all, and setting it again is the
 	// only way to get it.
+	n.Ignored = append(n.Ignored, SupersededSettings(b)...)
 	n.Ignored = append(n.Ignored, cfg.sanitizeSampling()...)
-	n.Ignored = append(n.Ignored, cfg.sanitizePerModel()...)
-	n.Ignored = append(n.Ignored, cfg.sanitizePinned()...)
+	n.Ignored = append(n.Ignored, cfg.sanitizeModels()...)
 	n.Ignored = append(n.Ignored, cfg.sanitizePreload()...)
 	// Repaired: the setting IS in force, in a changed form. Telling an
 	// operator to set it again would send them looking for a value that is
@@ -1451,6 +1513,51 @@ func Load(path string) (Config, Notices, error) {
 		return Default(), Notices{}, &InvalidError{Path: path, Err: err, Parsed: cfg, Notices: n}
 	}
 	return cfg, n, nil
+}
+
+// superseded names the settings keys this build no longer reads, and what
+// carries each of them now.
+//
+// Every one of them was a per-model setting with a shape of its own. They are
+// one map today (iss-2609062213413447), and pre-1.0 that migration is made by
+// the operator rather than by a compatibility path nobody would ever be able
+// to delete: the old keys are not read, and the next save writes the new shape.
+var superseded = map[string]string{
+	"model_sampling": "replaced by models[<id>].sampling",
+	"per_model":      "replaced by models[<id>]",
+	"pinned":         "replaced by models[<id>].pinned",
+}
+
+// SupersededSettings names the superseded keys a settings body or file still
+// carries, each with what carries it now.
+//
+// One function for both surfaces, because they owe the same answer. On the
+// file path Load reports them as ignored, so an operator is told once — at the
+// start that ignored them — rather than left to wonder why a model is no
+// longer pinned. On the settings path the endpoint refuses the body outright:
+// a caller posting one of these keys is a script or a shell of someone's own,
+// and answering "saved" to a save that changed nothing is the one reply that
+// leaves them believing it worked.
+//
+// Read off the raw bytes, because the fields are gone from the type and
+// encoding/json says nothing about a key it does not know. Matched the way
+// encoding/json matches a field name, case-insensitively, so a hand-edited
+// "Pinned" is reported rather than silently dropped.
+func SupersededSettings(b []byte) []string {
+	var named map[string]json.RawMessage
+	if err := json.Unmarshal(b, &named); err != nil {
+		return nil
+	}
+	var out []string
+	for _, key := range slices.Sorted(maps.Keys(superseded)) {
+		for k := range named {
+			if strings.EqualFold(k, key) {
+				out = append(out, key+" ("+superseded[key]+")")
+				break
+			}
+		}
+	}
+	return out
 }
 
 // Notices is what Load had to change about a settings file to make it usable,
