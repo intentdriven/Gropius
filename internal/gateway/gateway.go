@@ -312,6 +312,11 @@ func (g *Gateway) handleListModels(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// One reading of the rule for the whole listing, so two entries in one
+	// answer can never be judged by two different rules because the operator
+	// saved between them.
+	chatRule := g.cfg().EffectiveChatRule()
+
 	data := make([]any, 0, len(ready))
 	for _, m := range ready {
 		entry := map[string]any{
@@ -335,6 +340,29 @@ func (g *Gateway) handleListModels(w http.ResponseWriter, r *http.Request) {
 			entry["context_length"] = m.ContextLength
 			entry["max_model_len"] = m.ContextLength
 		}
+		// What HuggingFace says this model is, in HuggingFace's own words, and
+		// what this server makes of them. The two tag fields are absent when
+		// the Hub said nothing — an empty string or an empty list would read as
+		// an answer — and `chat` is always present, because the whole value of
+		// the flag is telling a model that can hold a conversation from one
+		// that cannot, and an absent key would be read as an older Gropius that
+		// cannot say either way.
+		//
+		// All three go to every client, keyed or not, loopback or not. They say
+		// what a model IS, which is the same class of fact as its context
+		// length; the residency fields below say what this Mac is doing, which
+		// is the class an open server withholds.
+		//
+		// The flag decides nothing about what is served. Every model stays
+		// callable by name whatever the rule says of it: this is a hint for a
+		// picker, not a filter, and nothing on the completions path reads it.
+		if m.PipelineTag != "" {
+			entry["pipeline_tag"] = m.PipelineTag
+		}
+		if len(m.Tags) > 0 {
+			entry["tags"] = m.Tags
+		}
+		entry["chat"] = chatRule.Matches(m.PipelineTag, m.Tags)
 		if residency != nil {
 			addResidency(entry, residency[config.FoldRepoID(m.RepoID)], pinned[config.FoldRepoID(m.RepoID)])
 		}

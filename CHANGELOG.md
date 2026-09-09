@@ -118,6 +118,27 @@ GitHub release notes.
 
 ### Added
 
+- **Every model says what kind of model it is, and a client can pick by it.**
+  `GET /v1/models` now carries HuggingFace's own `pipeline_tag` and `tags` for
+  each model — recorded from the Hub when the model was downloaded, republished
+  as they are, absent when the Hub said nothing — plus a `chat` flag saying
+  whether this server counts the model as able to hold a conversation. Until
+  now, every downloaded model was offered for chat, including the ones that
+  cannot chat: the browse step saw the Hub's words and the registry forgot them,
+  so a picker had nothing to go on and put an OCR model beside a chat model.
+  Gropius invents no taxonomy for this — the words are the Hub's, and the only
+  judgement is the rule, **Settings → Which models can chat** and `chat_rule` in
+  `config.json`: a list of pipeline tags that count and a list of tags a model
+  must carry, shipped as `text-generation`/`image-text-to-text` and
+  `conversational`. The search tab shows each result's pipeline tag, or "no
+  tag", before you download anything, and GropiusChat's menu now runs the same
+  rule as its own default, changeable in its Settings. **Nothing is filtered:**
+  every model stays callable over the API by name whatever the rule says of it.
+  A model downloaded by an earlier build carries no words — nothing on disk says
+  what kind of model it is — and is marked as unable to chat until it is
+  downloaded again. See [docs/chat-models.md](docs/chat-models.md) and
+  [docs/models-list.md](docs/models-list.md).
+
 - **Gropius answers on this Mac whatever else it answers on.** Every bind
   acquires loopback as well as the address it names, so choosing who on the
   network may reach the server no longer costs you the ability to reach it

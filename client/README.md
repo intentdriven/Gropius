@@ -48,11 +48,15 @@ open dist/GropiusChat.app
    stop button interrupts a reply in progress. Until a server answers, the box
    is greyed out and says so.
 
-   The menu offers the models that can hold a conversation. Where a server says
-   a model cannot, that model is left out of the menu and stays callable over
-   the API by the name it is listed under — it is simply not put in front of
-   you here. A server that says nothing about the matter offers everything it
-   serves.
+   The menu offers the models that can hold a conversation. It works that out
+   itself, from the HuggingFace pipeline tag and tags the server publishes for
+   each model: a model outside the rule is left out of the menu and stays
+   callable over the API by the name it is listed under — it is simply not put
+   in front of you here. The rule is yours to change, under **Models to offer**
+   in Settings: a comma-separated list of pipeline tags that count, and a second
+   of tags a model must carry. Clear a field to stop testing that half. Where a
+   server publishes no words for a model, its own verdict is used instead, and a
+   server that says nothing about the matter offers everything it serves.
 
 Your messages sit on the right in a bubble tinted with your accent colour, the
 model's on the left in a plain one. Both are drawn from the system's own

@@ -962,6 +962,138 @@ func TestConcurrentSavesEachKeepTheirOwnField(t *testing.T) {
 	}
 }
 
+// The panel is served the rule in force, not the empty record of a rule nobody
+// has saved yet: the form shows what it is given and posts it back, so a blank
+// pair of fields would read as "test nothing" and hand every model to the
+// picker at the next save.
+func TestTheSettingsAnswerCarriesTheRuleInForce(t *testing.T) {
+	srv := newTestControl(t, config.Default())
+
+	resp, err := srv.Client().Get(srv.URL + "/api/settings")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var out struct {
+		ChatRule config.ChatRule `json:"chat_rule"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	if !out.ChatRule.Equal(config.DefaultChatRule()) {
+		t.Errorf("the panel is served %+v, want the rule in force %+v", out.ChatRule, config.DefaultChatRule())
+	}
+}
+
+// The rule is one more setting, and the file is a surface an operator edits by
+// hand: a save that names it must not disturb anything else, and a save that
+// does not name it must not disturb the rule.
+func TestSavingTheChatRuleTouchesNothingElse(t *testing.T) {
+	cfg := config.Default()
+	cfg.Advertise = true
+	cfg.Preload = []string{"mlx-community/Qwen3-8B-4bit"}
+	cfg.Models = pinnedModels("org/keeper")
+	srv, a := newTestControlApp(t, cfg)
+
+	resp := postJSON(t, srv, "/api/settings",
+		`{"host":"0.0.0.0","port":11535,"api_key":"","decode_concurrency":4,"idle_timeout_sec":0,`+
+			`"chat_rule":{"pipeline_tags":["text-generation"],"required_tags":[]}}`)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	got := a.Config()
+	if len(got.ChatRule.PipelineTags) != 1 || got.ChatRule.PipelineTags[0] != "text-generation" {
+		t.Errorf("chat rule = %+v, want the one just saved", got.ChatRule)
+	}
+	if len(got.ChatRule.RequiredTags) != 0 || got.ChatRule.RequiredTags == nil {
+		t.Errorf("required tags = %v, want the empty list the operator asked for", got.ChatRule.RequiredTags)
+	}
+	// The per-model map among them: the rule is machine-wide and sits beside
+	// it, so a save that names one must not disturb the other.
+	if !got.Advertise || len(got.Preload) != 1 || !got.Models["org/keeper"].Pinned {
+		t.Errorf("an unrelated setting moved: advertise=%v preload=%v models=%v", got.Advertise, got.Preload, got.Models)
+	}
+}
+
+// And the other direction: a save that says nothing about the rule keeps it —
+// including the rule of an operator who cleared both fields, which is a rule
+// they set and not a rule they never had. Restoring the shipped default there
+// would mark half their models as unable to chat on the next unrelated save.
+func TestSavingSettingsWithoutNamingTheChatRuleKeepsIt(t *testing.T) {
+	cases := []struct {
+		name string
+		rule config.ChatRule
+	}{
+		{
+			name: "a rule the operator narrowed",
+			rule: config.ChatRule{PipelineTags: []string{"text-generation"}, RequiredTags: []string{}},
+		},
+		{
+			name: "a rule the operator cleared entirely",
+			rule: config.ChatRule{PipelineTags: []string{}, RequiredTags: []string{}},
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			cfg := config.Default()
+			cfg.ChatRule = c.rule
+			srv, a := newTestControlApp(t, cfg)
+
+			resp := postJSON(t, srv, "/api/settings",
+				`{"host":"0.0.0.0","port":11535,"api_key":"","decode_concurrency":4,"idle_timeout_sec":0}`)
+			resp.Body.Close()
+			got := a.Config().ChatRule
+			if !got.Equal(c.rule) {
+				t.Errorf("chat rule = %+v after an unrelated save, want %+v", got, c.rule)
+			}
+			if got.IsZero() {
+				t.Error("the rule read back as unset, so the shipped default is in force again")
+			}
+		})
+	}
+}
+
+// The bounds are the settings path's too. An oversized rule posted to the panel
+// is refused and named, rather than accepted, written to config.json and cut
+// down at the next restart — which would leave a rule in force that nobody
+// agreed to, in a file that says otherwise.
+func TestSavingAnOversizedChatRuleIsRefused(t *testing.T) {
+	srv, a := newTestControlApp(t, config.Default())
+
+	many := make([]string, config.MaxChatRuleTags+1)
+	for i := range many {
+		many[i] = fmt.Sprintf("tag-%d", i)
+	}
+	body, err := json.Marshal(map[string]any{
+		"host": "0.0.0.0", "port": 11535, "api_key": "", "decode_concurrency": 4,
+		"idle_timeout_sec": 0,
+		"chat_rule":        map[string]any{"pipeline_tags": many, "required_tags": []string{}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp := postJSON(t, srv, "/api/settings", string(body))
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", resp.StatusCode)
+	}
+	var out struct {
+		Error struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.Error.Message, "chat_rule.pipeline_tags") {
+		t.Errorf("the refusal reads %q; it must name the field the operator has to fix", out.Error.Message)
+	}
+	if !a.Config().ChatRule.IsZero() {
+		t.Errorf("the refused rule reached the configuration anyway: %+v", a.Config().ChatRule)
+	}
+}
+
 // pinnedModels is the per-model settings map that pins exactly these models.
 // Pinning is a field on a model's settings rather than a list of its own
 // (iss-2609062213413447).

@@ -262,6 +262,28 @@
     </label>
 
     <fieldset class="group">
+      <legend>Which models can chat</legend>
+      <p class="hint">Each model carries the words HuggingFace puts on it — a pipeline
+        tag such as <code>text-generation</code>, and tags such as
+        <code>conversational</code> — recorded when it was downloaded. This rule decides
+        which of them the models list marks as able to hold a conversation, so a chat
+        client can leave an OCR or a speech model out of its picker. It filters nothing:
+        every model stays callable over the API by name, whatever the rule says of it.
+        Clear a field to stop testing that half; clear both and every model is marked as
+        able to chat. A model downloaded before Gropius recorded these words, or while
+        HuggingFace could not be reached, carries none and is marked as unable — download
+        it again to give it the words.</p>
+      <label>
+        <span>Pipeline tags that count (comma-separated)</span>
+        <input id="setChatPipelines" type="text" placeholder="text-generation, image-text-to-text">
+      </label>
+      <label>
+        <span>Tags a model must carry (comma-separated)</span>
+        <input id="setChatTags" type="text" placeholder="conversational">
+      </label>
+    </fieldset>
+
+    <fieldset class="group">
       <legend>Sampling defaults</legend>
       <p class="hint">Served to every request that leaves the parameter out. A request
         that sets its own value always wins. A blank field means the model server's own

@@ -600,6 +600,19 @@ type Config struct {
 	StatsMonths   int   `json:"stats_months,omitempty"`
 	StatsMaxBytes int64 `json:"stats_max_bytes,omitempty"`
 
+	// ChatRule decides which models are published on the models list as able
+	// to hold a conversation, from the Hub's own words for what a model is.
+	// Absent — the default, and what a fresh install stores — means the rule
+	// Gropius ships (DefaultChatRule). It is not a second representation of
+	// that rule: a rule whose two lists are present and empty tests nothing,
+	// which is how an operator says "offer every model for chat".
+	//
+	// Machine-wide, and deliberately not one of the per-model settings below:
+	// it is one rule read against every model's own words, not a thing the
+	// operator says model by model. It filters nothing either way — every
+	// model stays callable by name over the API whatever the rule says of it.
+	ChatRule ChatRule `json:"chat_rule,omitzero"`
+
 	// Models holds every setting that belongs to one model rather than to the
 	// machine, keyed by the registry's canonical repo id. A model with no
 	// entry runs on the machine-wide settings above, which is what every model
@@ -934,6 +947,15 @@ func (c Config) Clone() Config {
 			out.Models[k] = v.Clone()
 		}
 	}
+	// Both halves of the rule: the settings write path decodes a posted body
+	// into a clone, and a shared backing array would land a caller's words in
+	// the live rule before Validate had looked at them.
+	//
+	// ChatRule.Clone copies with make and copy rather than appending onto a nil
+	// slice, which for an empty half would yield nil — turning a rule an
+	// operator cleared back into a rule they never set, and so reinstating the
+	// shipped default at the next save of any unrelated setting.
+	out.ChatRule = c.ChatRule.Clone()
 	return out
 }
 
@@ -1147,6 +1169,9 @@ func (c Config) Validate() error {
 		return fmt.Errorf("preload names %d models, more than the %d this holds", len(c.Preload), MaxPreload)
 	}
 	if err := c.validateModels(); err != nil {
+		return err
+	}
+	if err := c.ChatRule.validate(); err != nil {
 		return err
 	}
 	// Eviction grace on an open endpoint is a denial-of-service lever: a parked
@@ -1509,6 +1534,7 @@ func Load(path string) (Config, Notices, error) {
 	n.Repaired = append(n.Repaired, cfg.sanitizeBudget()...)
 	n.Repaired = append(n.Repaired, cfg.sanitizeGrace()...)
 	n.Repaired = append(n.Repaired, cfg.sanitizeAPIKey()...)
+	n.Repaired = append(n.Repaired, cfg.sanitizeChatRule()...)
 	if err := cfg.Validate(); err != nil {
 		return Default(), Notices{}, &InvalidError{Path: path, Err: err, Parsed: cfg, Notices: n}
 	}
