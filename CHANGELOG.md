@@ -25,13 +25,14 @@ GitHub release notes.
   two fixed shades of another chat app they were. And a first message to a model
   that is not yet in memory now reads **Loading**, with the model's name, rather
   than showing the same spinner a slow answer shows — a wait that looked like a
-  hang. The client learns it two ways, and needs neither: the server marks the
-  load in the stream it is already sending, and for a server that does not, the
-  client watches the models list while it waits; against a server that says
-  neither, nothing changes. The model menu offers the models that can hold a
-  conversation, and a model a server rules out stays callable over the API by
-  name — a server that says nothing about the matter still offers everything it
-  serves.
+  hang. The client works it out from the residency the models list already
+  publishes, read once a second while it waits and dropped the moment the answer
+  starts; where a server publishes no residency it shows the plain spinner, as
+  before. And the model menu now honours a chat capability where a server
+  publishes one: a model marked as unable to hold a conversation is left out of
+  the menu and stays callable over the API by name, while a server that says
+  nothing about the matter offers everything it serves — which is every Gropius
+  in the field today.
 
 - **A request waiting for memory now looks again by itself, rather than only
   when something wakes it.** The pool wakes every waiting request whenever room

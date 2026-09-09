@@ -48,10 +48,11 @@ open dist/GropiusChat.app
    stop button interrupts a reply in progress. Until a server answers, the box
    is greyed out and says so.
 
-   The menu offers the models that can hold a conversation. A server may serve
-   others — an OCR model, say — and those stay callable over the API by the
-   name they are listed under; they are simply not put in front of you here. A
-   server that says nothing about the matter offers everything it serves.
+   The menu offers the models that can hold a conversation. Where a server says
+   a model cannot, that model is left out of the menu and stays callable over
+   the API by the name it is listed under — it is simply not put in front of
+   you here. A server that says nothing about the matter offers everything it
+   serves.
 
 Your messages sit on the right in a bubble tinted with your accent colour, the
 model's on the left in a plain one. Both are drawn from the system's own
@@ -61,10 +62,11 @@ Increase Contrast.
 Loading a model into memory takes seconds to a minute. While that is happening
 the reply reads **Loading**, with the model's name, rather than showing the same
 spinner a slow answer shows — so a first message to a cold model reads as
-provisioning rather than as a hang. The client learns it two ways: the server
-marks the wait in the stream it is already sending, and, for a server that does
-not, the client watches the models list once a second while it waits. Either
-way the indicator becomes the ordinary one the moment the answer starts.
+provisioning rather than as a hang. It comes from the residency the models list
+publishes: the client reads it once a second while it waits, and stops the
+moment the answer starts. A server that does not publish residency to this
+client — see [the models list reference](../docs/models-list.md) — shows the
+plain spinner instead.
 
 Thinking models (Qwen3, etc.) stream their reasoning; a grey **Thoughts** row
 above the answer expands to show it, so a reply that spends its whole budget
