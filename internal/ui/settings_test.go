@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/intentdriven/Gropius/internal/runtime"
+	"github.com/intentdriven/Gropius/internal/capability"
 )
 
 // evalPanelValue evaluates one expression against the named functions lifted
@@ -157,9 +157,9 @@ func TestSettingsFormChargesPinnedModelsWhatThePoolCharges(t *testing.T) {
 		want float64
 	}{
 		{fmt.Sprintf(`pinnedCharge(%s, [])`, models), 0},
-		{fmt.Sprintf(`pinnedCharge(%s, ["org/a"])`, models), float64(runtime.LoadCost(1000))},
+		{fmt.Sprintf(`pinnedCharge(%s, ["org/a"])`, models), float64(capability.LoadCost(1000))},
 		{fmt.Sprintf(`pinnedCharge(%s, ["org/a","org/b"])`, models),
-			float64(runtime.LoadCost(1000) + runtime.LoadCost(500))},
+			float64(capability.LoadCost(1000) + capability.LoadCost(500))},
 		// A pinned model this Mac has not downloaded has no size to charge.
 		{fmt.Sprintf(`pinnedCharge(%s, ["org/not-downloaded"])`, models), 0},
 	}
@@ -197,7 +197,7 @@ func TestSettingsFormDrawsARowForEveryPin(t *testing.T) {
 func TestSettingsFormChargesADownloadItsDeclaredSize(t *testing.T) {
 	const models = `[{"repo_id":"org/incoming","bytes":0,"size_bytes":1000}]`
 	got := evalPanelNumber(t, fmt.Sprintf(`pinnedCharge(%s, ["org/incoming"])`, models), "foldRepoID", "pinnedCharge")
-	if want := float64(runtime.LoadCost(1000)); got != want {
+	if want := float64(capability.LoadCost(1000)); got != want {
 		t.Errorf("pinnedCharge = %v, want %v", got, want)
 	}
 }

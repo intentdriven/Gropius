@@ -558,7 +558,7 @@ func (a *App) smallestChargeableModel() (int64, string) {
 		if size <= 0 {
 			continue
 		}
-		if cost := runtime.LoadCost(size); smallest == 0 || cost < smallest {
+		if cost := capability.LoadCost(size); smallest == 0 || cost < smallest {
 			smallest, id = cost, m.RepoID
 		}
 	}
@@ -860,7 +860,7 @@ func (a *App) pinnedCharge(pinned []string) (sum int64, unsized []string) {
 			unsized = append(unsized, m.RepoID)
 			continue
 		}
-		sum += runtime.LoadCost(size)
+		sum += capability.LoadCost(size)
 	}
 	return sum, unsized
 }

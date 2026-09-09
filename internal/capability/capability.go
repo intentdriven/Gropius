@@ -16,12 +16,18 @@ type Machine struct {
 // diskHeadroom is left free so a download never fills the disk to the brim.
 const diskHeadroom = 2 << 30 // 2 GiB
 
-// runFootprint estimates the memory a model of the given download size occupies
-// once loaded: the weights plus ~20% for the KV cache and activations. This
-// mirrors the process pool's LoadCost so the "fits" filter and the pool agree —
-// a model the filter shows is one the pool will actually load.
-func runFootprint(downloadSize int64) int64 {
-	return downloadSize + downloadSize/5
+// LoadCost estimates the memory a model of the given size on disk occupies once
+// loaded: the weights plus ~20% for the KV cache and activations.
+//
+// This is the one home of that charge. It is what the "fits" filter measures a
+// model against, what the process pool charges a resident model against the
+// memory budget, what the app measures a pinned set against, and — through a
+// test in internal/ui — what the control panel's own copy is held to. It lives
+// here because internal/runtime reads this package and not the other way round,
+// so a second copy in the pool is what let the filter show a model the pool
+// would refuse.
+func LoadCost(diskBytes int64) int64 {
+	return diskBytes + diskBytes/5 // 1.2x
 }
 
 // Fits reports whether a model of downloadSize bytes can both be stored and run
@@ -40,7 +46,7 @@ func (m Machine) Reason(downloadSize int64) string {
 	if m.FreeDisk > 0 && downloadSize+diskHeadroom > m.FreeDisk {
 		return "not enough free disk space"
 	}
-	if m.RAMBudget > 0 && runFootprint(downloadSize) > m.RAMBudget {
+	if m.RAMBudget > 0 && LoadCost(downloadSize) > m.RAMBudget {
 		return "too large for this Mac's memory"
 	}
 	return ""

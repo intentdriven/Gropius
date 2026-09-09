@@ -283,8 +283,21 @@ type Machine struct {
 	// cannot be measured. Advice, not a limit.
 	WarnAbove int64 `json:"warn_above"`
 	// ResidentBytes is what the models in memory are charged against the
-	// budget, the same 1.2x figure eviction uses.
+	// budget, the same 1.2x figure eviction uses — including the servers in
+	// ExitingBytes, because that is the figure the pool admits a load against.
+	// A panel that counted only the models it lists would report room the pool
+	// will not give out.
 	ResidentBytes int64 `json:"resident_bytes"`
+	// ExitingBytes is the part of that charged to model servers which have left
+	// the pool and whose processes have not exited yet. They appear in no
+	// models list — they are nobody's model any more — but their memory is not
+	// back, so a load can be refused while every model on screen fits.
+	ExitingBytes int64 `json:"exiting_bytes"`
+	// StuckServers is how many of those are past the point where stopping them
+	// should have worked: SIGTERM, then SIGKILL, then nothing. Their memory is
+	// held until the kernel lets go, so the budget is smaller than it looks for
+	// as long as this is not zero.
+	StuckServers int `json:"stuck_servers"`
 	// OverBudget says the models in memory cost more than the budget allows.
 	// Lowering the budget unloads nothing, so this stands until they unload by
 	// the usual rules.
@@ -299,9 +312,10 @@ type Machine struct {
 // is fed exclusively by the stream. One builder, one truth.
 func (c *Control) snapshot() State {
 	cfg := c.App.Config()
+	residency := c.App.Pool.Residency()
 	st := State{
 		Models:    c.App.Registry.List(),
-		Resident:  c.App.Pool.Resident(),
+		Resident:  residency.Models,
 		Setup:     c.App.Provisioner.Status(),
 		Config:    redactConfig(cfg),
 		Pinned:    c.App.Pool.Pinned(),
@@ -310,7 +324,10 @@ func (c *Control) snapshot() State {
 		Hostname:  hostname(),
 	}
 	budget := c.App.Pool.MemoryBudget()
-	resident := residentCharge(st.Resident)
+	// One reading, not two: a stop landing between a models list and a tally
+	// read would count the same server in both, or in neither.
+	exiting, stuck := residency.ExitingBytes, residency.StuckServers
+	resident := residentCharge(st.Resident) + exiting
 	st.Machine = Machine{
 		TotalRAM:        c.App.MachineRAM(),
 		Budget:          budget,
@@ -318,7 +335,14 @@ func (c *Control) snapshot() State {
 		BudgetIsDefault: cfg.MaxResidentBytes == 0,
 		WarnAbove:       c.App.BudgetWarnAbove(),
 		ResidentBytes:   resident,
+		ExitingBytes:    exiting,
+		StuckServers:    stuck,
 		OverBudget:      resident > budget,
+	}
+	if stuck > 0 {
+		st.Warnings = append(st.Warnings, fmt.Sprintf(
+			"%s of memory is held by %d model server(s) that were stopped and have not exited. Until they do, that much of the budget cannot be used.",
+			runtime.HumanBytes(exiting), stuck))
 	}
 	if cfg.ExposedToLAN() && cfg.APIKey == "" {
 		st.Warnings = append(st.Warnings,
@@ -346,12 +370,13 @@ func (c *Control) snapshot() State {
 }
 
 // residentCharge is what the models in memory cost the budget: each one's size
-// on disk plus a fifth, which is the figure the pool charges (runtime.LoadCost)
+// on disk plus a fifth, which is the figure the pool charges
+// (capability.LoadCost)
 // and therefore the only one that can be compared with the budget.
 func residentCharge(resident []runtime.Resident) int64 {
 	var sum int64
 	for _, r := range resident {
-		sum += runtime.LoadCost(r.Bytes)
+		sum += capability.LoadCost(r.Bytes)
 	}
 	return sum
 }

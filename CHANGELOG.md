@@ -11,7 +11,6 @@ GitHub release notes.
 
 ## [Unreleased]
 
-
 ### Changed
 
 - **The chat client reads as a Mac app, and says when it is waiting on a
@@ -125,6 +124,53 @@ GitHub release notes.
   until now nothing on the client side listened.
 
 ### Fixed
+
+- **A swapped-out model keeps its share of the memory budget until it is
+  really gone.** Evicting a model handed its memory back on paper the moment it
+  left the pool, and the replacement was started straight away — while the
+  first server was still shutting down and still holding its weights. On a
+  server that does not stop at once the two overlapped by the whole of the
+  first one's footprint, which is the memory blowup the budget exists to
+  prevent. The model being replaced is now told to go at once, as before, but
+  the request that wanted its room waits for the process to actually exit
+  before its own model is started — and so does a request whose own model
+  failed to load, which leaves a server shutting down in just the same way. A
+  request that has not got that long to wait no longer takes a model down on
+  its way to being refused, and requests waiting for a server to exit count
+  towards the same queue limit as every other request waiting for memory.
+
+- **The panel says when a stopped model server is still holding memory.** A
+  server that survives being stopped and then killed keeps its memory until the
+  system lets go of it, which makes the budget smaller than the models on
+  screen account for. Settings now reports how much is held that way and by how
+  many servers, and the log says so once when it happens, again if the server
+  does go later, and again at shutdown. Meanwhile models go on loading and
+  swapping inside what is left, rather than every request for room being
+  refused from then on. If such a server never goes, restarting Gropius is the
+  remedy.
+
+- **A burst of requests for several models that are not loaded can be refused
+  rather than queued.** Requests waiting for memory share a queue with a small
+  number of places overall and a smaller number per caller, and callers that
+  present no API key count as one caller between them. Because a request now
+  waits for the model it is replacing to actually exit, it occupies one of
+  those places for a moment where it previously did not, so the third and later
+  requests of such a burst can get the ordinary "not enough memory" refusal
+  straight away. A retry a moment later succeeds, and requests for models
+  already in memory are unaffected.
+
+- **Model servers left behind by a crash are cleaned up even after the Mac's
+  clock has been corrected.** If Gropius is force-quit or crashes, the model
+  servers it started keep holding their memory, and the next start kills them
+  using a small file recording what was running. That file was stamped with the
+  system's boot time — a figure macOS quietly adjusts whenever the clock is
+  stepped, which happens on the first time sync after a start-up and after
+  sleep. A stamp that no longer matched read as "a previous boot", and the
+  clean-up did nothing: the abandoned servers held their memory until the Mac
+  was restarted. The stamp is now the identifier macOS gives each boot, which
+  does not move, and the per-process check that stops the clean-up ever killing
+  something it did not start is unchanged. A file left by an earlier version is
+  ignored rather than acted on.
 
 - **The committed identity pin now has a gate behind it.** `.abcd/config/identity.json`
   records the author identity every commit here is expected to carry, and until
