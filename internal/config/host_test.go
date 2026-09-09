@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -316,8 +317,24 @@ func TestValidateTreatsThePrivateModeAsExposedForTheGraceRule(t *testing.T) {
 	c.BindMode = BindModePrivateNetwork
 	c.EvictionGrace = true
 	c.APIKey = ""
-	if err := c.Validate(); err == nil {
-		t.Error("Validate accepted eviction grace with no API key under the private-network mode — the mode can bind an address network callers reach, and a stored configuration cannot know whether it did")
+	err := c.Validate()
+	if err == nil {
+		t.Fatal("Validate accepted eviction grace with no API key under the private-network mode — the mode can bind an address network callers reach, and a stored configuration cannot know whether it did")
+	}
+	// The message has to describe the server the operator has. This Host is
+	// loopback, so calling it LAN-exposed sends them to look at a bind address
+	// that is not what fired the rule.
+	if strings.Contains(err.Error(), "LAN-exposed") || !strings.Contains(err.Error(), "private-network mode") {
+		t.Errorf("Validate said %q — with a loopback Host it is the mode that fired this, and the message has to say so", err)
+	}
+
+	// The wildcard keeps the wording it had: that server IS LAN-exposed.
+	lan := Default()
+	lan.Host = "0.0.0.0"
+	lan.EvictionGrace = true
+	lan.APIKey = ""
+	if err := lan.Validate(); err == nil || !strings.Contains(err.Error(), "LAN-exposed") {
+		t.Errorf("Validate said %v on a wildcard bind, want the LAN-exposed wording", err)
 	}
 	c.APIKey = "a-key"
 	if err := c.Validate(); err != nil {

@@ -1158,8 +1158,18 @@ func (c Config) Validate() error {
 	// network callers" is the strongest thing that can be asked of it. Erring
 	// closed costs a key on a feature that is off by default; erring open
 	// costs the queue this rule protects.
-	if c.EvictionGrace && (c.ExposedToLAN() || c.BindMode == BindModePrivateNetwork) && c.APIKey == "" {
-		return errors.New("eviction grace needs an API key on a LAN-exposed server: without one the wait queue cannot be shared out between callers, and one client can hold up model loading for everyone")
+	if c.EvictionGrace && c.APIKey == "" {
+		// Two spellings of one rule, because the operator has to recognise the
+		// server being described. A loopback Host under the private-network
+		// mode is not a LAN-exposed server, and telling them it is sends them
+		// to look at a bind address that is not what fired this.
+		const why = ": without one the wait queue cannot be shared out between callers, and one client can hold up model loading for everyone"
+		switch {
+		case c.ExposedToLAN():
+			return errors.New("eviction grace needs an API key on a LAN-exposed server" + why)
+		case c.BindMode == BindModePrivateNetwork:
+			return errors.New("eviction grace needs an API key on a server that may reach other machines (private-network mode)" + why)
+		}
 	}
 	if c.StatsMonths < 1 || c.StatsMonths > MaxStatsMonths {
 		return fmt.Errorf("keep statistics for between 1 and %d months, got %d", MaxStatsMonths, c.StatsMonths)
