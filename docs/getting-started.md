@@ -204,9 +204,12 @@ Gropius does not remove them for you. Everything belonging to one account
 stays in that
 account's own `~/Library/Application Support/Gropius`: its settings
 (`config.json`, which holds the API key and the HuggingFace token), its list of
-models (`registry.json`), its model-server logs, its request statistics, and
+models (`registry.json`), its model-server logs, Gropius's own log, its request
+statistics, and
 the private Python runtime it starts model servers with. So an API key or a
-token one account sets is never readable by another.
+token one account sets is never readable by another. What Gropius writes in
+that log, and how to make it say more while you are diagnosing something, is on
+the [logging page](logging.md).
 
 The first time an account runs with the shared cache, its list of models starts
 empty and is rebuilt from the models already in the shared folder — nothing is

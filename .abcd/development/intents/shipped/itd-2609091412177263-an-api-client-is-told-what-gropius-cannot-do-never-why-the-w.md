@@ -71,7 +71,8 @@ the detailed level fills the disk.
 
 ## Audit Notes
 
-_Empty. Populated by intent-auditor when intent moves to shipped/._
+<!-- abcd-review: OWED receipt=rcp-1f33f9504a0e -->
+Fidelity review OWED (receipt rcp-1f33f9504a0e).
 
 ## Grounds
 
