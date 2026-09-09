@@ -668,7 +668,23 @@ func (p *Pool) acquire(ctx context.Context, repoID string, mayWait bool) (*Upstr
 			if drainUntil.IsZero() {
 				drainUntil = time.Now().Add(p.opts.drainWait)
 			}
-			if left := time.Until(drainUntil); left > 0 {
+			left := time.Until(drainUntil)
+			// A caller queued under a grace keeps its own maximum wait: the
+			// grace promises an answer inside that interval, and an exiting
+			// process is not a licence to overrun it. Past it this falls
+			// through and is refused as a wait that timed out, which is what
+			// it is.
+			//
+			// Only under a grace. Switching grace off zeroes both intervals
+			// and releases everything parked — the operator has just said
+			// "swap now" — and clamping to a zero maximum there would refuse
+			// the very requests that release is for.
+			if w != nil && p.grace > 0 {
+				if rem := p.maxWait - time.Since(w.arrived); rem < left {
+					left = rem
+				}
+			}
+			if left > 0 {
 				drained := p.drained
 				p.mu.Unlock()
 				timer := time.NewTimer(left)

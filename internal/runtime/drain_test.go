@@ -172,6 +172,45 @@ func TestAServerThatWillNotExitDoesNotHoldTheCallerForEver(t *testing.T) {
 	}
 }
 
+// Under an eviction grace the caller was promised an answer inside the maximum
+// wait. Waiting for a stopped server to exit must not overrun that: past it the
+// request is refused, as it would be for any other reason it could not be
+// served in time.
+func TestADrainWaitDoesNotOverrunTheMaximumEvictionWait(t *testing.T) {
+	l := newFakeLauncher()
+	l.holdExitFor = "org/a"
+	src := &fakeSource{models: map[string]int64{"org/a": 100, "org/b": 100}}
+	p := newTestPool(t, l, src, PoolOptions{
+		MaxResidentBytes: 200,
+		EvictionGrace:    50 * time.Millisecond,
+		MaxEvictionWait:  200 * time.Millisecond,
+	})
+
+	_, release, err := p.Acquire(context.Background(), "org/a")
+	if err != nil {
+		t.Fatalf("Acquire org/a: %v", err)
+	}
+	release()
+
+	started := time.Now()
+	_, rel, err := p.Acquire(context.Background(), "org/b")
+	if rel != nil {
+		rel()
+	}
+	took := time.Since(started)
+	if err == nil {
+		t.Fatal("org/b loaded on top of a server that had not exited")
+	}
+	if !errors.Is(err, ErrBusy) {
+		t.Errorf("Acquire org/b = %v, want a busy refusal", err)
+	}
+	// maxDrainWait is 25s. Anything near that means the maximum wait was
+	// ignored; a small multiple of the 200ms maximum is scheduling noise.
+	if took > 3*time.Second {
+		t.Errorf("the refusal took %s, overrunning a maximum wait of 200ms", took)
+	}
+}
+
 // A client that hangs up while it waits for an evicted server to exit is not
 // kept waiting for it, and leaves nothing behind in the queue.
 func TestADrainWaitEndsWhenTheClientHangsUp(t *testing.T) {
