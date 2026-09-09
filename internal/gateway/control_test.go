@@ -869,3 +869,69 @@ func TestConcurrentSavesEachKeepTheirOwnField(t *testing.T) {
 		}
 	}
 }
+
+// The panel is served the rule in force, not the empty record of a rule nobody
+// has saved yet: the form shows what it is given and posts it back, so a blank
+// pair of fields would read as "test nothing" and hand every model to the
+// picker at the next save.
+func TestTheSettingsAnswerCarriesTheRuleInForce(t *testing.T) {
+	srv := newTestControl(t, config.Default())
+
+	resp, err := srv.Client().Get(srv.URL + "/api/settings")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var out struct {
+		ChatRule config.ChatRule `json:"chat_rule"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	if !out.ChatRule.Equal(config.DefaultChatRule()) {
+		t.Errorf("the panel is served %+v, want the rule in force %+v", out.ChatRule, config.DefaultChatRule())
+	}
+}
+
+// The rule is one more setting, and the file is a surface an operator edits by
+// hand: a save that names it must not disturb anything else, and a save that
+// does not name it must not disturb the rule.
+func TestSavingTheChatRuleTouchesNothingElse(t *testing.T) {
+	cfg := config.Default()
+	cfg.Advertise = true
+	cfg.Preload = []string{"mlx-community/Qwen3-8B-4bit"}
+	cfg.Pinned = []string{"org/keeper"}
+	srv, a := newTestControlApp(t, cfg)
+
+	resp := postJSON(t, srv, "/api/settings",
+		`{"host":"0.0.0.0","port":11535,"api_key":"","decode_concurrency":4,"idle_timeout_sec":0,`+
+			`"chat_rule":{"pipeline_tags":["text-generation"],"required_tags":[]}}`)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	got := a.Config()
+	if len(got.ChatRule.PipelineTags) != 1 || got.ChatRule.PipelineTags[0] != "text-generation" {
+		t.Errorf("chat rule = %+v, want the one just saved", got.ChatRule)
+	}
+	if len(got.ChatRule.RequiredTags) != 0 || got.ChatRule.RequiredTags == nil {
+		t.Errorf("required tags = %v, want the empty list the operator asked for", got.ChatRule.RequiredTags)
+	}
+	if !got.Advertise || len(got.Preload) != 1 || len(got.Pinned) != 1 {
+		t.Errorf("an unrelated setting moved: advertise=%v preload=%v pinned=%v", got.Advertise, got.Preload, got.Pinned)
+	}
+}
+
+// And the other direction: a save that says nothing about the rule keeps it.
+func TestSavingSettingsWithoutNamingTheChatRuleKeepsIt(t *testing.T) {
+	cfg := config.Default()
+	cfg.ChatRule = config.ChatRule{PipelineTags: []string{"text-generation"}, RequiredTags: []string{}}
+	srv, a := newTestControlApp(t, cfg)
+
+	resp := postJSON(t, srv, "/api/settings",
+		`{"host":"0.0.0.0","port":11535,"api_key":"","decode_concurrency":4,"idle_timeout_sec":0}`)
+	resp.Body.Close()
+	if got := a.Config().ChatRule; !got.Equal(cfg.ChatRule) {
+		t.Errorf("chat rule = %+v after an unrelated save, want %+v", got, cfg.ChatRule)
+	}
+}

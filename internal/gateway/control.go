@@ -612,6 +612,13 @@ func redactConfig(c config.Config) config.Config {
 	if c.HFToken != "" {
 		c.HFToken = "********"
 	}
+	// The chat rule is resolved rather than reported raw. The panel serves the
+	// stored settings into its form and the form posts them back, so an unset
+	// rule — the state of every install until someone saves — would reach the
+	// form as two blank fields, which this form reads as "test nothing" and
+	// would save as exactly that. The panel shows what is in force, and what it
+	// shows is what it saves.
+	c.ChatRule = c.EffectiveChatRule()
 	return c
 }
 
