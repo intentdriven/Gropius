@@ -68,7 +68,9 @@ Cross-machine LAN use works; TLS and notarized distribution are not yet included
   model's share, how long requests took, the spread of those times, and when
   models were evicted and reloaded
   ([what the views mean](docs/statistics-explained.md)).
-- **Network-shared** — bind the LAN, discoverable over Bonjour, optional API key.
+- **Network-shared** — bind the LAN, discoverable over Bonjour (the chat client
+  lists the servers it finds, so nobody has to guess an address), optional API
+  key.
 - **Multi-account** — other user accounts on the same Mac share one copy of each
   model on disk and on the GPU.
 
