@@ -121,7 +121,16 @@ CI (`.github/workflows/ci.yml`) gates on: `gofmt -l .` (must be empty),
   artefacts (logs, traces, scratch output) go here, never in tracked
   directories.
 - **Decisions:** one dated line in `.abcd/work/DECISIONS.md` at the time the
-  decision is made; promote architecture-shaping ones to an ADR.
+  decision is made; promote architecture-shaping ones to an ADR. An ADR is
+  never edited once ratified: a change of mind is a new ADR that supersedes it,
+  linked in both directions, and the old one changes only its status fields.
+- **Pre-1.0 means no migration code.** Breaking changes to `config.json`, the
+  registry or the statistics files are acceptable while the version is below
+  1.0.0; testers re-create state. Do not add compatibility shims or migration
+  paths for them; say `impact: breaking` in the record and the changelog.
+- **Tooling findings do not live in this ledger.** A finding about abcd itself
+  (a missing lint, a false positive, a verb the binary lacks) goes to the
+  gitignored `.abcd/.work.local/for_abcd/` notes, never to `.abcd/work/issues/`.
 - **Docs:** `docs/` is user-facing only — one Diátaxis type per page (tutorial,
   how-to, reference, or explanation), present tense only (what IS; history
   lives in git). User-facing prose in British English; identifiers, code
