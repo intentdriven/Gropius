@@ -11,6 +11,39 @@ GitHub release notes.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Deleting a model now holds the model until the deletion is finished.**
+  Removing a model is not one step — its record goes first and its files
+  afterwards — and in between it looked to the rest of Gropius like a model that
+  had never been there. A download or a request arriving in that gap started
+  writing into, or loading from, a directory that was being carried away: the
+  model could come back as "ready" with most of its files gone, or a model
+  server could answer requests from files nothing on this Mac lists any more. A
+  download or a second delete asked for during a removal is now refused with a
+  conflict until the removal has finished, and a load is refused for the same
+  reason.
+
+- **Saving settings while a model is downloading no longer changes that
+  download's access token underneath it.** The token was read and written
+  without any synchronisation, and a download that started under one token could
+  find itself using another halfway through a repo — turning the second half of
+  a gated download into a run of refusals. A download now runs, from its file
+  listing to its last file, under the token that was in force when it started;
+  a saved token applies to whatever starts next.
+
+- **A download asked for while Gropius is shutting down is refused rather than
+  abandoned.** Shutdown cancels the downloads it can see and then waits for
+  them, and one accepted after that point was left writing files nothing was
+  waiting for.
+
+- **A model whose first registry record cannot be written no longer leaves a
+  pending delete waiting for ever.** The delete waits for the download to stop
+  touching the files; when the download never started, nothing ever told it so,
+  and the request that asked for the deletion hung for the life of the process.
+  In shared-cache mode, where another account owns the index file, a failed
+  registry write is routine rather than a disk-full hypothetical.
+
 ## [0.4.0] - 2026-09-08
 
 ### Added
