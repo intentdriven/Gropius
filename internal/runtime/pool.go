@@ -175,15 +175,20 @@ type PoolOptions struct {
 	// report is a no-op; see PoolObserver for what the pool promises it.
 	Observer PoolObserver
 
+	// DrainWait is how long the pool waits for a stopped model server to exit
+	// before it stops counting on that memory coming back: past it a load is
+	// refused rather than held, the server is reported as stuck, and the
+	// eviction plan starts working around its charge instead of waiting for it.
+	// It bounds nothing the operator asked for and everything the machine has
+	// to do, so it is derived — zero, the only value anything but a test
+	// passes, means maxDrainWait, which is what stopping a server is allowed to
+	// take plus a margin.
+	DrainWait time.Duration
+
 	// HTTP is the client used for readiness probes.
 	HTTP *http.Client
 	// now is injectable for tests.
 	now func() time.Time
-	// drainWait replaces maxDrainWait, so a test can exercise the two bounds
-	// built on it — how long a caller waits for a stopped model server, and
-	// when the pool calls that server stuck — without waiting them out in real
-	// time. Zero means maxDrainWait.
-	drainWait time.Duration
 }
 
 // Pool runs one model server process per model and routes to them.
@@ -221,12 +226,17 @@ type Pool struct {
 	// top of a victim that has released nothing. This is the charge a load
 	// WAITS for: it is coming back. Guarded by mu.
 	drainBytes int64
-	// stuck are the servers that did not exit even after SIGKILL. Their memory
-	// is gone for the life of this process — a restart is the only remedy — so
-	// it is not something to wait for. It is charged (the memory really is
-	// spent) and it is EVICTABLE-AGAINST: the eviction plan counts it, so a
-	// load can still take an idle model to make room around it. Guarded by mu.
-	stuck []stuckServer
+	// stuck are the servers that did not exit even after SIGKILL, by the id
+	// their watcher holds. Their memory is not something to wait for — nothing
+	// further can be done to them — but it is charged (it really is spent) and
+	// it is EVICTABLE-AGAINST: the eviction plan counts it, so a load can still
+	// take an idle model to make room around it. A late exit is still credited:
+	// the watcher goes on waiting on Done with nothing else to do. Guarded by
+	// mu.
+	stuck map[uint64]stuckServer
+	// nextStuck names the next one, so a watcher can find its own entry to
+	// remove without depending on a position in a slice. Guarded by mu.
+	nextStuck uint64
 	// drainGen changes whenever either of the two above does. A waiter records
 	// it, so a wake-up that cannot have changed the answer costs a comparison
 	// rather than a walk of the pool. Guarded by mu.
@@ -276,6 +286,31 @@ type stuckServer struct {
 	charge int64
 }
 
+// stuckChargeLocked is the memory held by servers that would not die. Callers
+// must hold p.mu.
+func (p *Pool) stuckChargeLocked() int64 {
+	var sum int64
+	for _, s := range p.stuck {
+		sum += s.charge
+	}
+	return sum
+}
+
+// stuckServersLocked lists them in the order they got stuck, so shutdown names
+// them the same way twice. Callers must hold p.mu.
+func (p *Pool) stuckServersLocked() []stuckServer {
+	ids := make([]uint64, 0, len(p.stuck))
+	for id := range p.stuck {
+		ids = append(ids, id)
+	}
+	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+	out := make([]stuckServer, 0, len(ids))
+	for _, id := range ids {
+		out = append(out, p.stuck[id])
+	}
+	return out
+}
+
 // loadWaiter is one request parked for want of room for its model.
 //
 // Its own clock is real time rather than the pool's injectable one: what it
@@ -313,6 +348,12 @@ type loadWaiter struct {
 	// blocking, is answered from what the waiter already carries — no resolving
 	// the model, no stat-ing the launcher's files under p.mu.
 	drainGen uint64
+	// mayWait says whether this acquisition honours the eviction grace, which
+	// is what decides the bound it is held to and therefore how long it may
+	// sleep. It is a property of the call — Acquire or AcquireNow — so it is
+	// fixed for the life of the waiter, unlike the intervals it selects
+	// between, which the operator can change while the request waits.
+	mayWait bool
 }
 
 // defaultMaxLoadWaiters is the ceiling on parked loads. See
@@ -329,8 +370,8 @@ func NewPool(opts PoolOptions) *Pool {
 		// mid-load and force wasteful re-probing.
 		opts.HTTP = &http.Client{}
 	}
-	if opts.drainWait <= 0 {
-		opts.drainWait = maxDrainWait
+	if opts.DrainWait <= 0 {
+		opts.DrainWait = maxDrainWait
 	}
 	if opts.now == nil {
 		opts.now = time.Now
@@ -365,6 +406,7 @@ func NewPool(opts PoolOptions) *Pool {
 		pinned:      pinnedSet(opts.Pinned),
 		grace:       opts.EvictionGrace,
 		maxWait:     opts.MaxEvictionWait,
+		stuck:       map[uint64]stuckServer{},
 		stopIdle:    make(chan struct{}),
 		idleDone:    make(chan struct{}),
 	}
@@ -721,7 +763,13 @@ func (p *Pool) acquire(ctx context.Context, repoID string, mayWait bool) (*Upstr
 			// carries what this load asked for.
 			var noRoom *NoRoomError
 			_ = errors.As(err, &noRoom)
-			w = &loadWaiter{arrived: time.Now(), need: noRoom.need, source: src, signal: make(chan struct{}, 1)}
+			w = &loadWaiter{
+				arrived: time.Now(),
+				need:    noRoom.need,
+				source:  src,
+				mayWait: mayWait,
+				signal:  make(chan struct{}, 1),
+			}
 			p.waiters = append(p.waiters, w)
 		}
 		delay := p.wakeDelayLocked(w)
@@ -1325,7 +1373,7 @@ func (p *Pool) waitBoundLocked(mayWait bool) time.Duration {
 	if mayWait && p.grace > 0 {
 		return p.maxWait
 	}
-	return p.opts.drainWait
+	return p.opts.DrainWait
 }
 
 // canParkLocked reports whether this caller could park for a drain if the load
@@ -1510,13 +1558,25 @@ const wakeRecheckFloor = 250 * time.Millisecond
 //
 // wakeRecheckFloor keeps the re-check from becoming a spin on a very short
 // grace, and the millisecond floor keeps a stopped clock from spinning.
+//
+// The bound the first term is measured against is this waiter's own — see
+// waitBoundLocked — and not p.maxWait. With grace off, which is the default,
+// that maximum is zero: a waiter for a stopped server's memory is held to the
+// drain bound instead, and computing its sleep from the wrong figure gave a
+// negative delay that no later term could shorten, so every such waiter fell
+// through to the millisecond floor and re-took p.mu a thousand times a second
+// for as long as it waited.
 func (p *Pool) wakeDelayLocked(w *loadWaiter) time.Duration {
 	waited := time.Since(w.arrived)
-	delay := p.maxWait - waited
+	delay := p.waitBoundLocked(w.mayWait) - waited
 	if own := p.grace - waited; own > 0 && own < delay {
 		delay = own
 	}
-	if recheck := max(p.grace, wakeRecheckFloor); recheck < delay {
+	// The re-check is a ceiling on any sleep, and the answer outright for a
+	// waiter whose bound has already run out: it is about to be refused on its
+	// next pass, and the delay must not be a negative number that only the
+	// floor catches.
+	if recheck := max(p.grace, wakeRecheckFloor); delay <= 0 || recheck < delay {
 		delay = recheck
 	}
 	now := p.opts.now()
@@ -1573,7 +1633,7 @@ func (p *Pool) drainEntry(repoID string, proc Process, charge int64) {
 	// this goroutine stops waiting rather than living as long as the app: the
 	// charge moves to the stuck list, which no load waits for and every
 	// eviction plan counts, and the operator is told which process took it.
-	timer := time.NewTimer(p.opts.drainWait)
+	timer := time.NewTimer(p.opts.DrainWait)
 	select {
 	case <-proc.Done():
 		timer.Stop()
@@ -1589,20 +1649,37 @@ func (p *Pool) drainEntry(repoID string, proc Process, charge int64) {
 
 	p.mu.Lock()
 	p.drainBytes -= charge
-	p.stuck = append(p.stuck, stuckServer{repoID: repoID, pid: proc.Pid(), charge: charge})
+	id := p.nextStuck
+	p.nextStuck++
+	p.stuck[id] = stuckServer{repoID: repoID, pid: proc.Pid(), charge: charge}
 	p.drainGen++
-	// The memory is not coming back, but the pool can still work around it:
-	// waking every waiter lets one that could be served by evicting an idle
-	// model go and do that instead of sitting out a wait for an exit that is
-	// not going to happen.
+	// Nothing is going to be woken by this memory coming back, so wake every
+	// waiter now: one that could be served by evicting an idle model instead
+	// should go and do that rather than sit out a wait for an exit that may
+	// never come.
 	p.wakeWaitersLocked()
 	p.mu.Unlock()
 
 	// Logged off the lock: p.mu is the pool's one lock, and a slow sink would
 	// stall every other caller for the length of a write.
-	p.opts.Log.Warn("a stopped model server has not exited; its memory stays charged against the budget until Gropius restarts",
+	p.opts.Log.Warn("a stopped model server has not exited; its memory stays charged against the budget until it does",
 		"model", repoID, "pid", proc.Pid(), "charged", HumanBytes(charge),
-		"waited", p.opts.drainWait, "stop_error", stopErr)
+		"waited", p.opts.DrainWait, "stop_error", stopErr)
+
+	// Keep watching, with nothing else to do and nobody waiting on it. A
+	// process the kernel reaps late — minutes later, at shutdown, whenever —
+	// still closes Done, and its memory is as real as anyone else's: dropping
+	// the watch here would charge the budget for it until Gropius restarted,
+	// however long ago it actually went.
+	<-proc.Done()
+
+	p.mu.Lock()
+	delete(p.stuck, id)
+	p.drainGen++
+	p.wakeWaitersLocked()
+	p.mu.Unlock()
+	p.opts.Log.Info("a model server that would not stop has now exited; its memory is back",
+		"model", repoID, "pid", proc.Pid(), "charged", HumanBytes(charge))
 }
 
 // Residency is one consistent answer to what this pool is holding: the models
@@ -1634,16 +1711,6 @@ func (p *Pool) Residency() Residency {
 		ExitingBytes: p.drainBytes + p.stuckChargeLocked(),
 		StuckServers: len(p.stuck),
 	}
-}
-
-// stuckChargeLocked is the memory held by servers that would not die. Callers
-// must hold p.mu.
-func (p *Pool) stuckChargeLocked() int64 {
-	var sum int64
-	for _, s := range p.stuck {
-		sum += s.charge
-	}
-	return sum
 }
 
 // ErrNotLoaded is returned by Unload when the model is not resident.
@@ -1769,7 +1836,7 @@ func (p *Pool) Close() error {
 		p.notify(func(o PoolObserver) { o.EntryStopped(e.repoID, StopShutdown) })
 	}
 	p.entries = map[string]*entry{}
-	stuck := append([]stuckServer(nil), p.stuck...)
+	stuck := p.stuckServersLocked()
 	// Every parked request is answered rather than left holding a connection
 	// while the process goes away; each sees p.closed and returns ErrClosed.
 	p.wakeWaitersLocked()

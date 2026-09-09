@@ -60,12 +60,14 @@ system has stopped and then killed, and which is still there — leaves the
 request refused rather than held, and the panel says how much memory is being
 held that way and by how many servers.
 
-That memory does not come back on its own. Gropius has already asked the server
-to stop and then killed it; there is nothing further it can do, and it stops
-waiting rather than watching for ever. It works around the loss — models still
-load and are swapped inside what is left — and the budget is simply that much
-smaller until Gropius is restarted, which is the remedy. The log names the
-server on the way out, so the next start can finish the job.
+Nothing waits on that memory any more. Gropius has already asked the server to
+stop and then killed it; there is nothing further it can do, so it stops
+counting on the memory coming back and works around the loss instead — models
+go on loading and being swapped inside what is left, rather than every request
+for room being refused from then on. If the system does let go of the server
+later, the memory is credited then, and the panel stops reporting it. If it
+never does, restarting Gropius is the remedy; the log names the server on the
+way out, so the next start can finish the job.
 
 ## Choosing a figure
 

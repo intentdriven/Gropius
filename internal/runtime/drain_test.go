@@ -143,7 +143,7 @@ func TestAServerThatWillNotExitDoesNotHoldTheCallerForEver(t *testing.T) {
 	l := newFakeLauncher()
 	l.holdExitFor = "org/a"
 	src := &fakeSource{models: map[string]int64{"org/a": 100, "org/b": 100}}
-	p := newTestPool(t, l, src, PoolOptions{MaxResidentBytes: 200, drainWait: 100 * time.Millisecond})
+	p := newTestPool(t, l, src, PoolOptions{MaxResidentBytes: 200, DrainWait: 100 * time.Millisecond})
 
 	_, release, err := p.Acquire(context.Background(), "org/a")
 	if err != nil {
@@ -204,7 +204,7 @@ func TestADrainWaitDoesNotOverrunTheMaximumEvictionWait(t *testing.T) {
 	if !errors.Is(err, ErrBusy) {
 		t.Errorf("Acquire org/b = %v, want a busy refusal", err)
 	}
-	// maxDrainWait is 25s. Anything near that means the maximum wait was
+	// maxDrainWait is 20s. Anything near that means the maximum wait was
 	// ignored; a small multiple of the 200ms maximum is scheduling noise.
 	if took > 3*time.Second {
 		t.Errorf("the refusal took %s, overrunning a maximum wait of 200ms", took)

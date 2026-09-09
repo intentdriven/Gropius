@@ -320,7 +320,7 @@ func TestAServerThatWillNotDieIsReportedAsStuck(t *testing.T) {
 	src := &fakeSource{models: map[string]int64{"org/a": 100, "org/b": 100}}
 	p := newTestPool(t, l, src, PoolOptions{
 		MaxResidentBytes: 200,
-		drainWait:        100 * time.Millisecond,
+		DrainWait:        100 * time.Millisecond,
 		Log:              slog.New(slog.NewTextHandler(&logged, nil)),
 	})
 
@@ -341,15 +341,94 @@ func TestAServerThatWillNotDieIsReportedAsStuck(t *testing.T) {
 		t.Errorf("nothing was logged about a server that would not die: %q", got)
 	}
 
-	// Nothing waits on it any more: the goroutine that was watching for the
-	// exit is gone, so the charge stands until this process restarts. That is
-	// the honest answer — the pool cannot see a process it has already killed
-	// let go of its memory — and it is what the shutdown log and the docs say.
+	// No load waits on it any more — nothing further can be done to it — but
+	// the watch does not end: a process the kernel reaps late still closes
+	// Done, and its memory is as real as anyone else's. Crediting it only at
+	// the next restart would charge the budget for memory that came back
+	// minutes ago.
+	l.procFor("org/a").exit()
+	waitFor(t, "the late exit to be credited", func() bool {
+		r := p.Residency()
+		return r.StuckServers == 0 && r.ExitingBytes == 0
+	})
+	if got := logged.String(); !strings.Contains(got, "has now exited") {
+		t.Errorf("the late exit was not reported: %q", got)
+	}
+}
+
+// Shutting down while such a server is still there names it in the log: it
+// outlives this process, and the crash-recovery ledger is what the next start
+// reads to finish it off.
+func TestShutdownNamesAServerThatWouldNotDie(t *testing.T) {
+	l := newFakeLauncher()
+	l.holdExitFor = "org/a"
+	var logged safeBuf
+	src := &fakeSource{models: map[string]int64{"org/a": 100}}
+	p := newTestPool(t, l, src, PoolOptions{
+		MaxResidentBytes: 200,
+		DrainWait:        100 * time.Millisecond,
+		Log:              slog.New(slog.NewTextHandler(&logged, nil)),
+	})
+
+	_, release, err := p.Acquire(context.Background(), "org/a")
+	if err != nil {
+		t.Fatalf("Acquire org/a: %v", err)
+	}
+	release()
+	if err := p.Unload("org/a"); err != nil {
+		t.Fatalf("Unload org/a: %v", err)
+	}
+	waitFor(t, "org/a to be given up on", func() bool {
+		return p.Residency().StuckServers == 1
+	})
+
 	if err := p.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
 	if got := logged.String(); !strings.Contains(got, "shutting down while a stopped model server is still running") {
 		t.Errorf("shutdown did not name the server still holding memory: %q", got)
+	}
+}
+
+// A parked waiter must sleep for something between the spin floor and the
+// periodic re-check. With grace off — the default — the maximum eviction wait
+// is zero, and computing the sleep from it gave a negative delay that only the
+// millisecond floor caught: every waiter for a stopped server's memory then
+// re-took the pool's one lock about a thousand times a second, walking the
+// entries and the pinned set on each pass, for as long as it waited.
+func TestAParkedWaiterDoesNotSpinWithGraceOff(t *testing.T) {
+	l := newFakeLauncher()
+	src := &fakeSource{models: map[string]int64{"org/a": 100}}
+	p := newTestPool(t, l, src, PoolOptions{MaxResidentBytes: 200})
+
+	for _, tc := range []struct {
+		name    string
+		mayWait bool
+	}{
+		{"a request that honours the grace", true},
+		{"a start-up preload", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := &loadWaiter{
+				arrived: time.Now().Add(-time.Second),
+				need:    capability.LoadCost(100),
+				mayWait: tc.mayWait,
+				signal:  make(chan struct{}, 1),
+			}
+			p.mu.Lock()
+			delay := p.wakeDelayLocked(w)
+			p.mu.Unlock()
+
+			// The pool holds nothing and there is no grace, so no term can
+			// shorten the periodic re-check: that is the whole delay. The
+			// millisecond floor is what the bug produced, and it is inside any
+			// range that only names bounds, so this asserts the value.
+			recheck := max(p.grace, wakeRecheckFloor)
+			if delay != recheck {
+				t.Errorf("wakeDelayLocked = %s, want the re-check interval %s (a delay at the %s floor is the waiter spinning on p.mu)",
+					delay, recheck, time.Millisecond)
+			}
+		})
 	}
 }
 
@@ -365,7 +444,7 @@ func TestAStuckServerDoesNotBlockEvictionForEver(t *testing.T) {
 	// Charged 120 each: the budget holds two.
 	p := newTestPool(t, l, src, PoolOptions{
 		MaxResidentBytes: 300,
-		drainWait:        100 * time.Millisecond,
+		DrainWait:        100 * time.Millisecond,
 	})
 
 	_, release, err := p.Acquire(context.Background(), "org/a")

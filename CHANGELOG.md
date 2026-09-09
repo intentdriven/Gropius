@@ -99,12 +99,14 @@ GitHub release notes.
   towards the same queue limit as every other request waiting for memory.
 
 - **The panel says when a stopped model server is still holding memory.** A
-  server that survives being stopped and then killed keeps its memory until
-  Gropius is restarted, which makes the budget smaller than the models on
+  server that survives being stopped and then killed keeps its memory until the
+  system lets go of it, which makes the budget smaller than the models on
   screen account for. Settings now reports how much is held that way and by how
-  many servers, the log says so once when it happens and again at shutdown, and
-  models go on loading and swapping inside what is left rather than every
-  request for room being refused from then on.
+  many servers, and the log says so once when it happens, again if the server
+  does go later, and again at shutdown. Meanwhile models go on loading and
+  swapping inside what is left, rather than every request for room being
+  refused from then on. If such a server never goes, restarting Gropius is the
+  remedy.
 
 - **A burst of requests for several models that are not loaded can be refused
   rather than queued.** Requests waiting for memory share a queue with a small
