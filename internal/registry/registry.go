@@ -19,6 +19,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/intentdriven/Gropius/internal/capability"
 	"github.com/intentdriven/Gropius/internal/config"
 )
 
@@ -59,6 +60,13 @@ type Model struct {
 	// an unknown figure absent from the JSON rather than published as 0,
 	// which a client that trims its history would read as "no context".
 	ContextLength int64 `json:"context_length,omitempty"`
+	// KVBytesPerToken is what one token of prompt costs this model's attention
+	// cache at f16, worked out from its own configuration (see
+	// capability.KVShape). It is a floor rather than an estimate — every model
+	// the lab measured held more — and the memory budget charges it with a
+	// safety factor. Zero means the configuration does not say enough to work
+	// it out, and such a model is charged the flat figure instead.
+	KVBytesPerToken int64 `json:"kv_bytes_per_token,omitempty"`
 }
 
 // MaxContextLength bounds the context length Gropius will believe. A model
@@ -162,6 +170,11 @@ func Open(path string) (*Registry, error) {
 		// directory is bounded.
 		if !plausibleContextLength(m.ContextLength) {
 			m.ContextLength = 0
+		}
+		// And the cache figure with it, for the same reason: it is persisted,
+		// and it decides how much of this Mac's memory a load is charged.
+		if !plausibleKVBytesPerToken(m.KVBytesPerToken) {
+			m.KVBytesPerToken = 0
 		}
 		r.models[key(m.RepoID)] = m
 	}
@@ -509,7 +522,7 @@ func (r *Registry) Rescan(modelsDir string) error {
 				continue
 			}
 			dir := filepath.Join(modelsDir, org.Name(), repo.Name())
-			complete, size, contextLength := inspectModelDir(dir)
+			complete, size, facts := inspectModelDir(dir)
 			if !complete {
 				continue
 			}
@@ -523,12 +536,13 @@ func (r *Registry) Rescan(modelsDir string) error {
 				continue
 			}
 			found[repoID] = Model{
-				RepoID:        repoID,
-				Path:          dir,
-				Bytes:         size,
-				ContextLength: contextLength,
-				State:         StateReady,
-				AddedAt:       time.Now(),
+				RepoID:          repoID,
+				Path:            dir,
+				Bytes:           size,
+				ContextLength:   facts.ContextLength,
+				KVBytesPerToken: facts.KVBytesPerToken,
+				State:           StateReady,
+				AddedAt:         time.Now(),
 			}
 		}
 	}
@@ -546,6 +560,7 @@ func (r *Registry) Rescan(modelsDir string) error {
 			// recorded by a build that predates the figure gains it at the
 			// next startup rescan rather than only on a re-download.
 			existing.ContextLength = m.ContextLength
+			existing.KVBytesPerToken = m.KVBytesPerToken
 			existing.State = StateReady
 			existing.Err = ""
 			r.models[key(repoID)] = existing
@@ -603,7 +618,7 @@ func (r *Registry) Rescan(modelsDir string) error {
 // a model config (mirroring the app layer's structural validation), and every
 // weight shard named by model.safetensors.index.json must be present as a
 // regular file.
-func inspectModelDir(dir string) (complete bool, size int64, contextLength int64) {
+func inspectModelDir(dir string) (complete bool, size int64, facts ModelFacts) {
 	var hasConfig, hasWeights, partial, irregular bool
 	err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
@@ -639,7 +654,7 @@ func inspectModelDir(dir string) (complete bool, size int64, contextLength int64
 		return nil
 	})
 	if err != nil {
-		return false, 0, 0
+		return false, 0, ModelFacts{}
 	}
 	// The cheap flags gate the reads, as they always have: a directory with
 	// no config.json, a .part marker, or an irregular weight file is skipped
@@ -648,13 +663,42 @@ func inspectModelDir(dir string) (complete bool, size int64, contextLength int64
 	// model at all, and what positional range it declares — so the figure
 	// costs the scan no read it was not already making.
 	if !hasConfig || !hasWeights || partial || irregular {
-		return false, size, 0
+		return false, size, ModelFacts{}
 	}
 	cfg, err := readModelConfig(dir)
 	if err != nil || !plausibleConfig(cfg) || CheckShards(dir) != nil {
-		return false, size, 0
+		return false, size, ModelFacts{}
 	}
-	return true, size, contextLengthFrom(cfg)
+	return true, size, factsFrom(cfg)
+}
+
+// ModelFacts is what one decode of config.json says about a model beyond
+// whether it is one: the window it declares, and what a token of prompt costs
+// its attention cache.
+type ModelFacts struct {
+	ContextLength   int64
+	KVBytesPerToken int64
+}
+
+// ReadModelFacts reads both figures out of the model configuration in dir, in
+// one decode. The download path uses it so that a model carries both from the
+// moment it is ready rather than only after the next startup rescan — and so
+// that publishing a download reads config.json once, on a path whose cost is
+// paid while another model's load waits for the registry.
+func ReadModelFacts(dir string) ModelFacts {
+	cfg, err := readModelConfig(dir)
+	if err != nil {
+		return ModelFacts{}
+	}
+	return factsFrom(cfg)
+}
+
+// factsFrom reads both figures out of one decoded configuration.
+func factsFrom(cfg map[string]any) ModelFacts {
+	return ModelFacts{
+		ContextLength:   contextLengthFrom(cfg),
+		KVBytesPerToken: kvBytesPerTokenFrom(cfg),
+	}
 }
 
 // maxManifestJSON caps how much of config.json or the shard index we read. A
@@ -720,20 +764,6 @@ func CheckModelConfig(dir string) error {
 	return nil
 }
 
-// ReadContextLength reports the architectural context length declared by the
-// model configuration in dir, or 0 when it declares none or declares one that
-// is not plausible. It is exported so the app layer's download paths read the
-// figure through this one primitive, rather than a second copy of the key
-// rule that could drift from the rescan's — the same reason CheckShards is
-// exported.
-func ReadContextLength(dir string) int64 {
-	cfg, err := readModelConfig(dir)
-	if err != nil {
-		return 0
-	}
-	return contextLengthFrom(cfg)
-}
-
 // contextLengthFrom applies the key rule, sampled on 2026-09-06 against the
 // four models the lab benchmarked and seven further configurations on disk
 // (research note 2026-09-06-model-bench-findings):
@@ -785,6 +815,120 @@ func positionalRange(level map[string]any) int64 {
 // index file.
 func plausibleContextLength(n int64) bool {
 	return n > 0 && n <= MaxContextLength
+}
+
+// MaxKVBytesPerToken bounds the cache cost the registry will believe, for the
+// reason MaxContextLength bounds the window: the figure is persisted and, in
+// shared-cache mode, derived from a file another local account can write, and
+// it decides how much of this Mac's memory one model is charged. 16 MB per
+// token is far above any real model (the largest of the four the lab measured
+// implies about 940 KB in its most expensive reading) and far below anything
+// that could be mistaken for one.
+const MaxKVBytesPerToken = 1 << 24
+
+// kvBytesPerTokenFrom applies the key rules, sampled on 2026-09-06 against the
+// four models the lab benchmarked (research note 2026-09-06-context-windows
+// and the nominal caps beside it). It reads the shape and leaves the
+// arithmetic to capability.KVShape, which is where the charge lives.
+//
+// The level rule is contextLengthFrom's: the top level is authoritative, and a
+// composite configuration that nests the text model's settings is read there
+// instead. Within a level:
+//
+//   - Only layers that keep a per-token cache are counted. A hybrid model
+//     declares which those are, in one of three spellings: layer_types (a list
+//     naming each layer), hybrid_override_pattern (a letter per layer, "*" for
+//     attention), or full_attention_interval (every nth layer). A
+//     configuration with none of them is charged as though every layer
+//     attended over the whole prompt, which is the conservative floor: no
+//     model of a given depth costs more than that.
+//   - A model that caches a compressed latent instead of keys and values
+//     (kv_lora_rank, as multi-head latent attention does) is charged that
+//     latent, which is what such a server actually keeps.
+//   - Head counts fall back the way the model implementations do: the
+//     key-value head count, else the attention head count; the declared head
+//     dimension, else the hidden size divided by the attention heads.
+func kvBytesPerTokenFrom(cfg map[string]any) int64 {
+	level := cfg
+	if _, present := cfg["num_hidden_layers"]; !present {
+		if text, ok := cfg["text_config"].(map[string]any); ok {
+			level = text
+		}
+	}
+	layers, ok := configNumber(level, "num_hidden_layers")
+	if !ok {
+		return 0
+	}
+	shape := capability.KVShape{FullAttentionLayers: fullAttentionLayers(level, layers)}
+	// A latent cache replaces the per-head arithmetic, so it is read first.
+	if rank, ok := configNumber(level, "kv_lora_rank"); ok {
+		rope, _ := configNumber(level, "qk_rope_head_dim")
+		shape.LatentDim = rank + rope
+		return shape.BytesPerToken()
+	}
+	heads, ok := configNumber(level, "num_key_value_heads")
+	if !ok {
+		heads, ok = configNumber(level, "num_attention_heads")
+		if !ok {
+			return 0
+		}
+	}
+	shape.KVHeads = heads
+	dim, ok := configNumber(level, "head_dim")
+	if !ok {
+		hidden, hok := configNumber(level, "hidden_size")
+		attention, aok := configNumber(level, "num_attention_heads")
+		if !hok || !aok {
+			return 0
+		}
+		dim = hidden / attention
+	}
+	shape.HeadDim = dim
+	return shape.BytesPerToken()
+}
+
+// fullAttentionLayers is how many of a model's layers keep a per-token cache.
+// A configuration that declares no hybrid layout gets the whole depth, which
+// over-charges a hybrid model whose spelling is not one of these three and
+// under-charges nothing.
+func fullAttentionLayers(level map[string]any, layers int64) int64 {
+	if types, ok := level["layer_types"].([]any); ok && len(types) > 0 {
+		var n int64
+		for _, t := range types {
+			if s, ok := t.(string); ok && s == "full_attention" {
+				n++
+			}
+		}
+		return n
+	}
+	if pattern, ok := level["hybrid_override_pattern"].(string); ok && pattern != "" {
+		return int64(strings.Count(pattern, "*"))
+	}
+	if interval, ok := configNumber(level, "full_attention_interval"); ok {
+		// Rounded up: a depth that does not divide by the interval has a
+		// part-filled last group, and the layer in it attends.
+		return (layers + interval - 1) / interval
+	}
+	return layers
+}
+
+// configNumber reads one positive whole number out of a configuration level.
+// Anything else — a string, an object, a fraction, a negative — is not a
+// figure, and yields nothing rather than a zero that would read as one. The
+// bounds on what the numbers may mean are capability.KVShape's; this only
+// keeps the value inside an int64.
+func configNumber(level map[string]any, key string) (int64, bool) {
+	n, ok := level[key].(float64)
+	if !ok || n != math.Trunc(n) || n <= 0 || n > math.MaxInt32 {
+		return 0, false
+	}
+	return int64(n), true
+}
+
+// plausibleKVBytesPerToken is the bound applied wherever a cache cost enters
+// the registry: on a scan, and again when one is read back from the index.
+func plausibleKVBytesPerToken(n int64) bool {
+	return n >= 0 && n <= MaxKVBytesPerToken
 }
 
 // CheckShards reports an error unless every weight shard named by
