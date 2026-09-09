@@ -269,6 +269,14 @@ func TestAModelBeingDeletedCannotBeResolvedForALoad(t *testing.T) {
 // there. Sizing the directory that has just arrived is that work, and on a real
 // model it is a walk of a multi-gigabyte tree; done under the lock, it would let
 // the size of one model set how long every other model's load waits.
+//
+// Two rounds of the same download, differing only in how much there is to size,
+// rather than one round against an absolute bound. Something does legitimately
+// stay under this lock — the registry write, which has to be one step with the
+// deregistration — and on a loaded machine an fsync is tens of milliseconds, so
+// an absolute bound measures that and the scheduler rather than the property.
+// What the property predicts is a difference: with the sizing under the lock the
+// worst delay grows by the cost of the walk, and without it, it does not.
 func TestAFinishingDownloadDoesNotHoldUpALoadOfAnotherModel(t *testing.T) {
 	a := newTestApp(t)
 	a.Hub.BaseURL = fakeHub(t).URL
@@ -284,53 +292,61 @@ func TestAFinishingDownloadDoesNotHoldUpALoadOfAnotherModel(t *testing.T) {
 		t.Fatalf("registering the second model: %v", err)
 	}
 
-	dir := a.Paths.ModelDir("org/repo")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		t.Fatalf("creating the model directory: %v", err)
+	// worstLoadDelayDuringDownload runs a download to completion while asking
+	// for the other model as fast as it can, and reports the longest any one of
+	// those asks took.
+	worstLoadDelayDuringDownload := func() time.Duration {
+		stop := make(chan struct{})
+		worst := make(chan time.Duration, 1)
+		go func() {
+			var longest time.Duration
+			for {
+				select {
+				case <-stop:
+					worst <- longest
+					return
+				default:
+				}
+				began := time.Now()
+				if _, _, err := src.Resolve("org/other"); err != nil {
+					t.Errorf("resolving the second model: %v", err)
+				}
+				if took := time.Since(began); took > longest {
+					longest = took
+				}
+			}
+		}()
+		if err := a.Download("org/repo"); err != nil {
+			t.Fatalf("Download: %v", err)
+		}
+		waitFor(t, "the model to become ready", func() bool {
+			m, err := a.Registry.Get("org/repo")
+			return err == nil && m.Ready()
+		})
+		close(stop)
+		return <-worst
 	}
+
+	// The control: the model's directory holds only the model.
+	small := worstLoadDelayDuringDownload()
+
+	// The same download again, with a great deal more to size. A re-download
+	// keeps the directory, so the blobs are still there when it finishes.
+	dir := a.Paths.ModelDir("org/repo")
 	plantBlobs(t, dir, 6000)
 
-	// What sizing that directory costs, measured warm on this machine right
-	// now, so the assertion below is a comparison rather than a guess about
-	// what hardware the suite is running on.
+	// What sizing it now costs, measured warm on this machine, so the margin
+	// below is a figure from this run rather than a guess about the hardware.
 	_ = dirSize(dir)
 	start := time.Now()
 	_ = dirSize(dir)
 	sizing := time.Since(start)
 
-	stop := make(chan struct{})
-	worst := make(chan time.Duration, 1)
-	go func() {
-		var longest time.Duration
-		for {
-			select {
-			case <-stop:
-				worst <- longest
-				return
-			default:
-			}
-			began := time.Now()
-			if _, _, err := src.Resolve("org/other"); err != nil {
-				t.Errorf("resolving the second model: %v", err)
-			}
-			if took := time.Since(began); took > longest {
-				longest = took
-			}
-		}
-	}()
+	big := worstLoadDelayDuringDownload()
 
-	if err := a.Download("org/repo"); err != nil {
-		t.Fatalf("Download: %v", err)
-	}
-	waitFor(t, "the model to become ready", func() bool {
-		m, err := a.Registry.Get("org/repo")
-		return err == nil && m.Ready()
-	})
-	close(stop)
-
-	if blocked := <-worst; blocked >= sizing/2 {
-		t.Errorf("a load of another model was held up for %v while sizing the finishing download's directory costs %v — the sizing is happening under the lock the pool waits on",
-			blocked, sizing)
+	if big > small+sizing/2 {
+		t.Errorf("the worst load delay went from %v to %v when the finishing download's directory grew by %v of sizing — the sizing is happening under the lock the pool waits on",
+			small, big, sizing)
 	}
 }
 
