@@ -174,7 +174,22 @@ type ExecLauncher struct {
 }
 
 func (l *ExecLauncher) pidLedger() *pidLedger {
-	l.ledgerOnce.Do(func() { l.ledger = newPIDLedger(l.Paths.Root) })
+	// This account's own directory, not the data root: the ledger records
+	// process groups only the uid that started them can signal, so it is no use
+	// to another account — and in a shared root the second account's write over
+	// the first account's ledger is refused by the sticky bit and swallowed,
+	// which ends orphan reaping for it without a word.
+	// Account, falling back to Root for a Paths built by hand without it — the
+	// same fallback config.Paths applies to the state directory. With neither,
+	// newPIDLedger returns an inert ledger rather than a relative path in
+	// whatever directory the process was started from.
+	l.ledgerOnce.Do(func() {
+		dir := l.Paths.Account
+		if dir == "" {
+			dir = l.Paths.Root
+		}
+		l.ledger = newPIDLedger(dir)
+	})
 	return l.ledger
 }
 
@@ -248,26 +263,30 @@ func (l *ExecLauncher) Launch(ctx context.Context, spec Spec) (Process, error) {
 
 	logPath := filepath.Join(l.LogDir, logFileName(spec.RepoID))
 	// EnsureDirs created LogDir at startup as a real directory. Re-check rather
-	// than MkdirAll: in shared mode the account that owns the logs directory can
-	// swap it for a symlink at any time, and a path-based MkdirAll would follow
-	// it and put this account's log file inside a directory it did not choose.
+	// than MkdirAll: a path-based MkdirAll would follow a link left under that
+	// name and put this account's log file inside a directory it did not choose.
 	if fi, err := os.Lstat(l.LogDir); err != nil {
 		return nil, fmt.Errorf("log directory %s: %w", l.LogDir, err)
 	} else if !fi.IsDir() {
 		return nil, fmt.Errorf("log directory %s is not a directory", l.LogDir)
 	}
-	// 0600, not the 0644 os.Create would give. In shared mode LogDir sits under
-	// the group-readable /Users/Shared/Gropius, and the model server logs at
-	// INFO — request-level detail another local account has no business reading.
-	// O_TRUNC keeps the per-model log from growing without bound across restarts.
+	// 0600, not the 0644 os.Create would give: the model server logs at INFO —
+	// request-level detail nobody else has business reading. O_TRUNC keeps the
+	// per-model log from growing without bound across restarts.
 	//
-	// The name is predictable and LogDir is group-writable in shared mode, so
-	// another local account can plant a symlink under it — and a truncating
-	// open that followed it would empty, then stream logs into, any file this
-	// account can write. O_NOFOLLOW refuses the link; O_NONBLOCK keeps a
-	// planted FIFO from blocking the open forever (and is inert on the regular
-	// file the fstat below guarantees); the fstat on the opened handle refuses
-	// anything else that is not a regular file.
+	// LogDir is this account's own directory (config.Paths.Logs resolves through
+	// accountDir), which is what makes the open reachable at all: while the logs
+	// sat in the shared root, one account's 0600 log under a name derived from
+	// the repo id meant the NEXT account's O_CREATE|O_TRUNC returned EACCES and
+	// the model would not start for it.
+	//
+	// The hardening stays. The name is predictable, and a link or a FIFO left
+	// under it — by anything that can write this directory, or by an older
+	// install that kept logs elsewhere — would let a truncating open empty, then
+	// stream logs into, any file this account can write. O_NOFOLLOW refuses the
+	// link; O_NONBLOCK keeps a planted FIFO from blocking the open forever (and
+	// is inert on the regular file the fstat below guarantees); the fstat on the
+	// opened handle refuses anything else that is not a regular file.
 	logFile, err := os.OpenFile(logPath,
 		os.O_CREATE|os.O_WRONLY|os.O_TRUNC|syscall.O_NONBLOCK|syscall.O_NOFOLLOW, 0o600)
 	if err != nil {

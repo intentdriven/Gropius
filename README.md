@@ -73,7 +73,8 @@ Cross-machine LAN use works; TLS and notarized distribution are not yet included
   key. A mesh VPN reaches it from further away, with the same steps and a
   different address ([how to](docs/mesh-vpn.md)).
 - **Multi-account** — other user accounts on the same Mac share one copy of each
-  model on disk and on the GPU.
+  model on disk and on the GPU. The models are shared; each account keeps its
+  own settings and its own model list, so no key or token crosses accounts.
 
 ## Install
 

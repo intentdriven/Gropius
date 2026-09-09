@@ -60,7 +60,7 @@ func TestEnsureDirsWidensDataDirsUnderSetgidSharedRoot(t *testing.T) {
 	if err := p.EnsureDirs(); err != nil {
 		t.Fatalf("EnsureDirs: %v", err)
 	}
-	for _, d := range []string{p.Models, filepath.Dir(p.HFCache), p.HFCache, p.Logs} {
+	for _, d := range []string{p.Models, filepath.Dir(p.HFCache), p.HFCache} {
 		fi, err := os.Stat(d)
 		if err != nil {
 			t.Fatalf("stat %s: %v", d, err)
@@ -75,13 +75,17 @@ func TestEnsureDirsWidensDataDirsUnderSetgidSharedRoot(t *testing.T) {
 		}
 	}
 	// bin must NOT be widened: a group-writable bin would let one account
-	// replace the uv binary another account executes.
-	fi, err := os.Stat(p.Bin)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if fi.Mode()&0o020 != 0 {
-		t.Errorf("bin mode = %v, must not be group-writable (it holds executables)", fi.Mode())
+	// replace the uv binary another account executes. Nor must logs: it holds
+	// one account's record of what its own model servers printed, under names
+	// another account would then be unable to write.
+	for name, d := range map[string]string{"bin": p.Bin, "logs": p.Logs} {
+		fi, err := os.Stat(d)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if fi.Mode()&0o020 != 0 {
+			t.Errorf("%s mode = %v, must not be group-writable", name, fi.Mode())
+		}
 	}
 }
 
@@ -323,6 +327,94 @@ func TestEnsureDirsRefusesSymlinkedLayoutDirUnderSetgidRoot(t *testing.T) {
 				t.Error("EnsureDirs created hf/hub inside the victim directory")
 			}
 		})
+	}
+}
+
+// sharedLayout stands a temporary directory in for the shared root and returns
+// the layout NewPaths derives for it: a setgid data root holding what every
+// account shares, and this account's own directory holding what it does not.
+//
+// The derivation is the real one — the seam is the shared root's path, not the
+// rule — so a NewPaths that stopped splitting the layout, or split it
+// differently, is caught here rather than agreeing with a hand-written copy of
+// itself.
+func sharedLayout(t *testing.T) (Paths, string, string) {
+	t.Helper()
+	root := t.TempDir()
+	if err := os.Chmod(root, 0o775|os.ModeSetgid|os.ModeSticky); err != nil {
+		t.Fatal(err)
+	}
+	withSharedRoot(t, root)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	acct := filepath.Join(home, "Library", "Application Support", "Gropius")
+	p := NewPaths(root)
+	if p.Bin == filepath.Join(root, "bin") {
+		t.Fatal("NewPaths did not split the layout for the shared root")
+	}
+	return p, root, acct
+}
+
+// withSharedRoot points the shared-root rule at dir for the duration of a test.
+func withSharedRoot(t *testing.T, dir string) {
+	t.Helper()
+	prev := sharedRoot
+	sharedRoot = dir
+	t.Cleanup(func() { sharedRoot = prev })
+}
+
+// The layout under a shared cache straddles two directories: what every account
+// shares sits in the setgid root, and this account's executables, settings and
+// registry sit in its own directory, which is outside it. EnsureDirs has to
+// create both. It used to refuse the whole layout on the first entry that was
+// not under the root — so with the executables moved out, a Mac with a shared
+// cache installed could not start Gropius at all.
+func TestEnsureDirsUnderASharedRootCreatesThisAccountsOwnDirectories(t *testing.T) {
+	p, root, acct := sharedLayout(t)
+	if err := p.EnsureDirs(); err != nil {
+		t.Fatalf("EnsureDirs refused the layout a shared cache actually produces: %v", err)
+	}
+	for _, d := range []string{p.Bin, p.Venv, p.Python, p.Logs} {
+		if fi, err := os.Stat(d); err != nil || !fi.IsDir() {
+			t.Errorf("expected %s to exist (err=%v)", d, err)
+		}
+		if !strings.HasPrefix(d, acct) {
+			t.Errorf("%s should be in this account's own directory", d)
+		}
+	}
+	// The shared half is unchanged: still widened to match the installer's mode,
+	// so the next account can write what this one created.
+	for _, d := range []string{p.Models, filepath.Dir(p.HFCache), p.HFCache} {
+		fi, err := os.Stat(d)
+		if err != nil {
+			t.Fatalf("stat %s: %v", d, err)
+		}
+		if fi.Mode()&0o020 == 0 || fi.Mode()&os.ModeSetgid == 0 || fi.Mode()&os.ModeSticky == 0 {
+			t.Errorf("%s mode = %v, want group-writable setgid sticky", d, fi.Mode())
+		}
+		if !strings.HasPrefix(d, root) {
+			t.Errorf("%s should stay in the shared root", d)
+		}
+	}
+	// Executables are never widened, wherever they live.
+	if fi, err := os.Stat(p.Bin); err != nil || fi.Mode()&0o020 != 0 {
+		t.Errorf("bin mode = %v (err=%v), must not be group-writable", fi.Mode(), err)
+	}
+}
+
+// A shared data directory that is not under the shared root is a layout nobody
+// can have meant: models, the HuggingFace cache and the logs are what the root
+// exists to hold, and one resolved outside it would be widened to
+// group-writable somewhere no co-tenant was ever meant to reach. The refusal
+// that used to cover every entry is kept for exactly these.
+func TestEnsureDirsRefusesASharedDataDirOutsideTheRoot(t *testing.T) {
+	p, _, acct := sharedLayout(t)
+	p.Models = filepath.Join(acct, "models")
+	if err := p.EnsureDirs(); err == nil {
+		t.Fatal("EnsureDirs accepted a shared data directory outside the shared root")
+	}
+	if _, err := os.Stat(p.Models); !os.IsNotExist(err) {
+		t.Errorf("the refused directory was created anyway (err=%v)", err)
 	}
 }
 

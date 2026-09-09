@@ -49,17 +49,26 @@ func OpenRegular(path string) (*os.File, os.FileInfo, error) {
 // to an endless device never reaches EOF. See OpenRegular for why the open is
 // hardened.
 func ReadRegular(path string, max int64) ([]byte, error) {
-	f, _, err := OpenRegular(path)
+	b, _, err := ReadRegularInfo(path, max)
+	return b, err
+}
+
+// ReadRegularInfo is ReadRegular, and also returns what the open saw: the
+// FileInfo of the handle the bytes were read from, not of the path. A caller
+// that decides something from a file's ownership or mode must decide it from
+// this one, since a check made by a second stat of the path can be raced.
+func ReadRegularInfo(path string, max int64) ([]byte, os.FileInfo, error) {
+	f, info, err := OpenRegular(path)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer f.Close()
 	b, err := io.ReadAll(io.LimitReader(f, max+1))
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if int64(len(b)) > max {
-		return nil, fmt.Errorf("%s exceeds %d bytes", filepath.Base(path), max)
+		return nil, nil, fmt.Errorf("%s exceeds %d bytes", filepath.Base(path), max)
 	}
-	return b, nil
+	return b, info, nil
 }

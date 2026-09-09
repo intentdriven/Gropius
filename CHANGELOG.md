@@ -65,6 +65,27 @@ GitHub release notes.
   points its own hostname at `127.0.0.1` is refused. An install with a key
   behaves as before.
 
+
+- **Under a shared model cache, every account now keeps its own settings and
+  its own model list.** They used to be one `config.json` and one
+  `registry.json` beside the models, which worked for whichever account ran
+  first and for no other: the second account could not read the first's
+  settings, and the shared folder's sticky bit — the thing that stops one
+  account deleting another's models — made its every attempt to save its model
+  list fail. It could serve, and it could record nothing. Both files now live
+  in the account's own folder, where it owns them; the models stay shared,
+  which is what the shared cache is for. A HuggingFace token or an API key one
+  account sets is now unreadable by the others, rather than shared by accident.
+  On an account's first start after this change, its model list is rebuilt from
+  the models already in the shared folder, so nothing is downloaded twice, and
+  the settings it had kept in the shared folder are moved into its own — only
+  ever its own: settings belonging to another account are left untouched and
+  unread. Moved, not copied: a key left in the shared folder would still be
+  readable there, and would come back into service under an older build.
+  **A single-account install is unaffected.** In an existing shared install the
+  second and later accounts genuinely behave differently, which is the point:
+  they can now save what they change.
+
 ### Security
 
 - **Every command Gropius runs is now named by its full path.** Reading this
@@ -270,6 +291,25 @@ GitHub release notes.
   file already carrying more is trimmed to fit and says so as it loads, rather
   than being refused: the key is shortened, never cleared, so a server exposed
   to the network is never opened by a value in a file.
+
+
+- **A second account can serve a model the first account has already served.**
+  Each model server writes a log named after the model, and while those logs
+  sat in the shared folder the second account could not open one the first
+  account had written — so that model would not start for it at all, and every
+  model in a shared cache is one the other account has served. The same fault
+  silently stopped it cleaning up model servers left behind by a crash. Logs
+  and that record now live with each account's own settings.
+
+- **Gropius starts again on a Mac with a shared model cache.** Two safeguards
+  had come to refuse each other: the startup check that stops another account
+  planting a link under one of Gropius' folders insisted every folder sit
+  inside the shared one, and the decision that no account runs another
+  account's programs had since moved the private Python runtime into each
+  account's own folder. The check now covers the folders that are actually
+  shared — the models and the download cache, which are still held to the
+  permissions the installer sets — and lets each account's own folders be its
+  own. A single-account install never saw this.
 
 ## [0.4.0] - 2026-09-08
 
