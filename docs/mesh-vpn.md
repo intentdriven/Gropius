@@ -48,7 +48,7 @@ not the panel. Loopback is in the bind whichever choice you make, so narrowing
 the server to the mesh keeps the panel, the menu-bar app, and a client in
 another user account on this Mac.
 
-## Serve on the mesh address and nothing else
+## Serve on the mesh address, and not on the local network
 
 **A private network** binds the mesh address and this Mac, and no other address
 this Mac holds. A machine at the next desk cannot reach the server; your own

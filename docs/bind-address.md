@@ -18,8 +18,8 @@ address. Narrowing the bind never costs you the control panel, the menu-bar
 app, or a client running in another user account on the same Mac — all three
 reach the server over loopback.
 
-Nothing else gains anything by it. Loopback is this Mac and no other machine, on
-any network, under any bind.
+No other machine gains anything by it. Loopback is this Mac and this Mac alone,
+on any network, under any bind.
 
 The control panel is loopback-only under every choice, so what a machine
 elsewhere reaches is the model API and not the panel.

@@ -197,3 +197,63 @@ func TestAForeignHolderOfTheSecondAddressIsRefused(t *testing.T) {
 	}
 	probe.Close()
 }
+
+// Criterion 2 of the private-network intent, in the only form a unit test can
+// take it: an address outside the bind refuses the connection. It is the
+// property the whole record rests on — the narrowing is in the socket rather
+// than in a code path — so it is measured rather than reasoned about.
+//
+// Environment-dependent by nature, and written to skip rather than to fail
+// when the environment is not there: a Mac with no non-loopback IPv4 address
+// has nothing to dial. The wildcard half is what keeps the skip honest, by
+// showing that the dial can tell the two binds apart at all.
+func TestAnAddressOutsideTheBindRefusesTheConnection(t *testing.T) {
+	other := aNonLoopbackIPv4(t)
+	if other == "" {
+		t.Skip("this Mac holds no non-loopback IPv4 address, so there is nothing outside the bind to dial")
+	}
+	port := freePort(t)
+
+	narrow, _, _, err := acquireBind(bind.ForHost("127.0.0.1"), port, time.Second, func() portHolder { return holderNone })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if conn, err := net.DialTimeout("tcp", net.JoinHostPort(other, strconv.Itoa(port)), time.Second); err == nil {
+		conn.Close()
+		closeAll(narrow)
+		t.Fatal("an address outside the bind accepted a connection — the narrowing is not in the socket")
+	}
+	closeAll(narrow)
+
+	// The same dial against the wildcard, so a skip or a pass above cannot be
+	// the dial failing for its own reasons.
+	wide, _, _, err := acquireBind(bind.ForHost("0.0.0.0"), freePort(t), time.Second, func() portHolder { return holderNone })
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeAll(wide)
+	widePort := wide[len(wide)-1].Addr().(*net.TCPAddr).Port
+	conn, err := net.DialTimeout("tcp", net.JoinHostPort(other, strconv.Itoa(widePort)), time.Second)
+	if err != nil {
+		t.Fatalf("the wildcard bind refused a connection on %s: %v — the dial cannot tell the two binds apart, so the refusal above proves nothing", "an address this Mac holds", err)
+	}
+	conn.Close()
+}
+
+// aNonLoopbackIPv4 is one address this Mac holds that is not loopback, or ""
+// when it holds none.
+func aNonLoopbackIPv4(t *testing.T) string {
+	t.Helper()
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return ""
+	}
+	for _, a := range addrs {
+		n, ok := a.(*net.IPNet)
+		if !ok || n.IP.IsLoopback() || n.IP.To4() == nil {
+			continue
+		}
+		return n.IP.String()
+	}
+	return ""
+}
