@@ -159,7 +159,7 @@ func (c *Control) handleInstance(w http.ResponseWriter, r *http.Request) {
 // attacks that a source-address check alone cannot see.
 //
 // A page the victim visits runs in their browser, which connects from 127.0.0.1
-// — so RemoteAddr is loopback and a bare check waves the request through. Two
+// — so RemoteAddr is loopback and a bare check waves the request through. Three
 // extra guards close that:
 //
 //   - Host allow-list: a DNS-rebinding attack points a hostname it controls at
@@ -168,14 +168,20 @@ func (c *Control) handleInstance(w http.ResponseWriter, r *http.Request) {
 //   - Origin allow-list: a cross-site POST from evil.com carries its origin. The
 //     real UI is same-origin (a loopback origin), so any other origin is refused.
 //     This blocks classic CSRF, which needs no rebinding.
+//   - Sec-Fetch-Site: a no-cors subresource fetch — <img src>, and every other
+//     request a page makes without reading the answer — carries no Origin at
+//     all, so the allow-list above never runs and the route is executed blind.
+//     The browser states where the request came from in this header instead,
+//     and a page cannot forge it. admitToControlPlane below carries the one
+//     exception to this guard: a person following a link to the panel.
 //
-// The three checks are fromThisMachine, which is where the rule lives: the
+// The four checks are fromThisMachine, which is where the rule lives: the
 // models list admits a keyless install's loopback client on exactly the same
 // terms, and two spellings of "came from this machine" would be two things to
 // keep right. Only the refusal message is the control plane's own.
 func loopbackOnly(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !fromThisMachine(r) {
+		if !admitToControlPlane(r) {
 			writeError(w, http.StatusForbidden, loopbackRefusal(r))
 			return
 		}
@@ -183,17 +189,64 @@ func loopbackOnly(next http.Handler) http.Handler {
 	})
 }
 
+// admitToControlPlane is fromThisMachine, plus the one request the fourth
+// guard refuses that this plane must still serve: a person following a link to
+// the panel.
+//
+// A top-level navigation the operator started somewhere else — a link in a
+// rendered page of this project's own documentation, which autolinks the
+// panel's address — is cross-site to the browser, and refusing it would answer
+// a click with a 403 the reader cannot act on. It is not the request iss-11 is
+// about: what that names is a page reading a route it never shows anyone,
+// which is a subresource fetch. A navigation puts the answer in front of the
+// person who asked for it, in a window they can see, and the page that started
+// it cannot read a line of it back.
+//
+// The exception is bounded twice over, because a navigation is only harmless
+// where the answer is a page:
+//
+//   - Method and destination: a GET or HEAD whose Sec-Fetch-Dest is "document".
+//     An <iframe> is "iframe" and an <img> is "image", so neither borrows this,
+//     and the panel therefore still cannot be framed by a site.
+//   - Path: the panel and its assets only. A navigation to /api/ is a blind
+//     read of a route that answers with JSON, so it is refused exactly as the
+//     fetch would be. The gateway's own /v1 routes never reach here at all.
+func admitToControlPlane(r *http.Request) bool {
+	if !sameMachineConnection(r) {
+		return false
+	}
+	return sameOriginFetch(r) || isPanelNavigation(r)
+}
+
+// isPanelNavigation reports whether r is a browser navigating a window to one
+// of the panel's own pages, rather than a page fetching something.
+func isPanelNavigation(r *http.Request) bool {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		return false
+	}
+	if strings.HasPrefix(r.URL.Path, "/api/") {
+		return false
+	}
+	return r.Header.Get("Sec-Fetch-Mode") == "navigate" &&
+		r.Header.Get("Sec-Fetch-Dest") == "document"
+}
+
 // loopbackRefusal says which of fromThisMachine's checks refused r, so the
 // operator reading a 403 learns what to change. Evaluated only on the refusal
 // path, and it enumerates the same checks in the same order.
 func loopbackRefusal(r *http.Request) string {
+	origin := r.Header.Get("Origin")
 	switch {
 	case !isLoopback(r.RemoteAddr):
 		return "the Gropius control panel is only reachable from the computer it runs on"
 	case !isLoopbackHost(r.Host):
 		return "unrecognized Host header — the control panel only answers to localhost"
-	default:
+	case origin != "" && !isLoopbackOrigin(origin):
 		return "cross-origin request to the control panel refused"
+	default:
+		// The only check left, so this is the one that refused: the request
+		// named a Sec-Fetch-Site other than the panel's own page.
+		return "cross-site request to the control panel refused"
 	}
 }
 
@@ -652,6 +705,13 @@ func redactConfig(c config.Config) config.Config {
 	if c.HFToken != "" {
 		c.HFToken = "********"
 	}
+	// The chat rule is resolved rather than reported raw. The panel serves the
+	// stored settings into its form and the form posts them back, so an unset
+	// rule — the state of every install until someone saves — would reach the
+	// form as two blank fields, which this form reads as "test nothing" and
+	// would save as exactly that. The panel shows what is in force, and what it
+	// shows is what it saves.
+	c.ChatRule = c.EffectiveChatRule()
 	return c
 }
 
@@ -900,9 +960,11 @@ func hostname() string {
 
 // maxSearchLimit bounds the "limit" query parameter on /api/search. Without a
 // ceiling, a single request turns into an unbounded fan-out of outbound
-// RepoSize lookups (internal/hub) against HuggingFace — reachable even from a
-// blind, Origin-less cross-origin GET (e.g. <img src>), since loopbackOnly's
-// Origin check only ever sees an Origin header on same-site or POST requests.
+// RepoSize lookups (internal/hub) against HuggingFace. loopbackOnly now refuses
+// the blind, Origin-less cross-origin GET (e.g. <img src>) that reached this
+// route, on the Sec-Fetch-Site header its Origin check never sees — but the cap
+// stands on its own: a browser too old to send that header still gets here, and
+// the operator's own panel can ask for any number it likes.
 const maxSearchLimit = 100
 
 // searchLimit parses and bounds the "limit" query parameter.
@@ -1024,9 +1086,25 @@ type modelRequest struct {
 	Model string `json:"model"`
 }
 
+// decodeModelRequest reads the one model name every model-action endpoint takes.
+// The body is capped here, in the single place all of them share, rather than at
+// five call sites: an uncapped decoder buffers whatever it is handed on the way
+// to the end of the first JSON value, and loopback is reachable from any browser
+// tab the person running this Mac has open.
+//
+// The cap is the settings save's, deliberately reused rather than a second
+// number invented: it is the control plane's one bound, and it is already orders
+// of magnitude more than a repository id needs, so nothing a caller legitimately
+// sends here can reach it.
 func decodeModelRequest(w http.ResponseWriter, r *http.Request) (string, bool) {
 	var req modelRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Model == "" {
+	err := json.NewDecoder(http.MaxBytesReader(w, r.Body, config.MaxConfigBytes)).Decode(&req)
+	var tooLarge *http.MaxBytesError
+	if errors.As(err, &tooLarge) {
+		writeError(w, http.StatusBadRequest, "request body is too large")
+		return "", false
+	}
+	if err != nil || req.Model == "" {
 		writeError(w, http.StatusBadRequest, `a "model" field is required`)
 		return "", false
 	}

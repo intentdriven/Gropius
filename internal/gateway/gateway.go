@@ -84,6 +84,11 @@ type Gateway struct {
 	log    *slog.Logger
 	tr     http.RoundTripper
 	stats  *stats.Recorder
+	// refusalLog holds the line written when a client is refused without being
+	// told why, to one per model per minute. A refusal is client-induced, so
+	// the line it produces has to be rate-limited or the log is somewhere a
+	// stranger can write at the rate it can send requests.
+	refusalLog *logEvery
 }
 
 // New builds a Gateway.
@@ -109,12 +114,13 @@ func New(opts Options) *Gateway {
 		}
 	}
 	return &Gateway{
-		cfg:    cfgFn,
-		pool:   opts.Pool,
-		models: opts.Models,
-		log:    opts.Log,
-		tr:     opts.Transport,
-		stats:  opts.Stats,
+		cfg:        cfgFn,
+		pool:       opts.Pool,
+		models:     opts.Models,
+		log:        opts.Log,
+		tr:         opts.Transport,
+		stats:      opts.Stats,
+		refusalLog: newLogEvery(refusalLogEvery),
 	}
 }
 
@@ -213,23 +219,82 @@ func bearerToken(header string) string {
 // treats a loopback connection as this machine's own operator answers here, so
 // the rule is stated once.
 //
-// What this does NOT stop, and the condition on that staying harmless: a
+// The third guard is what closes the request the first two cannot see: a
 // no-cors subresource — <script src>, <img> — that a page anywhere points at
-// the loopback URL sends a loopback Host and no Origin at all, so it passes.
-// It is not a read primitive today, because the gateway emits no
+// the loopback URL sends a loopback Host and no Origin at all, so the Origin
+// allow-list never runs and the request is executed blind. Sec-Fetch-Site is
+// the browser's own statement of where the request came from, sent on every
+// request including that one, and unforgeable from script. A value that is
+// neither this document's own origin nor a direct navigation is refused. The
+// header is treated as advisory when absent, because everything that is not a
+// browser — curl, an OpenAI client, an older browser — sends none, and this is
+// the only guard whose absence a non-browser client is expected to exhibit.
+//
+// Comparison is exact and lowercase, as the Fetch specification defines the
+// four values, so an unrecognized spelling fails closed.
+//
+// What that leaves, and the condition on it staying harmless: a browser old
+// enough to send no Sec-Fetch-Site at all still reaches these routes blind. It
+// is not a read primitive, because the gateway emits no
 // Access-Control-Allow-Origin (so the body is opaque to the page) and the JSON
 // is a syntax error if parsed as script. The day any CORS header is added to
-// these routes, that stops being true and this predicate is no longer enough
-// on its own.
+// these routes, that stops being true.
 func fromThisMachine(r *http.Request) bool {
+	return sameMachineConnection(r) && sameOriginFetch(r)
+}
+
+// sameMachineConnection is the first three guards without the fourth: the
+// socket, the Host and the Origin all name this machine.
+//
+// It is separate only because the control plane admits one request the fourth
+// guard would refuse — a person following a link to the panel — and that
+// exception is the control plane's own, not a hole in the rule. Nothing else
+// calls this; everything else wants fromThisMachine.
+func sameMachineConnection(r *http.Request) bool {
 	if !isLoopback(r.RemoteAddr) {
 		return false
 	}
 	if !isLoopbackHost(r.Host) {
 		return false
 	}
-	origin := r.Header.Get("Origin")
-	return origin == "" || isLoopbackOrigin(origin)
+	if origin := r.Header.Get("Origin"); origin != "" && !isLoopbackOrigin(origin) {
+		return false
+	}
+	return true
+}
+
+// sameOriginFetch reports whether r's Sec-Fetch-Site header, if it sent one,
+// says the request came from this server's own page or from no page at all.
+//
+// "same-site" is refused along with "cross-site": on loopback a site is the
+// bare host, so a page served from another port on localhost is same-site to
+// the browser and is not this server's panel.
+func sameOriginFetch(r *http.Request) bool {
+	switch r.Header.Get("Sec-Fetch-Site") {
+	case "", "same-origin", "none":
+		return true
+	default:
+		return false
+	}
+}
+
+// entitled reports whether r may be told what this machine is doing — which
+// models are resident, how busy they are, and the memory budget they are
+// measured against.
+//
+// It is one rule with two arms, and both are trust classes this server already
+// had. On a keyed install the condition is the install's, not the request's:
+// withAuth has already decided who may call at all, and a loopback client
+// exempt from the bearer check sees the same picture a keyed LAN client does.
+// On a keyless install the LAN is unauthenticated and is told nothing, while a
+// client on this Mac is the class the control panel already shows exactly
+// these facts to over the same loopback.
+//
+// The models list and the pool's refusals answer here rather than each
+// spelling the rule out, so a fact withheld from one is withheld from the
+// other. A third notion of entitlement would be a third thing to keep right.
+func (g *Gateway) entitled(r *http.Request) bool {
+	return g.admittedKeyed(r) || fromThisMachine(r)
 }
 
 // isLoopback reports whether a RemoteAddr is on this machine.
@@ -279,16 +344,16 @@ func (g *Gateway) handleListModels(w http.ResponseWriter, r *http.Request) {
 	// admitted while no key was configured could then be served as if one had
 	// been.
 	//
-	// The loopback arm is fromThisMachine, not a bare source-address check.
-	// withAuth returns before its own Host and Origin guards when no key is
-	// configured, so on a keyless install nothing upstream has looked at either
-	// header: a DNS-rebound page would arrive from 127.0.0.1 carrying the
+	// The loopback arm of entitled is fromThisMachine, not a bare source-address
+	// check. withAuth returns before its own Host and Origin guards when no key
+	// is configured, so on a keyless install nothing upstream has looked at
+	// either header: a DNS-rebound page would arrive from 127.0.0.1 carrying the
 	// attacker's Host and read exactly the activity this handler withholds from
 	// the LAN. The guards therefore have to be applied here, and they are the
 	// same ones — the same function — the control plane is gated on.
 	var residency map[string]runtime.Resident
 	var pinned map[string]bool
-	if g.admittedKeyed(r) || fromThisMachine(r) {
+	if g.entitled(r) {
 		// Folded on the same rule as the residency join below. The pinned set
 		// is read separately from the residency snapshot because a pin is not
 		// a property of a loaded model: a pinned model the pool is not holding
@@ -311,6 +376,11 @@ func (g *Gateway) handleListModels(w http.ResponseWriter, r *http.Request) {
 			residency[config.FoldRepoID(res.RepoID)] = res
 		}
 	}
+
+	// One reading of the rule for the whole listing, so two entries in one
+	// answer can never be judged by two different rules because the operator
+	// saved between them.
+	chatRule := g.cfg().EffectiveChatRule()
 
 	data := make([]any, 0, len(ready))
 	for _, m := range ready {
@@ -335,6 +405,29 @@ func (g *Gateway) handleListModels(w http.ResponseWriter, r *http.Request) {
 			entry["context_length"] = m.ContextLength
 			entry["max_model_len"] = m.ContextLength
 		}
+		// What HuggingFace says this model is, in HuggingFace's own words, and
+		// what this server makes of them. The two tag fields are absent when
+		// the Hub said nothing — an empty string or an empty list would read as
+		// an answer — and `chat` is always present, because the whole value of
+		// the flag is telling a model that can hold a conversation from one
+		// that cannot, and an absent key would be read as an older Gropius that
+		// cannot say either way.
+		//
+		// All three go to every client, keyed or not, loopback or not. They say
+		// what a model IS, which is the same class of fact as its context
+		// length; the residency fields below say what this Mac is doing, which
+		// is the class an open server withholds.
+		//
+		// The flag decides nothing about what is served. Every model stays
+		// callable by name whatever the rule says of it: this is a hint for a
+		// picker, not a filter, and nothing on the completions path reads it.
+		if m.PipelineTag != "" {
+			entry["pipeline_tag"] = m.PipelineTag
+		}
+		if len(m.Tags) > 0 {
+			entry["tags"] = m.Tags
+		}
+		entry["chat"] = chatRule.Matches(m.PipelineTag, m.Tags)
 		if residency != nil {
 			addResidency(entry, residency[config.FoldRepoID(m.RepoID)], pinned[config.FoldRepoID(m.RepoID)])
 		}
@@ -482,7 +575,7 @@ func (g *Gateway) handleCompletions(w http.ResponseWriter, r *http.Request) {
 		// asked for: that name is the client's own text, of the client's own
 		// length, and the recorder is never handed either.
 		obs.failed(stats.ClassClientError)
-		writeError(w, http.StatusNotFound, err.Error())
+		writeError(w, http.StatusNotFound, notServedText(err, g.entitled(r)))
 		return
 	}
 	obs.resolved(model)
@@ -524,7 +617,26 @@ func (g *Gateway) handleCompletions(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusServiceUnavailable, "the model could not be started")
 			return
 		}
-		writeError(w, http.StatusServiceUnavailable, err.Error())
+		// What is left is the pool saying it will not serve this request now.
+		// Those texts are informative on purpose and describe this Mac, so
+		// they go only to a client this server owes an account of itself; see
+		// genericRefusal. The status code and the wait headers already set
+		// above are the same either way, so a client backing off is unaffected.
+		if g.entitled(r) {
+			writeError(w, http.StatusServiceUnavailable, err.Error())
+			return
+		}
+		// The operator keeps what the client no longer gets. Without this the
+		// only record of a refusal a LAN client cannot read is a class in the
+		// statistics, which does not say which model or why — and diagnosing
+		// "my clients are being refused" from the machine doing the refusing
+		// is the whole reason the message was informative in the first place.
+		// Rate-limited because the client sets the rate; see logEvery.
+		if g.refusalLog.allow(model) {
+			g.log.Info("refused a request, and told the client only that it could not be served",
+				"model", model, "class", refusalClass(err), "client", "unentitled", "err", err)
+		}
+		writeError(w, http.StatusServiceUnavailable, genericRefusal)
 		return
 	}
 	defer release()
@@ -1088,7 +1200,10 @@ func copyResponseHeaders(dst, src http.Header) {
 func (g *Gateway) resolveModel(requested string) (string, error) {
 	if m, err := g.models.Get(requested); err == nil {
 		if !m.Ready() {
-			return "", fmt.Errorf("model %q is not ready (%s)", requested, m.State)
+			return "", &notServedError{
+				requested: requested,
+				detail:    fmt.Sprintf("model %q is not ready (%s)", requested, m.State),
+			}
 		}
 		return m.RepoID, nil
 	}
@@ -1101,7 +1216,10 @@ func (g *Gateway) resolveModel(requested string) (string, error) {
 	}
 	switch len(matches) {
 	case 0:
-		return "", fmt.Errorf("model %q is not available — download it first", requested)
+		return "", &notServedError{
+			requested: requested,
+			detail:    fmt.Sprintf("model %q is not available — download it first", requested),
+		}
 	case 1:
 		return matches[0], nil
 	default:
@@ -1143,6 +1261,58 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(v)
 }
+
+// genericRefusal is what a client the server owes no account of itself is told
+// when the pool will not serve its request.
+//
+// The pool's own refusals are informative on purpose — they name the number of
+// requests already in flight for a model, or the resident memory budget in
+// bytes — and both are facts about this Mac rather than about the request. The
+// budget is a fraction of physical RAM, so it says roughly how much memory this
+// machine has, and a client can induce either refusal itself by saturating a
+// model or by asking for one it knows is large. That is the same class of fact
+// the models list withholds from an open server's network clients, so it is
+// withheld here on the same predicate. The status code and every header are
+// unchanged, because a client backing off honestly reads those, not this text.
+const genericRefusal = "cannot serve this model right now"
+
+// notServedError is the 404 for a model this server will not serve, and it
+// carries two texts because the fuller one describes this Mac.
+//
+// "not ready" says the model is here and downloading, which the listing an
+// open server serves the network deliberately does not: only ready models
+// appear there. Answering a network client with it turns the completions
+// endpoint into a way to enumerate what this Mac is fetching, one guessed name
+// at a time. The generic text is therefore the same sentence for a model that
+// is downloading and for one this Mac has never heard of — indistinguishable,
+// which a different-but-vaguer sentence for each would not have been.
+//
+// The ambiguity refusal is not one of these: the repo ids it names are already
+// in the listing every client is served, so there is nothing there to withhold
+// and a client cannot fix an ambiguous name without them.
+type notServedError struct {
+	// requested is the name the client asked for, echoed back to it.
+	requested string
+	// detail is what an entitled client is told, and is today's text.
+	detail string
+}
+
+func (e *notServedError) Error() string { return e.detail }
+
+// notServedText picks the text err's 404 is answered with.
+func notServedText(err error, entitled bool) string {
+	var notServed *notServedError
+	if entitled || !errors.As(err, &notServed) {
+		return err.Error()
+	}
+	return fmt.Sprintf("model %q is not available", notServed.requested)
+}
+
+// refusalLogEvery is how often the line above may be written for one model.
+// Long enough that a client sending continuously writes one line a minute,
+// short enough that an operator watching the log sees the next refusal within
+// a minute of asking themselves what is going on.
+const refusalLogEvery = time.Minute
 
 // writeError renders an OpenAI-shaped error, which is what clients parse.
 func writeError(w http.ResponseWriter, status int, msg string) {

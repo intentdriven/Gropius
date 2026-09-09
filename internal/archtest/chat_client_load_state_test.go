@@ -3,8 +3,11 @@ package archtest_test
 import (
 	"path/filepath"
 	"regexp"
+	"slices"
+	"strings"
 	"testing"
 
+	"github.com/intentdriven/Gropius/internal/config"
 	"github.com/intentdriven/Gropius/internal/gateway"
 	"github.com/intentdriven/Gropius/internal/runtime"
 )
@@ -47,10 +50,44 @@ var clientLoadingComment = regexp.MustCompile(
 var clientChattableDefault = regexp.MustCompile(
 	`var\s+chattable\s*:\s*Bool\s*\{\s*(?:chat\s*\?\?\s*true|chat\s*!=\s*false)\s*\}`)
 
-// clientPickerFiltersOnChattable matches the picker's list being derived
-// through that verdict rather than from the served list directly.
+// clientPickerFiltersOnChattable matches the promise rather than one spelling
+// of it: the picker's list is derived by filtering the served list through a
+// call to the rule's verdict, whatever the rule value is called at that point
+// and whether the closure or the method reference is used. What it cannot match
+// is a picker built from the served list directly, which is the failure.
 var clientPickerFiltersOnChattable = regexp.MustCompile(
-	`filter\(\\\.chattable\)`)
+	`chatModels\s*=\s*[^\n]*\.filter\s*[({][^\n]*\.offers\b`)
+
+// clientChatRuleDefaults match the two halves of the rule the client ships,
+// each as the stored setting a person can change in its Settings -- so a
+// comment describing the rule cannot stand in for the rule.
+var clientChatPipelineDefault = regexp.MustCompile(
+	`@AppStorage\("chatPipelineTags"\)\s+var\s+chatPipelineTags\s*:\s*String\s*=\s*"([^"]*)"`)
+var clientChatRequiredDefault = regexp.MustCompile(
+	`@AppStorage\("chatRequiredTags"\)\s+var\s+chatRequiredTags\s*:\s*String\s*=\s*"([^"]*)"`)
+
+// clientCategoryFields match the two fields the client decodes the Hub's words
+// out of. Codable keys off the property name, so the property IS the wire field.
+var clientPipelineField = regexp.MustCompile(
+	`(?m)^\s*let\s+pipeline_tag\s*:\s*String\?`)
+var clientTagsField = regexp.MustCompile(
+	`(?m)^\s*let\s+tags\s*:\s*\[String\]\?`)
+
+// gatewayCategoryFields match the gateway writing the same two fields onto a
+// models-list entry.
+var gatewayPipelineField = regexp.MustCompile(
+	`(?m)^\s*entry\["pipeline_tag"\]\s*=`)
+var gatewayTagsField = regexp.MustCompile(
+	`(?m)^\s*entry\["tags"\]\s*=`)
+
+// clientRuleIsEditable match each half of the rule being handed to a control as
+// a two-way binding -- the `$` projection, which in SwiftUI exists for nothing
+// else -- rather than one spelling of one control. A rule nothing binds is a
+// default nobody can move.
+var clientRuleIsEditable = regexp.MustCompile(
+	`\$(?:model\.|self\.)?chatPipelineTags\b`)
+var clientRequiredIsEditable = regexp.MustCompile(
+	`\$(?:model\.|self\.)?chatRequiredTags\b`)
 
 // TestChatClientReadsTheResidencyTheGatewayPublishes holds the client's reading
 // of a model's residency to the field and the value the server writes.
@@ -127,13 +164,13 @@ func TestChatClientRecognizesTheGatewaysLoadingComment(t *testing.T) {
 }
 
 // TestChatClientOffersEveryModelAServerDoesNotRuleOut holds the picker's
-// default for a models list that says nothing about a model's chat capability.
+// default for a models list that says nothing about a model at all.
 //
-// The capability is published per entry and absent means yes: a server that
-// predates the field, and every model on it, must still be offered. Default it
-// the other way and the client shows an empty picker against every Gropius
-// already installed -- a total failure to chat, from a field that was added to
-// hide an OCR model.
+// The client judges a model by the words the list publishes for it. A server
+// that publishes no words and no verdict is one that predates the whole idea,
+// and every model on it must still be offered: default it the other way and the
+// client shows an empty picker against every Gropius already installed -- a
+// total failure to chat, from a feature that was added to hide an OCR model.
 func TestChatClientOffersEveryModelAServerDoesNotRuleOut(t *testing.T) {
 	root := repoRootDir(t)
 	source := readRepoFile(t, root, filepath.Join("client", "GropiusChat", "GropiusChat.swift"))
@@ -147,7 +184,84 @@ func TestChatClientOffersEveryModelAServerDoesNotRuleOut(t *testing.T) {
 			"(or `chat != false`); a models list that publishes no chat capability must offer every model")
 	}
 	if !clientPickerFiltersOnChattable.MatchString(source) {
-		t.Error("client/GropiusChat/GropiusChat.swift does not build its picker list with " +
-			`filter(\.chattable); a model a server rules out would be offered anyway`)
+		t.Error("client/GropiusChat/GropiusChat.swift does not build its picker list by filtering " +
+			"the served list through its own chat rule; a model the rule excludes would be offered anyway")
+	}
+}
+
+// TestChatClientReadsTheCategoryTheGatewayPublishes holds the client's reading
+// of what a model is to the fields the server writes it under.
+//
+// Two more silent failures, the same shape as the residency above: a renamed
+// field decodes as nil, the client's rule then sees a model with no words on
+// it, and the picker quietly falls back to the server's own verdict. Nothing
+// errors, and nobody can see why a model is or is not offered.
+func TestChatClientReadsTheCategoryTheGatewayPublishes(t *testing.T) {
+	root := repoRootDir(t)
+	source := readRepoFile(t, root, filepath.Join("client", "GropiusChat", "GropiusChat.swift"))
+	gatewaySource := readRepoFile(t, root, filepath.Join("internal", "gateway", "gateway.go"))
+
+	for _, c := range []struct {
+		field   string
+		client  *regexp.Regexp
+		gateway *regexp.Regexp
+	}{
+		{"pipeline_tag", clientPipelineField, gatewayPipelineField},
+		{"tags", clientTagsField, gatewayTagsField},
+	} {
+		if !c.client.MatchString(source) {
+			t.Errorf("client/GropiusChat/GropiusChat.swift declares no %q on its models decoder; "+
+				"the words its own rule reads are unchecked", c.field)
+		}
+		if !c.gateway.MatchString(gatewaySource) {
+			t.Errorf("internal/gateway/gateway.go no longer writes entry[%q] onto a models-list entry; "+
+				"the chat client decodes the category under that name", c.field)
+		}
+	}
+}
+
+// TestChatClientShipsTheServersOwnChatRule holds the client's default rule to
+// the server's.
+//
+// The rule is the client's own -- it applies it to the tags the models list
+// publishes, and a person can change it in the client's Settings -- but the
+// default it ships with is not two independent decisions. A client whose
+// shipped rule differs from the server's would offer a different set of models
+// than the same server's `chat` flag names, with nothing on either surface to
+// explain the difference.
+func TestChatClientShipsTheServersOwnChatRule(t *testing.T) {
+	root := repoRootDir(t)
+	source := readRepoFile(t, root, filepath.Join("client", "GropiusChat", "GropiusChat.swift"))
+	rule := config.DefaultChatRule()
+
+	for _, c := range []struct {
+		what string
+		re   *regexp.Regexp
+		want []string
+	}{
+		{"pipeline tags", clientChatPipelineDefault, rule.PipelineTags},
+		{"required tags", clientChatRequiredDefault, rule.RequiredTags},
+	} {
+		m := c.re.FindStringSubmatch(source)
+		if m == nil {
+			t.Errorf("client/GropiusChat/GropiusChat.swift declares no stored default for the rule's %s", c.what)
+			continue
+		}
+		got := []string{}
+		for _, word := range strings.Split(m[1], ",") {
+			if word = strings.TrimSpace(word); word != "" {
+				got = append(got, word)
+			}
+		}
+		if !slices.Equal(got, c.want) {
+			t.Errorf("the chat client ships %v as its %s; the server ships %v", got, c.what, c.want)
+		}
+	}
+
+	// And the rule has to be changeable where the intent says it is, or it is
+	// a default rather than a setting.
+	if !clientRuleIsEditable.MatchString(source) || !clientRequiredIsEditable.MatchString(source) {
+		t.Error("client/GropiusChat/GropiusChat.swift binds no Settings control to both halves of the rule; " +
+			"the rule is then a constant a user cannot change")
 	}
 }

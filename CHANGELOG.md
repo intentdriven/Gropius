@@ -105,6 +105,53 @@ GitHub release notes.
 
 ### Security
 
+- **The model actions bound the body they read.** Loading, unloading,
+  downloading, cancelling and deleting a model each take one model name, but
+  the body carrying it was read without a limit, so a local caller — or a page
+  in a browser reaching loopback — could make the server buffer as much as it
+  cared to send; the body is now capped at the same size the settings save
+  uses, and one over it is refused as too large.
+
+- **A page in a browser can no longer reach the control panel blind.** The
+  panel refuses any request that did not come from this machine, and one of the
+  things it looked at was the `Origin` header a cross-site request carries. A
+  browser does not send that header on a fetch a page makes without reading the
+  answer — an `<img>` pointed at the panel's address, say — so a site the
+  operator visited could make the panel *do* things it could not then read
+  back: every listing, and every search of HuggingFace the panel offers. The
+  panel now also reads `Sec-Fetch-Site`, which the browser sends on that
+  request too and a page cannot forge: a request that says it came from
+  anywhere but the panel's own page is refused. **Nothing about a client that
+  is not a browser changes** — `curl`, an OpenAI client and an older browser
+  send no such header, and are admitted exactly as before, and **neither does
+  following a link**: opening the panel from a link on another page, a
+  bookmark, the menu bar or a typed address all still work, because a
+  navigation shows the answer to the person who asked for it rather than to the
+  page that asked. The panel cannot be put in a frame by a site, and a
+  navigation straight to an API address is refused like any other blind read.
+  The same rule now guards what `GET /v1/models` reports about which models are
+  loaded, because that listing is gated on the same "came from this machine"
+  test.
+
+- **An open server no longer tells the network how busy it is when it refuses
+  a request.** Asking for a model that is already at its request ceiling, or
+  one too large for the memory budget, came back with a message naming how many
+  requests that model was already handling, or the budget in bytes — which is a
+  fraction of this Mac's memory, and so says roughly how much it has. Any
+  client could induce either by saturating a model or asking for a large one.
+  Those are the same facts the models list withholds from an open server's
+  network clients, so the refusal now withholds them on the same rule: a client
+  on this Mac, and any client an API key admits, still gets the message that
+  says what is actually wrong; everyone else gets `cannot serve this model
+  right now`. A request naming a model that is still downloading is answered
+  the same way, since the models list an open server serves the network carries
+  ready models only — otherwise a client could have found out what this Mac was
+  fetching by guessing names at it. **Backing off is unaffected** — the status
+  code and every response header are the same for both, so a client that
+  retries on the status behaves exactly as it did. **And the operator keeps
+  what the client no longer gets:** the reason is written to this Mac's log,
+  once a minute per model, so a busy client cannot fill the log with it.
+
 - **Every command Gropius runs is now named by its full path.** Reading this
   Mac's Bonjour name, opening the control panel in a browser and copying the
   endpoint each started a small system command by bare name, so the one that
@@ -117,6 +164,27 @@ GitHub release notes.
   the rule for any command added later.
 
 ### Added
+
+- **Every model says what kind of model it is, and a client can pick by it.**
+  `GET /v1/models` now carries HuggingFace's own `pipeline_tag` and `tags` for
+  each model — recorded from the Hub when the model was downloaded, republished
+  as they are, absent when the Hub said nothing — plus a `chat` flag saying
+  whether this server counts the model as able to hold a conversation. Until
+  now, every downloaded model was offered for chat, including the ones that
+  cannot chat: the browse step saw the Hub's words and the registry forgot them,
+  so a picker had nothing to go on and put an OCR model beside a chat model.
+  Gropius invents no taxonomy for this — the words are the Hub's, and the only
+  judgement is the rule, **Settings → Which models can chat** and `chat_rule` in
+  `config.json`: a list of pipeline tags that count and a list of tags a model
+  must carry, shipped as `text-generation`/`image-text-to-text` and
+  `conversational`. The search tab shows each result's pipeline tag, or "no
+  tag", before you download anything, and GropiusChat's menu now runs the same
+  rule as its own default, changeable in its Settings. **Nothing is filtered:**
+  every model stays callable over the API by name whatever the rule says of it.
+  A model downloaded by an earlier build carries no words — nothing on disk says
+  what kind of model it is — and is marked as unable to chat until it is
+  downloaded again. See [docs/chat-models.md](docs/chat-models.md) and
+  [docs/models-list.md](docs/models-list.md).
 
 - **Gropius keeps its own log, in your account's folder, at a level you
   choose.** Everything the server knew about a refusal, a model that would not

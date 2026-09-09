@@ -122,9 +122,16 @@ private struct ModelsResponse: Decodable {
         /// same as "not loaded" — it is "not said", and nothing is claimed
         /// from it.
         let state: String?
-        /// Whether the model can serve a chat request at all. Absent on a
-        /// server that does not publish the capability.
+        /// Whether the model can serve a chat request at all, under the
+        /// server's own rule. Absent on a server that does not publish the
+        /// capability.
         let chat: Bool?
+        /// What HuggingFace says this model is: the repo's pipeline tag and its
+        /// tags, recorded by the server when the model was downloaded. Absent
+        /// when the Hub said nothing about that model, and on a server that
+        /// publishes no category at all.
+        let pipeline_tag: String?
+        let tags: [String]?
 
         /// Absent means yes. A server that publishes no capability is an older
         /// one, and every model it serves must still be offered — defaulting
@@ -133,6 +140,50 @@ private struct ModelsResponse: Decodable {
         var chattable: Bool { chat ?? true }
     }
     let data: [Model]
+}
+
+/// The client's own rule for which models it offers, read from the words the
+/// models list publishes.
+///
+/// It ships with the server's default — a test in the server's suite holds the
+/// two together — and a person changes it in Settings, because which models are
+/// worth putting in a picker is a judgement about this person's work and not
+/// something the server they are borrowing decides for them.
+///
+/// Each half is a comma-separated list of HuggingFace's own words, and a
+/// cleared half tests nothing.
+struct ChatRule {
+    let pipelineTags: [String]
+    let requiredTags: [String]
+
+    init(pipelineTags: String, requiredTags: String) {
+        self.pipelineTags = ChatRule.words(pipelineTags)
+        self.requiredTags = ChatRule.words(requiredTags)
+    }
+
+    private static func words(_ field: String) -> [String] {
+        field.split(separator: ",")
+            .map { $0.trimmingCharacters(in: .whitespaces).lowercased() }
+            .filter { !$0.isEmpty }
+    }
+
+    /// Whether this model belongs in the picker.
+    ///
+    /// A model the server publishes no words for is not one this rule can
+    /// judge, so the server's own verdict decides it — and a server that
+    /// publishes neither the words nor a verdict is one that predates the whole
+    /// idea, whose every model is offered. A model the server DOES publish
+    /// words for is judged here, and one the Hub never tagged is judged by the
+    /// server, which marks it as unable under the same default rule.
+    fileprivate func offers(_ m: ModelsResponse.Model) -> Bool {
+        guard m.pipeline_tag != nil || m.tags != nil else { return m.chattable }
+        if !pipelineTags.isEmpty {
+            let tag = (m.pipeline_tag ?? "").trimmingCharacters(in: .whitespaces).lowercased()
+            if !pipelineTags.contains(tag) { return false }
+        }
+        let have = Set((m.tags ?? []).map { $0.trimmingCharacters(in: .whitespaces).lowercased() })
+        return requiredTags.allSatisfy { have.contains($0) }
+    }
 }
 
 /// One streamed chunk from /v1/chat/completions with stream=true.
@@ -442,6 +493,18 @@ final class AppModel: ObservableObject {
     @AppStorage("serverPath") var serverPath: String = AppModel.defaultAPIPath
     @AppStorage("selectedModel") var selectedModel: String = ""
 
+    // Which models the picker offers, as two comma-separated lists of
+    // HuggingFace's own words. The defaults are the server's shipped rule; a
+    // test in the server's suite holds them to it. Clear a field to stop
+    // testing that half.
+    @AppStorage("chatPipelineTags") var chatPipelineTags: String = "text-generation, image-text-to-text"
+    @AppStorage("chatRequiredTags") var chatRequiredTags: String = "conversational"
+
+    /// The rule in force, built from the two stored fields.
+    var chatRule: ChatRule {
+        ChatRule(pipelineTags: chatPipelineTags, requiredTags: chatRequiredTags)
+    }
+
     /// The bearer token. Held in memory as @Published (so SettingsView's
     /// SecureField binds to it) but persisted to the Keychain, never
     /// UserDefaults. Loaded in init(); saved by SettingsView on change.
@@ -647,10 +710,12 @@ final class AppModel: ObservableObject {
             }
             let list = try JSONDecoder().decode(ModelsResponse.self, from: data)
             models = list.data.map(\.id).sorted()
-            // The picker offers what can chat. The rest stay served — an API
-            // client that asks for an OCR model by name still gets it — they
-            // are just not put in front of someone about to type a sentence.
-            chatModels = list.data.filter(\.chattable).map(\.id).sorted()
+            // The picker offers what this client's own rule counts as able to
+            // hold a conversation. The rest stay served — an API client that
+            // asks for an OCR model by name still gets it — they are just not
+            // put in front of someone about to type a sentence.
+            let rule = chatRule
+            chatModels = list.data.filter { rule.offers($0) }.map(\.id).sorted()
             if selectedModel.isEmpty || !chatModels.contains(selectedModel) {
                 selectedModel = chatModels.first ?? ""
             }
@@ -1632,6 +1697,17 @@ struct SettingsView: View {
                     .onChange(of: model.apiKey) { _, newValue in
                         Keychain.write(newValue)
                     }
+            }
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Models to offer").font(.caption).foregroundStyle(.secondary)
+                TextField("text-generation, image-text-to-text", text: $model.chatPipelineTags)
+                    .textFieldStyle(.roundedBorder)
+                TextField("conversational", text: $model.chatRequiredTags)
+                    .textFieldStyle(.roundedBorder)
+                Text("The menu offers models carrying these HuggingFace words — a pipeline tag "
+                     + "from the first list, and every tag in the second. Every model stays "
+                     + "reachable over the API by name. Clear a field to stop testing it.")
+                    .font(.caption2).foregroundStyle(.secondary)
             }
             HStack {
                 Spacer()
