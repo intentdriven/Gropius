@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/intentdriven/Gropius/internal/bind"
+	"github.com/intentdriven/Gropius/internal/config"
 )
 
 // freePort is a port that was momentarily bound and released, so it is very
@@ -256,4 +257,49 @@ func aNonLoopbackIPv4(t *testing.T) string {
 		return n.IP.String()
 	}
 	return ""
+}
+
+// Criterion 8 of the private-network intent: Gropius does not advertise to
+// networks the bind excludes. The advert is mDNS on the local link, so under
+// the private-network mode every advert it produced would name an address its
+// recipients cannot reach, while disclosing this Mac's hostname, the port, the
+// model count and whether a key is required to exactly the network the mode
+// exists to exclude (adr-2609091123526871 rule 8).
+//
+// It reads the configured mode and the plan, and never the detection: both are
+// state Gropius owns.
+func TestWhatGropiusAdvertisesItselfOn(t *testing.T) {
+	wildcard := bind.ForHost("0.0.0.0")
+	cases := []struct {
+		name string
+		cfg  func(c *config.Config)
+		plan bind.Plan
+		want bool
+	}{
+		{"the wildcard, advertising on", func(c *config.Config) { c.Host = "0.0.0.0" }, wildcard, true},
+		{"advertising switched off", func(c *config.Config) { c.Advertise = false }, wildcard, false},
+		{"this Mac only", func(c *config.Config) { c.Host = "127.0.0.1" }, bind.ForHost("127.0.0.1"), false},
+		{
+			"the private-network mode, with an address bound",
+			func(c *config.Config) { c.BindMode = config.BindModePrivateNetwork },
+			bind.Private("100.101.102.103", []string{"100.101.102.103"}, ""),
+			false,
+		},
+		{
+			"a bind that narrowed to this Mac",
+			func(c *config.Config) { c.Host = "0.0.0.0" },
+			wildcard.WithoutExtra("could not listen"),
+			false,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			cfg := config.Default()
+			cfg.Advertise = true
+			c.cfg(&cfg)
+			if got := advertises(cfg, c.plan); got != c.want {
+				t.Errorf("advertises() = %v, want %v", got, c.want)
+			}
+		})
+	}
 }

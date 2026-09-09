@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/intentdriven/Gropius/internal/bind"
+	"github.com/intentdriven/Gropius/internal/config"
 )
 
 // acquireBind takes the listeners a plan names, and reports the plan as it
@@ -78,6 +79,29 @@ func acquireBind(plan bind.Plan, port int, wait time.Duration, holder func() por
 			time.Sleep(retry)
 		}
 	}
+}
+
+// advertises reports whether this server announces itself over Bonjour.
+//
+// Three conditions, and the last two are about what the bind turned out to be
+// rather than what it asked for (adr-2609091123526871 rule 8). The advert is
+// mDNS on the local link: under the private-network mode, and on any bind that
+// narrowed to this Mac, every advert would name an address its recipients
+// cannot reach — while disclosing this Mac's hostname, the port, the model
+// count and whether a key is required to exactly the network the bind
+// excludes.
+//
+// It reads the configured mode and the plan, never the classifier. Both are
+// state Gropius owns end to end, which is what keeps this out of
+// adr-2609081118587999 rule 2.
+func advertises(cfg config.Config, plan bind.Plan) bool {
+	if !cfg.Advertise || !cfg.ExposedToLAN() {
+		return false
+	}
+	if cfg.BindMode == config.BindModePrivateNetwork {
+		return false
+	}
+	return !plan.LoopbackOnly()
 }
 
 // serveAll starts the server on every listener and returns a function that

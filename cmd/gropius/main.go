@@ -335,15 +335,8 @@ func runServer(lns []net.Listener, plan bind.Plan, paths config.Paths, cfg confi
 	})
 
 	// Advertise on the network so other machines can find this Mac by name.
-	// Not in the private-network mode, and not on a bind that narrowed to this
-	// Mac. The advert is mDNS on the local link, which is the network this mode
-	// exists to exclude: every advert it produced would carry this Mac's
-	// hostname, the port, the model count and whether a key is required to
-	// machines that cannot connect to what it names
-	// (adr-2609091123526871 rule 8). It reads the configured mode, never the
-	// detection.
 	var adv *discovery.Advertiser
-	if cfg.Advertise && cfg.ExposedToLAN() && cfg.BindMode != config.BindModePrivateNetwork && !plan.LoopbackOnly() {
+	if advertises(cfg, plan) {
 		adv = &discovery.Advertiser{
 			Port:         cfg.Port,
 			Models:       func() int { return len(a.Registry.Ready()) },
