@@ -950,10 +950,15 @@ func TestListModelsPublishesContextLengthUnderBothNames(t *testing.T) {
 		{RepoID: "org/wide", State: registry.StateReady, ContextLength: 262144},
 	}}
 	g := New(Options{Config: config.Default(), Pool: &stubPool{srv: fake}, Models: models})
-	srv := httptest.NewServer(g.Handler())
-	defer srv.Close()
 
-	entry := firstModelEntry(t, srv)
+	// Driven as a LAN client on a keyless install, which is the listing with
+	// no residency on it at all, so the exact-field-set assertion below stays
+	// about the context figure and the four OpenAI fields.
+	entries, _ := listModelsEntriesFrom(t, g.Handler(), "", "203.0.113.50:9999")
+	if len(entries) != 1 {
+		t.Fatalf("data = %+v, want exactly one model", entries)
+	}
+	entry := entries[0]
 	for _, name := range []string{"context_length", "max_model_len"} {
 		n, ok := entry[name].(float64)
 		if !ok || int64(n) != 262144 {
@@ -1057,9 +1062,10 @@ func TestModelsListReferenceDocumentsEveryFieldServed(t *testing.T) {
 	for k := range firstModelEntry(t, srv) {
 		served[k] = true
 	}
-	// The residency fields are served only on a keyed install, so the set the
-	// page is held to is the union of both listings — otherwise documenting
-	// them would read here as documenting a field that does not exist.
+	// The residency fields are withheld from a LAN client on a keyless
+	// install, so the set the page is held to is the union of both listings —
+	// otherwise documenting them would read here as documenting a field that
+	// does not exist.
 	keyed := residencyGateway(t, "bh_secret", runtime.Resident{
 		RepoID:   "org/warm",
 		State:    runtime.ResidencyLoaded,
@@ -1113,15 +1119,17 @@ func TestModelsListReferenceDocumentsEveryFieldServed(t *testing.T) {
 	// a declared figure is refused — which the acceptance criterion calls the
 	// documented ceiling, so it has to be a number on a user-facing page and
 	// has to be the number the code enforces.
-	// The same for residency: what the three values mean, that the fields
-	// need a key, and that reading one reserves nothing — a client that took
-	// the snapshot for a promise would be the failure this feature invites.
+	// The same for residency: what the three values mean, who the fields are
+	// served to — a client on this Mac, or one an API key admits — and that
+	// reading one reserves nothing; a client that took the snapshot for a
+	// promise would be the failure this feature invites.
 	for _, phrase := range []string{
 		"architectural maximum",
 		"may be smaller",
 		withThousands(registry.MaxContextLength),
 		"not_loaded",
 		"API key",
+		"on this Mac",
 		"snapshot",
 	} {
 		if !strings.Contains(string(page), phrase) {

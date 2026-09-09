@@ -203,24 +203,33 @@ func (g *Gateway) handleHealth(w http.ResponseWriter, r *http.Request) {
 // throws CacheNotFound when that directory is absent).
 func (g *Gateway) handleListModels(w http.ResponseWriter, r *http.Request) {
 	ready := g.models.Ready()
-	// Residency is reported only on an install that has a key configured. The
-	// three-state value is not itself a secret — an unauthenticated client can
-	// already learn it by timing a one-token completion, and in doing so it
-	// changes residency, which reporting never does — but the in-flight count
-	// and the last-used time say who is busy and when, and an open server
-	// discloses neither. The condition is the install's, not the request's: a
-	// loopback client exempt from the bearer check on a keyed install sees the
-	// same picture the control panel already shows it. A nil map means no key
-	// and no projection, which an empty one would not.
+	// Residency is reported to a client the install has admitted on its key,
+	// and to any client on this machine. The three-state value is not itself a
+	// secret — an unauthenticated client can already learn it by timing a
+	// one-token completion, and in doing so it changes residency, which
+	// reporting never does — but the in-flight count and the last-used time say
+	// who is busy and when, and an open server discloses neither to the network.
+	// A nil map means no projection, which an empty one would not.
 	//
-	// This is withAuth's own admission bit, not a second authorization path:
-	// withAuth still decides who may call the listing at all. Reading the key
-	// again here would be a second reading of a live value, and a request
+	// The two admissions are the two trust classes this server already has, and
+	// neither is new here. On a keyed install the condition is the install's,
+	// not the request's: a loopback client exempt from the bearer check sees
+	// the same picture a keyed LAN client does. On a keyless install the LAN is
+	// unauthenticated, so it is told nothing — but a client on this Mac is the
+	// class the control panel already shows exactly these facts to, over the
+	// same loopback, so withholding them from a program the same person is
+	// running on the same machine protects nothing.
+	//
+	// admittedKeyed is withAuth's own admission bit, not a second authorization
+	// path: withAuth still decides who may call the listing at all. Reading the
+	// key again here would be a second reading of a live value, and a request
 	// admitted while no key was configured could then be served as if one had
-	// been.
+	// been. isLoopback is that same middleware's loopback classification, read
+	// off the connection rather than off any header, and is the only notion of
+	// loopback this package has.
 	var residency map[string]runtime.Resident
 	var pinned map[string]bool
-	if g.admittedKeyed(r) {
+	if g.admittedKeyed(r) || isLoopback(r.RemoteAddr) {
 		// Folded on the same rule as the residency join below. The pinned set
 		// is read separately from the residency snapshot because a pin is not
 		// a property of a loaded model: a pinned model the pool is not holding
