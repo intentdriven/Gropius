@@ -78,6 +78,20 @@ func main() {
 	}
 	paths := config.NewPaths(rootDir)
 
+	// Settings are this account's own. Under a shared cache installed before
+	// they were, this account's settings are still in the shared folder, so
+	// carry them over before anything reads them — otherwise the first start
+	// after an upgrade would quietly run from the shipping defaults with the
+	// operator's API key and token left behind. Nothing is adopted from another
+	// account, and a failure here is not fatal: it means this account starts
+	// from the defaults, which is what it would have done anyway.
+	if adopted, err := paths.AdoptSharedConfig(); err != nil {
+		log.Warn("could not read the settings this account left in the shared folder — starting from the shipping defaults",
+			"path", paths.Config, "err", err)
+	} else if adopted {
+		log.Info("this account's settings now live in its own folder, not the shared one", "path", paths.Config)
+	}
+
 	start := loadStartupConfig(paths.Config)
 	cfg := start.Config
 	if start.Problem != "" {
