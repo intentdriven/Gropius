@@ -26,6 +26,25 @@ GitHub release notes.
   differently.** This is one less thing that has to hold for the queue to
   behave, not a stall anyone was hitting.
 
+
+- **A client connecting over loopback is told which models are loaded, whether
+  or not an API key is set.** `GET /v1/models` carries `state`, `in_flight`,
+  `last_used` and `pinned`, and used to carry them only on an install that had
+  a key — so the common first-run setup, a chat application beside the server
+  on one Mac with no key, had nothing to show in its model picker and no way to
+  tell a warm model from a cold one. A client reaching the server at
+  `localhost` is the same person at the same machine the control panel already
+  shows exactly these facts to, so it is now served them too. It is the
+  connection that decides, not the computer: a program on this Mac that dials
+  this Mac's network address instead is a network client here.
+  **Nothing changes for the network:** on an install with no key, a client that
+  did not connect over loopback is still served exactly the OpenAI fields and
+  the context figure, and learns nothing from the listing about what this Mac
+  is running or when. Nor can a page in a browser borrow the rule — it is the
+  same `Host` and `Origin` check the control panel is gated on, so a site that
+  points its own hostname at `127.0.0.1` is refused. An install with a key
+  behaves as before.
+
 ### Security
 
 - **Every command Gropius runs is now named by its full path.** Reading this
@@ -86,6 +105,45 @@ GitHub release notes.
   `http://localhost:11535`, the server on the same Mac that the documented
   install order puts there; the empty chat names Settings and has a button that
   opens it; and the disabled message box says why it is disabled.
+
+
+- **Saving settings no longer empties the bind address.** The bind control
+  offers two addresses, and a browser's `<select>` has no notion of a value it
+  does not offer: a Gropius bound to anything else — `localhost`, IPv6
+  loopback, or one specific address, each of which `config.json` accepts and
+  the server starts on — posted an empty host on *every* save, including saves
+  that changed nothing about the bind. The save was refused with "host must not
+  be empty", naming a field the pane never showed as wrong, and nothing on the
+  pane could be saved again until the operator edited `config.json` by hand.
+  The bind in force is now offered as an option of its own, labelled with the
+  address itself, so the pane shows the address Gropius is serving on and saves
+  it back unchanged.
+
+
+- **A disk that has stopped answering no longer holds the usage dashboard
+  open.** Every reading of the statistics store starts by flushing the writer,
+  so that it shows what has been recorded rather than what happened to have
+  reached the disk. That flush waited with nothing to interrupt it: closing the
+  panel did not stop it, and while it waited it held one of the two readings the
+  store allows at once, so a stalled disk could leave the dashboard unable to
+  answer anyone. The wait now ends with the reader — closing the panel stops the
+  work — and, for a panel left open, after ten seconds. The two views say so in
+  the two ways that suit them: the historical tables report a reading that
+  failed, and the live figures, which are in memory, are still shown, with
+  Settings saying beside them that the disk did not answer in time and that they
+  may not include the newest records. Either way it is said out loud rather than
+  left as a figure quietly missing part of the story, and it clears itself as
+  soon as the disk answers again.
+
+- **A streamed answer the client hung up on is no longer recorded as
+  cancelled.** An SSE client that treats `data: [DONE]` as the end of the
+  answer — most of them do — closes its socket on that line, without reading
+  the blank line after it. That close made the last two steps of relaying fail:
+  writing the terminator, and reading the model server's body to its end. The
+  request was then filed as cancelled and its token counts thrown away, so the
+  usage figures were short by exactly the requests that went best. An answer
+  that reached its terminal event is now recorded as delivered, with its
+  counts, whatever happens to the tidying-up after it.
 
 ## [0.4.0] - 2026-09-08
 

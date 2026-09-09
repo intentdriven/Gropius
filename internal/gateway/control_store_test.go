@@ -389,6 +389,49 @@ func TestNothingFromTheRequestReachesTheSummary(t *testing.T) {
 	}
 }
 
+// The store figures the panel is handed have to describe the reading they came
+// with, not the one before it. The endpoint reads the summaries and then
+// reports what the store has to say about itself — the lines it could not use,
+// and a writer it waited on and gave up on — so a panel showing figures that
+// are behind can say that they are. Read the other way round, the endpoint
+// carries the state of the previous poll and the trouble is always one poll
+// late.
+func TestTheStatisticsEndpointReportsTheReadingItJustDid(t *testing.T) {
+	a, srv, paths := recordingServer(t)
+	a.Stats.Add(stats.Record{Model: "org/a", At: 1788696030, Class: stats.ClassOK})
+	if err := a.StatsStore.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	// A summary line this build cannot use, which the reading counts as it
+	// goes: a figure the endpoint can only carry if it asked afterwards.
+	if err := os.WriteFile(filepath.Join(paths.Stats, "summary.jsonl"),
+		[]byte("this is not a line any Gropius wrote\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := http.Get(srv.URL + "/api/stats")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", res.StatusCode)
+	}
+	var view struct {
+		Store *stats.StoreStatus `json:"store"`
+	}
+	if err := json.NewDecoder(res.Body).Decode(&view); err != nil {
+		t.Fatal(err)
+	}
+	if view.Store == nil {
+		t.Fatal("the endpoint carries nothing about the store")
+	}
+	if view.Store.Skipped == 0 {
+		t.Error("the endpoint reports no unreadable lines, though the reading it just did found one — " +
+			"the store figures describe the poll before this one")
+	}
+}
+
 // The endpoint the Statistics tab reads carries the days whose detail the
 // store no longer holds, or nothing a person can see would say a period's
 // records are gone rather than that nothing happened in it.
