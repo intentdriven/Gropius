@@ -1086,9 +1086,25 @@ type modelRequest struct {
 	Model string `json:"model"`
 }
 
+// decodeModelRequest reads the one model name every model-action endpoint takes.
+// The body is capped here, in the single place all of them share, rather than at
+// five call sites: an uncapped decoder buffers whatever it is handed on the way
+// to the end of the first JSON value, and loopback is reachable from any browser
+// tab the person running this Mac has open.
+//
+// The cap is the settings save's, deliberately reused rather than a second
+// number invented: it is the control plane's one bound, and it is already orders
+// of magnitude more than a repository id needs, so nothing a caller legitimately
+// sends here can reach it.
 func decodeModelRequest(w http.ResponseWriter, r *http.Request) (string, bool) {
 	var req modelRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Model == "" {
+	err := json.NewDecoder(http.MaxBytesReader(w, r.Body, config.MaxConfigBytes)).Decode(&req)
+	var tooLarge *http.MaxBytesError
+	if errors.As(err, &tooLarge) {
+		writeError(w, http.StatusBadRequest, "request body is too large")
+		return "", false
+	}
+	if err != nil || req.Model == "" {
 		writeError(w, http.StatusBadRequest, `a "model" field is required`)
 		return "", false
 	}

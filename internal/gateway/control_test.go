@@ -1105,3 +1105,72 @@ func pinnedModels(ids ...string) map[string]config.ModelSettings {
 	}
 	return out
 }
+
+// The model-action endpoints decode a caller-supplied body, so they are bounded
+// the way the two handlers beside them are: the settings save at
+// config.MaxConfigBytes and the completions handler at maxRequestBody. Without a
+// cap the decoder buffers whatever it is fed on the way to the first JSON value.
+// Loopback-only is not the bound — a hostile browser tab reaches loopback.
+func TestModelActionsRefuseAnOversizedBody(t *testing.T) {
+	srv := newTestControl(t, config.Default())
+
+	modelPaths := []string{
+		"/api/models/download",
+		"/api/models/cancel",
+		"/api/models/delete",
+		"/api/models/load",
+		"/api/models/unload",
+	}
+
+	huge := `{"model":"` + strings.Repeat("a", config.MaxConfigBytes) + `"}`
+	for _, path := range modelPaths {
+		resp := postJSON(t, srv, path, huge)
+		var body struct {
+			Error struct {
+				Message string `json:"message"`
+			} `json:"error"`
+		}
+		json.NewDecoder(resp.Body).Decode(&body)
+		resp.Body.Close()
+
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Errorf("%s: status = %d for an oversized body, want 400", path, resp.StatusCode)
+		}
+		if !strings.Contains(body.Error.Message, "too large") {
+			t.Errorf("%s: message = %q, want it to name the body as too large",
+				path, body.Error.Message)
+		}
+	}
+
+	// A body of the size these endpoints actually take is untouched: it reaches
+	// the handler and is answered on its merits, not refused for its length.
+	for _, path := range modelPaths {
+		resp := postJSON(t, srv, path, `{"model":"acme/not-a-real-model"}`)
+		var body struct {
+			Error struct {
+				Message string `json:"message"`
+			} `json:"error"`
+		}
+		json.NewDecoder(resp.Body).Decode(&body)
+		resp.Body.Close()
+
+		if strings.Contains(body.Error.Message, "too large") {
+			t.Errorf("%s: an ordinary body was refused as too large: %q", path, body.Error.Message)
+		}
+	}
+
+	// A body with no model at all still gets the answer it always got.
+	resp := postJSON(t, srv, "/api/models/load", `{}`)
+	var body struct {
+		Error struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	json.NewDecoder(resp.Body).Decode(&body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest ||
+		!strings.Contains(body.Error.Message, `a "model" field is required`) {
+		t.Errorf("empty body: status = %d, message = %q; want 400 and the model-required message",
+			resp.StatusCode, body.Error.Message)
+	}
+}
