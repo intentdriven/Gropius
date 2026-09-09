@@ -21,6 +21,14 @@ GitHub release notes.
   answer ends, the reason is logged once, and the connection to the model
   server is closed.
 
+- **Clicking Load again no longer takes a second place in the queue for
+  memory.** Loading a model takes minutes and the button answers at once, so an
+  operator who saw nothing happen clicked it again — and with eviction grace
+  switched on, each click held one of the few places in that queue for the
+  whole maximum wait, until nothing else could load at all. A click that finds
+  the model already loading now joins that load instead of starting another,
+  and is answered the same way.
+
 - **The API key and the preload list are bounded, and a refusal says which one
   it is about.** Both could be saved at any size, so either could grow
   `config.json` until the next start could no longer read it — which locks the

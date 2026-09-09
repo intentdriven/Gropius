@@ -34,6 +34,19 @@ type Control struct {
 	// against it so a future launch can tell this user's server apart from a
 	// process squatting on the port (see cmd/gropius singleton coordination).
 	Root string
+
+	// loadMu guards loading, the set of models the Load button already has a
+	// background load running for, keyed by folded repo id.
+	//
+	// The button answers before the load finishes — a large model takes
+	// minutes — so an operator who sees nothing happen clicks it again. Each
+	// click used to start a goroutine of its own, and with eviction grace on
+	// each of those occupies one of the places in the queue for memory for the
+	// whole maximum wait: enough clicks fill the queue and every cold load,
+	// including the ones serving requests from the network, is refused until
+	// they drain.
+	loadMu  sync.Mutex
+	loading map[string]bool
 }
 
 // Handler returns the control plane and web UI, restricted to loopback.
@@ -926,17 +939,55 @@ func (c *Control) handleLoad(w http.ResponseWriter, r *http.Request) {
 	}
 	// Loading a large model can take minutes; do not hold the HTTP request open
 	// for it. The UI watches /api/events for the model to appear as resident.
-	go func() {
-		ctx, cancel := contextWithTimeout(15 * time.Minute)
-		defer cancel()
-		_, release, err := c.App.Pool.Acquire(ctx, model)
-		if err != nil {
-			c.App.Log.Error("preload failed", "model", model, "err", err)
-			return
-		}
-		release()
-	}()
+	//
+	// One background load per model, however many times the button is pressed:
+	// a second one would ask the pool for a model the first is already loading
+	// and hold a second place in the queue for memory to do it. A click that
+	// finds a load already running is answered with the same status, because
+	// it is the same true answer — this model is loading.
+	if c.beginLoad(model) {
+		go func() {
+			defer c.endLoad(model)
+			ctx, cancel := contextWithTimeout(15 * time.Minute)
+			defer cancel()
+			_, release, err := c.App.Pool.Acquire(ctx, model)
+			if err != nil {
+				c.App.Log.Error("preload failed", "model", model, "err", err)
+				return
+			}
+			release()
+		}()
+	}
 	writeJSON(w, http.StatusAccepted, map[string]any{"status": "loading", "model": model})
+}
+
+// beginLoad claims the background load of a model, reporting whether this
+// caller is the one that has to run it.
+//
+// Keyed on the folded repo id, which is how the pool itself looks a model up:
+// two spellings are two strings and one model, and keying on the spelling
+// would let a second click through under a different case.
+func (c *Control) beginLoad(model string) bool {
+	key := config.FoldRepoID(model)
+	c.loadMu.Lock()
+	defer c.loadMu.Unlock()
+	if c.loading[key] {
+		return false
+	}
+	if c.loading == nil {
+		c.loading = make(map[string]bool)
+	}
+	c.loading[key] = true
+	return true
+}
+
+// endLoad releases the claim, whether the load succeeded or failed. The next
+// click starts a fresh one — a load that failed is worth retrying, and a model
+// that is now resident costs the pool nothing to acquire again.
+func (c *Control) endLoad(model string) {
+	c.loadMu.Lock()
+	defer c.loadMu.Unlock()
+	delete(c.loading, config.FoldRepoID(model))
 }
 
 func (c *Control) handleUnload(w http.ResponseWriter, r *http.Request) {
