@@ -93,6 +93,20 @@ const (
 	// well: outside the handful of declarations that build the endpoint list,
 	// nothing in internal/gateway or cmd/gropius may name it at all.
 	detectionType = "Endpoint"
+	// resolverPkg is the carve-out: the one package outside the endpoint list
+	// that may read the classifier, because the private-network bind mode has
+	// to resolve an address from it (adr-2609081118587999's 2026-09-08
+	// amendment, adr-2609091123526871 rule 10).
+	//
+	// It is scanned for by name everywhere the classifier is, and for the same
+	// reason. A helper in the resolver taking an interface list and returning a
+	// bool would be the classification with a different spelling, and reaching
+	// it from the gateway, the panel or the command has to be exactly as loud
+	// as reaching netshape directly — otherwise the carve-out is a laundry and
+	// the amendment widened by accident, which is the failure this file exists
+	// to make impossible to do quietly.
+	resolverPkg  = "github.com/intentdriven/Gropius/internal/bind/private"
+	resolverName = "private"
 )
 
 // enforcementPath is every package that decides who may reach this server or
@@ -107,6 +121,7 @@ const (
 // below instead.
 var enforcementPath = []string{
 	"github.com/intentdriven/Gropius/internal/config",
+	"github.com/intentdriven/Gropius/internal/bind",
 	"github.com/intentdriven/Gropius/internal/runtime",
 	"github.com/intentdriven/Gropius/internal/app",
 	"github.com/intentdriven/Gropius/internal/capability",
@@ -131,6 +146,16 @@ var notEnforcement = map[string]string{
 	"github.com/intentdriven/Gropius/internal/mlxtest":  "test helpers; nothing ships in the binary",
 	"github.com/intentdriven/Gropius/internal/sitetest": "test helpers for the landing-page renderer",
 	"github.com/intentdriven/Gropius/cmd/gropius-site":  "renders the landing page offline and serves nothing",
+}
+
+// carveOut is the amendment, written down. It is deliberately not part of
+// notEnforcement: the resolver DOES decide who may reach this server — it picks
+// the address the private-network mode binds — and filing it as "not
+// enforcement" would be the quiet widening the amendment forbade in the same
+// paragraph that granted it. It is enforcement, it reads the detection, and it
+// is the only thing in the module of which both are true.
+var carveOut = map[string]string{
+	resolverPkg: "resolves the address the private-network bind mode acquires, which is enforcement reading a detection — permitted by adr-2609081118587999's 2026-09-08 amendment, on its two conditions: ambiguity is refused rather than resolved, and the selection is always shown. Nothing else here is opened, and the package is scanned for by name wherever the classifier is",
 }
 
 func TestTheEnforcementPathCannotSeeThePrivateNetworkDetection(t *testing.T) {
@@ -169,7 +194,7 @@ func TestEveryPackageIsOnOneSideOfTheRule(t *testing.T) {
 	seen := map[string]bool{}
 	for _, pkg := range strings.Fields(string(out)) {
 		seen[pkg] = true
-		if onPath[pkg] || notEnforcement[pkg] != "" {
+		if onPath[pkg] || notEnforcement[pkg] != "" || carveOut[pkg] != "" {
 			continue
 		}
 		t.Errorf("%s is on neither enforcementPath nor notEnforcement, so no rule here covers it and it would pass in silence — decide which it is: if anything in it decides who may reach this server or what it will do for them, add it to enforcementPath; otherwise add it to notEnforcement with the reason (adr-2609081118587999 rule 2)", pkg)
@@ -184,6 +209,39 @@ func TestEveryPackageIsOnOneSideOfTheRule(t *testing.T) {
 	for pkg := range notEnforcement {
 		if !seen[pkg] {
 			t.Errorf("notEnforcement names %s, which is not a package in this module any more — remove it", pkg)
+		}
+	}
+	for pkg := range carveOut {
+		if !seen[pkg] {
+			t.Errorf("carveOut names %s, which is not a package in this module any more — remove it, and with it the exception the amendment granted", pkg)
+		}
+	}
+}
+
+// The carve-out is one package wide, and this is what holds it there: the
+// classifier is imported by the endpoint list's package, by the resolver, and
+// by nothing else in the module. A second importer is a second place the
+// detection reaches enforcement, and it fails here rather than being noticed
+// in review.
+func TestOnlyTheEndpointListAndTheResolverImportTheClassifier(t *testing.T) {
+	out, err := exec.Command("go", "list", "-f", "{{.ImportPath}} {{join .Imports \" \"}}", "github.com/intentdriven/Gropius/...").CombinedOutput()
+	if err != nil {
+		t.Fatalf("go list: %v\n%s", err, out)
+	}
+	allowed := map[string]bool{
+		"github.com/intentdriven/Gropius/internal/gateway": true,
+		resolverPkg: true,
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 0 {
+			continue
+		}
+		pkg := fields[0]
+		for _, imp := range fields[1:] {
+			if imp == detectionPkg && !allowed[pkg] {
+				t.Errorf("%s imports %s — the classifier is read by the endpoint list and by the private-network resolver, and by nothing else (adr-2609081118587999 rule 2 and its amendment)", pkg, detectionPkg)
+			}
 		}
 	}
 }
@@ -419,6 +477,9 @@ func scanForDetection(t *testing.T, dir string) []detectionRef {
 			case *ast.SelectorExpr:
 				if id, ok := v.X.(*ast.Ident); ok && id.Name == detectionName {
 					add(detectionName + "." + v.Sel.Name)
+				}
+				if id, ok := v.X.(*ast.Ident); ok && id.Name == resolverName {
+					add(resolverName + "." + v.Sel.Name)
 				}
 			case *ast.Ident:
 				switch v.Name {

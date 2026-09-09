@@ -1,6 +1,10 @@
 package config
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"testing"
+)
 
 // Host is the one setting an operator can only reach by editing config.json by
 // hand (the panel offers the wildcard and loopback and nothing else, iss-7), so
@@ -10,10 +14,13 @@ import "testing"
 // the same value went into the endpoint list as a base URL, control characters
 // and all.
 //
-// What is accepted is what the listener accepts, no less: cmd/gropius builds
-// the address as "<host>:<port>", so a bracketed IPv6 literal binds and its
-// unbracketed form does not, and both spellings have to stay legal here or a
-// working install stops starting.
+// What is accepted is what the listener accepts, no less. That set widened
+// when the listen address stopped being built with fmt.Sprintf: every address
+// now goes through net.JoinHostPort (adr-2609091123526871 rule 5), which
+// brackets an IPv6 literal itself, so "::1" and "[::1]" are the same bind and
+// both are accepted. What is still refused is a value JoinHostPort would
+// bracket into something no listener takes — "192.168.1.5:8080" is a host and
+// a port, not a host.
 func TestValidBindHostAcceptsWhatCanBeBoundAndRefusesWhatCannot(t *testing.T) {
 	cases := []struct {
 		host string
@@ -43,10 +50,10 @@ func TestValidBindHostAcceptsWhatCanBeBoundAndRefusesWhatCannot(t *testing.T) {
 		{"-leading-dash.local", false, "not a legal label"},
 		{"trailing-dash-.local", false, "nor is this one"},
 		{"a..b", false, "an empty label"},
-		{"::", false, "the IPv6 wildcard unbracketed: \"::\" + \":11535\" is not an address"},
-		{"::1", false, "nor is IPv6 loopback unbracketed — measured, the listen fails"},
-		{"fd00::1", false, "nor a routable one"},
-		{"fe80::1%en0", false, "nor a zoned one"},
+		{"::", true, "the IPv6 wildcard unbracketed: JoinHostPort brackets it, and it binds"},
+		{"::1", true, "IPv6 loopback unbracketed: measured, it binds once JoinHostPort spells it"},
+		{"fd00::1", true, "and a routable one"},
+		{"fe80::1%en0", true, "and a zoned one, which the listener takes and a URL cannot carry"},
 	}
 	for _, c := range cases {
 		if got := ValidBindHost(c.host); got != c.want {
@@ -67,7 +74,7 @@ func TestValidateRefusesAHostThatCannotBeBound(t *testing.T) {
 			t.Errorf("Validate() accepted Host %q — it cannot be bound, and it reaches the endpoint list as a base URL", host)
 		}
 	}
-	for _, host := range []string{"0.0.0.0", "127.0.0.1", "localhost", "[::1]", "[fd00::1]", "alices-mac.local"} {
+	for _, host := range []string{"0.0.0.0", "127.0.0.1", "localhost", "[::1]", "::1", "[fd00::1]", "fd00::1", "alices-mac.local"} {
 		c := Default()
 		c.Host = host
 		if err := c.Validate(); err != nil {
@@ -221,6 +228,65 @@ func TestABindHostThatIsSecretlyAnAddressIsRefused(t *testing.T) {
 	for _, host := range []string{"0.0.0.0", "127.0.0.1", "192.168.1.5", "[::1]", "[fd00::1]"} {
 		if !ValidBindHost(host) {
 			t.Errorf("ValidBindHost(%q) refused an address", host)
+		}
+	}
+}
+
+// The bind mode is its own field, never a sentinel in Host
+// (adr-2609091123526871 rule 6). A word like "private" in Host passes host
+// validation as a name, fails to listen, and exits the app with no panel and
+// no recovery but the file — the precise failure the mode exists to remove.
+//
+// Absent is the default, and it is what every configuration written before the
+// field existed carries: a file with no bind_mode loads, and its Host decides
+// the bind exactly as it did.
+func TestBindModeIsItsOwnFieldWithOnlyTwoValues(t *testing.T) {
+	for _, mode := range []string{BindModeHost, BindModePrivateNetwork} {
+		c := Default()
+		c.BindMode = mode
+		if err := c.Validate(); err != nil {
+			t.Errorf("Validate() refused bind_mode %q: %v", mode, err)
+		}
+	}
+	for _, mode := range []string{"private", "private network", "PRIVATE-NETWORK", "lan", "true"} {
+		c := Default()
+		c.BindMode = mode
+		if err := c.Validate(); err == nil {
+			t.Errorf("Validate() accepted bind_mode %q — an unrecognised mode would decide the bind, and nothing downstream knows what it means", mode)
+		}
+	}
+	// A file that predates the field is not a file with a broken bind.
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(`{"host":"0.0.0.0","port":11535}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, _, err := Load(path)
+	if err != nil {
+		t.Fatalf("a configuration with no bind_mode did not load: %v", err)
+	}
+	if cfg.BindMode != BindModeHost {
+		t.Errorf("bind_mode = %q, want the default", cfg.BindMode)
+	}
+}
+
+// ExposedToLAN answers from the operator's choice and never from the interface
+// list (adr-2609091123526871 rule 7). It is read by the
+// generate-a-key-or-lock-down branch, the eviction-grace key requirement, the
+// panel's warning and Bonjour; asking whether a private-network interface
+// exists would put every one of those on another process's state, which is
+// rule 2 of adr-2609081118587999 and is not what its amendment opened.
+//
+// So the private-network mode is exposed whatever Host says, including when it
+// has fallen back to loopback because it found no address. That errs closed —
+// a key required for a server nothing off this Mac can reach — and the panel
+// says which of the two happened.
+func TestThePrivateNetworkModeIsExposedWhateverHostSays(t *testing.T) {
+	for _, host := range []string{"0.0.0.0", "127.0.0.1", "localhost", "[::1]"} {
+		c := Default()
+		c.Host = host
+		c.BindMode = BindModePrivateNetwork
+		if !c.ExposedToLAN() {
+			t.Errorf("Host %q in the private-network mode: ExposedToLAN() = false — the mode binds an address other machines reach, so every control that turns on exposure must arm", host)
 		}
 	}
 }

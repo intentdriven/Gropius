@@ -383,8 +383,24 @@ func (p Paths) EnsureDirs() error {
 // Config is the user-facing settings file.
 type Config struct {
 	// Host to bind the gateway to. 0.0.0.0 exposes it to the LAN.
+	//
+	// It is one of the addresses this server answers on rather than the only
+	// one: loopback is acquired alongside whatever this names, so narrowing
+	// the bind never costs the operator their own control panel
+	// (adr-2609091123526871, iss-7). internal/bind turns this into the set of
+	// addresses actually acquired.
 	Host string `json:"host"`
-	Port int    `json:"port"`
+	// BindMode decides how the bind is worked out. Empty — the default, and
+	// what every configuration written before this field carries — means Host
+	// decides. BindModePrivateNetwork means the address is resolved from this
+	// Mac's interfaces instead, and Host is left as the operator last set it
+	// so that switching back restores their choice.
+	//
+	// Its own field rather than a sentinel in Host, deliberately: a word like
+	// "private" passes host validation as a name, then fails to listen, and
+	// the app exits with no panel and no recovery but editing the file.
+	BindMode string `json:"bind_mode"`
+	Port     int    `json:"port"`
 
 	// APIKey, when non-empty, requires "Authorization: Bearer <key>" on /v1
 	// requests. Empty (the default) means the LAN endpoint is open.
@@ -920,7 +936,15 @@ func (c Config) Validate() error {
 	// that repeats it. Load turns a refusal here into a lock-down to loopback,
 	// which is the same fail-closed path a corrupt file takes.
 	if !ValidBindHost(c.Host) {
-		return fmt.Errorf("host %q is neither an IP address (bracketed, as \"[::1]\", for IPv6) nor a host name", c.Host)
+		return fmt.Errorf("host %q is neither an IP address nor a host name", c.Host)
+	}
+	// An unrecognised bind mode decides the bind, and nothing downstream knows
+	// what it decided. Refused rather than repaired, in the direction every
+	// other bind fault runs: Load turns this into a loopback bind with the
+	// rest of the operator's settings kept, and Save turns it into a message
+	// while they are there to read it.
+	if c.BindMode != BindModeHost && c.BindMode != BindModePrivateNetwork {
+		return fmt.Errorf("bind_mode %q is not a bind mode this build has; leave it out for the address in \"host\", or set %q", c.BindMode, BindModePrivateNetwork)
 	}
 	if c.DecodeConcurrency < 1 {
 		return fmt.Errorf("decode_concurrency must be >= 1, got %d", c.DecodeConcurrency)
@@ -959,33 +983,43 @@ func (c Config) Validate() error {
 	return c.validateSampling()
 }
 
+// The two bind modes. A third choice in Settings, never automatic: switching
+// it on changes who can reach an existing install, and a default that moves
+// the day someone installs a VPN is a default change wearing a feature's
+// clothes.
+const (
+	// BindModeHost is the default: Config.Host is the bind.
+	BindModeHost = ""
+	// BindModePrivateNetwork serves on the one address this Mac holds on a
+	// private network, and on this Mac. It fails closed to this Mac alone when
+	// there is no such address, or more than one — it never picks between them
+	// (adr-2609081118587999, amendment condition 1).
+	BindModePrivateNetwork = "private-network"
+)
+
 // ValidBindHost reports whether a value is something cmd/gropius can bind.
 //
 // It is as wide as the listener and no wider, and that is checked rather than
 // asserted: every value the table in host_test.go marks bindable was watched
 // to produce a listener, and every value it refuses was watched to fail.
 //
-// The address is built as "<host>:<port>", so an IPv6 literal binds only when
-// the configuration carries it bracketed. That is a rule about spelling, not
-// about which addresses exist: "[::1]:11535" listens and "::1:11535" is
-// refused by net.SplitHostPort as "too many colons in address" — at every
-// port, for every IPv6 address, on every machine. An earlier version of this
-// comment said both spellings had to stay legal "or a working install stops
-// starting", which had it exactly backwards: an unbracketed IPv6 host is one
-// no working install can be carrying, because main.go logs "cannot listen"
-// and exits 1 before it serves anything. Accepting it turned a hand-edited
-// typo into an app that would not start; refusing it sends Load down the
-// narrow-to-loopback path, and the app starts and says why. A zone
-// ("[fe80::1%en0]") binds and stays legal, even though URLHost refuses to put
-// one in a URL.
+// An IPv6 literal is accepted in either spelling. The listen address is built
+// by internal/bind through net.JoinHostPort (adr-2609091123526871 rule 5),
+// which brackets a host carrying colons itself, so "::1" and "[::1]" name the
+// same bind and both listen. That was not true while the address was built
+// with fmt.Sprintf: "::1:11535" came back from net.SplitHostPort as "too many
+// colons in address" and the app exited before it served anything, which is
+// iss-7's second fault. The bracketed spelling stays accepted because
+// config.json files carry it.
+//
+// What a colon still cannot do is carry a port. "192.168.1.5:8080" parses as
+// no address, and a colon is not legal in a host-name label, so it is refused
+// here rather than bracketed by JoinHostPort into an address no listener
+// takes. A zone ("fe80::1%en0", bracketed or not) binds and stays legal, even
+// though URLHost refuses to put one in a URL.
 func ValidBindHost(host string) bool {
 	bare, ok := unbracket(host)
 	if !ok {
-		return false
-	}
-	// Unbracketed, a colon is the port separator, so no value carrying one is
-	// a host cmd/gropius can bind — neither "::1" nor "192.168.1.5:8080".
-	if !strings.HasPrefix(host, "[") && strings.Contains(bare, ":") {
 		return false
 	}
 	if addr, zone, hasZone := strings.Cut(bare, "%"); hasZone {
@@ -1181,6 +1215,20 @@ func validHostLabel(label string) bool {
 // says today, and a malformed value binds nothing at all, and neither is a
 // reason to stand down.
 func (c Config) ExposedToLAN() bool {
+	// The private-network mode binds an address other machines reach, so every
+	// control that turns on exposure arms — from the mode the operator chose,
+	// never from whether a private-network interface is present. Reading the
+	// interfaces here would put the bearer-token branch, the eviction-grace
+	// requirement, the panel's warning and Bonjour on another process's state,
+	// which adr-2609081118587999 rule 2 closes and its amendment did not open:
+	// the amendment opened which address the mode binds, and nothing else.
+	//
+	// The cost, stated rather than hidden: on a Mac with no private network
+	// the mode serves loopback only and an API key is still required for it.
+	// That errs closed, and the panel says which of the two happened.
+	if c.BindMode == BindModePrivateNetwork {
+		return true
+	}
 	bare, ok := unbracket(c.Host)
 	if !ok {
 		return true
