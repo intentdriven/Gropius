@@ -126,12 +126,19 @@ What that withholds is the *listing*, and only the listing. On a server left
 open, a client that never presents a key can still work out which models are
 warm by timing a one-token completion — a loaded model answers straight away, a
 cold one takes seconds to a minute — and that probe loads the model it asks
-about, which reading the field never does. A model already at its request
-ceiling, or one that does not fit in the memory budget, is refused with a
-message that names how many requests are already in flight for it, or the
-budget figure. So an unkeyed
+about, which reading the field never does. So an unkeyed
 server keeps activity off the listing it serves the network; it does not keep
 it secret. The key is what protects the server.
+
+**A refusal follows the same rule.** A model already at its request ceiling, or
+one that does not fit in the memory budget, is refused with a message that
+names how many requests are already in flight for it, or the budget figure —
+and those are the same facts as the listing's, so they go to the same clients.
+A client the listing tells nothing is refused instead with
+`cannot serve this model right now`.
+The status code and every response header are identical
+either way, so a client that backs off on the status keeps working unchanged;
+only the sentence differs.
 
 The key is also one key, shared by every client that has it. A client holding
 it sees the whole machine's activity — every model's in-flight count and
@@ -224,8 +231,8 @@ rules.
   ceiling in that moment. A model with a request
   in flight is never the one chosen, a model still loading is not either, and a
   pinned model is not either. If nothing can be freed, the request is refused
-  with an error naming the memory pressure. That refusal names no model: which
-  models this Mac is protecting stays off the network.
+  with an error naming the memory pressure, on the rule above. That refusal
+  names no model: which models this Mac is protecting stays off the network.
 - **Eviction grace** (**Settings**, off by default) changes when that unload
   happens. With it on, a model is protected for a set interval after it
   finishes a request, and a request that needs its memory waits for another

@@ -103,6 +103,20 @@ GitHub release notes.
   guards what `GET /v1/models` reports about which models are loaded, because
   that listing is gated on the same "came from this machine" test.
 
+- **An open server no longer tells the network how busy it is when it refuses
+  a request.** Asking for a model that is already at its request ceiling, or
+  one too large for the memory budget, came back with a message naming how many
+  requests that model was already handling, or the budget in bytes — which is a
+  fraction of this Mac's memory, and so says roughly how much it has. Any
+  client could induce either by saturating a model or asking for a large one.
+  Those are the same facts the models list withholds from an open server's
+  network clients, so the refusal now withholds them on the same rule: a client
+  on this Mac, and any client an API key admits, still gets the message that
+  says what is actually wrong; everyone else gets `cannot serve this model
+  right now`. **Backing off is unaffected** — the status code and every
+  response header are the same for both, so a client that retries on the status
+  behaves exactly as it did.
+
 - **Every command Gropius runs is now named by its full path.** Reading this
   Mac's Bonjour name, opening the control panel in a browser and copying the
   endpoint each started a small system command by bare name, so the one that

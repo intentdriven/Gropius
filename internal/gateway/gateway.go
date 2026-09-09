@@ -261,6 +261,25 @@ func sameOriginFetch(r *http.Request) bool {
 	}
 }
 
+// entitled reports whether r may be told what this machine is doing — which
+// models are resident, how busy they are, and the memory budget they are
+// measured against.
+//
+// It is one rule with two arms, and both are trust classes this server already
+// had. On a keyed install the condition is the install's, not the request's:
+// withAuth has already decided who may call at all, and a loopback client
+// exempt from the bearer check sees the same picture a keyed LAN client does.
+// On a keyless install the LAN is unauthenticated and is told nothing, while a
+// client on this Mac is the class the control panel already shows exactly
+// these facts to over the same loopback.
+//
+// The models list and the pool's refusals answer here rather than each
+// spelling the rule out, so a fact withheld from one is withheld from the
+// other. A third notion of entitlement would be a third thing to keep right.
+func (g *Gateway) entitled(r *http.Request) bool {
+	return g.admittedKeyed(r) || fromThisMachine(r)
+}
+
 // isLoopback reports whether a RemoteAddr is on this machine.
 func isLoopback(remoteAddr string) bool {
 	host := remoteAddr
@@ -308,16 +327,16 @@ func (g *Gateway) handleListModels(w http.ResponseWriter, r *http.Request) {
 	// admitted while no key was configured could then be served as if one had
 	// been.
 	//
-	// The loopback arm is fromThisMachine, not a bare source-address check.
-	// withAuth returns before its own Host and Origin guards when no key is
-	// configured, so on a keyless install nothing upstream has looked at either
-	// header: a DNS-rebound page would arrive from 127.0.0.1 carrying the
+	// The loopback arm of entitled is fromThisMachine, not a bare source-address
+	// check. withAuth returns before its own Host and Origin guards when no key
+	// is configured, so on a keyless install nothing upstream has looked at
+	// either header: a DNS-rebound page would arrive from 127.0.0.1 carrying the
 	// attacker's Host and read exactly the activity this handler withholds from
 	// the LAN. The guards therefore have to be applied here, and they are the
 	// same ones — the same function — the control plane is gated on.
 	var residency map[string]runtime.Resident
 	var pinned map[string]bool
-	if g.admittedKeyed(r) || fromThisMachine(r) {
+	if g.entitled(r) {
 		// Folded on the same rule as the residency join below. The pinned set
 		// is read separately from the residency snapshot because a pin is not
 		// a property of a loaded model: a pinned model the pool is not holding
@@ -546,7 +565,16 @@ func (g *Gateway) handleCompletions(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusServiceUnavailable, "the model could not be started")
 			return
 		}
-		writeError(w, http.StatusServiceUnavailable, err.Error())
+		// What is left is the pool saying it will not serve this request now.
+		// Those texts are informative on purpose and describe this Mac, so
+		// they go only to a client this server owes an account of itself; see
+		// genericRefusal. The status code and the wait headers already set
+		// above are the same either way, so a client backing off is unaffected.
+		msg := genericRefusal
+		if g.entitled(r) {
+			msg = err.Error()
+		}
+		writeError(w, http.StatusServiceUnavailable, msg)
 		return
 	}
 	defer release()
@@ -1165,6 +1193,20 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(v)
 }
+
+// genericRefusal is what a client the server owes no account of itself is told
+// when the pool will not serve its request.
+//
+// The pool's own refusals are informative on purpose — they name the number of
+// requests already in flight for a model, or the resident memory budget in
+// bytes — and both are facts about this Mac rather than about the request. The
+// budget is a fraction of physical RAM, so it says roughly how much memory this
+// machine has, and a client can induce either refusal itself by saturating a
+// model or by asking for one it knows is large. That is the same class of fact
+// the models list withholds from an open server's network clients, so it is
+// withheld here on the same predicate. The status code and every header are
+// unchanged, because a client backing off honestly reads those, not this text.
+const genericRefusal = "cannot serve this model right now"
 
 // writeError renders an OpenAI-shaped error, which is what clients parse.
 func writeError(w http.ResponseWriter, status int, msg string) {
