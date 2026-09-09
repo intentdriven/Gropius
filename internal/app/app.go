@@ -39,6 +39,11 @@ type App struct {
 	StatsStore *stats.FileStore
 	Log        *slog.Logger
 
+	// logLevel is Options.LogLevel: the variable Log's handler reads. Held so
+	// that applyLogLevel can move it at a save. Nil is the switched-off case
+	// and every method below tolerates one.
+	logLevel *slog.LevelVar
+
 	// bindPlan is the set of addresses this process acquired at startup, which
 	// is what the endpoint list and the panel report. It is fixed for the life
 	// of the process: nothing re-binds (adr-2609091123526871 rule 9), so a
@@ -136,6 +141,16 @@ type Options struct {
 	// acquire listeners — every test — wants, and what the app did before a
 	// bind became a set.
 	Bind bind.Plan
+	// LogLevel is the variable the process's log handler reads on every line,
+	// so that saving a new log_level takes effect on the next line rather than
+	// at the next start. Nil — what every test that does not care builds — means
+	// the level is fixed for the life of the process, which is what it was
+	// before this field existed.
+	//
+	// It is the level and not the logger: Log above is what the app writes
+	// through, and handing the app a second way to reach the handler would be a
+	// second answer to "what level is in force".
+	LogLevel *slog.LevelVar
 }
 
 // New wires the application together.
@@ -188,6 +203,7 @@ func New(opts Options) (*App, error) {
 		Stats:       stats.New(stats.Options{Store: store}),
 		StatsStore:  store,
 		Log:         opts.Log,
+		logLevel:    opts.LogLevel,
 		cfg:         opts.Config,
 		bindPlan:    opts.Bind,
 		downloads:   map[string]*download{},
@@ -251,6 +267,7 @@ func New(opts Options) (*App, error) {
 		MaxLoadWaitersPerSource: 2,
 	})
 	a.applyStatistics(opts.Config)
+	a.applyLogLevel(opts.Config)
 
 	// The fit check cannot refuse a file — a hand-edited one can pin anything —
 	// so an over-budget set reaches the pool whatever this says. Passing the
@@ -385,7 +402,35 @@ func (a *App) SetConfig(c config.Config) error {
 	// already waiting rather than leaving them to sit out a grace nobody wants
 	// any more.
 	a.Pool.SetEvictionGrace(a.enforcedGrace(c))
+	// Applied live, and last: the line below is written at whatever level this
+	// save just chose, so an operator who switches to detailed sees the save
+	// that switched it in the detail they asked for.
+	a.applyLogLevel(c)
+	// Said out loud, at the sparse level. On a Mac several people log into,
+	// the control plane asks nobody for a password, so a server whose settings
+	// changed under it is a fact the person reading the log afterwards has no
+	// other way to recover. Only the level is named: every other field here is
+	// either uninteresting or a secret, and a save line that printed the API
+	// key would undo the whole point of having a log file.
+	a.Log.Info("settings changed", "log_level", c.EffectiveLogLevel())
 	return nil
+}
+
+// applyLogLevel puts the chosen level into force.
+//
+// One function, called from the composition root and from every save, for the
+// reason applyStatistics gives: a start and a save that worked the level out
+// separately would be two answers to what is in force, and the one an operator
+// could not see is the one that would be wrong.
+//
+// A nil variable is the switched-off case — an App assembled without one, which
+// is every test that does not care — and means the level is fixed for the life
+// of the process, exactly as it was before this existed.
+func (a *App) applyLogLevel(c config.Config) {
+	if a.logLevel == nil {
+		return
+	}
+	a.logLevel.Set(c.SlogLevel())
 }
 
 // evictionGraceFor turns the stored settings into the two intervals the pool
@@ -714,8 +759,25 @@ type poolObserver struct {
 
 func (o poolObserver) LoadStarted(repoID string) { o.rec.LoadStarted(repoID) }
 
+// LoadFinished records the load and says, in one sparse line, whether the
+// model is now serving.
+//
+// A model arriving in memory and a model failing to arrive are two of the
+// handful of events an operator reads the log to reconstruct, so each gets one
+// line at the sparse level and neither carries a figure. How long the load
+// took is a figure, and so is the error: a launch failure wraps whatever the
+// child process said, which on this path can be an os.PathError carrying
+// absolute paths out of this account's own home directory. Both go to the
+// detailed level, where the operator has asked for them.
 func (o poolObserver) LoadFinished(repoID string, took time.Duration, err error) {
 	o.rec.LoadFinished(repoID, took, err)
+	if err != nil {
+		o.log.Info("model failed to load", "model", repoID)
+		o.log.Debug("model failed to load", "model", repoID, "took", took, "err", err)
+		return
+	}
+	o.log.Info("model loaded", "model", repoID)
+	o.log.Debug("model loaded", "model", repoID, "took", took)
 }
 
 func (o poolObserver) EntryStopped(repoID string, reason runtime.StopReason) {
@@ -731,6 +793,13 @@ func (o poolObserver) EntryStopped(repoID string, reason runtime.StopReason) {
 		mapped = string(reason)
 	}
 	o.rec.Removed(repoID, mapped)
+	// The other half of the pair above: a model that is no longer in memory,
+	// and which of the seven ways it went. The reason is on the sparse line
+	// rather than below it because "unloaded" and "evicted" are different
+	// events to the person reading, not two levels of detail about one — an
+	// operator whose model keeps going away needs to know at a glance whether
+	// something took it or it timed out.
+	o.log.Info("model unloaded", "model", repoID, "reason", mapped)
 }
 
 // stopReasons maps every reason the pool can give onto the recorder's own. It

@@ -151,6 +151,7 @@ var notEnforcement = map[string]string{
 	"github.com/intentdriven/Gropius/cmd/gropius":       "reaches the endpoint list through the gateway, so no import rule can cover it; covered by its own source-scoped rule below",
 	"github.com/intentdriven/Gropius/internal/netshape": "is the classifier",
 	"github.com/intentdriven/Gropius/internal/ui":       "serves the control panel's assets and decides nothing about who may reach the server; presentation is what rule 1 allows. It imports nothing of ours and so could import the gateway, while cmd/gropius already imports it — a helper here reading Endpoint.Network is a route into the enforcement path, which is why TestThePanelPackageDoesNotReadTheDetectionEither scans it with nothing allowlisted",
+	"github.com/intentdriven/Gropius/internal/applog":   "builds the process's own log — a file, a level and a rotation. It decides nothing about who may reach the server or what it will do for them, and it imports nothing of ours, so there is no address in it to enforce on. What it must never gain is a reason to look at one: a log that reported which network a client came from would put the detection on the path of every served request",
 	"github.com/intentdriven/Gropius/internal/archtest": "is these rules",
 	"github.com/intentdriven/Gropius/internal/mlxtest":  "test helpers; nothing ships in the binary",
 	"github.com/intentdriven/Gropius/internal/sitetest": "test helpers for the landing-page renderer",

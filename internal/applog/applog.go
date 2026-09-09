@@ -180,10 +180,21 @@ const fileFlags = os.O_CREATE | os.O_WRONLY | os.O_APPEND | syscall.O_NONBLOCK |
 const logPerm os.FileMode = 0o600
 
 func openRotator(opts Options) (*rotator, error) {
-	// Lstat rather than MkdirAll, exactly as the launcher does: a path-based
-	// MkdirAll would follow a link left under the directory's name and put this
-	// account's log inside a directory it did not choose. The directory is
-	// created at start-up by config.Paths.EnsureDirs; this only checks it.
+	// Created when it is missing, and only then. On a first run — and on a
+	// shared-cache install where this account has never run Gropius per-user —
+	// nothing has made this directory yet, and the run whose log is most worth
+	// having is the first one. Owner-only, following internal/stats's own rule
+	// for the directory it creates: config.Paths.EnsureDirs leaves an existing
+	// non-shared directory's mode alone, so a 0700 made here survives.
+	if _, err := os.Lstat(opts.Dir); errors.Is(err, os.ErrNotExist) {
+		if err := os.MkdirAll(opts.Dir, 0o700); err != nil {
+			return nil, fmt.Errorf("create log directory %s: %w", opts.Dir, err)
+		}
+	}
+	// Lstat rather than Stat, exactly as the launcher does: a link standing
+	// where the log directory should be would otherwise let anything that can
+	// write the parent choose where this account's log is written, and a
+	// path-based MkdirAll would have followed it rather than reporting it.
 	fi, err := os.Lstat(opts.Dir)
 	if err != nil {
 		return nil, fmt.Errorf("log directory %s: %w", opts.Dir, err)

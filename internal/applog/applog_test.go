@@ -364,3 +364,53 @@ func TestCloseIsIdempotent(t *testing.T) {
 	l.Logger.Info("after close")
 	_ = fmt.Sprint(l.Path)
 }
+
+// The log directory belongs to this account and may not exist yet: on a first
+// run, and on a shared-cache install where this account has never run Gropius
+// per-user, nothing has created it. Opening the log creates it owner-only
+// rather than refusing — the alternative is a first run with no log, which is
+// the run whose log is most worth having.
+func TestOpenCreatesTheLogDirectoryWhenItIsMissing(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "logs")
+
+	l, _ := openIn(t, dir, applog.Options{})
+	l.Logger.Info("serving")
+	if err := l.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	fi, err := os.Lstat(dir)
+	if err != nil {
+		t.Fatalf("the log directory was not created: %v", err)
+	}
+	if perm := fi.Mode().Perm(); perm != 0o700 {
+		t.Errorf("log directory permissions = %#o, want 0700", perm)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "gropius.log")); err != nil {
+		t.Errorf("the log file is not in the created directory: %v", err)
+	}
+}
+
+// A link standing where the log directory should be is refused rather than
+// followed: an install that moved its logs, or anything that can write the
+// parent, could otherwise choose where this account's log is written.
+func TestOpenRefusesALinkStandingInForTheLogDirectory(t *testing.T) {
+	parent := t.TempDir()
+	elsewhere := t.TempDir()
+	dir := filepath.Join(parent, "logs")
+	if err := os.Symlink(elsewhere, dir); err != nil {
+		t.Fatal(err)
+	}
+
+	var stderr bytes.Buffer
+	l, err := applog.Open(applog.Options{Dir: dir, Stderr: &stderr})
+	if l != nil {
+		t.Cleanup(func() { l.Close() })
+	}
+	if err == nil {
+		t.Fatal("Open followed a link standing where the log directory should be")
+	}
+	if _, err := os.Stat(filepath.Join(elsewhere, "gropius.log")); err == nil {
+		t.Error("the log was written through the link")
+	}
+}

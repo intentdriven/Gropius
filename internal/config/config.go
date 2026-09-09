@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"maps"
 	"net"
 	"os"
@@ -600,6 +601,27 @@ type Config struct {
 	StatsMonths   int   `json:"stats_months,omitempty"`
 	StatsMaxBytes int64 `json:"stats_max_bytes,omitempty"`
 
+	// LogLevel decides how much Gropius writes about itself, in its own log and
+	// on standard error. "sparse" — the default, and what every configuration
+	// written before this field carries — is one line per event that mattered:
+	// a refusal, a model loading or leaving, a launch that failed, the server
+	// starting and stopping, a settings save. "detailed" adds the figures those
+	// lines omit: how many requests were already in flight, the memory budget
+	// in bytes, how long a request waited, the wrapped launch error, and the
+	// drain behind an eviction.
+	//
+	// It is Gropius's own level and reaches nothing else. In particular it
+	// never reaches the model servers, which are launched at INFO whatever this
+	// says (adr-2609061503319212, and the guard in
+	// internal/archtest/statistics_switch_test.go): at DEBUG mlx_lm writes
+	// prompts and completions to its log, and no setting in this file may ask
+	// for that.
+	//
+	// Empty means sparse, the way an empty BindMode means Host decides. Read it
+	// through EffectiveLogLevel, so "unset" has one meaning and not one per
+	// caller.
+	LogLevel string `json:"log_level,omitempty"`
+
 	// Models holds every setting that belongs to one model rather than to the
 	// machine, keyed by the registry's canonical repo id. A model with no
 	// entry runs on the machine-wide settings above, which is what every model
@@ -1085,6 +1107,70 @@ func Default() Config {
 	}
 }
 
+// The two levels Gropius writes its own log at. Sparse is one line per event
+// that mattered; detailed adds the figures sparse omits. They are the strings
+// config.json carries, the strings the control panel posts, and the strings
+// docs/logging.md prints — one spelling, so a level cannot mean one thing in
+// the panel and another in the file.
+const (
+	LogLevelSparse   = "sparse"
+	LogLevelDetailed = "detailed"
+)
+
+// EffectiveLogLevel is the level in force: the one that was set, or sparse.
+//
+// Empty is the default rather than a level of its own, so a settings file
+// written before this field existed, a field the operator cleared, and a fresh
+// install all mean the same thing — the rule GraceSeconds and MaxWaitSeconds
+// already follow for their own unset figures.
+func (c Config) EffectiveLogLevel() string {
+	if c.LogLevel == "" {
+		return LogLevelSparse
+	}
+	return c.LogLevel
+}
+
+// SlogLevel is what the handler reads: sparse is Info and above, detailed is
+// Debug and above.
+//
+// The mapping lives here, beside the names, because it is the whole of what
+// the two words mean. Anything that turned a level name into a slog.Level
+// somewhere else would be a second definition of "detailed", and the first
+// time the two disagreed the panel would promise an operator figures the
+// process was not writing.
+func (c Config) SlogLevel() slog.Level {
+	if c.EffectiveLogLevel() == LogLevelDetailed {
+		return slog.LevelDebug
+	}
+	return slog.LevelInfo
+}
+
+// validLogLevel reports whether name is one this build writes at. It is the
+// one predicate both the repair and the refusal below are decided by.
+func validLogLevel(name string) bool {
+	return name == "" || name == LogLevelSparse || name == LogLevelDetailed
+}
+
+// sanitizeLogLevel repairs a log level this build cannot use and says that it
+// did, so a hand-edited file, a backup or another build's settings still load.
+//
+// Repaired rather than refused, for the reason sanitizeStats gives: a refused
+// config.json sends the next start into its fail-closed loopback-only branch,
+// and a machine-wide outage is far too much to pay for a word that decides how
+// much the log says. Reported rather than repaired silently, because the level
+// IS in force in a changed form — an operator who wrote "verbose" and reads
+// nothing would go looking in a detailed log that was never written. Save
+// still refuses the same value outright, which is the moment the operator is
+// there to read why.
+func (c *Config) sanitizeLogLevel() []string {
+	if validLogLevel(c.LogLevel) {
+		return nil
+	}
+	repaired := []string{"log_level=" + c.LogLevel}
+	c.LogLevel = ""
+	return repaired
+}
+
 // sanitizeStats repairs a retention figure this build cannot use and returns
 // what it repaired, so a hand-edited file, a backup or another build's
 // settings still load.
@@ -1181,6 +1267,14 @@ func (c Config) Validate() error {
 	if c.StatsMaxBytes < MinStatsMaxBytes || c.StatsMaxBytes > MaxStatsMaxBytes {
 		return fmt.Errorf("the statistics store's limit must be between %d and %d bytes, got %d",
 			MinStatsMaxBytes, MaxStatsMaxBytes, c.StatsMaxBytes)
+	}
+	// The one enum in this file that is repaired on the way in and refused
+	// here: Load sanitizes before it validates, so a hand-edited word never
+	// reaches this check, and what does reach it is a save the operator is
+	// standing in front of.
+	if !validLogLevel(c.LogLevel) {
+		return fmt.Errorf("log_level %q is not one this build writes at; use %q or %q",
+			c.LogLevel, LogLevelSparse, LogLevelDetailed)
 	}
 	if c.MaxResidentBytes < 0 {
 		return fmt.Errorf("max_resident_bytes must not be negative, got %d", c.MaxResidentBytes)
@@ -1509,6 +1603,7 @@ func Load(path string) (Config, Notices, error) {
 	n.Repaired = append(n.Repaired, cfg.sanitizeBudget()...)
 	n.Repaired = append(n.Repaired, cfg.sanitizeGrace()...)
 	n.Repaired = append(n.Repaired, cfg.sanitizeAPIKey()...)
+	n.Repaired = append(n.Repaired, cfg.sanitizeLogLevel()...)
 	if err := cfg.Validate(); err != nil {
 		return Default(), Notices{}, &InvalidError{Path: path, Err: err, Parsed: cfg, Notices: n}
 	}

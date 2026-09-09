@@ -746,12 +746,25 @@ func (p *Pool) acquire(ctx context.Context, repoID string, mayWait bool) (*Upstr
 				// the log needs to tell them apart: a machine refusing loads
 				// because everything in memory is protected is not the same as
 				// one refusing them because the queue for memory is full.
+				//
+				// The figures are on a second line at the detailed level
+				// rather than on this one. They are the same facts about this
+				// Mac that the refusal on the wire is deliberately stripped of
+				// — the memory budget in bytes is roughly how much memory this
+				// machine has, and the queue depth is how busy it is — and a
+				// client can provoke a refusal at the rate it can send
+				// requests. Writing them by default would put a detailed
+				// description of this Mac in a file at a rate a stranger sets.
 				if verdict == waitQueueFull {
 					p.opts.Log.Info("refused a model load: as many requests are already waiting for memory as the queue allows",
+						"model", repoID)
+					p.opts.Log.Debug("refused a model load: as many requests are already waiting for memory as the queue allows",
 						"model", repoID, "waiting", queued,
 						"limit", HumanBytes(noRoom.Limit))
 				} else {
 					p.opts.Log.Info("refused a model load: no model in memory could be freed",
+						"model", repoID)
+					p.opts.Log.Debug("refused a model load: no model in memory could be freed",
 						"model", repoID, "protected", noRoom.Protected,
 						"limit", HumanBytes(noRoom.Limit), "waited", noRoom.Waited)
 				}
