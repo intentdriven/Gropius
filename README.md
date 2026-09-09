@@ -73,6 +73,13 @@ Cross-machine LAN use works; TLS and notarized distribution are not yet included
   model's share, how long requests took, the spread of those times, and when
   models were evicted and reloaded
   ([what the views mean](docs/statistics-explained.md)).
+- **A log that says why** — Gropius keeps its own log in your account's data
+  folder, so the reason behind a refusal a client saw is somewhere you can read
+  it even when the app was launched from the Finder and has no terminal to
+  print to. Sparse by default, one line per event that mattered; switch it to
+  detailed while you are diagnosing something and it adds the figures behind
+  each line. Neither level writes a prompt, an answer, a key or the address of
+  the client that sent a request ([reference](docs/logging.md)).
 - **Network-shared** — bind the LAN, discoverable over Bonjour (the chat client
   lists the servers it finds, so nobody has to guess an address), optional API
   key. A mesh VPN reaches it from further away, with the same steps and a

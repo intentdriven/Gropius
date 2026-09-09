@@ -227,6 +227,28 @@ GitHub release notes.
   downloaded again. See [docs/chat-models.md](docs/chat-models.md) and
   [docs/models-list.md](docs/models-list.md).
 
+- **Gropius keeps its own log, in your account's folder, at a level you
+  choose.** Everything the server knew about a refusal, a model that would not
+  start or a model leaving memory went to standard error and nowhere else — and
+  macOS discards a Finder-launched app's standard error, so on the way most
+  people run Gropius it went nowhere at all. The reason behind a refusal a
+  client saw was unreadable on the machine doing the refusing. There is now a
+  `gropius.log` beside the model servers' own logs, owner-only, rolled over at
+  5 MB with five files kept, and written at the same time as the stream a
+  terminal shows. The new `log_level` setting — **Server log** in Settings, or
+  `log_level` in `config.json` — chooses between `sparse`, one line per event
+  that mattered, and `detailed`, which adds the figures those lines leave out:
+  how long a load took, how many requests were in flight, the memory budget,
+  the wait, and the error behind a launch that failed. It takes effect on the
+  next line, so there is nothing to restart, and a save that does not mention
+  it leaves it alone. Neither level ever writes a prompt, an answer, an API
+  key, a HuggingFace token or the address of the client that sent a request,
+  and the split is partly why: a client can cause a refusal every time it asks,
+  so the figures that describe this Mac are not written at the default level at
+  a rate a stranger sets. It is Gropius's own level and never the model
+  servers', which are still always run at their INFO level
+  ([reference](docs/logging.md)).
+
 - **Gropius answers on this Mac whatever else it answers on.** Every bind
   acquires loopback as well as the address it names, so choosing who on the
   network may reach the server no longer costs you the ability to reach it

@@ -24,13 +24,19 @@ import (
 // so a test can read the refusal two clients are served for the same error.
 func refusingGateway(t *testing.T, key string, err error) http.Handler {
 	t.Helper()
-	h, _ := refusingGatewayLogging(t, key, err)
+	h, _ := refusingGatewayLogging(t, key, err, slog.LevelInfo)
 	return h
 }
 
 // refusingGatewayLogging is the same install with its log in hand, for the
 // tests that read what the operator is told.
-func refusingGatewayLogging(t *testing.T, key string, err error) (http.Handler, *bytes.Buffer) {
+//
+// The level is the caller's, because what the operator is told is now two
+// things and not one: which model and which refusal at the sparse level, and
+// the pool's own message — which names this Mac's memory budget — at the
+// detailed one. A test that did not choose would be asserting against
+// whichever level happened to be the default.
+func refusingGatewayLogging(t *testing.T, key string, err error, level slog.Level) (http.Handler, *bytes.Buffer) {
 	t.Helper()
 	fake := mlxtest.Start(mlxtest.Options{ModelArg: "/m"})
 	t.Cleanup(fake.Close)
@@ -46,7 +52,7 @@ func refusingGatewayLogging(t *testing.T, key string, err error) (http.Handler, 
 		Config: cfg,
 		Pool:   &stubPool{srv: fake, acquireErr: err},
 		Models: models,
-		Log:    slog.New(slog.NewTextHandler(&logged, &slog.HandlerOptions{Level: slog.LevelInfo})),
+		Log:    slog.New(slog.NewTextHandler(&logged, &slog.HandlerOptions{Level: level})),
 	}).Handler(), &logged
 }
 
@@ -287,30 +293,65 @@ func TestTheModelsListReferenceDescribesTheRefusalRule(t *testing.T) {
 // else — and the reason the message was informative in the first place is that
 // somebody has to be able to read it.
 func TestARedactedRefusalIsRecordedForTheOperator(t *testing.T) {
-	h, logged := refusingGatewayLogging(t, "", &runtime.NoRoomError{Limit: 41 << 30})
+	// Which model, which refusal and which client class are the sparse line:
+	// they are what an operator asked "why are my requests being refused"
+	// answers from, and they are on by default.
+	t.Run("sparse", func(t *testing.T) {
+		h, logged := refusingGatewayLogging(t, "", &runtime.NoRoomError{Limit: 41 << 30}, slog.LevelInfo)
 
-	if w := completionAs(t, h, "203.0.113.50:9999", ""); w.Code != http.StatusServiceUnavailable {
-		t.Fatalf("status = %d, want 503", w.Code)
-	}
-
-	line := logged.String()
-	for _, want := range []string{
-		"org/warm",                   // which model
-		"nothing evictable",          // which refusal
-		"unentitled",                 // which client class
-		runtime.HumanBytes(41 << 30), // and the message the client did not get
-	} {
-		if !strings.Contains(line, want) {
-			t.Errorf("the log does not carry %q: %s", want, line)
+		if w := completionAs(t, h, "203.0.113.50:9999", ""); w.Code != http.StatusServiceUnavailable {
+			t.Fatalf("status = %d, want 503", w.Code)
 		}
-	}
+
+		line := logged.String()
+		for _, want := range []string{
+			"org/warm",          // which model
+			"nothing evictable", // which refusal
+			"unentitled",        // which client class
+		} {
+			if !strings.Contains(line, want) {
+				t.Errorf("the log does not carry %q: %s", want, line)
+			}
+		}
+		// The pool's message names this Mac's memory budget in bytes, which is
+		// the fact genericRefusal strips out of the answer. It is not written
+		// by default for the same reason it is not sent: a client can cause
+		// this refusal every time it asks (itd-2609091412177263).
+		if got := runtime.HumanBytes(41 << 30); strings.Contains(line, got) {
+			t.Errorf("the sparse log carries the memory budget %q: %s", got, line)
+		}
+	})
+
+	// And the message itself, which is the thing the client no longer gets, is
+	// one level away rather than nowhere.
+	t.Run("detailed", func(t *testing.T) {
+		h, logged := refusingGatewayLogging(t, "", &runtime.NoRoomError{Limit: 41 << 30}, slog.LevelDebug)
+
+		if w := completionAs(t, h, "203.0.113.50:9999", ""); w.Code != http.StatusServiceUnavailable {
+			t.Fatalf("status = %d, want 503", w.Code)
+		}
+
+		line := logged.String()
+		for _, want := range []string{
+			"org/warm",
+			"nothing evictable",
+			"unentitled",
+			runtime.HumanBytes(41 << 30), // the message the client did not get
+		} {
+			if !strings.Contains(line, want) {
+				t.Errorf("the detailed log does not carry %q: %s", want, line)
+			}
+		}
+	})
 }
 
 // An entitled client was told the reason itself, so there is nothing here for
 // the log to rescue — and a line per served refusal would be noise on the one
 // install where every refusal is a local client's own.
 func TestAnInformativeRefusalIsNotLoggedTwice(t *testing.T) {
-	h, logged := refusingGatewayLogging(t, "", &runtime.NoRoomError{Limit: 41 << 30})
+	// At the detailed level, so that "not logged" means not logged at all
+	// rather than logged below the level this test happened to read at.
+	h, logged := refusingGatewayLogging(t, "", &runtime.NoRoomError{Limit: 41 << 30}, slog.LevelDebug)
 
 	completionAs(t, h, "127.0.0.1:52001", "")
 
@@ -323,7 +364,10 @@ func TestAnInformativeRefusalIsNotLoggedTwice(t *testing.T) {
 // held to one per model per minute. Without that, a LAN client that retries in
 // a loop writes to this Mac's log as fast as it can send requests.
 func TestTheRedactedRefusalLogIsRateLimitedPerModel(t *testing.T) {
-	h, logged := refusingGatewayLogging(t, "", &runtime.NoRoomError{Limit: 41 << 30})
+	// At the sparse level, where one allowed refusal is one line. The detailed
+	// level writes a second line for the same event, which
+	// TestOneRateLimitedRefusalWritesBothItsLines holds.
+	h, logged := refusingGatewayLogging(t, "", &runtime.NoRoomError{Limit: 41 << 30}, slog.LevelInfo)
 
 	for range 5 {
 		completionForAs(t, h, "org/warm", "203.0.113.50:9999")

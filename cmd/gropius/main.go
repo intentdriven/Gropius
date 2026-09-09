@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/intentdriven/Gropius/internal/app"
+	"github.com/intentdriven/Gropius/internal/applog"
 	"github.com/intentdriven/Gropius/internal/bind"
 	"github.com/intentdriven/Gropius/internal/bind/private"
 	"github.com/intentdriven/Gropius/internal/config"
@@ -67,6 +68,9 @@ func main() {
 		return
 	}
 
+	// Until the data root is known there is nowhere to put a file, so the first
+	// few lines go to standard error alone — which is where every line went
+	// before this app had a log at all.
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
 	rootDir := *root
@@ -79,6 +83,30 @@ func main() {
 		}
 	}
 	paths := config.NewPaths(rootDir)
+
+	// From here on the log is a file as well as a stream. This is the whole
+	// point of the file: a Finder-launched .app has no standard error, so
+	// everything below — a settings file that would not parse, a bind that was
+	// narrowed, a model that would not start — used to go nowhere anybody
+	// could read it.
+	//
+	// Opened before the port is claimed, so the reason a start went wrong is
+	// written down even when this process goes on to be a client of a server
+	// that is already running. A log that could not be opened is a warning and
+	// nothing more: appLog.Logger is the stderr-only logger in that case, and
+	// a server that will not start because it cannot write about starting is
+	// the worse outcome.
+	appLog, logErr := applog.Open(applog.Options{Dir: paths.Logs})
+	defer appLog.Close()
+	log = appLog.Logger
+	if logErr != nil {
+		log.Warn("could not open this account's log file; logging to standard error only, which a Finder-launched app discards",
+			"path", paths.Logs, "err", logErr)
+	}
+	// The first line of every run, and the one that says where the rest of them
+	// are. An operator who has just been asked "what does the log say" needs
+	// the path before they need anything else.
+	log.Info("gropius starting", "version", version, "log", appLog.Path)
 
 	// Settings are this account's own. Under a shared cache installed before
 	// they were, this account's settings are still in the shared folder, so
@@ -102,6 +130,12 @@ func main() {
 
 	start := loadStartupConfig(paths.Config)
 	cfg := start.Config
+	// The level the operator chose, in force from the next line on. Set here
+	// rather than left to app.New because the lines between this point and the
+	// app being built — the bind, the key, the listeners — are exactly the ones
+	// an operator switches to detailed to read. From the app onwards
+	// App.applyLogLevel owns it, at a start and at every save alike.
+	appLog.Level.Set(cfg.SlogLevel())
 	if start.Problem != "" {
 		log.Error(start.Problem, start.Args...)
 	}
@@ -147,7 +181,7 @@ func main() {
 	}
 	announceBind(log, cfg, plan)
 
-	if err := runServer(lns, plan, paths, cfg, start.Notices, *headless, log); err != nil {
+	if err := runServer(lns, plan, paths, cfg, start.Notices, *headless, appLog); err != nil {
 		log.Error("server stopped", "err", err)
 		os.Exit(1)
 	}
@@ -297,8 +331,11 @@ func warnStartupNotices(log *slog.Logger, n config.Notices) {
 // in rather than re-derived because loading happens once, before the bind is
 // decided, and nothing downstream can tell a value that was repaired from one
 // the operator wrote that way.
-func runServer(lns []net.Listener, plan bind.Plan, paths config.Paths, cfg config.Config, notices config.Notices, headless bool, log *slog.Logger) error {
-	a, err := app.New(app.Options{Paths: paths, Config: cfg, Log: log, Bind: plan})
+func runServer(lns []net.Listener, plan bind.Plan, paths config.Paths, cfg config.Config, notices config.Notices, headless bool, appLog *applog.Log) error {
+	log := appLog.Logger
+	// The level variable travels with the logger, so a save in Settings moves
+	// the level this handler reads rather than the level of a copy.
+	a, err := app.New(app.Options{Paths: paths, Config: cfg, Log: log, Bind: plan, LogLevel: appLog.Level})
 	if err != nil {
 		return err
 	}
