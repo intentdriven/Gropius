@@ -69,6 +69,8 @@ Cross-machine LAN use works; TLS and notarized distribution are not yet included
   models were evicted and reloaded
   ([what the views mean](docs/statistics-explained.md)).
 - **Network-shared** — bind the LAN, discoverable over Bonjour, optional API key.
+  A mesh VPN reaches it from further away, with the same steps and a different
+  address ([how to](docs/mesh-vpn.md)).
 - **Multi-account** — other user accounts on the same Mac share one copy of each
   model on disk and on the GPU.
 

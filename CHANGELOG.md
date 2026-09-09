@@ -11,6 +11,7 @@ GitHub release notes.
 
 ## [Unreleased]
 
+
 ### Changed
 
 - **A request waiting for memory now looks again by itself, rather than only
@@ -37,6 +38,21 @@ GitHub release notes.
   The Bonjour lookup was the one that mattered: it runs once, early, in every
   account that launches Gropius, with no click to invite it. A test now holds
   the rule for any command added later.
+
+### Added
+
+- **A how-to for serving over a mesh VPN.**
+  [docs/mesh-vpn.md](docs/mesh-vpn.md) takes the walk-through's "talk to it from
+  another machine" steps and runs them over a mesh network instead of the local
+  one, and it is where the mark beside an endpoint is explained: it names the
+  network the address belongs to, and says nothing about how safe it is or who
+  else can reach it. The page also lists the four things Gropius cannot see and
+  the reader can — publishing the address to the public internet through the
+  VPN's own tunnelling feature, a sharing rule that widens who reaches it, that
+  the mark is not a statement about encryption, and that Gropius speaks plain
+  HTTP either way, so whatever protection the traffic has is the VPN's and stops
+  where the VPN stops. Linked from the README and from the getting-started
+  guide.
 
 ## [0.4.0] - 2026-09-08
 
