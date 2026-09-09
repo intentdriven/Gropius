@@ -87,6 +87,13 @@ Two other things are refused as you tick a box, both rare: pinning a model this
 Mac records no size for — Gropius will not measure a set against the budget with
 a model missing from the sum — and pinning more than 256 models.
 
+## Where the pins are kept
+
+In `config.json`, as `"pinned": true` on the model's entry under `models`,
+beside anything else set for that model. See
+[Reference: sampling parameters](sampling-reference.md#where-the-values-are-kept)
+for the shape of that section.
+
 ## Unpin a model
 
 Clear its box in **Settings → Pinned models** and save. The model stays in

@@ -648,7 +648,10 @@ function renderSettings() {
   $('setStatsMB').value = Math.round((c.stats_max_bytes || 0) / (1024 * 1024));
   renderStatsStore();
   writeSampling('input', c.sampling);
-  overrides = { ...(c.model_sampling || {}) };
+  overrides = {};
+  Object.entries(c.models || {}).forEach(([id, ms]) => {
+    if (ms && ms.sampling) overrides[id] = ms.sampling;
+  });
   renderOverrides();
   renderMergeSwitches();
   renderPinSwitches();
@@ -688,7 +691,7 @@ function renderPinSwitches() {
 // Mac, then one per pin that names a model this Mac does not have.
 //
 // The second half is not a nicety. The form carries through every pin it does
-// not list (see pinnedModels), so a pin with no box could never be removed —
+// not list (see modelSettings), so a pin with no box could never be removed —
 // and a model deleted after it was pinned, or pinned before it was downloaded,
 // leaves exactly that. Showing it is what makes every pin removable by the
 // form that made it.
@@ -719,18 +722,6 @@ function listedPinModels() {
 // checkedPinModels lists the models whose box is ticked.
 function checkedPinModels() {
   return pinBoxes().filter((cb) => cb.checked).map((cb) => cb.dataset.model);
-}
-
-// pinnedModels returns the whole pinned list a save posts. The server replaces
-// what it holds with this, so a model whose box is clear is simply left out —
-// a list cannot be shortened by omission any other way. A pin for a model the
-// form does not list is carried through, because a model can be pinned before
-// it is downloaded and a form with no box for it has nothing to say about it.
-function pinnedModels(current, listed, checked) {
-  const shown = new Set((listed || []).map(foldRepoID));
-  const out = (current || []).filter((id) => !shown.has(foldRepoID(id)));
-  (checked || []).forEach((id) => out.push(id));
-  return out;
 }
 
 // pinnedCharge is what the pinned models cost against the memory budget: each
@@ -857,7 +848,7 @@ function updatePinBudget() {
 function renderMergeSwitches() {
   const box = $('mergeList');
   const models = state.models || [];
-  const per = state.config.per_model || {};
+  const per = state.config.models || {};
   box.innerHTML = '';
   if (!models.length) {
     box.innerHTML = '<p class="hint">Download a model and it appears here.</p>';
@@ -894,32 +885,52 @@ function checkedMergeModels() {
   return mergeBoxes().filter((cb) => cb.checked).map((cb) => cb.dataset.model);
 }
 
-// perModelSettings returns the whole per-model map a save posts. The server
-// replaces what it holds with this, so a model whose box is clear is simply
-// left out and its merging goes off — a map cannot be switched off by omission
-// any other way.
+// modelSettings returns the whole per-model map a save posts: one map holding
+// every setting that belongs to a model rather than to the machine — merging,
+// pinning and the sampling override.
 //
-// Two things are therefore carried through rather than rebuilt. Settings this
-// form does not own stay on the model that has them, so ticking a box never
-// wipes a model's other settings. And a model the form does not list keeps
-// everything it has, because a model can be given settings before it is
-// downloaded and a form with no box for it has nothing to say about it.
-function perModelSettings(current, listed, checked) {
-  const shown = new Set(listed || []);
+// The server replaces what it holds with this, so a model whose box is clear
+// is simply left out and the setting goes off — a map cannot be switched off
+// by omission any other way. Two things are therefore carried through rather
+// than rebuilt. A setting this form does not own stays on the model that has
+// it, so ticking one box never wipes another setting. And a model the form
+// does not list keeps everything it has, because a model can be given settings
+// before it is downloaded and a form with no box for it has nothing to say
+// about it.
+//
+// The sampling overrides are not a box but a whole editor, which holds every
+// override there is while it is open, so they are assigned rather than
+// toggled: a model missing from them has had its override removed.
+function modelSettings(current, overrides, listedMerge, checkedMerge, listedPin, checkedPin) {
   const out = {};
   Object.keys(current || {}).forEach((id) => {
-    if (!shown.has(id)) {
-      out[id] = current[id];
-      return;
-    }
-    const rest = Object.assign({}, current[id]);
-    delete rest.merge_system_messages;
-    if (Object.keys(rest).length) out[id] = rest;
+    out[id] = Object.assign({}, current[id]);
+    delete out[id].sampling;
   });
-  (checked || []).forEach((id) => {
-    out[id] = Object.assign({}, out[id] || {}, { merge_system_messages: true });
+  Object.keys(overrides || {}).forEach((id) => {
+    out[id] = Object.assign({}, out[id] || {}, { sampling: overrides[id] });
+  });
+  applyModelSwitch(out, 'merge_system_messages', listedMerge, checkedMerge);
+  applyModelSwitch(out, 'pinned', listedPin, checkedPin);
+  // A model left with no settings at all is left out entirely, so that
+  // clearing every box for a model removes it rather than storing an empty
+  // object under its name.
+  Object.keys(out).forEach((id) => {
+    if (!Object.keys(out[id]).length) delete out[id];
   });
   return out;
+}
+
+// applyModelSwitch writes one row of boxes into the map being posted: every
+// model the form drew a box for loses the setting, and every model whose box
+// is ticked gets it back. A model with no box is not touched.
+function applyModelSwitch(models, field, listed, checked) {
+  (listed || []).forEach((id) => {
+    if (models[id]) delete models[id][field];
+  });
+  (checked || []).forEach((id) => {
+    models[id] = Object.assign({}, models[id] || {}, { [field]: true });
+  });
 }
 
 function renderOverrides() {
@@ -1109,9 +1120,11 @@ $('settingsForm').addEventListener('submit', async (e) => {
     // A blank sampling field is sent as null, not as zero: the model server is
     // handed a flag only for a parameter that has a value.
     sampling:           readSampling('input'),
-    model_sampling:     overrides,
-    per_model:         perModelSettings(state.config.per_model, listedMergeModels(), checkedMergeModels()),
-    pinned:            pinnedModels(state.pinned, listedPinModels(), checkedPinModels()),
+    models: modelSettings(
+      state.config.models, overrides,
+      listedMergeModels(), checkedMergeModels(),
+      listedPinModels(), checkedPinModels(),
+    ),
   };
   try {
     const res = await api('/api/settings', {

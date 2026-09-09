@@ -37,17 +37,20 @@ type Control struct {
 	// process squatting on the port (see cmd/gropius singleton coordination).
 	Root string
 
-	// Repaired names the settings config.Load could not use as written and put
-	// into force in a changed form — a trimmed API key, a clamped grace, a
-	// statistics figure replaced by its default. Set once before serving, and
-	// cleared by a save, which rewrites the file from the values in force.
+	// Notices is what config.Load had to change about config.json to make it
+	// usable: settings put into force in a changed form (a trimmed API key, a
+	// clamped grace, a statistics figure replaced by its default) and settings
+	// not in force at all (a value this build cannot use, a key it no longer
+	// reads). Set once before serving, and cleared by a save, which rewrites
+	// the file from the settings in force.
 	//
 	// It is here because the panel is the surface the operator is looking at.
-	// The startup log says this once, into a stream nobody running the app from
-	// the menu bar ever sees, and the panel shows an API key as asterisks
-	// whether it was trimmed or not — so without this the one setting where the
-	// repair changes what every client must send is invisible.
-	Repaired []string
+	// The startup log says this once, into a stream nobody running the app
+	// from the menu bar ever sees — so without this, a repair that changes
+	// what every client must send, and a setting silently dropped because this
+	// build no longer reads its key, are both invisible to the person who set
+	// them.
+	Notices config.Notices
 
 	// loadMu guards loading, the set of models the Load button already has a
 	// background load running for, keyed by folded repo id.
@@ -62,9 +65,9 @@ type Control struct {
 	loadMu  sync.Mutex
 	loading map[string]bool
 
-	// repairMu guards Repaired, which the snapshot reads on every state request
+	// noticeMu guards Notices, which the snapshot reads on every state request
 	// and a save clears.
-	repairMu sync.Mutex
+	noticeMu sync.Mutex
 
 	// settingsMu serialises the whole settings write path: read the settings
 	// in force, decode the posted body into a copy of them, hand the result to
@@ -368,9 +371,7 @@ func (c *Control) snapshot() State {
 	if w := c.App.MemoryBudgetWarning(); w != "" {
 		st.Warnings = append(st.Warnings, w)
 	}
-	if w := c.repairWarning(); w != "" {
-		st.Warnings = append(st.Warnings, w)
-	}
+	st.Warnings = append(st.Warnings, c.noticeWarnings()...)
 	if !c.App.Provisioner.Installed() {
 		st.Warnings = append(st.Warnings,
 			"The MLX runtime is not installed yet — models cannot be served until setup finishes.")
@@ -1191,33 +1192,45 @@ func (c *Control) handleSetSettings(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, out)
 }
 
-// repairWarning is what the panel says about the settings the file could not
-// carry as written.
+// noticeWarnings is what the panel says about the settings config.json could
+// not be used for as written.
 //
-// It says they are in force, because they are, and it names them: an operator
-// who reads "your API key was shortened" can check the key their clients send,
-// which is the only thing they can usefully do about it. Saying "ignored" would
-// send them to set a key that is already working, and blaming the model server
-// would send them to the wrong software entirely.
-func (c *Control) repairWarning() string {
-	c.repairMu.Lock()
-	defer c.repairMu.Unlock()
-	if len(c.Repaired) == 0 {
-		return ""
+// Two warnings, never one, because the two lists mean opposite things to the
+// person reading them. A REPAIRED setting is in force in a changed form, and
+// naming it is the only thing an operator can act on: someone who reads "your
+// API key was shortened" can check the key their clients send. Saying
+// "ignored" there would send them to set a key that is already working.
+//
+// An IGNORED setting is not in force at all, and that is the half the log
+// alone never reached: a per-model setting whose key this build no longer
+// reads is gone from a running server whose panel showed nothing about it, and
+// the operator finds out when a request is refused for memory a pin was
+// supposed to be holding.
+func (c *Control) noticeWarnings() []string {
+	c.noticeMu.Lock()
+	defer c.noticeMu.Unlock()
+	var out []string
+	if len(c.Notices.Ignored) > 0 {
+		out = append(out, "Some settings in config.json are not in force: "+
+			strings.Join(c.Notices.Ignored, ", ")+
+			". Set them again here and save.")
 	}
-	return "Some settings in config.json could not be used as written and are in force in a changed form: " +
-		strings.Join(c.Repaired, ", ") +
-		". Check them here and save to write the values now in force back to the file."
+	if len(c.Notices.Repaired) > 0 {
+		out = append(out, "Some settings in config.json could not be used as written and are in force in a changed form: "+
+			strings.Join(c.Notices.Repaired, ", ")+
+			". Check them here and save to write the values now in force back to the file.")
+	}
+	return out
 }
 
-// clearRepairs drops the notice once a save has rewritten config.json from the
-// values in force: there is nothing left in the file that needed repairing, and
-// a warning that outlives what it warned about is the same untruth from the
-// other side.
-func (c *Control) clearRepairs() {
-	c.repairMu.Lock()
-	defer c.repairMu.Unlock()
-	c.Repaired = nil
+// clearNotices drops both notices once a save has rewritten config.json from
+// the settings in force: there is nothing left in the file that needed
+// repairing, nothing left in it that this build ignores, and a warning that
+// outlives what it warned about is the same untruth from the other side.
+func (c *Control) clearNotices() {
+	c.noticeMu.Lock()
+	defer c.noticeMu.Unlock()
+	c.Notices = config.Notices{}
 }
 
 // applySettings is the settings write path, from the settings in force to what
@@ -1227,6 +1240,18 @@ func (c *Control) clearRepairs() {
 func (c *Control) applySettings(raw []byte) (map[string]any, error) {
 	c.settingsMu.Lock()
 	defer c.settingsMu.Unlock()
+
+	// A body naming a setting this build no longer reads is refused rather
+	// than half-applied. It would otherwise go wrong in silence — the keys
+	// decode into nothing and the save succeeds — which is exactly the
+	// problem: the caller is a script or a shell of someone's own (the panel
+	// never posts them), and "saved" would tell them their pins and overrides
+	// were stored when the file was written without them.
+	if named := config.SupersededSettings(raw); len(named) > 0 {
+		return nil, fmt.Errorf(
+			"these settings are no longer read: %s — post per-model settings under \"models\"",
+			strings.Join(named, ", "))
+	}
 
 	current := c.App.Config()
 
@@ -1243,17 +1268,17 @@ func (c *Control) applySettings(raw []byte) (map[string]any, error) {
 	incoming := current.Clone()
 	// "Keep what you did not send" is a rule about fields, not about the
 	// members of a collection. encoding/json merges into an existing map, so
-	// decoding a posted model_sampling object into the current one reinstates
-	// every override the object leaves out — which is every override the user
-	// just deleted. Naming the field means "these are the overrides", so start
-	// from nothing; omitting it still keeps what is there. The same holds for
-	// per_model, where leaving a model out is how Settings switches its
-	// merging off.
-	if namesModelSampling(raw) {
-		incoming.ModelSampling = nil
-	}
-	if namesPerModel(raw) {
-		incoming.PerModel = nil
+	// decoding a posted models object into the current one reinstates every
+	// model the object leaves out — its merging switched back on, its pin back
+	// on, its sampling override back. Naming the field means "these are the
+	// models with settings", so start from nothing; omitting it still keeps
+	// what is there.
+	//
+	// One collection, one guard. There were two of these maps and a list
+	// beside them, each of which had to be remembered here
+	// (iss-2609062213413447).
+	if namesModels(raw) {
+		incoming.Models = nil
 	}
 	if err := json.Unmarshal(raw, &incoming); err != nil {
 		return nil, errors.New("settings body is not valid JSON")
@@ -1272,7 +1297,7 @@ func (c *Control) applySettings(raw []byte) (map[string]any, error) {
 	}
 	// The file has just been written from the settings in force, repairs and
 	// all, so there is nothing left in it to repair.
-	c.clearRepairs()
+	c.clearNotices()
 	// Host, the bind mode and the port bind the server; decode concurrency and
 	// idle timeout are pool options — all five are consumed only at startup,
 	// and SetConfig cannot apply them live.
@@ -1295,13 +1320,10 @@ func (c *Control) applySettings(raw []byte) (map[string]any, error) {
 	return out, nil
 }
 
-// namesModelSampling reports whether the posted body carries a model_sampling
-// field at all, however it is spelled — including as null.
-func namesModelSampling(body []byte) bool { return namesField(body, "model_sampling") }
-
-// namesPerModel reports the same for per_model, the other collection a save
+// namesModels reports whether the posted body carries a models field at all,
+// however it is spelled — including as null. It is the one collection a save
 // replaces rather than merges into.
-func namesPerModel(body []byte) bool { return namesField(body, "per_model") }
+func namesModels(body []byte) bool { return namesField(body, "models") }
 
 // namesField reports whether the posted body carries this field at all,
 // however it is spelled — including as null.

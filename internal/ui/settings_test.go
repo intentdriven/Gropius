@@ -34,10 +34,14 @@ func evalPanelValue(t *testing.T, expr string, functions ...string) map[string]a
 
 // The per-model settings a save posts are the whole map, not a patch: the
 // server replaces what it holds with what the form sends, which is how a model
-// left out of the form has its merging switched off. A model with settings this
-// form does not own keeps them either way, so a later per-model setting is not
-// wiped by someone ticking a merging box.
+// left out of the form has its merging switched off and its pin dropped. A
+// model with a setting this form does not own keeps it either way, so a later
+// per-model setting is not wiped by someone ticking a box.
+//
+// One map, so one function: merging, pinning and the sampling override are
+// three rows of the same form and three fields of the same entry.
 func TestSettingsFormPostsThePerModelMapWhole(t *testing.T) {
+	const qwen = "mlx-community/Qwen3-8B-4bit"
 	cases := []struct {
 		name string
 		expr string
@@ -45,27 +49,37 @@ func TestSettingsFormPostsThePerModelMapWhole(t *testing.T) {
 	}{
 		{
 			name: "a box that is ticked switches merging on",
-			expr: `perModelSettings({}, ["mlx-community/Qwen3-8B-4bit"], ["mlx-community/Qwen3-8B-4bit"])`,
-			want: map[string]any{
-				"mlx-community/Qwen3-8B-4bit": map[string]any{"merge_system_messages": true},
-			},
+			expr: `modelSettings({}, {}, ["` + qwen + `"], ["` + qwen + `"], [], [])`,
+			want: map[string]any{qwen: map[string]any{"merge_system_messages": true}},
 		},
 		{
 			name: "a box that is clear leaves the model out",
-			expr: `perModelSettings({"mlx-community/Qwen3-8B-4bit":{"merge_system_messages":true}}, ["mlx-community/Qwen3-8B-4bit"], [])`,
+			expr: `modelSettings({"` + qwen + `":{"merge_system_messages":true}}, {}, ["` + qwen + `"], [], [], [])`,
 			want: map[string]any{},
 		},
 		{
-			name: "a model's other settings survive an unticked box",
-			expr: `perModelSettings({"org/a":{"merge_system_messages":true,"temperature":0.7}}, ["org/a"], [])`,
-			want: map[string]any{"org/a": map[string]any{"temperature": 0.7}},
+			name: "a ticked pin box pins the model",
+			expr: `modelSettings({}, {}, [], [], ["org/a"], ["org/a"])`,
+			want: map[string]any{"org/a": map[string]any{"pinned": true}},
 		},
 		{
-			name: "a model's other settings survive a ticked box",
-			expr: `perModelSettings({"org/a":{"temperature":0.7}}, ["org/a"], ["org/a"])`,
-			want: map[string]any{
-				"org/a": map[string]any{"temperature": 0.7, "merge_system_messages": true},
-			},
+			name: "an unticked pin box unpins it and leaves its other settings",
+			expr: `modelSettings({"org/a":{"pinned":true,"merge_system_messages":true}}, {}, [], [], ["org/a"], [])`,
+			want: map[string]any{"org/a": map[string]any{"merge_system_messages": true}},
+		},
+		{
+			name: "the override editor holds the whole sampling set",
+			expr: `modelSettings({"org/a":{"sampling":{"temperature":0.7}}}, {}, [], [], [], [])`,
+			want: map[string]any{},
+		},
+		{
+			name: "a sampling override sits beside the switches on one model",
+			expr: `modelSettings({"org/a":{"pinned":true}}, {"org/a":{"temperature":0.7}}, ["org/a"], ["org/a"], ["org/a"], ["org/a"])`,
+			want: map[string]any{"org/a": map[string]any{
+				"sampling":              map[string]any{"temperature": 0.7},
+				"merge_system_messages": true,
+				"pinned":                true,
+			}},
 		},
 		{
 			// The settings are keyed by model id, and a model can be given
@@ -75,7 +89,7 @@ func TestSettingsFormPostsThePerModelMapWhole(t *testing.T) {
 			// read, and its settings are carried through rather than deleted
 			// by an unrelated save.
 			name: "a model the form does not list keeps its settings",
-			expr: `perModelSettings({"org/not-downloaded":{"merge_system_messages":true}}, ["org/a"], [])`,
+			expr: `modelSettings({"org/not-downloaded":{"merge_system_messages":true}}, {}, ["org/a"], [], [], [])`,
 			want: map[string]any{
 				"org/not-downloaded": map[string]any{"merge_system_messages": true},
 			},
@@ -83,7 +97,7 @@ func TestSettingsFormPostsThePerModelMapWhole(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got := evalPanelValue(t, c.expr, "perModelSettings")
+			got := evalPanelValue(t, c.expr, "modelSettings", "applyModelSwitch")
 			if !reflect.DeepEqual(got, c.want) {
 				t.Errorf("%s = %#v, want %#v", c.expr, got, c.want)
 			}
@@ -91,9 +105,9 @@ func TestSettingsFormPostsThePerModelMapWhole(t *testing.T) {
 	}
 }
 
-// perModelSettings is only worth testing while the form both builds its body
-// from it and renders the boxes it reads. These are the two lines the value
-// tests above cannot reach without a DOM.
+// modelSettings is only worth testing while the form both builds its body from
+// it and renders the boxes it reads. These are the lines the value tests above
+// cannot reach without a DOM.
 //
 // Matched on the identifiers rather than the line, so re-aligning the object
 // literal the body is built from — a whitespace-only edit — does not report
@@ -101,49 +115,15 @@ func TestSettingsFormPostsThePerModelMapWhole(t *testing.T) {
 func TestSettingsFormIsWiredToThePerModelSwitches(t *testing.T) {
 	src := readPanelSource(t)
 	for _, want := range []*regexp.Regexp{
-		regexp.MustCompile(`per_model:\s*perModelSettings\(\s*state\.config\.per_model,\s*listedMergeModels\(\),\s*checkedMergeModels\(\),?\s*\)`),
+		regexp.MustCompile(`models:\s*modelSettings\(\s*state\.config\.models,\s*overrides,\s*` +
+			`listedMergeModels\(\),\s*checkedMergeModels\(\),\s*` +
+			`listedPinModels\(\),\s*checkedPinModels\(\),?\s*\)`),
 		regexp.MustCompile(`\brenderMergeSwitches\(\)`),
+		regexp.MustCompile(`\brenderPinSwitches\(\)`),
 	} {
 		if !want.MatchString(src) {
 			t.Errorf("the control panel no longer matches %s — the per-model switches are then asserted by nothing", want)
 		}
-	}
-}
-
-// The pinned list a save posts is the whole list, not a patch: the server
-// replaces what it holds with what the form sends, which is how unticking a
-// box unpins a model. A pin for a model the form does not list — one that is
-// not downloaded yet — is carried through, because the form has nothing to say
-// about it.
-func TestSettingsFormPostsThePinnedListWhole(t *testing.T) {
-	cases := []struct {
-		name string
-		expr string
-		want []any
-	}{
-		{
-			name: "a ticked box pins the model",
-			expr: `pinnedModels([], ["org/a", "org/b"], ["org/a"])`,
-			want: []any{"org/a"},
-		},
-		{
-			name: "an unticked box leaves the model out",
-			expr: `pinnedModels(["org/a"], ["org/a"], [])`,
-			want: []any{},
-		},
-		{
-			name: "a pin for a model the form does not list survives",
-			expr: `pinnedModels(["org/not-downloaded"], ["org/a"], ["org/a"])`,
-			want: []any{"org/not-downloaded", "org/a"},
-		},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			got := evalPanelArray(t, tc.expr, "foldRepoID", "pinnedModels")
-			if !reflect.DeepEqual(got, tc.want) {
-				t.Errorf("%s = %v, want %v", tc.expr, got, tc.want)
-			}
-		})
 	}
 }
 
@@ -213,8 +193,8 @@ func TestThePanelReadsThePinnedSetThePoolIsEnforcing(t *testing.T) {
 	if !strings.Contains(src, "state.pinned") {
 		t.Error("the panel never reads state.pinned, so it cannot show what the pool is protecting")
 	}
-	if strings.Contains(src, "state.config.pinned") {
-		t.Error("the panel reads state.config.pinned; the stored settings are not what is being enforced")
+	if !regexp.MustCompile(`pinRows\(\s*state\.models \|\| \[\],\s*state\.pinned \|\| \[\]\s*\)`).MatchString(src) {
+		t.Error("the pin boxes are no longer drawn from state.pinned; the stored settings are not what is being enforced")
 	}
 	if !strings.Contains(src, "state.machine") {
 		t.Error("the panel never reads state.machine, so it cannot say what a pinned set leaves of the budget")

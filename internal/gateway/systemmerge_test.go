@@ -28,7 +28,7 @@ const mergeModel = "mlx-community/Qwen3-8B-4bit"
 // on for the one model these tests serve.
 func mergingOn() config.Config {
 	cfg := config.Default()
-	cfg.PerModel = map[string]config.ModelSettings{
+	cfg.Models = map[string]config.ModelSettings{
 		mergeModel: {MergeSystemMessages: true},
 	}
 	return cfg
@@ -396,7 +396,7 @@ func TestSwitchingMergingOffRelaysTheNextRequestUnchanged(t *testing.T) {
 	}
 
 	mu.Lock()
-	cfg.PerModel = nil
+	cfg.Models = nil
 	mu.Unlock()
 
 	got := postMerge(t, srv, fake, map[string]any{"model": mergeModel, "messages": in})

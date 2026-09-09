@@ -13,6 +13,24 @@ GitHub release notes.
 
 ### Changed
 
+- **BREAKING: every per-model setting now lives in one place in `config.json`,
+  and the settings from before this change are dropped.** Sampling overrides,
+  pinned models and the system-message-merging switches were three separate
+  sections of the settings file — `model_sampling`, `pinned` and `per_model` —
+  each with its own ceiling, its own handling of an unusable entry and its own
+  rules, held together by nothing but care. They are one `models` section now,
+  keyed by the model's repository id, with a model's sampling override, its pin
+  and its merging switch sitting side by side on the same entry. Gropius is
+  before 1.0 and carries no migration code, so the three old sections are no
+  longer read: the control panel warns that they are not in force and names
+  them, the startup log says the same, and the next time you save settings they
+  are gone from the file. A settings request that posts one of the old sections
+  is refused rather than answered "saved", naming the section and where it
+  lives now. Per-model sampling defaults, pinned models and merging switches
+  set before this change must be set again in **Settings**. Everything else in
+  the file — the API key, the bind address, the memory budget, the machine-wide
+  sampling defaults, the preload list — is untouched.
+
 - **The chat client reads as a Mac app, and says when it is waiting on a
   model.** The message box is a real multi-line control — bordered, with focused
   and disabled states you can see, growing with what you type and scrolling once
