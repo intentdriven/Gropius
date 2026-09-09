@@ -20,6 +20,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"unicode/utf8"
 )
 
 // Paths is the on-disk layout. All fields are absolute.
@@ -620,6 +621,27 @@ func (c *Config) sanitizePerModel() []string {
 // but Validate is machine-independent, so the count is what is bounded here.
 const MaxPinned = MaxPerModel
 
+// MaxPreload bounds the preload list, for the reason MaxPinned bounds the
+// pinned list beside it and to the same figure: a config.json grown without
+// limit is one the next start cannot read, and a start that cannot read it
+// locks the server down to loopback. The list names models to load into memory
+// at startup, so it cannot usefully be longer than the models this Mac can
+// hold — a bound the memory budget puts in the single digits — while Validate
+// has to be machine-independent, so what is bounded here is the count, at the
+// figure the two per-model maps already use.
+const MaxPreload = MaxPinned
+
+// MaxAPIKeyBytes bounds the API key, for the same reason and against the same
+// hazard.
+//
+// GenerateAPIKey produces 43 characters (32 random bytes, base64 without
+// padding), which is what a fresh install carries and what almost every
+// install keeps. The ceiling is an order of magnitude above that, so a
+// passphrase a person chose or a password manager produced fits with room to
+// spare, and the field stops being a lever for growing config.json towards
+// MaxConfigBytes from the settings endpoint.
+const MaxAPIKeyBytes = 512
+
 // validatePinned checks the pinned list the way validateSampling checks the
 // sampling overrides: this is the settings path, where a human is waiting for
 // an answer, so an entry that names no model is refused rather than dropped.
@@ -698,6 +720,70 @@ func (c *Config) sanitizeBudget() []string {
 	dropped := []string{"max_resident_bytes[" + strconv.FormatInt(c.MaxResidentBytes, 10) + "]"}
 	c.MaxResidentBytes = 0
 	return dropped
+}
+
+// sanitizePreload cuts a preload list this build cannot use down to the
+// ceiling and names what it cut, so a hand-edited file, a backup or another
+// build's settings still load.
+//
+// Cut rather than refused, for the reason sanitizePinned gives: the panel
+// serves the stored settings into its form and the form posts them back, so a
+// list that is refused rather than trimmed would come back on the next save
+// and be refused there — wedging every settings change there is, the API key
+// included, until someone edited the file by hand.
+//
+// The entries kept are the ones at the front. They are all equally
+// well-formed — only their position is the problem — so one line naming the
+// field and the count says everything an operator can act on, where a line per
+// entry would say the same thing two hundred times.
+func (c *Config) sanitizePreload() []string {
+	if len(c.Preload) <= MaxPreload {
+		return nil
+	}
+	cut := len(c.Preload) - MaxPreload
+	c.Preload = c.Preload[:MaxPreload]
+	return []string{"preload (" + strconv.Itoa(cut) + " entries beyond the " +
+		strconv.Itoa(MaxPreload) + "-model ceiling)"}
+}
+
+// sanitizeAPIKey trims an API key this build cannot use and says that it did,
+// so a hand-edited file, a backup or another build's settings still load.
+//
+// Trimmed rather than cleared: clearing it would turn one over-long value in a
+// file into a LAN-exposed server that anyone on the network can use, which is
+// the one outcome this configuration is never allowed to arrive at by
+// accident. Trimmed rather than refused, for the reason the sanitizers above
+// give — a refused file locks the next start down to loopback, and the key
+// would come back on the next save and be refused there.
+//
+// What is left is still a key, and a client using the old one is refused: the
+// file was already carrying a value no save would have written, and the panel
+// shows the operator exactly what is in force now. The value is never named in
+// what is reported — it is the secret this field exists to hold.
+func (c *Config) sanitizeAPIKey() []string {
+	if len(c.APIKey) <= MaxAPIKeyBytes {
+		return nil
+	}
+	key := c.APIKey[:MaxAPIKeyBytes]
+	// A cut through the middle of a multi-byte character would leave a string
+	// that is not valid UTF-8, which Save would re-encode as something else
+	// again. Step back to the last whole character; at most three steps for a
+	// value that is UTF-8 at all.
+	whole := key
+	for len(whole) > 0 && !utf8.ValidString(whole) {
+		whole = whole[:len(whole)-1]
+	}
+	// A value with no whole character anywhere in it leaves nothing to step
+	// back to, and the raw cut is kept rather than the empty string this would
+	// otherwise produce. Nothing reaches here with one today — Load's decoder
+	// coerces invalid UTF-8 to U+FFFD — and the guard does not depend on that
+	// staying true: an empty key is an open server on a LAN-exposed install,
+	// which is the one repair this function must never make.
+	if whole != "" {
+		key = whole
+	}
+	c.APIKey = key
+	return []string{"api_key (trimmed to the " + strconv.Itoa(MaxAPIKeyBytes) + "-byte ceiling)"}
 }
 
 // Clone returns a copy that shares no slice, map or pointer with the original.
@@ -924,6 +1010,14 @@ func (c Config) Validate() error {
 	}
 	if c.DecodeConcurrency < 1 {
 		return fmt.Errorf("decode_concurrency must be >= 1, got %d", c.DecodeConcurrency)
+	}
+	// Named fields, both of them: this is the settings path, where a person is
+	// waiting to be told which of a form's worth of settings was refused.
+	if len(c.APIKey) > MaxAPIKeyBytes {
+		return fmt.Errorf("api_key must be at most %d bytes, got %d", MaxAPIKeyBytes, len(c.APIKey))
+	}
+	if len(c.Preload) > MaxPreload {
+		return fmt.Errorf("preload names %d models, more than the %d this holds", len(c.Preload), MaxPreload)
 	}
 	if err := c.validatePinned(); err != nil {
 		return err
@@ -1227,27 +1321,65 @@ func (c Config) ExposedToLAN() bool {
 // hang startup before the fail-closed branch in main could ever run, and a
 // symlinked or oversized file is refused rather than applied. Any such refusal
 // is an error, which main treats as "lock down to loopback".
-func Load(path string) (Config, []string, error) {
+func Load(path string) (Config, Notices, error) {
 	cfg := Default()
 	b, err := ReadRegular(path, MaxConfigBytes)
 	if errors.Is(err, fs.ErrNotExist) {
-		return cfg, nil, nil
+		return cfg, Notices{}, nil
 	}
 	if err != nil {
-		return cfg, nil, fmt.Errorf("read config: %w", err)
+		return cfg, Notices{}, fmt.Errorf("read config: %w", err)
 	}
 	if err := json.Unmarshal(b, &cfg); err != nil {
-		return Default(), nil, fmt.Errorf("parse config %s: %w", path, err)
+		return Default(), Notices{}, fmt.Errorf("parse config %s: %w", path, err)
 	}
-	dropped := append(cfg.sanitizeSampling(), cfg.sanitizePerModel()...)
-	dropped = append(dropped, cfg.sanitizePinned()...)
-	dropped = append(dropped, cfg.sanitizeStats()...)
-	dropped = append(dropped, cfg.sanitizeBudget()...)
-	dropped = append(dropped, cfg.sanitizeGrace()...)
+	var n Notices
+	// Ignored: the setting is not in force at all, and setting it again is the
+	// only way to get it.
+	n.Ignored = append(n.Ignored, cfg.sanitizeSampling()...)
+	n.Ignored = append(n.Ignored, cfg.sanitizePerModel()...)
+	n.Ignored = append(n.Ignored, cfg.sanitizePinned()...)
+	n.Ignored = append(n.Ignored, cfg.sanitizePreload()...)
+	// Repaired: the setting IS in force, in a changed form. Telling an
+	// operator to set it again would send them looking for a value that is
+	// working — and for the API key it would be worse than that, because the
+	// trimmed key is the one their clients must now send.
+	n.Repaired = append(n.Repaired, cfg.sanitizeStats()...)
+	n.Repaired = append(n.Repaired, cfg.sanitizeBudget()...)
+	n.Repaired = append(n.Repaired, cfg.sanitizeGrace()...)
+	n.Repaired = append(n.Repaired, cfg.sanitizeAPIKey()...)
 	if err := cfg.Validate(); err != nil {
-		return Default(), nil, &InvalidError{Path: path, Err: err, Parsed: cfg, Dropped: dropped}
+		return Default(), Notices{}, &InvalidError{Path: path, Err: err, Parsed: cfg, Notices: n}
 	}
-	return cfg, dropped, nil
+	return cfg, n, nil
+}
+
+// Notices is what Load had to change about a settings file to make it usable,
+// kept in two lists because the difference is the whole of what an operator
+// needs to hear.
+//
+// A setting in Ignored is not in force at all: it named nothing this build can
+// use, and setting it again is the only way to get it. A setting in Repaired
+// IS in force, in a changed form — trimmed, clamped, or replaced by the
+// default that stands behind it. One message for both said "ignoring settings
+// the model server would not accept — set them again", which is untrue of
+// every repair and dangerous for exactly one of them: a trimmed API key is the
+// key clients must send from that moment on, and an operator told it was
+// ignored has been told the opposite of what happened.
+type Notices struct {
+	Ignored  []string
+	Repaired []string
+}
+
+// Empty reports whether the file needed no changing at all.
+func (n Notices) Empty() bool { return len(n.Ignored) == 0 && len(n.Repaired) == 0 }
+
+// All names everything Load changed, ignored and repaired together, for a
+// caller that wants the fields and not the distinction.
+func (n Notices) All() []string {
+	out := make([]string, 0, len(n.Ignored)+len(n.Repaired))
+	out = append(out, n.Ignored...)
+	return append(out, n.Repaired...)
 }
 
 // InvalidError reports a config.json that read and parsed cleanly and then
@@ -1271,9 +1403,10 @@ type InvalidError struct {
 	// Parsed is the configuration as it was read: sanitized, and invalid in
 	// whatever way Err names. It is not safe to run as it stands.
 	Parsed Config
-	// Dropped names the sampling preferences sanitizeSampling discarded, as
-	// Load's second return value would have carried them.
-	Dropped []string
+	// Notices names what sanitizing changed on the way here, split the way
+	// Load's second return value would have carried it: settings that are not
+	// in force at all, and settings that are in force in a changed form.
+	Notices Notices
 }
 
 func (e *InvalidError) Error() string { return "invalid config " + e.Path + ": " + e.Err.Error() }

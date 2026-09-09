@@ -204,6 +204,53 @@ GitHub release notes.
   In shared-cache mode, where another account owns the index file, a failed
   registry write is routine rather than a disk-full hypothetical.
 
+
+- **A model server that stops mid-sentence no longer grows the gateway's
+  memory.** A streamed answer is relayed a line at a time, and a server that
+  hung without finishing its line made that line grow for as long as it kept
+  writing. One line is now bounded by the same figure that bounds a whole
+  non-streamed answer, which no real chunk comes anywhere near: past it, the
+  answer ends, the reason is logged once, and the connection to the model
+  server is closed.
+
+- **A setting that was repaired is no longer reported as one that was
+  ignored.** Loading `config.json` says what it had to change, and one message
+  covered both cases: "ignoring settings the model server would not accept —
+  set them again in Settings". That is untrue of every setting that is repaired
+  rather than dropped, and actively misleading for an API key trimmed to the
+  new ceiling — the shortened key is the one clients must send, not one to set
+  again. The two are now told apart and worded for what each is, the model
+  server is no longer blamed for a limit Gropius chose, and a repair shows in
+  the control panel's warnings as well as in the log, because the panel shows a
+  key as asterisks whether it was trimmed or not. Saving clears the notice: the
+  file has just been written from the values in force.
+
+- **Two settings saves at once no longer lose one of the changes.** Each save
+  read the settings in force, applied what was posted to a copy of them and
+  wrote the result back, so two saves that overlapped — two browser tabs, or
+  the panel and a script — each wrote a configuration that had never seen the
+  other's change, and the second silently reverted a setting nobody had
+  touched. The list of models a save says need reloading was worked out against
+  the same stale picture. Saves are now taken one at a time, start to finish.
+
+- **Clicking Load again no longer takes a second place in the queue for
+  memory.** Loading a model takes minutes and the button answers at once, so an
+  operator who saw nothing happen clicked it again — and with eviction grace
+  switched on, each click held one of the few places in that queue for the
+  whole maximum wait, until nothing else could load at all. A click that finds
+  the model already loading now joins that load instead of starting another,
+  and is answered the same way.
+
+- **The API key and the preload list are bounded, and a refusal says which one
+  it is about.** Both could be saved at any size, so either could grow
+  `config.json` until the next start could no longer read it — which locks the
+  server down to loopback. A key may now be up to 512 bytes (a generated one is
+  43) and the preload list up to 256 models, and a save beyond either is
+  refused by name rather than as a body that is simply too large. A settings
+  file already carrying more is trimmed to fit and says so as it loads, rather
+  than being refused: the key is shortened, never cleared, so a server exposed
+  to the network is never opened by a value in a file.
+
 ## [0.4.0] - 2026-09-08
 
 ### Added

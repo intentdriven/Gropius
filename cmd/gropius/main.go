@@ -83,7 +83,7 @@ func main() {
 	if start.Problem != "" {
 		log.Error(start.Problem, start.Args...)
 	}
-	warnDroppedSettings(log, start.Dropped)
+	warnStartupNotices(log, start.Notices)
 
 	// Fail closed on an exposed bind with no key. A LAN-bound listener with no
 	// API key is reachable, unauthenticated, by everyone on the network, and a
@@ -113,6 +113,9 @@ func main() {
 				lockDown("could not save the generated API key — starting locked down to loopback only so the endpoint is not left open", "path", paths.Config, "err", err)
 				break
 			}
+			// That save wrote the file from the settings in force, repairs
+			// included, so there is nothing left in it to warn about.
+			start.Notices.Repaired = nil
 			log.Warn("SECURITY: this server binds a LAN address, so an API key was generated and saved; clients must send it as \"Authorization: Bearer <key>\". Change or clear it in Settings.",
 				"api_key", key)
 		}
@@ -137,7 +140,7 @@ func main() {
 		return
 	}
 
-	if err := runServer(ln, paths, cfg, *headless, log); err != nil {
+	if err := runServer(ln, paths, cfg, start.Notices.Repaired, *headless, log); err != nil {
 		log.Error("server stopped", "err", err)
 		os.Exit(1)
 	}
@@ -147,7 +150,7 @@ func main() {
 // it got there.
 type startupConfig struct {
 	Config  config.Config
-	Dropped []string
+	Notices config.Notices
 	// Problem is the message explaining a lockdown, empty when config.json
 	// loaded cleanly. Args carries its structured fields.
 	Problem string
@@ -177,9 +180,9 @@ type startupConfig struct {
 //     the objection was to something else and the defaults are all that is
 //     left.
 func loadStartupConfig(path string) startupConfig {
-	cfg, dropped, err := config.Load(path)
+	cfg, notices, err := config.Load(path)
 	if err == nil {
-		return startupConfig{Config: cfg, Dropped: dropped}
+		return startupConfig{Config: cfg, Notices: notices}
 	}
 
 	lockedDefaults := config.Default()
@@ -207,29 +210,46 @@ func loadStartupConfig(path string) startupConfig {
 	}
 	return startupConfig{
 		Config:  locked,
-		Dropped: invalid.Dropped,
+		Notices: invalid.Notices,
 		Problem: "config.json is not a valid configuration — the bind address is locked down to loopback only and the rest of your settings are kept; fix it in Settings and restart",
 		Args:    []any{"path", path, "err", invalid.Err},
 	}
 }
 
-// warnDroppedSettings reports the settings that were read but not applied.
+// warnStartupNotices reports what loading config.json had to change about it.
 //
-// A sampling preference the model server would refuse is ignored rather than
-// fatal: applying it would break every request that omits that parameter, and
-// refusing the file would lock the server down to loopback. Dropping it
-// silently would be worse than either — the field simply shows as blank in the
-// panel with nothing to say where it went.
-func warnDroppedSettings(log *slog.Logger, dropped []string) {
-	if len(dropped) == 0 {
-		return
+// Two lines, because the two lists mean opposite things to the person reading
+// them. A setting that was IGNORED is not in force: a sampling preference the
+// model server would refuse is dropped rather than applied, because applying it
+// would break every request that omits that parameter and refusing the file
+// would lock the server down to loopback — and dropping it silently would be
+// worse than either, leaving a field that shows as blank in the panel with
+// nothing to say where it went.
+//
+// A setting that was REPAIRED is in force right now, in a changed form. Saying
+// it was ignored sends an operator to look for a setting that is working, and
+// for one of them it is worse than that: a trimmed API key is the key their
+// clients must send from that moment on. Neither line blames the model server,
+// which has nothing to do with a length this build chose.
+func warnStartupNotices(log *slog.Logger, n config.Notices) {
+	if len(n.Ignored) > 0 {
+		log.Warn("ignoring settings this build cannot use — set them again in Settings",
+			"fields", strings.Join(n.Ignored, ", "))
 	}
-	log.Warn("ignoring settings the model server would not accept — set them again in Settings",
-		"fields", strings.Join(dropped, ", "))
+	if len(n.Repaired) > 0 {
+		log.Warn("some settings could not be used as written and are in force in a changed form — check them in Settings",
+			"fields", strings.Join(n.Repaired, ", "))
+	}
 }
 
 // runServer is the primary instance: it owns the models and the GPU.
-func runServer(ln net.Listener, paths config.Paths, cfg config.Config, headless bool, log *slog.Logger) error {
+//
+// repaired names the settings config.json could not carry as written, which the
+// control panel warns about until a save rewrites the file. It is carried in
+// rather than re-derived because loading happens once, before the bind is
+// decided, and nothing downstream can tell a value that was repaired from one
+// the operator wrote that way.
+func runServer(ln net.Listener, paths config.Paths, cfg config.Config, repaired []string, headless bool, log *slog.Logger) error {
 	a, err := app.New(app.Options{Paths: paths, Config: cfg, Log: log})
 	if err != nil {
 		return err
@@ -261,7 +281,7 @@ func runServer(ln net.Listener, paths config.Paths, cfg config.Config, headless 
 	// Control plane + web UI — administrative, so loopback-only (Control.Handler
 	// enforces it). Mounted at "/" as the catch-all for everything that is not a
 	// /v1 or /health request.
-	ctrl := &gateway.Control{App: a, UI: ui.Handler(), Root: paths.Root}
+	ctrl := &gateway.Control{App: a, UI: ui.Handler(), Root: paths.Root, Repaired: repaired}
 	mux.Handle("/", ctrl.Handler())
 
 	srv := &http.Server{

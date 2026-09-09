@@ -607,6 +607,30 @@ func TestAnAnswerCutShortIsNotRecordedAsOne(t *testing.T) {
 	}
 }
 
+// An answer ended by the relay's own line cap is not the model server failing.
+// It was reachable, it was answering, and Gropius stopped reading because of a
+// limit Gropius chose — recording that as "unreachable" points an operator
+// reading the statistics at the wrong piece of software.
+func TestAnAnswerEndedByTheLineCapIsNotBlamedOnTheModelServer(t *testing.T) {
+	out := streamRewriteSSE(httptest.NewRecorder(),
+		io.LimitReader(fillReader{}, maxStreamLine+1024),
+		"backend", "friendly", relayOptions{observing: true})
+	if !out.oversizeLine {
+		t.Fatal("the relay did not report ending the answer on its own limit")
+	}
+
+	obs := &observation{rec: stats.New(stats.Options{}), started: time.Now(),
+		record: stats.Record{Class: stats.ClassOK, FirstTokenMS: stats.NoFirstToken}}
+	obs.relayed(out)
+	if obs.record.Class == stats.ClassUnreachable {
+		t.Error("the relay's own limit was recorded as the model server being unreachable")
+	}
+	if obs.record.Class != stats.ClassGatewayError {
+		t.Errorf("recorded as %q, want %q — the failure is Gropius's own",
+			obs.record.Class, stats.ClassGatewayError)
+	}
+}
+
 type errReader struct{ err error }
 
 func (r errReader) Read([]byte) (int, error) { return 0, r.err }

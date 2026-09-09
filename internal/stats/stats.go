@@ -66,9 +66,11 @@ const (
 	// ClassCancelled is a client that went away before the answer was done.
 	ClassCancelled Class = "cancelled"
 	// ClassGatewayError is Gropius's own failure: it could not re-encode the
-	// request or could not build the call to the model server. It is neither
-	// the client's fault nor the model server's, and recording it as anything
-	// else would put the blame on one of them.
+	// request, could not build the call to the model server, or ended a
+	// streamed answer on a limit of its own — a line that reached the relay's
+	// ceiling with no end to it. It is neither the client's fault nor the model
+	// server's, and recording it as anything else would put the blame on one of
+	// them.
 	ClassGatewayError Class = "gateway_error"
 )
 

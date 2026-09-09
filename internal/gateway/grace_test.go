@@ -3,8 +3,10 @@ package gateway
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -111,4 +113,92 @@ func TestStateReportsHowManyRequestsAreWaitingForRoom(t *testing.T) {
 	}
 	t.Fatalf("state.waiting = %d while a request was queued for room, want 1",
 		stateOf(t, srv).Waiting)
+}
+
+// An impatient operator clicks Load again when nothing appears to happen. Each
+// click used to start a goroutine of its own, and with grace on each of those
+// occupies one of the eight places in the queue for memory for the whole
+// maximum wait — so eight clicks fill it and every cold load from the network
+// is refused until they drain. A click that finds a load already running for
+// that model must join it rather than start a second.
+func TestRepeatedLoadClicksAcquireOnce(t *testing.T) {
+	cfg := config.Default()
+	cfg.MaxResidentBytes = 250 // LoadCost is 1.2x, so it holds one of the two
+	cfg.EvictionGrace = true
+	cfg.EvictionGraceSec = 30
+	cfg.EvictionMaxWaitSec = 60
+	a, srv := newBudgetControl(t, cfg, 128*gb, map[string]int64{"org/a": 200, "org/b": 200})
+
+	// Fill the budget with a model that has just gone idle, so a load of the
+	// other one has to queue for room rather than finishing at once.
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	_, release, err := a.Pool.Acquire(ctx, "org/a")
+	if err != nil {
+		t.Fatalf("Acquire(org/a): %v", err)
+	}
+	release() // idle, and inside its grace
+
+	const clicks = 5
+	statuses := make(chan int, clicks)
+	failures := make(chan error, clicks)
+	var wg sync.WaitGroup
+	for range clicks {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			req, err := http.NewRequest(http.MethodPost, srv.URL+"/api/models/load",
+				strings.NewReader(`{"model":"org/b"}`))
+			if err != nil {
+				failures <- err
+				return
+			}
+			req.Header.Set("Content-Type", "application/json")
+			resp, err := srv.Client().Do(req)
+			if err != nil {
+				failures <- err
+				return
+			}
+			defer resp.Body.Close()
+			io.Copy(io.Discard, resp.Body)
+			statuses <- resp.StatusCode
+		}()
+	}
+	wg.Wait()
+	close(statuses)
+	close(failures)
+	for err := range failures {
+		t.Fatalf("POST /api/models/load: %v", err)
+	}
+	// Every click is answered the same way: the model is loading. A click that
+	// joined a load already running is not an error to report.
+	for got := range statuses {
+		if got != http.StatusAccepted {
+			t.Errorf("status = %d, want %d", got, http.StatusAccepted)
+		}
+	}
+
+	waitFor(t, func() bool { return a.Pool.Waiting() >= 1 },
+		"no load ever reached the queue for memory")
+	// One place taken, and it stays one: the clicks that found a load already
+	// in progress started nothing.
+	for range 30 {
+		if got := a.Pool.Waiting(); got != 1 {
+			t.Fatalf("%d clicks put %d loads in the queue for memory, want 1", clicks, got)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// waitFor polls until cond holds, failing with msg if it never does.
+func waitFor(t *testing.T, cond func() bool, msg string) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal(msg)
 }

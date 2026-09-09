@@ -143,7 +143,7 @@ func TestLoadDropsOutOfRangeSamplingRatherThanRefusingTheFile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cfg, dropped, err := Load(path)
+	cfg, notices, err := Load(path)
 	if err != nil {
 		t.Fatalf("Load() = %v, want nil — an out-of-range preference must not lock the server down", err)
 	}
@@ -159,8 +159,8 @@ func TestLoadDropsOutOfRangeSamplingRatherThanRefusingTheFile(t *testing.T) {
 	if cfg.Sampling.MaxTokens == nil || *cfg.Sampling.MaxTokens != 8192 {
 		t.Errorf("max_tokens = %v, want the in-range value kept", cfg.Sampling.MaxTokens)
 	}
-	if len(dropped) != 1 || !strings.Contains(dropped[0], "top_p") {
-		t.Errorf("dropped = %v, want exactly the top_p field named so main can log it", dropped)
+	if len(notices.All()) != 1 || !strings.Contains(notices.All()[0], "top_p") {
+		t.Errorf("dropped = %v, want exactly the top_p field named so main can log it", notices.All())
 	}
 }
 
@@ -172,7 +172,7 @@ func TestLoadDropsAnOverrideWithAnUnusableRepoID(t *testing.T) {
 	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	cfg, dropped, err := Load(path)
+	cfg, notices, err := Load(path)
 	if err != nil {
 		t.Fatalf("Load() = %v, want nil", err)
 	}
@@ -182,7 +182,7 @@ func TestLoadDropsAnOverrideWithAnUnusableRepoID(t *testing.T) {
 	if _, ok := cfg.ModelSampling["org/name"]; !ok {
 		t.Error("the well-formed override was dropped too")
 	}
-	if len(dropped) == 0 {
+	if len(notices.All()) == 0 {
 		t.Error("dropped = empty, want the rejected key named")
 	}
 }
@@ -287,15 +287,15 @@ func TestTooManyOverridesIsRefusedAndDroppedOnLoad(t *testing.T) {
 	if err := os.WriteFile(path, b, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	loaded, dropped, err := Load(path)
+	loaded, notices, err := Load(path)
 	if err != nil {
 		t.Fatalf("Load() = %v, want nil — an oversized override map must not lock the server down", err)
 	}
 	if len(loaded.ModelSampling) != MaxModelSampling {
 		t.Errorf("kept %d overrides, want the ceiling of %d", len(loaded.ModelSampling), MaxModelSampling)
 	}
-	if len(dropped) != 5 {
-		t.Errorf("dropped %d, want the 5 beyond the ceiling named", len(dropped))
+	if len(notices.All()) != 5 {
+		t.Errorf("dropped %d, want the 5 beyond the ceiling named", len(notices.All()))
 	}
 }
 
@@ -443,12 +443,12 @@ func TestAFullOverrideMapStillFitsTheConfigFile(t *testing.T) {
 	if err := Save(path, cfg); err != nil {
 		t.Fatalf("Save: %v — a legal override map does not fit the file", err)
 	}
-	loaded, dropped, err := Load(path)
+	loaded, notices, err := Load(path)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if len(dropped) != 0 {
-		t.Errorf("dropped %v from a config within every limit", dropped)
+	if len(notices.All()) != 0 {
+		t.Errorf("dropped %v from a config within every limit", notices.All())
 	}
 	if len(loaded.ModelSampling) != MaxModelSampling {
 		t.Errorf("loaded %d overrides, want %d", len(loaded.ModelSampling), MaxModelSampling)
@@ -522,14 +522,14 @@ func TestMaxTokensAboveTheCeilingIsRefusedAndDropped(t *testing.T) {
 	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	cfg, dropped, err := Load(path)
+	cfg, notices, err := Load(path)
 	if err != nil {
 		t.Fatalf("Load() = %v, want nil", err)
 	}
 	if cfg.Sampling.MaxTokens != nil {
 		t.Errorf("max_tokens = %d, want it dropped", *cfg.Sampling.MaxTokens)
 	}
-	if len(dropped) != 1 || !strings.Contains(dropped[0], "max_tokens") {
-		t.Errorf("dropped = %v, want max_tokens named", dropped)
+	if len(notices.All()) != 1 || !strings.Contains(notices.All()[0], "max_tokens") {
+		t.Errorf("dropped = %v, want max_tokens named", notices.All())
 	}
 }
