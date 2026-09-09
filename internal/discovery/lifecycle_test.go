@@ -3,8 +3,9 @@ package discovery
 import (
 	"context"
 	"errors"
-	"io"
 	"log/slog"
+	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -27,10 +28,18 @@ type fakeAnnouncer struct {
 	attempts int
 	blockAt  int           // 0-based attempt that waits on gate (-1: none)
 	gate     chan struct{} // released by the test
+
+	serveFailAt map[int]bool // 0-based Respond attempts that fail immediately
+	serves      int
 }
 
 func newFakeAnnouncer() *fakeAnnouncer {
-	return &fakeAnnouncer{failAt: map[int]bool{}, blockAt: -1, gate: make(chan struct{})}
+	return &fakeAnnouncer{
+		failAt:      map[int]bool{},
+		serveFailAt: map[int]bool{},
+		blockAt:     -1,
+		gate:        make(chan struct{}),
+	}
 }
 
 func (f *fakeAnnouncer) record(ev string) {
@@ -75,26 +84,46 @@ func (f *fakeAnnouncer) Register(cfg dnssd.Config) (registration, error) {
 	}
 
 	f.mu.Lock()
+	id := len(f.texts)
 	f.texts = append(f.texts, cfg.Text)
 	f.mu.Unlock()
 	f.record("register:" + cfg.Text["auth"])
-	return &fakeRegistration{f: f}, nil
+	return &fakeRegistration{f: f, id: id}, nil
 }
 
-type fakeRegistration struct{ f *fakeAnnouncer }
+// fakeRegistration is one registration. id identifies it, so a test can tell a
+// registration that was served twice from two registrations served once — the
+// difference between reusing a socket pair and opening another.
+type fakeRegistration struct {
+	f  *fakeAnnouncer
+	id int
+}
 
 func (r *fakeRegistration) Respond(ctx context.Context) error {
 	r.f.mu.Lock()
+	n := r.f.serves
+	r.f.serves++
+	fail := r.f.serveFailAt[n]
+	r.f.mu.Unlock()
+
+	// dnssd probes and announces inside Respond, not in Add, so a registration
+	// that was accepted can still fail the moment it is served.
+	if fail {
+		r.f.record("serve-failed#" + strconv.Itoa(r.id))
+		return errors.New("mDNS probe failed")
+	}
+
+	r.f.mu.Lock()
 	r.f.live++
 	r.f.mu.Unlock()
-	r.f.record("respond")
+	r.f.record("respond#" + strconv.Itoa(r.id))
 
 	<-ctx.Done()
 
 	r.f.mu.Lock()
 	r.f.live--
 	r.f.mu.Unlock()
-	r.f.record("exit")
+	r.f.record("exit#" + strconv.Itoa(r.id))
 	return nil
 }
 
@@ -120,9 +149,47 @@ func (h *hints) bump(n int) {
 	h.models += n
 }
 
+// logRecorder captures what the advertiser says. An outage that persists fails
+// identically every tick, so how OFTEN it is reported is a property worth
+// asserting, not only what is reported.
+type logRecorder struct {
+	mu   sync.Mutex
+	said []string // "LEVEL message"
+}
+
+func (l *logRecorder) Enabled(context.Context, slog.Level) bool { return true }
+
+func (l *logRecorder) Handle(_ context.Context, r slog.Record) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.said = append(l.said, r.Level.String()+" "+r.Message)
+	return nil
+}
+
+func (l *logRecorder) WithAttrs([]slog.Attr) slog.Handler { return l }
+func (l *logRecorder) WithGroup(string) slog.Handler      { return l }
+
+func (l *logRecorder) lines() []string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return append([]string(nil), l.said...)
+}
+
+// saidAbout counts the recorded lines containing substr.
+func (l *logRecorder) saidAbout(substr string) int {
+	n := 0
+	for _, line := range l.lines() {
+		if strings.Contains(line, substr) {
+			n++
+		}
+	}
+	return n
+}
+
 // testAdvertiser builds an Advertiser wired to the fake, ticking fast enough
 // that a test never waits on the production interval.
-func testAdvertiser(f *fakeAnnouncer, h *hints) *Advertiser {
+func testAdvertiser(f *fakeAnnouncer, h *hints) (*Advertiser, *logRecorder) {
+	rec := &logRecorder{}
 	return &Advertiser{
 		Port: 11434,
 		AuthRequired: func() bool {
@@ -135,10 +202,10 @@ func testAdvertiser(f *fakeAnnouncer, h *hints) *Advertiser {
 			defer h.mu.Unlock()
 			return h.models
 		},
-		Log:      slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Log:      slog.New(rec),
 		announce: f,
 		interval: time.Millisecond,
-	}
+	}, rec
 }
 
 // waitFor polls until cond holds over the fake's event log, or fails the test.
@@ -152,6 +219,19 @@ func waitFor(t *testing.T, f *fakeAnnouncer, what string, cond func([]string) bo
 		time.Sleep(time.Millisecond)
 	}
 	t.Fatalf("timed out waiting for %s; events were %v", what, f.log())
+}
+
+// waitUntil polls cond until it holds, or fails the test.
+func waitUntil(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for %s", what)
 }
 
 func count(events []string, prefix string) int {
@@ -180,7 +260,7 @@ func count(events []string, prefix string) int {
 func TestATextChangeReRegistersInsteadOfMutatingTheLiveService(t *testing.T) {
 	f := newFakeAnnouncer()
 	var h hints
-	a := testAdvertiser(f, &h)
+	a, rec := testAdvertiser(f, &h)
 
 	if err := a.Start(context.Background()); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -188,7 +268,7 @@ func TestATextChangeReRegistersInsteadOfMutatingTheLiveService(t *testing.T) {
 	defer a.Stop()
 
 	waitFor(t, f, "the first advertisement to be responding", func(ev []string) bool {
-		return len(ev) >= 2 && ev[0] == "register:none" && ev[1] == "respond"
+		return len(ev) >= 2 && ev[0] == "register:none" && ev[1] == "respond#0"
 	})
 
 	// Alice sets an API key in the control panel: the advertised auth hint
@@ -203,7 +283,7 @@ func TestATextChangeReRegistersInsteadOfMutatingTheLiveService(t *testing.T) {
 	if len(ev) < 4 {
 		t.Fatalf("events = %v, want at least register, respond, exit, register", ev)
 	}
-	want := []string{"register:none", "respond", "exit", "register:bearer"}
+	want := []string{"register:none", "respond#0", "exit#0", "register:bearer"}
 	for i, w := range want {
 		if ev[i] != w {
 			t.Fatalf("events = %v, want them to start %v — a TXT change must stop the "+
@@ -212,12 +292,15 @@ func TestATextChangeReRegistersInsteadOfMutatingTheLiveService(t *testing.T) {
 	}
 
 	waitFor(t, f, "the replacement advertisement to be responding", func(ev []string) bool {
-		return count(ev, "respond") == 2
+		return count(ev, "respond#") == 2
 	})
 
 	texts := f.registeredTexts()
 	if len(texts) != 2 || texts[1]["auth"] != "bearer" {
 		t.Fatalf("registered TXT records = %v, want the second to carry auth=bearer", texts)
+	}
+	if got := rec.saidAbout("updated network advertisement"); got != 1 {
+		t.Errorf("logged the update %d times, want once: %v", got, rec.lines())
 	}
 }
 
@@ -227,13 +310,13 @@ func TestATextChangeReRegistersInsteadOfMutatingTheLiveService(t *testing.T) {
 func TestUnchangedHintsDoNotReRegister(t *testing.T) {
 	f := newFakeAnnouncer()
 	var h hints
-	a := testAdvertiser(f, &h)
+	a, rec := testAdvertiser(f, &h)
 
 	if err := a.Start(context.Background()); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	waitFor(t, f, "the advertisement to be responding", func(ev []string) bool {
-		return count(ev, "respond") == 1
+		return count(ev, "respond#") == 1
 	})
 
 	// Many ticks at a millisecond apiece, with nothing changing.
@@ -243,6 +326,9 @@ func TestUnchangedHintsDoNotReRegister(t *testing.T) {
 	if got := count(f.log(), "register:"); got != 1 {
 		t.Errorf("%d registrations over ~60 ticks with unchanged hints, want 1: %v", got, f.log())
 	}
+	if got := rec.saidAbout("updated network advertisement"); got != 0 {
+		t.Errorf("logged an update %d times with nothing changed: %v", got, rec.lines())
+	}
 }
 
 // A re-registration that fails leaves the service off the network entirely, so
@@ -251,7 +337,7 @@ func TestAFailedReRegistrationIsRetriedOnTheNextTick(t *testing.T) {
 	f := newFakeAnnouncer()
 	f.failAt[1] = true // the re-registration, not the initial one
 	var h hints
-	a := testAdvertiser(f, &h)
+	a, rec := testAdvertiser(f, &h)
 
 	if err := a.Start(context.Background()); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -259,7 +345,7 @@ func TestAFailedReRegistrationIsRetriedOnTheNextTick(t *testing.T) {
 	defer a.Stop()
 
 	waitFor(t, f, "the advertisement to be responding", func(ev []string) bool {
-		return count(ev, "respond") == 1
+		return count(ev, "respond#") == 1
 	})
 
 	h.setAuth(true)
@@ -268,11 +354,14 @@ func TestAFailedReRegistrationIsRetriedOnTheNextTick(t *testing.T) {
 		return count(ev, "register-failed") == 1 && count(ev, "register:") == 2
 	})
 	waitFor(t, f, "the retried advertisement to be responding", func(ev []string) bool {
-		return count(ev, "respond") == 2
+		return count(ev, "respond#") == 2
 	})
 
 	if got := f.liveCount(); got != 1 {
 		t.Errorf("live responders = %d after the retry, want 1", got)
+	}
+	if got := rec.saidAbout("could not publish"); got != 1 {
+		t.Errorf("reported the failure %d times, want once: %v", got, rec.lines())
 	}
 	texts := f.registeredTexts()
 	if texts[len(texts)-1]["auth"] != "bearer" {
@@ -287,13 +376,18 @@ func TestARefreshInFlightDoesNotSurviveStop(t *testing.T) {
 	f := newFakeAnnouncer()
 	f.blockAt = 1 // hold the re-registration open
 	var h hints
-	a := testAdvertiser(f, &h)
+	a, rec := testAdvertiser(f, &h)
 
-	if err := a.Start(context.Background()); err != nil {
+	// Cancelling the context Start was given is what Stop does internally, and
+	// doing it from here makes the ordering exact: the cancellation is complete
+	// before the held registration is released, with no sleep to tune.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := a.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	waitFor(t, f, "the advertisement to be responding", func(ev []string) bool {
-		return count(ev, "respond") == 1
+		return count(ev, "respond#") == 1
 	})
 
 	h.setAuth(true)
@@ -301,15 +395,15 @@ func TestARefreshInFlightDoesNotSurviveStop(t *testing.T) {
 		return count(ev, "register-entered") == 1
 	})
 
+	cancel()
+	// Let the in-flight registration complete, after the shutdown was asked for.
+	close(f.gate)
+
 	stopped := make(chan struct{})
 	go func() {
 		defer close(stopped)
 		a.Stop()
 	}()
-
-	// Let the in-flight registration complete, after Stop has been asked for.
-	close(f.gate)
-
 	select {
 	case <-stopped:
 	case <-time.After(5 * time.Second):
@@ -318,6 +412,12 @@ func TestARefreshInFlightDoesNotSurviveStop(t *testing.T) {
 
 	if got := f.liveCount(); got != 0 {
 		t.Errorf("%d responders still live after Stop returned, want 0: %v", got, f.log())
+	}
+
+	// Nothing is claimed to have been published for a service Stop was about to
+	// tear down.
+	if rec.saidAbout("advertisement") != 0 {
+		t.Errorf("the advertiser reported publishing work during Stop: %v", rec.lines())
 	}
 
 	// And nothing starts up afterwards.
@@ -334,7 +434,7 @@ func TestARefreshInFlightDoesNotSurviveStop(t *testing.T) {
 func TestConcurrentHintChangesAndStopAreRaceFree(t *testing.T) {
 	f := newFakeAnnouncer()
 	var h hints
-	a := testAdvertiser(f, &h)
+	a, _ := testAdvertiser(f, &h)
 
 	if err := a.Start(context.Background()); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -368,4 +468,99 @@ func TestConcurrentHintChangesAndStopAreRaceFree(t *testing.T) {
 	}
 	// Stop is idempotent.
 	a.Stop()
+}
+
+// Registering a service and serving it are two steps in dnssd: Register only
+// builds the service and hands it to a responder, while the probe and the first
+// announcement happen inside Respond. So a registration can be accepted and its
+// responder still fail immediately — the network went away between the two —
+// and treating the registration's success as "published" leaves the Mac on no
+// browser's list until something else changes.
+//
+// The responder that gave up must be served again, and — because dnssd closes
+// its sockets only on the way out of a Respond that ran to cancellation — the
+// retry must reuse the registration it already has rather than build another,
+// which would strand a socket pair on every attempt.
+func TestAResponderThatFailsIsServedAgainOnTheSameRegistration(t *testing.T) {
+	f := newFakeAnnouncer()
+	f.serveFailAt[0] = true // the network is down when the service is first served
+	f.serveFailAt[1] = true // and still down on the first retry
+	var h hints
+	a, rec := testAdvertiser(f, &h)
+
+	if err := a.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer a.Stop()
+
+	waitFor(t, f, "the advertisement to be serving after the outage", func(ev []string) bool {
+		return count(ev, "respond#") == 1
+	})
+
+	if got := count(f.log(), "serve-failed#"); got != 2 {
+		t.Errorf("%d failed serves recorded, want 2: %v", got, f.log())
+	}
+	if got := count(f.log(), "register:"); got != 1 {
+		t.Errorf("%d registrations across two failed serves, want 1 — each extra one "+
+			"opens a socket pair that dnssd will never close: %v", got, f.log())
+	}
+	if got := f.liveCount(); got != 1 {
+		t.Errorf("live responders = %d after recovery, want 1", got)
+	}
+
+	// An outage that persists fails the same way every tick. It is reported on
+	// the way in and on the way out, not once per tick in between. Recovery is
+	// announced only once the responder has survived an interval, so wait for
+	// it rather than reading the log the moment it starts.
+	waitUntil(t, "the recovery to be reported", func() bool {
+		return rec.saidAbout("republished") == 1
+	})
+	if got := rec.saidAbout("has stopped"); got != 1 {
+		t.Errorf("reported the outage %d times over two failed serves, want once: %v", got, rec.lines())
+	}
+
+	// And it stays quiet once it is back.
+	time.Sleep(30 * time.Millisecond)
+	if got := rec.saidAbout("republished"); got != 1 {
+		t.Errorf("reported the recovery %d times, want once: %v", got, rec.lines())
+	}
+}
+
+// The same failure on the re-registration path: the hints changed, the old
+// advertisement was withdrawn, the new registration was accepted and its
+// responder then failed. The service is off the network and must go back on.
+func TestAReRegistrationWhoseResponderFailsIsRetried(t *testing.T) {
+	f := newFakeAnnouncer()
+	f.serveFailAt[1] = true // the responder for the re-registration
+	var h hints
+	a, rec := testAdvertiser(f, &h)
+
+	if err := a.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer a.Stop()
+
+	waitFor(t, f, "the advertisement to be responding", func(ev []string) bool {
+		return count(ev, "respond#") == 1
+	})
+
+	h.setAuth(true)
+
+	waitFor(t, f, "the replacement responder to fail", func(ev []string) bool {
+		return count(ev, "serve-failed#1") == 1
+	})
+	waitFor(t, f, "the replacement to be serving after the retry", func(ev []string) bool {
+		return count(ev, "respond#1") == 1
+	})
+
+	if got := count(f.log(), "register:"); got != 2 {
+		t.Errorf("%d registrations, want 2 — the retry must reuse the registration "+
+			"whose responder failed, not build another: %v", got, f.log())
+	}
+	if got := f.liveCount(); got != 1 {
+		t.Errorf("live responders = %d, want 1", got)
+	}
+	if got := rec.saidAbout("has stopped"); got != 1 {
+		t.Errorf("reported the failure %d times, want once: %v", got, rec.lines())
+	}
 }

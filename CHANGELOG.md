@@ -26,6 +26,17 @@ GitHub release notes.
   republication that fails is retried on the next refresh rather than leaving
   the Mac undiscoverable until it is restarted.
 
+- **An advertisement that stops on its own is put back.** Claiming a name on
+  the network is a separate step from being handed the service, and it happens
+  a moment later — so an advertisement could be accepted and then fail, on a
+  Mac whose Wi-Fi had just dropped or whose network changed under it. The Mac
+  then stayed off every browser's list until the next time the advertised
+  hints changed, or until Gropius was restarted. It now watches its own
+  advertisement and puts it back on the network as soon as it can, reusing
+  what it already claimed rather than starting over each time. An outage is
+  reported once when it begins and once when it ends, instead of every fifteen
+  seconds for as long as the network is away.
+
 ## [0.4.0] - 2026-09-08
 
 ### Added
