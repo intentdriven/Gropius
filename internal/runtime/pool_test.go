@@ -82,6 +82,9 @@ type fakeLauncher struct {
 	// until the test says so, which is what a real server does for the length
 	// of its SIGTERM grace: out of the pool, still holding its memory.
 	holdExitFor string
+	// loadDelayFor overrides loadDelay for one model, so a test can have one
+	// model never become ready while the others load at once.
+	loadDelayFor map[string]time.Duration
 
 	mu        sync.Mutex
 	prechecks int
@@ -96,10 +99,11 @@ type fakeLauncher struct {
 
 func newFakeLauncher() *fakeLauncher {
 	return &fakeLauncher{
-		specs:    map[string]Spec{},
-		procs:    map[string]*fakeProc{},
-		servers:  map[string]*mlxtest.Server{},
-		dieAfter: map[string]bool{},
+		specs:        map[string]Spec{},
+		procs:        map[string]*fakeProc{},
+		servers:      map[string]*mlxtest.Server{},
+		dieAfter:     map[string]bool{},
+		loadDelayFor: map[string]time.Duration{},
 	}
 }
 
@@ -122,6 +126,9 @@ func (l *fakeLauncher) Launch(ctx context.Context, spec Spec) (Process, error) {
 	}
 
 	loadDelay := l.loadDelay
+	if d, ok := l.loadDelayFor[spec.RepoID]; ok {
+		loadDelay = d
+	}
 	if l.dieAfter[spec.RepoID] {
 		// A process that dies during startup never finished loading, so it must
 		// never answer a completion successfully. Keep it "loading" forever; it

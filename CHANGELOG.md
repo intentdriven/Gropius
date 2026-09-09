@@ -21,9 +21,17 @@ GitHub release notes.
   first one's footprint, which is the memory blowup the budget exists to
   prevent. The model being replaced is now told to go at once, as before, but
   the request that wanted its room waits for the process to actually exit
-  before its own model is started. A stopped server that will not go at all no
-  longer holds the machine indefinitely either: the waiting request is refused
-  the way any other request that cannot be served is.
+  before its own model is started — and so does a request whose own model
+  failed to load, which leaves a server shutting down in just the same way. A
+  request that has not got that long to wait no longer takes a model down on
+  its way to being refused, and requests waiting for a server to exit count
+  towards the same queue limit as every other request waiting for memory.
+
+- **The panel says when a stopped model server is still holding memory.** A
+  server that survives being stopped and then killed keeps its memory until the
+  system reclaims it, which makes the budget smaller than the models on screen
+  account for. Settings now reports how much is held that way and by how many
+  servers, and the log says so once when it happens.
 
 - **Model servers left behind by a crash are cleaned up even after the Mac's
   clock has been corrected.** If Gropius is force-quit or crashes, the model

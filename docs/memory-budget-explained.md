@@ -55,7 +55,11 @@ resident at the time go by the usual rules.
 A swap does not lift the ceiling either. A model being replaced keeps its share
 of the budget until its server process has actually gone, so the request that
 needed the room waits out those seconds rather than starting a second server on
-top of the first.
+top of the first. That wait is bounded: a server that will not go — one the
+system has stopped and then killed, and which is still there — leaves the
+request refused rather than held, and the panel says how much memory is being
+held that way and by how many servers. Until they go, the budget is that much
+smaller than it looks.
 
 ## Choosing a figure
 
