@@ -61,11 +61,35 @@ type App struct {
 	cfgMu sync.RWMutex
 	cfg   config.Config
 
-	// dlMu guards in-flight downloads so a repo cannot be downloaded twice at
-	// once, and so a download can be cancelled from the UI.
+	// dlMu guards everything that decides who may touch a model's directory:
+	// the in-flight downloads, the removals in progress, and whether this app
+	// is still accepting either. Those three are one decision — a download must
+	// not start onto a directory a removal is walking, and a removal must not
+	// start on one a download is writing — so they are one lock.
+	//
+	// It sits *under* the pool's mutex in the order adr-2609070004056820
+	// records: modelSource.Resolve takes it while the pool holds p.mu, because
+	// refusing a launch onto a model being deleted has to happen where the
+	// launch is decided. So nothing may hold dlMu while calling into the pool,
+	// which is why Delete releases it before Pool.Unload and Close releases it
+	// before Pool.Close. It is never held across a configuration read either,
+	// so it adds no edge to cfgMu or saveMu.
 	dlMu      sync.Mutex
 	downloads map[string]*download
+	// deleting names the models whose files are being removed right now.
+	// Registry.Remove drops the index entry before it unlinks the directory, so
+	// without this there is a window in which the model looks absent to the
+	// index and present on disk — long enough for a download to start writing
+	// into a directory that is being carried away, or for a request to launch a
+	// model server onto one.
+	deleting map[string]bool
+	// dlClosed records that Close has taken its snapshot. A download registered
+	// after that would add to dlWG a goroutine Close is no longer waiting for.
+	dlClosed bool
 	// dlWG lets Close wait for cancelled downloads to actually stop writing.
+	// Every counter increment happens under dlMu, beside the map entry it
+	// belongs to, so Close cannot see an empty map and a zero counter while a
+	// download is on its way in.
 	dlWG sync.WaitGroup
 }
 
@@ -127,7 +151,7 @@ func New(opts Options) (*App, error) {
 	}
 
 	hc := hub.New()
-	hc.Token = opts.Config.HFToken
+	hc.SetToken(opts.Config.HFToken)
 
 	store := stats.NewStore(opts.Paths.Stats, stats.StoreOptions{
 		Months:   opts.Config.StatsMonths,
@@ -150,6 +174,7 @@ func New(opts Options) (*App, error) {
 		Log:         opts.Log,
 		cfg:         opts.Config,
 		downloads:   map[string]*download{},
+		deleting:    map[string]bool{},
 	}
 
 	launcher := opts.Launcher
@@ -181,7 +206,7 @@ func New(opts Options) (*App, error) {
 	grace = clampGraceToIdle(grace, time.Duration(opts.Config.IdleTimeoutSec)*time.Second)
 	a.Pool = runtime.NewPool(runtime.PoolOptions{
 		Launcher:    launcher,
-		Models:      modelSource{reg},
+		Models:      modelSource{a},
 		IdleTimeout: time.Duration(opts.Config.IdleTimeoutSec) * time.Second,
 		// Resolved here rather than left to the pool, so that the budget the
 		// pool enforces, the ceiling a save is checked against and the share
@@ -316,7 +341,10 @@ func (a *App) SetConfig(c config.Config) error {
 	// off is asking for it to stop, not for a history to be destroyed.
 	a.applyStatistics(c)
 
-	a.Hub.Token = c.HFToken
+	// Behind the hub's own lock: download goroutines read the token to build
+	// every request they issue, and a download already running keeps the token
+	// it started with rather than changing horses mid-repo.
+	a.Hub.SetToken(c.HFToken)
 	// Applied live, so a model already in memory is protected from the next
 	// eviction rather than from the one after a restart. The pool takes its own
 	// lock, the one both eviction paths hold while they read the set.
@@ -958,10 +986,29 @@ func perModelKeys(in map[string]config.ModelSettings) []string {
 }
 
 // modelSource adapts the registry to runtime.ModelSource.
-type modelSource struct{ reg *registry.Registry }
+//
+// It resolves through the App rather than the registry alone because the
+// registry is not the whole answer to "may this model be launched now": a
+// removal in progress has already dropped the index entry and is still
+// unlinking the files, and the pool decides to launch inside this call.
+type modelSource struct{ app *App }
 
 func (s modelSource) Resolve(repoID string) (string, int64, error) {
-	m, err := s.reg.Get(repoID)
+	// Asked before the index, because the index is not what says whether this
+	// model may be launched. The window is precise: Delete calls Pool.Unload
+	// and then Registry.Remove, and between Unload returning and Remove's index
+	// write there is nothing holding p.mu — so an Acquire can take p.mu, enter
+	// startLocked, resolve this model from an index that still lists it, and
+	// launch a server onto a directory that is about to be unlinked. Nothing
+	// else closes that window: the pool's own ErrBusy check is point-in-time
+	// and has already passed, and Registry.Remove drops the entry before it
+	// touches the files. It is sub-millisecond and it is real, and what comes
+	// through it is a model server answering requests from unlinked files after
+	// every surface that reports what this Mac holds has stopped listing it.
+	if s.app.isDeleting(repoID) {
+		return "", 0, fmt.Errorf("%s is being deleted", repoID)
+	}
+	m, err := s.app.Registry.Get(repoID)
 	if err != nil {
 		return "", 0, fmt.Errorf("%s is not downloaded", repoID)
 	}
@@ -977,6 +1024,19 @@ var ErrAlreadyDownloading = errors.New("already downloading")
 // ErrInvalidRepoID is returned when a model id is not a well-formed
 // "<org>/<name>". Callers (the control plane) map it to 400, not 409.
 var ErrInvalidRepoID = errors.New("invalid model id")
+
+// ErrDeleting is returned when a model's files are being removed and something
+// asks to download or delete it again. It is a conflict, not a failure: the
+// removal is running and the operator can ask again once it has finished.
+var ErrDeleting = errors.New("model is being deleted")
+
+// ErrShuttingDown is returned when a download is asked for after Close.
+//
+// Refused rather than accepted-and-abandoned: Close cancels the downloads it
+// can see and then waits for them, so a download started after that snapshot
+// would go on writing into the models directory of an app that believes it has
+// stopped.
+var ErrShuttingDown = errors.New("shutting down")
 
 // Download fetches a model in the background and tracks it in the registry.
 //
@@ -1001,6 +1061,18 @@ func (a *App) Download(repoID string) error {
 	}
 
 	a.dlMu.Lock()
+	if a.dlClosed {
+		a.dlMu.Unlock()
+		return fmt.Errorf("cannot download %s: %w", repoID, ErrShuttingDown)
+	}
+	// A removal in progress owns this directory until it is finished. Checked
+	// under the same lock the removal marks itself with, so the two orderings
+	// are the only two there are: either this download registers first and the
+	// removal waits for it, or the removal is marked first and this is refused.
+	if a.deleting[dlKey(repoID)] {
+		a.dlMu.Unlock()
+		return fmt.Errorf("%s is being deleted; try again once it is gone: %w", repoID, ErrDeleting)
+	}
 	if _, busy := a.downloads[dlKey(repoID)]; busy {
 		a.dlMu.Unlock()
 		return ErrAlreadyDownloading
@@ -1008,7 +1080,28 @@ func (a *App) Download(repoID string) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	dl := &download{repoID: repoID, cancel: cancel, done: make(chan struct{})}
 	a.downloads[dlKey(repoID)] = dl
+	// Counted here rather than beside the `go` below: Close snapshots this map
+	// and then waits on dlWG, so a registration that is visible to Delete but
+	// not yet to the wait group is a download Close would return without.
+	a.dlWG.Add(1)
 	a.dlMu.Unlock()
+
+	// From the unlock above this handle is public: a Delete can already be
+	// parked on dl.done. Every way out of this function that does not reach the
+	// goroutine has to release it, or that Delete waits for a goroutine nobody
+	// ever started — one control-plane handler stuck for the life of the
+	// process. A registry write failing is not hypothetical here: in
+	// shared-cache mode another account owns the index file.
+	handedOff := false
+	defer func() {
+		if handedOff {
+			return
+		}
+		cancel()
+		a.finishDownload(dl, nil)
+		close(dl.done)
+		a.dlWG.Done()
+	}()
 
 	dest := a.Paths.ModelDir(repoID)
 	// Remember whether a ready model is already being served from dest: a
@@ -1031,11 +1124,10 @@ func (a *App) Download(repoID string) error {
 		State:   registry.StateDownloading,
 		AddedAt: addedAt,
 	}); err != nil {
-		a.finishDownload(dl, nil)
 		return err
 	}
 
-	a.dlWG.Add(1)
+	handedOff = true
 	go func() {
 		defer a.dlWG.Done()
 		defer close(dl.done)
@@ -1074,20 +1166,33 @@ func (a *App) Download(repoID string) error {
 		// Each branch publishes its final state and deregisters the download
 		// in one step (see finishDownload). Logging stays outside it: the log
 		// is not what another goroutine is waiting to see.
+		//
+		// So does every reading of the disk. dlMu is on the model-load path —
+		// modelSource.Resolve takes it while the pool holds p.mu — and walking
+		// a multi-gigabyte model directory under it would let the size of the
+		// model that just arrived set how long every other model's load waits
+		// for the pool's own lock. That is the rule pool.go states for its
+		// refusal path, and it applies here for the same reason. What is left
+		// inside is the publication itself: the registry write and the
+		// deregistration, which have to be one step or a caller can see a model
+		// finish and still be refused its next Download.
 		switch {
 		case err == nil:
+			// Re-derive the size from disk rather than trusting the manifest,
+			// and read the context length through the registry's own primitive,
+			// so the download path and the rescan apply one key rule — a model
+			// carries its context length from the moment it is ready, not only
+			// after the next startup rescan. Both touch the disk, so both are
+			// done here, before the lock.
+			bytes := dirSize(dest)
+			contextLength := registry.ReadContextLength(dest)
 			var perr error
 			a.finishDownload(dl, func() {
-				// Re-derive the size from disk rather than trusting the manifest.
 				perr = a.Registry.Put(registry.Model{
-					RepoID: repoID,
-					Path:   dest,
-					Bytes:  dirSize(dest),
-					// Read through the registry's own primitive, so the download
-					// path and the rescan apply one key rule; a model carries its
-					// context length from the moment it is ready, not only after
-					// the next startup rescan.
-					ContextLength: registry.ReadContextLength(dest),
+					RepoID:        repoID,
+					Path:          dest,
+					Bytes:         bytes,
+					ContextLength: contextLength,
 					State:         registry.StateReady,
 					Progress:      100,
 					AddedAt:       addedAt,
@@ -1112,9 +1217,12 @@ func (a *App) Download(repoID string) error {
 		case errors.Is(err, context.Canceled):
 			// A cancelled download leaves .part files behind on purpose: they let
 			// the next attempt resume instead of starting over.
+			// Asked before the lock: it validates the model directory, which
+			// is disk work, and dlMu is on the model-load path.
+			restorable := a.canRestoreReady(dest, wasReady)
 			var restored bool
 			a.finishDownload(dl, func() {
-				restored = a.restoreReady(repoID, dest, wasReady, prior)
+				restored = restorable && a.restoreReady(repoID, dest, prior)
 				if !restored {
 					a.Registry.SetState(repoID, registry.StateFailed, 0, "cancelled")
 				}
@@ -1126,9 +1234,10 @@ func (a *App) Download(repoID string) error {
 			}
 
 		default:
+			restorable := a.canRestoreReady(dest, wasReady)
 			var restored bool
 			a.finishDownload(dl, func() {
-				restored = a.restoreReady(repoID, dest, wasReady, prior)
+				restored = restorable && a.restoreReady(repoID, dest, prior)
 				if !restored {
 					a.Registry.SetState(repoID, registry.StateFailed, 0, err.Error())
 				}
@@ -1144,9 +1253,23 @@ func (a *App) Download(repoID string) error {
 	return nil
 }
 
+// canRestoreReady answers the disk half of the question restoreReady acts on:
+// was this model ready before the attempt, and do its files still validate?
+//
+// It is a function of its own so that the caller can ask it before taking
+// dlMu, which the pool waits on for every load. Asking it a moment earlier
+// costs nothing: the download goroutine is the only writer of this directory
+// while it runs, and a Delete that would take the files away is parked on
+// dl.done, which does not close until that goroutine has finished.
+func (a *App) canRestoreReady(dest string, wasReady bool) bool {
+	return wasReady && validateModelDir(dest) == nil
+}
+
 // restoreReady puts a model back into the ready state after a failed or
-// cancelled download attempt, provided it was ready before the attempt and its
-// files still validate. It reports whether the model was restored.
+// cancelled download attempt. It reports whether the model was restored.
+//
+// Callers ask canRestoreReady first; this is the write alone, so that the only
+// thing done under dlMu is the publication.
 //
 // Everything it restores comes from prior — the record the model had before
 // the attempt — rather than from the directory: measuring the directory now
@@ -1155,10 +1278,7 @@ func (a *App) Download(repoID string) error {
 // revision's context length beside the old revision's size. A record that
 // predates the figure still gains it, because the startup rescan re-derives
 // it from the directory that is actually being served.
-func (a *App) restoreReady(repoID, dest string, wasReady bool, prior registry.Model) bool {
-	if !wasReady || validateModelDir(dest) != nil {
-		return false
-	}
+func (a *App) restoreReady(repoID, dest string, prior registry.Model) bool {
 	if perr := a.Registry.Put(registry.Model{
 		RepoID:        repoID,
 		Path:          dest,
@@ -1205,6 +1325,17 @@ func (a *App) finishDownload(dl *download, publish func()) {
 // so a case variant of a running download is seen as that download.
 func dlKey(repoID string) string { return config.FoldRepoID(repoID) }
 
+// isDeleting reports whether this model's files are being removed right now.
+//
+// It takes dlMu and calls nothing while holding it, which is what lets the pool
+// ask it from inside startLocked — under p.mu — without inverting the recorded
+// order (adr-2609070004056820).
+func (a *App) isDeleting(repoID string) bool {
+	a.dlMu.Lock()
+	defer a.dlMu.Unlock()
+	return a.deleting[dlKey(repoID)]
+}
+
 // CancelDownload stops an in-flight download.
 //
 // If there is no live download but the registry still records the model as
@@ -1248,12 +1379,30 @@ func (a *App) Delete(repoID string) error {
 	if m, err := a.Registry.Get(repoID); err == nil {
 		repoID = m.RepoID
 	}
+	// Claim the model and read the in-flight download in one step. Claiming it
+	// is what makes the removal atomic against everything that would otherwise
+	// start touching the directory while it is half gone — a Download, and a
+	// request-triggered load through modelSource.Resolve — because both consult
+	// this map under this lock. Reading the download here rather than in a
+	// second pass is what leaves no gap between the two: a download that is not
+	// in the map at this moment cannot start after it.
+	a.dlMu.Lock()
+	if a.deleting[dlKey(repoID)] {
+		a.dlMu.Unlock()
+		return fmt.Errorf("%s is already being deleted: %w", repoID, ErrDeleting)
+	}
+	a.deleting[dlKey(repoID)] = true
+	dl, downloading := a.downloads[dlKey(repoID)]
+	a.dlMu.Unlock()
+	defer func() {
+		a.dlMu.Lock()
+		delete(a.deleting, dlKey(repoID))
+		a.dlMu.Unlock()
+	}()
+
 	// Cancel any download of this model AND wait for it to stop. Cancelling alone
 	// is not enough: the goroutine would keep writing into the directory we are
 	// about to remove, and the model would reappear moments after being deleted.
-	a.dlMu.Lock()
-	dl, downloading := a.downloads[dlKey(repoID)]
-	a.dlMu.Unlock()
 	if downloading {
 		dl.cancel()
 		<-dl.done
@@ -1279,6 +1428,10 @@ func (a *App) Delete(repoID string) error {
 // files after the app believed it had shut down.
 func (a *App) Close() error {
 	a.dlMu.Lock()
+	// Set before the snapshot below, under the same lock a download registers
+	// itself with, so the set cancelled here is the whole set there will ever
+	// be: a Download arriving after this is refused rather than left writing.
+	a.dlClosed = true
 	for _, dl := range a.downloads {
 		dl.cancel()
 	}
