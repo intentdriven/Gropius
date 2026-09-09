@@ -11,6 +11,21 @@ GitHub release notes.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The Bonjour advertisement is republished, not edited, when what it says
+  changes.** Setting or clearing the API key, or a change in how many models
+  are servable, used to rewrite the advertised record in place while the
+  responder was still reading it — an unsynchronised write against a
+  concurrent read, whose worst case is a garbled or missing answer to a
+  machine that happens to be browsing at that moment. Gropius now takes the
+  advertisement off the network, waits for it to be gone, and publishes it
+  afresh. The visible cost is that the service disappears and reappears in a
+  browser such as Bonjour Browser for the moment the change takes, which is
+  why it is done only when the record's contents have actually changed. A
+  republication that fails is retried on the next refresh rather than leaving
+  the Mac undiscoverable until it is restarted.
+
 ## [0.4.0] - 2026-09-08
 
 ### Added

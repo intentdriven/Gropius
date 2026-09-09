@@ -83,12 +83,6 @@ func (f *fakeAnnouncer) Register(cfg dnssd.Config) (registration, error) {
 
 type fakeRegistration struct{ f *fakeAnnouncer }
 
-// UpdateText is what iss-12 is about: mutating a live registration in place.
-// The fake records it so a run that still does it says so out loud.
-func (r *fakeRegistration) UpdateText(text map[string]string) {
-	r.f.record("update-text:" + text["auth"])
-}
-
 func (r *fakeRegistration) Respond(ctx context.Context) error {
 	r.f.mu.Lock()
 	r.f.live++

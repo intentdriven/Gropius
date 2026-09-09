@@ -226,9 +226,24 @@ func (ad *advertisement) withdraw() {
 // refresh periodically re-publishes the TXT record when the advertised auth
 // state or model count changes, so a runtime config change (e.g. setting an API
 // key in the control panel) is reflected to clients rather than left stale.
+//
+// A change is published by withdrawing the whole advertisement and registering
+// it afresh, never by editing the service a running responder is reading — see
+// the comment on registration. The cost is one goodbye plus a re-probe per
+// change, so peers watching a browse see the service blink; the hints change
+// rarely (an API key toggled, the servable-model count moving), which is what
+// makes that price acceptable.
+//
+// Everything happens in this one goroutine, so a withdraw can never overlap the
+// registration that replaces it, and Stop — which cancels ctx and waits on done
+// — cannot be outrun by a refresh that resurrects the service.
 func (a *Advertiser) refresh(ctx context.Context, cfg dnssd.Config, ad *advertisement, done chan struct{}) {
 	defer close(done)
-	defer func() { ad.withdraw() }()
+	defer func() {
+		if ad != nil {
+			ad.withdraw()
+		}
+	}()
 
 	interval := a.interval
 	if interval <= 0 {
@@ -244,11 +259,29 @@ func (a *Advertiser) refresh(ctx context.Context, cfg dnssd.Config, ad *advertis
 			return
 		case <-tick.C:
 			cur := a.txtRecord()
-			if sameText(last, cur) {
+			// No churn: withdrawing costs peers a cache flush, so only an
+			// actual change is worth one. A nil ad means the last registration
+			// failed and the service is off the network — always retry that.
+			if ad != nil && sameText(last, cur) {
 				continue
 			}
-			ad.reg.UpdateText(cur)
-			last = cur
+			if ad != nil {
+				ad.withdraw()
+				ad = nil
+			}
+			// Stop may have fired while the goodbye was going out. Do not put
+			// back a service that has just been taken off the network.
+			if ctx.Err() != nil {
+				return
+			}
+			next, err := a.publish(ctx, cfg, cur)
+			if err != nil {
+				// The service is now advertised nowhere. Leave ad nil so the
+				// next tick tries again rather than reporting it published.
+				a.Log.Warn("could not re-publish the network advertisement, retrying", "err", err)
+				continue
+			}
+			ad, last = next, cur
 			a.Log.Info("updated network advertisement",
 				"auth", cur["auth"], "models", cur["models"])
 		}

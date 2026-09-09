@@ -20,14 +20,16 @@ type announcer interface {
 }
 
 // registration is one service that has been handed to a responder.
+//
+// There is deliberately no way to change a registration's TXT record. dnssd
+// offers one — ServiceHandle.UpdateText — and it is not safe to call: it writes
+// Service.Text with no locking while the responder goroutine reads that same
+// field under a mutex private to the library. A TXT change is therefore a new
+// registration, never an edit to a live one (iss-12).
 type registration interface {
 	// Respond serves the registered service until ctx is cancelled, then
 	// withdraws it (the mDNS "goodbye") and returns.
 	Respond(ctx context.Context) error
-
-	// UpdateText re-announces the service under a new TXT record without
-	// withdrawing it.
-	UpdateText(text map[string]string)
 }
 
 // dnssdAnnouncer is the real registration path, over github.com/brutella/dnssd.
@@ -42,22 +44,18 @@ func (dnssdAnnouncer) Register(cfg dnssd.Config) (registration, error) {
 	if err != nil {
 		return nil, fmt.Errorf("create mDNS responder: %w", err)
 	}
-	handle, err := responder.Add(service)
-	if err != nil {
+	// The service handle is deliberately discarded: the only thing it offers
+	// beyond what Service() reports is UpdateText, which races the responder.
+	if _, err := responder.Add(service); err != nil {
 		return nil, fmt.Errorf("add mDNS service: %w", err)
 	}
-	return &dnssdRegistration{responder: responder, handle: handle}, nil
+	return &dnssdRegistration{responder: responder}, nil
 }
 
 type dnssdRegistration struct {
 	responder dnssd.Responder
-	handle    dnssd.ServiceHandle
 }
 
 func (r *dnssdRegistration) Respond(ctx context.Context) error {
 	return r.responder.Respond(ctx)
-}
-
-func (r *dnssdRegistration) UpdateText(text map[string]string) {
-	r.handle.UpdateText(text, r.responder)
 }
