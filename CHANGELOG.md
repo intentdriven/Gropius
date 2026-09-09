@@ -11,6 +11,20 @@ GitHub release notes.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Saving settings no longer empties the bind address.** The bind control
+  offers two addresses, and a browser's `<select>` has no notion of a value it
+  does not offer: a Gropius bound to anything else — `localhost`, IPv6
+  loopback, or one specific address, each of which `config.json` accepts and
+  the server starts on — posted an empty host on *every* save, including saves
+  that changed nothing about the bind. The save was refused with "host must not
+  be empty", naming a field the pane never showed as wrong, and nothing on the
+  pane could be saved again until the operator edited `config.json` by hand.
+  The bind in force is now offered as an option of its own, labelled with the
+  address itself, so the pane shows the address Gropius is serving on and saves
+  it back unchanged.
+
 ## [0.4.0] - 2026-09-08
 
 ### Added

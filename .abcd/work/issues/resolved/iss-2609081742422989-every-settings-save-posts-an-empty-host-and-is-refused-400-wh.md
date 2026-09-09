@@ -9,6 +9,8 @@ found_during: "2026-09-08 design review of itd-2609081718534201"
 origin: researcher-authored
 production_mode: hand-written
 found_at: "internal/ui/static/index.html"
+resolution: "The settings pane renders the stored bind host as an extra <option> before assigning it, so a host the select never offered — localhost, IPv6 loopback, one specific address — round-trips instead of posting the empty string an unoffered HTMLSelectElement value yields, and every save on such a bind is accepted again."
+impact: fix
 ---
 
 Every settings save posts an empty host and is refused with 400, whenever the bind host is not one of the two the select offers.
@@ -28,3 +30,7 @@ Which of those an operator can actually hit today is narrower than it first look
 Relation to the recorded advice: iss-7 records that the settings UI offers only the wildcard and loopback, so a narrowed bind needs a hand-edited config.json, and that editing the same file back is the recovery. adr-2609081118587999 rule 3 makes that hand-edited bind the ONLY admissible way to narrow exposure. This bug is the second half of the same sharp edge: the operator who follows that route keeps a working /v1 API and loses the whole settings pane, with an error message that points at nothing they typed.
 
 Fixes are cheap and are a choice rather than a discovery, which is why this is captured rather than fixed in passing: render the stored host as an extra <option> when it matches neither literal (smallest, keeps the control a select and makes the value round-trip); or make the control a datalist-backed text input (matches what Validate actually accepts, and puts a free-text bind address in the UI, which is a bind-surface decision); or have the form omit host entirely when it is unchanged, since handleSetSettings already preserves fields the body does not name. The third is the smallest change that stops the data loss but leaves the panel displaying a bind that is not the one in force.
+
+## Grounds
+
+- pursued: we expect the pane to show and save the bind in force for every host config.Validate accepts, because the select is now given an option for whatever host is stored before the value is assigned, and the option added last time is dropped first so a bind that changes does not accumulate dead addresses. We are wrong if a host reaches the panel that the select can hold but the server then refuses — the round trip is only as wide as config.Validate — or if some later code assigns setHost.value without calling renderBindOptions first, which would silently return the empty-string bug; the seam test on renderSettings is what would catch the second. Pursued now rather than deferred because resolving iss-7 widens the bug from two spellings of loopback to every specific-address bind.
