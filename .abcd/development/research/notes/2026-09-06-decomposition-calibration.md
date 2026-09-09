@@ -255,3 +255,46 @@ why for entitled clients, so nothing reversed.
 Verdict adopted: FILE-AS-IS, one intent. Grade: routing survived. The design
 review found the log the intent writes to does not exist (stderr only), which
 became the first sentence of the mechanism rather than a routing change.
+
+## 2026-09-09 — recording mode (itd-2609091707499248)
+
+Proposal: a server-side mode recording every prompt and answer, explicitly
+activated, announced to every client session as a first message, with no way
+to circumvent it.
+
+| Part | Type | Home |
+| --- | --- | --- |
+| A server-wide recording mode | user-facing capability | this intent |
+| Explicit activation on three surfaces | capability | this intent |
+| Every session told first, no way round | user-facing API contract | this intent |
+| A second reader (and, it turned out, a writer) of prompt content | trust-boundary rule | a superseding ADR for adr-2609061610102325 |
+| The store lives per-account | mechanism | the spec, on the per-account rule |
+
+Typed links: `supersedes` itd-2609062346072707 (proposed); `refines` the
+logging intent's no-prompts scope condition; `reverses` the never-retain
+clause of the prompt-content ADR (flagged; the human confirmed the ADR route).
+
+Verdict adopted: FILE-AS-IS with the ADR as companion. Grade: routing
+survived; the PROMISE did not survive the design review — "told first, no way
+round" is not a thing a stateless server can do — and the human HELD the
+intent rather than adopt the every-answer rule. Lesson, same as the category
+run: when a proposal's headline is a guarantee, run the feasibility review
+before the press-release question, because the guarantee is the decision.
+
+## 2026-09-09 — usage measurement, and held adaptive settings (itd-2609091712141073, itd-2609091712142715)
+
+Proposal: fully dynamic, customised per-model and context-window settings on
+the server; until then, collect the data that says what to configure.
+
+| Part | Type | Home |
+| --- | --- | --- |
+| Per-model settings an operator can change | exists or in flight | no record; `builds_on` the unified models map and the served-window intent |
+| Settings that adapt without a restart | capability, unproven | a held draft (itd-2609091712142715) the data lifts |
+| Per-request and per-model usage facts on the dashboard, exportable | capability, buildable now | this intent (itd-2609091712141073) |
+| No prompt content in it | invariant | already holds; linked |
+| Which record carries it | mechanism | the spec: fields on the existing request line, no new kind |
+
+Typed links: `builds_on` itd-2609061521082551 and its store ADRs; `builds_on`
+itd-2609061431481936; `refines` itd-2609091301112705.
+
+Verdict adopted: SPLIT. Grade: routing survived as proposed.
