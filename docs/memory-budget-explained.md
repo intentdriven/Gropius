@@ -35,8 +35,11 @@ any figure you type at its word.
 
 A loaded model is charged three things: its weights, a fifth of them again for
 the working set a running model needs whatever the prompt is, and the attention
-cache the context window it serves will build — once for every sequence its
-server may decode at once.
+cache its declared context window costs — once for every sequence its server
+may decode at once. The window is the one the model's own configuration
+declares, the same figure the models list shows as its context length; nothing
+between a client and the model server caps it, so it is the length a prompt may
+actually reach.
 
 The cache is the term that decides which models can share this Mac. It grows
 with the prompt, and what it costs per token is a property of the architecture
@@ -55,7 +58,7 @@ arithmetic is a floor rather than an estimate — every model measured held two 
 seven times it, because a server keeps more than the raw cache — so Gropius
 multiplies it by seven, the top of the range it measured. A model whose
 configuration cannot be read is charged the flat figure instead: its weights
-plus a fifth, which is what every model was charged before this.
+plus a fifth.
 
 Two consequences worth knowing. A model whose window costs more than the whole
 budget is charged the budget, not more: it loads, and it loads alone. And

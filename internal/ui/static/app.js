@@ -666,7 +666,7 @@ function pinnedModels(current, listed, checked) {
 // serves will build, once per sequence its server may decode at once, and
 // never more than the whole budget — a model that fills the budget by itself
 // loads alone rather than not at all. A model whose configuration says nothing
-// about its cache is charged the flat figure, as every model was before this.
+// about its cache is charged the flat figure.
 // The factor of 7 is capability.KVSafetyFactor: the measured cost per token
 // runs two to seven times what a configuration implies, so the figure read off
 // the configuration is a floor. A test in internal/ui holds this to the Go
@@ -749,7 +749,7 @@ function budgetHint(machine) {
     parts.push(`The models in memory use ${size(resident)} of it.`);
   }
   if (m.warn_above && budget > m.warn_above) {
-    parts.push('macOS and everything else running share this memory, and a model is charged the weights it loads rather than what a long conversation adds to it.');
+    parts.push('macOS and everything else running share this memory, and a model\'s charge is worked out from its configuration rather than measured on this Mac.');
   }
   return parts.join(' ');
 }
