@@ -20,19 +20,31 @@ import (
 type fakeSource struct {
 	mu     sync.Mutex
 	models map[string]int64 // repoID -> size
+	// facts overrides what Resolve reports for a model, so a test can give one
+	// the window and cache cost a real model's configuration would carry. A
+	// model with no entry here resolves with neither, which is how a model
+	// whose configuration says nothing is charged — the flat figure.
+	facts map[string]ResolvedModel
 }
 
 // Resolve matches the registry's case-insensitive lookup, so a differently
 // cased id resolves and launches here exactly as it does in production.
-func (s *fakeSource) Resolve(repoID string) (string, int64, error) {
+func (s *fakeSource) Resolve(repoID string) (ResolvedModel, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for id, size := range s.models {
-		if strings.EqualFold(id, repoID) {
-			return "/models/" + id, size, nil
+		if !strings.EqualFold(id, repoID) {
+			continue
 		}
+		m := ResolvedModel{Path: "/models/" + id, Bytes: size}
+		for factID, f := range s.facts {
+			if strings.EqualFold(factID, repoID) {
+				m.ServedContext, m.KVChargePerToken = f.ServedContext, f.KVChargePerToken
+			}
+		}
+		return m, nil
 	}
-	return "", 0, fmt.Errorf("%s is not downloaded", repoID)
+	return ResolvedModel{}, fmt.Errorf("%s is not downloaded", repoID)
 }
 
 // fakeProc is a Process backed by an in-process fake mlx server.

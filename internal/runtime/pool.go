@@ -18,8 +18,31 @@ import (
 
 // ModelSource resolves a repo id to an on-disk model. The registry implements it.
 type ModelSource interface {
-	// Resolve returns the model's directory and on-disk size.
-	Resolve(repoID string) (path string, bytes int64, err error)
+	// Resolve returns what the pool needs to know about the model to launch it
+	// and to charge it against the memory budget.
+	Resolve(repoID string) (ResolvedModel, error)
+}
+
+// ResolvedModel is one model on disk, as far as the pool is concerned.
+//
+// The last two fields are what the memory budget charges a model beyond its
+// weights: the window it will serve and what a token of that window costs its
+// attention cache. Both come from the model's own config.json, read once when
+// the directory is scanned, and either being zero means the configuration did
+// not say — which is charged the flat figure, as every model was before this.
+type ResolvedModel struct {
+	// Path is the directory passed to mlx_lm.server --model.
+	Path string
+	// Bytes is the model's size on disk.
+	Bytes int64
+	// ServedContext is the window Gropius serves this model at: the operator's
+	// per-model setting, or the window the model declares when they have set
+	// none (config.Config.ServedContext). The gateway refuses a request
+	// estimated to be larger, so it is the window the pool charges.
+	ServedContext int64
+	// KVChargePerToken is what one token of that window is charged against the
+	// budget (registry.Model.KVChargePerToken).
+	KVChargePerToken int64
 }
 
 // Upstream is a ready model server the gateway can proxy to.
@@ -76,13 +99,18 @@ const (
 // that can serve now from one still loading; the control panel shows the rest
 // of these fields on loopback and does not read State yet.
 type Resident struct {
-	RepoID   string         `json:"repo_id"`
-	State    ResidencyState `json:"state"`
-	Port     int            `json:"port"`
-	Bytes    int64          `json:"bytes"`
-	LoadedAt time.Time      `json:"loaded_at"`
-	LastUsed time.Time      `json:"last_used"`
-	InFlight int            `json:"in_flight"`
+	RepoID string         `json:"repo_id"`
+	State  ResidencyState `json:"state"`
+	Port   int            `json:"port"`
+	Bytes  int64          `json:"bytes"`
+	// Charge is what this model costs the memory budget, which is more than
+	// its size: the weights, their headroom, and the attention cache the
+	// window it serves will build. It is the only figure that can be compared
+	// with the budget, so it is the one every surface reporting memory adds up.
+	Charge   int64     `json:"charge_bytes"`
+	LoadedAt time.Time `json:"loaded_at"`
+	LastUsed time.Time `json:"last_used"`
+	InFlight int       `json:"in_flight"`
 }
 
 // PoolOptions configures a Pool.
@@ -90,8 +118,8 @@ type PoolOptions struct {
 	Launcher Launcher
 	Models   ModelSource
 	// MaxResidentBytes is the pool's memory budget as it starts: the ceiling on
-	// the total charged size (capability.LoadCost, 1.2x the size on disk) of the
-	// models held at once. Zero or less means the default share of this Mac's
+	// the total charged size (capability.LoadCostOf) of the models held at
+	// once. Zero or less means the default share of this Mac's
 	// memory.
 	//
 	// The starting value only. SetMemoryBudget replaces it, and the figure the
@@ -253,9 +281,20 @@ type Pool struct {
 
 // entry is one model server, loaded or loading.
 type entry struct {
-	repoID   string
-	port     int
-	bytes    int64
+	repoID string
+	port   int
+	// resolved is what the model source last said about this model: its size,
+	// the window it declares and what a token of that window costs its cache.
+	// Kept rather than discarded after the launch because it is what the
+	// charge is worked out from, and both it and the budget can change under a
+	// model that is already resident.
+	resolved ResolvedModel
+	// charge is what this model costs the memory budget: its weights and the
+	// caches the window it serves will build (capability.LoadCostOf). Every
+	// admission decision counts this one figure — so the memory a model is
+	// holding is never accounted at two different rates — and it is reworked
+	// whenever one of its inputs moves (rechargeLocked).
+	charge   int64
 	modelArg string
 	proc     Process
 
@@ -452,6 +491,11 @@ func (p *Pool) SetMemoryBudget(n int64) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.maxResident = n
+	// Nothing is recharged here, and that is a property of the charge rather
+	// than an omission: what a model costs is its weights, its window and its
+	// concurrency, none of which the budget touches. A charge that moved with
+	// the budget would be a figure the machine does not support.
+	//
 	// A raise can make room with nothing having to finish, so a request
 	// already waiting acts on it at once rather than at the next release.
 	p.wakeWaitersLocked()
@@ -901,6 +945,97 @@ func (p *Pool) acquire(ctx context.Context, repoID string, mayWait bool) (*Upstr
 	}, releaseSlot, nil
 }
 
+// RefreshCharges asks the model source about every resident model again and
+// charges each on what it says now.
+//
+// A model's facts move under it: a re-download can change the window its
+// configuration declares, and the registry's record changes with no load in
+// between. The pool would otherwise go on charging what the model was when it
+// was admitted, which is a figure nothing on disk supports any more. A model
+// the source can no longer resolve — one being deleted — keeps the charge it
+// was admitted on, because its server is still holding exactly that memory.
+func (p *Pool) RefreshCharges() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, e := range p.entries {
+		m, err := p.opts.Models.Resolve(e.repoID)
+		if err != nil {
+			continue
+		}
+		e.resolved = m
+	}
+	p.rechargeLocked()
+	// A charge that fell may have made room for a waiting request.
+	p.wakeWaitersLocked()
+}
+
+// rechargeLocked reworks every resident model's charge from the facts the pool
+// holds for it and the budget in force. Callers must hold p.mu.
+//
+// The drain and stuck tallies are deliberately left alone: each was taken from
+// an entry's charge when its server was stopped and is credited back with that
+// same figure when the process goes, and a tally recharged halfway through
+// would credit back more or less memory than it took.
+func (p *Pool) rechargeLocked() {
+	for _, e := range p.entries {
+		e.charge = p.chargeLocked(e.resolved)
+	}
+}
+
+// tooLargeLocked explains a model that cannot be held at all, and says what
+// would hold it. Callers must hold p.mu.
+//
+// Two of the three figures in the charge are the operator's to change — the
+// window this model is served at and how many requests its server batches —
+// and both are settings they can reach, so the refusal names the largest of
+// each that would fit rather than leaving them to do the arithmetic from a
+// number of bytes. It names only the model asked for: this text reaches an
+// unauthenticated LAN client, and what else this Mac holds is not its
+// business.
+func (p *Pool) tooLargeLocked(repoID string, m ResolvedModel, need int64) error {
+	base := fmt.Sprintf("%s needs about %s of memory but the budget is %s",
+		repoID, HumanBytes(need), HumanBytes(p.maxResident))
+	sequences := int64(p.opts.DecodeConcurrency)
+	perToken := capability.MulSaturating(m.KVChargePerToken, sequences)
+	room := p.maxResident - capability.LoadCost(m.Bytes)
+	if perToken <= 0 || room <= 0 || m.ServedContext <= 0 {
+		// Nothing but the weights to give back: no window and no concurrency
+		// makes this model fit this budget.
+		return fmt.Errorf("%s — raise the memory budget or choose a smaller quantization", base)
+	}
+	window := room / perToken
+	fits := fmt.Sprintf("lower this model's served context from %d to about %d tokens",
+		m.ServedContext, window)
+	if perSequence := capability.MulSaturating(m.KVChargePerToken, m.ServedContext); perSequence > 0 {
+		if n := room / perSequence; n >= 1 && sequences > 1 {
+			fits += fmt.Sprintf(", lower batched requests from %d to %d", sequences, n)
+		}
+	}
+	if window <= 0 {
+		return fmt.Errorf("%s at its served context of %d tokens and %d batched requests — raise the memory budget or choose a smaller quantization",
+			base, m.ServedContext, sequences)
+	}
+	return fmt.Errorf("%s at its served context of %d tokens and %d batched requests — %s, or raise the memory budget",
+		base, m.ServedContext, sequences, fits)
+}
+
+// chargeLocked is what a model costs the budget in force. Callers must hold
+// p.mu, because the budget it is measured against is the one the pool holds
+// there and may be replaced while the pool runs.
+//
+// One home for the inputs the pool supplies: the decode concurrency every
+// server is launched with, which is how many caches one model may be building
+// at once, and the budget itself, which is the ceiling on what any single
+// model is charged.
+func (p *Pool) chargeLocked(m ResolvedModel) int64 {
+	return capability.LoadCostOf(capability.Load{
+		DiskBytes:        m.Bytes,
+		KVChargePerToken: m.KVChargePerToken,
+		Window:           m.ServedContext,
+		Sequences:        int64(p.opts.DecodeConcurrency),
+	})
+}
+
 // startLocked launches a model server. Callers must hold p.mu.
 //
 // waited is how long the caller has already been queued for room, which is
@@ -908,16 +1043,15 @@ func (p *Pool) acquire(ctx context.Context, repoID string, mayWait bool) (*Upstr
 // is allowed to do to the models in memory, and is what keeps the queue
 // first-in, first-out.
 func (p *Pool) startLocked(repoID string, waited time.Duration, adm admission, canPark bool) (*entry, error) {
-	path, size, err := p.opts.Models.Resolve(repoID)
+	m, err := p.opts.Models.Resolve(repoID)
 	if err != nil {
 		return nil, err
 	}
+	path := m.Path
 
-	need := capability.LoadCost(size)
+	need := p.chargeLocked(m)
 	if need > p.maxResident {
-		return nil, fmt.Errorf(
-			"%s needs about %s of memory but the limit is %s — raise the memory budget or choose a smaller quantization",
-			repoID, HumanBytes(need), HumanBytes(p.maxResident))
+		return nil, p.tooLargeLocked(repoID, m, need)
 	}
 	// Plan the eviction before the precheck, and refuse from the plan alone.
 	// Precheck stats the launcher's files, and this runs under p.mu — the
@@ -973,7 +1107,8 @@ func (p *Pool) startLocked(repoID string, waited time.Duration, adm admission, c
 	e := &entry{
 		repoID:   repoID,
 		port:     port,
-		bytes:    size,
+		resolved: m,
+		charge:   need,
 		modelArg: path,
 		loadedAt: p.opts.now(),
 		lastUsed: p.opts.now(),
@@ -1158,7 +1293,7 @@ func allows(adm admission, victims []*entry) bool {
 func (p *Pool) liveChargeLocked() int64 {
 	var used int64
 	for _, e := range p.entries {
-		used += capability.LoadCost(e.bytes)
+		used += e.charge
 	}
 	return used
 }
@@ -1229,7 +1364,7 @@ func (p *Pool) evictionPlanLocked(need int64, waited time.Duration) ([]*entry, b
 	victims := make([]*entry, 0, len(candidates))
 	for _, e := range candidates {
 		victims = append(victims, e)
-		used -= capability.LoadCost(e.bytes)
+		used -= e.charge
 		if used+need <= p.maxResident {
 			return victims, true
 		}
@@ -1468,7 +1603,7 @@ func (p *Pool) canEverFitLocked(need int64) bool {
 	protected := p.stuckChargeLocked()
 	for _, e := range p.entries {
 		if p.isPinnedLocked(e.repoID) {
-			protected += capability.LoadCost(e.bytes)
+			protected += e.charge
 		}
 	}
 	return protected+need <= p.maxResident
@@ -1610,7 +1745,7 @@ func (p *Pool) stopEntryLocked(e *entry, reason StopReason) {
 		p.wakeWaitersLocked()
 		return
 	}
-	charge := capability.LoadCost(e.bytes)
+	charge := e.charge
 	p.drainBytes += charge
 	p.drainGen++
 	// A prod, not a promise of room: a waiter re-reads the pool when it comes
@@ -1776,7 +1911,8 @@ func (p *Pool) residentLocked() []Resident {
 			RepoID:   e.repoID,
 			State:    state,
 			Port:     e.port,
-			Bytes:    e.bytes,
+			Bytes:    e.resolved.Bytes,
+			Charge:   e.charge,
 			LoadedAt: e.loadedAt,
 			LastUsed: e.lastUsed,
 			InFlight: e.inFlight,

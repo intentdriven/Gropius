@@ -31,18 +31,52 @@ If this Mac's memory cannot be read at all, there is nothing to bound the figure
 to. Gropius falls back to a conservative default, shows no percentage, and takes
 any figure you type at its word.
 
-## What the budget does not count
+## What a model is charged, and why the cache is most of it
 
-A loaded model is charged its weights and headroom — the reference gives the
-figure. What that charge leaves out is the cache each request builds as it works
-through its prompt. That grows with the length of the prompt, differs sharply
-between model architectures (dense models pay the most for it), and the model
-server keeps such caches between requests, so a Mac loaded exactly to its budget
-can still run out of memory under long prompts served at the same time. It is a
-known limit, open in the project's own issue ledger.
+A loaded model is charged three things: its weights, a fifth of them again for
+the working set a running model needs whatever the prompt is, and the attention
+cache the window it is served at costs — once for every sequence its server may
+decode at once.
 
-This is why a budget claiming most of the machine draws a warning rather than an
-assurance, and why leaving room matters more the longer your prompts are.
+The cache is the term that decides which models can share this Mac. It grows
+with the prompt, and what it costs per token is a property of the architecture
+rather than of the model's size: measured on a 128 GB Mac, four models between
+18 GB and 45 GB of weights ranged from 12 KB to 353 KB per token, a thirtyfold
+spread, and the largest of them was not the most expensive. The model server
+also keeps a prompt's cache after the answer is sent, and caches stack across
+requests, so the charge is what the model may come to hold rather than what it
+holds the moment it loads.
+
+The figure per token is read from the model's own configuration: how many of
+its layers attend over the whole prompt, and what one layer's entry costs. That
+arithmetic is a floor rather than an estimate — every model measured held more
+than it, because a server keeps more than the raw cache — so Gropius multiplies
+it: five times for a model that caches keys and values per head, seven for one
+that caches a compressed latent, each the top of what its own kind was measured
+holding. A model whose configuration cannot be read is charged the flat figure
+instead: its weights plus a fifth.
+
+## The window is the operator's, and it is the same window twice
+
+The window in that charge is the one **Settings → Served context** holds for
+the model, and the window the model's own configuration declares when that
+field is blank. It is one figure doing two jobs, and that is what makes it
+trustworthy: the memory budget charges the cache this window costs, and the
+gateway refuses a request estimated to be larger than it. Gropius never budgets
+for one window and then serves another.
+
+That is what to reach for when a model will not fit. A model declaring 262,144
+tokens can cost more than a whole Mac at that window; served at 32,768 it costs
+a fraction of it, and it is a model this Mac can hold beside another rather
+than one it cannot hold at all. Lowering **Batched requests (decode
+concurrency)** does the same thing, in proportion: each sequence that may run
+at once holds its own cache.
+
+A model whose charge does not fit the budget is refused rather than loaded on a
+smaller figure. The refusal names the window and the concurrency it was charged
+at and the largest of each that would fit, so what to change is in the message.
+Gropius will not quietly charge a model less than it costs: a budget that lies
+by a factor is worse than one that says no.
 
 ## Why a change applies to the next load
 
@@ -75,8 +109,9 @@ Alice's Mac Studio serves models and does nothing else, so she raises the budget
 to most of the machine and keeps her writer and her reviewer in memory together.
 Bob works on the laptop he serves from, so he leaves the default alone.
 
-Add up the charged sizes of the models you want resident at the same time, leave
-room for the ones your clients ask for occasionally, and leave more again if
-those clients send long prompts. [Pinning](pinning-models.md) is the other half
-of this decision: it decides which models keep their place in the budget when
-something else needs the room.
+Add up the charged sizes of the models you want resident at the same time and
+leave room for the ones your clients ask for occasionally. The charge already
+counts the long prompts, so a set that fits is one this Mac can serve at those
+lengths rather than one it can merely load. [Pinning](pinning-models.md) is the
+other half of this decision: it decides which models keep their place in the
+budget when something else needs the room.

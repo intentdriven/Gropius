@@ -68,21 +68,30 @@ models that want a figure their own.
 
 In `config.json`, under `sampling` for the machine-wide set. Everything set for
 one model rather than for the machine lives under `models`, keyed by the
-model's repository id — its sampling override, whether it is pinned, and
-whether its system messages are merged:
+model's repository id — its sampling override, whether it is pinned, whether
+its system messages are merged, and the context window it is served at:
 
 ```json
 "models": {
   "mlx-community/Qwen3-8B-4bit": {
     "sampling": { "temperature": 0.2 },
     "pinned": true,
-    "merge_system_messages": true
+    "merge_system_messages": true,
+    "served_context": 32768
   }
 }
 ```
 
-A model with no entry is served with the machine-wide set, is evictable, and
-has its messages passed on as they arrive. At most 256 models are held.
+`served_context` is a token count, at most 8,388,608 and never more than the
+model's own declared window, which is what it falls back to when the field is
+absent or larger. It is the window a request is held to and the window the
+memory budget charges — see
+[Why there is a memory budget](memory-budget-explained.md) — and
+**Settings → Served context** is the same field in the panel.
+
+A model with no entry is served with the machine-wide set at its own declared
+window, is evictable, and has its messages passed on as they arrive. At most
+256 models are held.
 
 A value of the right kind but the wrong size, hand-edited into that file, is
 ignored rather than fatal: Gropius starts normally, logs which fields it
