@@ -221,8 +221,9 @@ func TestAnInheritedOverBudgetSetDoesNotBlockABudgetSave(t *testing.T) {
 }
 
 // A budget that takes most of the machine is advice, not an error: the charge
-// counts the weights a model loads and not the cache a long conversation adds,
-// so a Mac that is fully committed on paper can still run out under load.
+// is worked out from each model's configuration rather than measured on this
+// Mac, and everything else running draws on the same memory, so a Mac that is
+// fully committed on paper can still run out under load.
 func TestAHighBudgetIsWarnedAboutRatherThanRefused(t *testing.T) {
 	a := newBudgetApp(t, 100*gb, config.Default())
 

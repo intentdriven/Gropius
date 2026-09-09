@@ -499,10 +499,11 @@ func (a *App) BudgetWarnAbove() int64 {
 // end of its range, and "" for one in the middle.
 //
 // Advice rather than a refusal at both ends. At the top, what a Mac can carry
-// is not a figure Gropius knows: a loaded model is charged its weights and a
-// fifth, and not the cache a long conversation adds (iss-3), so a machine fully
-// committed on paper can still run out under load — and equally, a Mac that
-// runs nothing else can carry more than the default share. At the bottom, a
+// is not a figure Gropius knows: a model's charge is worked out from its own
+// configuration rather than measured here, and everything else on the machine
+// draws on the same memory, so a Mac fully committed on paper can still run
+// out under load — and equally, a Mac that runs nothing else can carry more
+// than the default share. At the bottom, a
 // budget under the smallest model's charge refuses every request and hides
 // every model from the search tab, and the operator should hear that from the
 // panel rather than from the first client to be turned away.
@@ -519,7 +520,7 @@ func (a *App) MemoryBudgetWarning() string {
 		return ""
 	}
 	return fmt.Sprintf(
-		"The memory budget (%s) is most of this Mac's memory (%s). macOS and everything else running share it, and a model is charged what it loads rather than what a long conversation adds to it, so requests can still run the machine out of memory.",
+		"The memory budget (%s) is most of this Mac's memory (%s). macOS and everything else running share it, and a model's charge is worked out from its configuration rather than measured on this Mac, so requests can still run the machine out of memory.",
 		runtime.HumanBytes(budget), runtime.HumanBytes(a.machineRAM))
 }
 
@@ -1236,6 +1237,12 @@ func (a *App) Download(repoID string) error {
 			if w := a.PinnedFitWarning(); w != "" {
 				a.Log.Warn("a model arrived and the pinned set no longer fits", "warning", w)
 			}
+			// A model that has just landed on top of one already in memory —
+			// a re-download of a revision with a different window — changes
+			// what the pool should be charging it. Asked for outside
+			// finishDownload, because the pool resolves models through this
+			// App and would take dlMu again from under it.
+			a.Pool.RefreshCharges()
 
 		case errors.Is(err, context.Canceled):
 			// A cancelled download leaves .part files behind on purpose: they let

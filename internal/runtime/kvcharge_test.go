@@ -163,3 +163,77 @@ func TestResidencyReportsTheChargeAndNotTheSize(t *testing.T) {
 		t.Errorf("Resident()[0].Bytes = %d, want the size on disk %d", got[0].Bytes, size)
 	}
 }
+
+// A charge worked out once and never again is a charge that goes stale. The
+// budget is one of its inputs — it is the ceiling on any single model — so a
+// model admitted while the budget was small is charged the whole of it, and
+// raising the budget must give the pool the honest figure back. Until it does,
+// a second model is admitted against a total the pool believes and the machine
+// does not.
+func TestRaisingTheBudgetRechargesTheModelsItWasHoldingDown(t *testing.T) {
+	const size, kv, window = 100, 1, 10000
+	honest := capability.LoadCostOf(capability.Load{
+		DiskBytes: size, KVBytesPerToken: kv, Window: window, Sequences: 1,
+	})
+	facts := map[string]ResolvedModel{
+		"org/a": {Bytes: size, ContextLength: window, KVBytesPerToken: kv},
+		"org/b": {Bytes: size, ContextLength: window, KVBytesPerToken: kv},
+	}
+	l := newFakeLauncher()
+	src := &fakeSource{models: map[string]int64{"org/a": size, "org/b": size}, facts: facts}
+	p := newTestPool(t, l, src, PoolOptions{MaxResidentBytes: 1000, DecodeConcurrency: 1})
+
+	if _, release, err := p.Acquire(context.Background(), "org/a"); err != nil {
+		t.Fatalf("Acquire(org/a): %v", err)
+	} else {
+		release()
+	}
+	if got := p.Resident(); len(got) != 1 || got[0].Charge != 1000 {
+		t.Fatalf("Resident() = %+v, want the one model charged the whole 1,000-byte budget", got)
+	}
+
+	// Room for one honest charge and not two.
+	p.SetMemoryBudget(100000)
+	if got := p.Resident(); len(got) != 1 || got[0].Charge != honest {
+		t.Errorf("Resident() = %+v after the raise, want the model charged %d", got, honest)
+	}
+	if _, release, err := p.Acquire(context.Background(), "org/b"); err != nil {
+		t.Fatalf("Acquire(org/b): %v", err)
+	} else {
+		release()
+	}
+	if got := p.Resident(); len(got) != 1 || got[0].RepoID != "org/b" {
+		t.Errorf("Resident() = %+v, want only org/b: two of these do not fit 100,000 bytes", got)
+	}
+}
+
+// The other input that moves under a resident model is the model itself: a
+// re-download can change the window its configuration declares, and the
+// registry's record of it changes with no load in between. The pool asks again
+// rather than charging what the model was when it was admitted.
+func TestRefreshChargesTakesTheModelsFactsAgain(t *testing.T) {
+	const size, kv = 100, 1
+	l := newFakeLauncher()
+	src := &fakeSource{
+		models: map[string]int64{"org/a": size},
+		facts:  map[string]ResolvedModel{"org/a": {Bytes: size, ContextLength: 100, KVBytesPerToken: kv}},
+	}
+	p := newTestPool(t, l, src, PoolOptions{MaxResidentBytes: 1000000, DecodeConcurrency: 1})
+	if _, release, err := p.Acquire(context.Background(), "org/a"); err != nil {
+		t.Fatalf("Acquire: %v", err)
+	} else {
+		release()
+	}
+
+	src.mu.Lock()
+	src.facts["org/a"] = ResolvedModel{Bytes: size, ContextLength: 10000, KVBytesPerToken: kv}
+	src.mu.Unlock()
+	p.RefreshCharges()
+
+	want := capability.LoadCostOf(capability.Load{
+		DiskBytes: size, KVBytesPerToken: kv, Window: 10000, Sequences: 1, Budget: 1000000,
+	})
+	if got := p.Resident(); len(got) != 1 || got[0].Charge != want {
+		t.Errorf("Resident() = %+v after the facts changed, want a charge of %d", got, want)
+	}
+}

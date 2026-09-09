@@ -281,12 +281,17 @@ type Pool struct {
 type entry struct {
 	repoID string
 	port   int
-	bytes  int64
+	// resolved is what the model source last said about this model: its size,
+	// the window it declares and what a token of that window costs its cache.
+	// Kept rather than discarded after the launch because it is what the
+	// charge is worked out from, and both it and the budget can change under a
+	// model that is already resident.
+	resolved ResolvedModel
 	// charge is what this model costs the memory budget: its weights and the
-	// caches the window it serves will build (capability.LoadCostOf). It is
-	// worked out once, when the model is admitted, and every admission
-	// decision after that counts this figure — so the memory a model is
-	// holding is never accounted at two different rates.
+	// caches the window it serves will build (capability.LoadCostOf). Every
+	// admission decision counts this one figure — so the memory a model is
+	// holding is never accounted at two different rates — and it is reworked
+	// whenever one of its inputs moves (rechargeLocked).
 	charge   int64
 	modelArg string
 	proc     Process
@@ -484,6 +489,13 @@ func (p *Pool) SetMemoryBudget(n int64) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.maxResident = n
+	// The budget is an input to every resident model's charge — it is the
+	// ceiling on any single one — so the models in memory are charged again
+	// against the new figure. Without this, a model admitted under a small
+	// budget keeps being counted at that budget after a raise, and the next
+	// load is admitted against a total the pool believes and the machine does
+	// not.
+	p.rechargeLocked()
 	// A raise can make room with nothing having to finish, so a request
 	// already waiting acts on it at once rather than at the next release.
 	p.wakeWaitersLocked()
@@ -933,6 +945,43 @@ func (p *Pool) acquire(ctx context.Context, repoID string, mayWait bool) (*Upstr
 	}, releaseSlot, nil
 }
 
+// RefreshCharges asks the model source about every resident model again and
+// charges each on what it says now.
+//
+// A model's facts move under it: a re-download can change the window its
+// configuration declares, and the registry's record changes with no load in
+// between. The pool would otherwise go on charging what the model was when it
+// was admitted, which is a figure nothing on disk supports any more. A model
+// the source can no longer resolve — one being deleted — keeps the charge it
+// was admitted on, because its server is still holding exactly that memory.
+func (p *Pool) RefreshCharges() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, e := range p.entries {
+		m, err := p.opts.Models.Resolve(e.repoID)
+		if err != nil {
+			continue
+		}
+		e.resolved = m
+	}
+	p.rechargeLocked()
+	// A charge that fell may have made room for a waiting request.
+	p.wakeWaitersLocked()
+}
+
+// rechargeLocked reworks every resident model's charge from the facts the pool
+// holds for it and the budget in force. Callers must hold p.mu.
+//
+// The drain and stuck tallies are deliberately left alone: each was taken from
+// an entry's charge when its server was stopped and is credited back with that
+// same figure when the process goes, and a tally recharged halfway through
+// would credit back more or less memory than it took.
+func (p *Pool) rechargeLocked() {
+	for _, e := range p.entries {
+		e.charge = p.chargeLocked(e.resolved)
+	}
+}
+
 // chargeLocked is what a model costs the budget in force. Callers must hold
 // p.mu, because the budget it is measured against is the one the pool holds
 // there and may be replaced while the pool runs.
@@ -962,7 +1011,7 @@ func (p *Pool) startLocked(repoID string, waited time.Duration, adm admission, c
 	if err != nil {
 		return nil, err
 	}
-	path, size := m.Path, m.Bytes
+	path := m.Path
 
 	need := p.chargeLocked(m)
 	if need > p.maxResident {
@@ -1024,7 +1073,7 @@ func (p *Pool) startLocked(repoID string, waited time.Duration, adm admission, c
 	e := &entry{
 		repoID:   repoID,
 		port:     port,
-		bytes:    size,
+		resolved: m,
 		charge:   need,
 		modelArg: path,
 		loadedAt: p.opts.now(),
@@ -1828,7 +1877,7 @@ func (p *Pool) residentLocked() []Resident {
 			RepoID:   e.repoID,
 			State:    state,
 			Port:     e.port,
-			Bytes:    e.bytes,
+			Bytes:    e.resolved.Bytes,
 			Charge:   e.charge,
 			LoadedAt: e.loadedAt,
 			LastUsed: e.lastUsed,
