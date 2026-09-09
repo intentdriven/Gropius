@@ -23,13 +23,25 @@ open dist/GropiusChat.app
 
 ## Use
 
-1. Launch it. On first run it tries `http://AlicesMac.local:11535` automatically.
-2. If that isn't your server, click the **gear** → enter the server URL. Use the
-   Mac's `.local` name or its LAN IP with port `11535` and no path — for
-   example `http://your-mac.local:11535`. The Gropius **Connect** tab and menu
-   bar show that address with `/v1` on the end (the form OpenAI clients want);
-   GropiusChat adds `/v1` itself, so drop the suffix when pasting. Add an API
-   key only if that server requires one.
+1. Launch it. On first run it tries `http://localhost:11535` — the Gropius
+   server on this same Mac, which is where the documented install puts one.
+2. If the server is on another Mac, open **Settings** (the **gear** in the
+   toolbar, or the button on the empty chat). Settings lists every Gropius
+   server it can find on your network: each row names the server, says whether
+   it needs an API key, and how many models it can serve. Click one and its
+   address fills the field — nothing connects until you say so, so the choice
+   of which machine receives your API key stays yours.
+
+   Nothing found, or the server is somewhere Bonjour does not reach? Type the
+   address instead: the Mac's `.local` name or its LAN IP with port `11535` and
+   no path — for example `http://your-mac.local:11535`. The Gropius **Connect**
+   tab and menu bar show that address with `/v1` on the end (the form OpenAI
+   clients want); GropiusChat adds `/v1` itself, so drop the suffix when
+   pasting. Add an API key only if that server requires one.
+
+   macOS asks for permission to search the local network the first time
+   Settings opens. Without it the list stays empty, and typing the address
+   still works.
 3. Pick a model from the top-right menu and start typing. Enter sends; the arrow
    button too. The stop button interrupts a reply in progress.
 
@@ -70,7 +82,9 @@ prompt the user to approve on first connect.
 
 - `GropiusChat/GropiusChat.swift` — the whole app (SwiftUI). `GET /v1/models` to
   list, `POST /v1/chat/completions` with `stream: true` to chat, parsed as SSE.
-- `Info.plist` — bundle metadata + local-network entitlements.
+- `Info.plist` — bundle metadata, local-network entitlements, and the Bonjour
+  service type the app may browse for (`_gropius._tcp`, the one the server
+  advertises).
 - `build.sh` — compiles with `swiftc` and assembles the `.app`.
 
 Settings persist across launches: the server URL and chosen model in

@@ -54,6 +54,16 @@ GitHub release notes.
   where the VPN stops. Linked from the README and from the getting-started
   guide.
 
+
+- **The chat client finds servers instead of asking you to name one.**
+  Settings now lists every Gropius server advertising itself on your network,
+  with the name it publishes, whether it wants an API key, and how many models
+  it can serve. Clicking one fills the address in. It never connects on its
+  own: which machine receives your API key stays your decision, and a server
+  that has left the network is reported when you pick it rather than quietly
+  failing later. The server has advertised itself over Bonjour all along —
+  until now nothing on the client side listened.
+
 ### Fixed
 
 - **The committed identity pin now has a gate behind it.** `.abcd/config/identity.json`
@@ -66,6 +76,16 @@ GitHub release notes.
   is self-contained shell, so it holds without any tool on `PATH`; it fails
   closed on a pin it cannot read; and a repository with no pin is unaffected.
   Contributors whose git identity already matches see no change.
+
+
+- **A first launch of the chat client no longer dead-ends.** It opened on a
+  documentation example's host name, which resolves for nobody, and the message
+  box stays disabled until a server answers — so the first thing a new user met
+  was a text field that would not take a keystroke and a sentence telling them
+  to connect, in a window offering nothing to click. It now opens on
+  `http://localhost:11535`, the server on the same Mac that the documented
+  install order puts there; the empty chat names Settings and has a button that
+  opens it; and the disabled message box says why it is disabled.
 
 ## [0.4.0] - 2026-09-08
 
