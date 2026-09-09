@@ -35,7 +35,9 @@ GitHub release notes.
 - **A download asked for while Gropius is shutting down is refused rather than
   abandoned.** Shutdown cancels the downloads it can see and then waits for
   them, and one accepted after that point was left writing files nothing was
-  waiting for.
+  waiting for. The control panel is told the server is unavailable, not that
+  the model is in conflict: it is the server that is going away, and asking
+  about a different model would not help.
 
 - **A model whose first registry record cannot be written no longer leaves a
   pending delete waiting for ever.** The delete waits for the download to stop

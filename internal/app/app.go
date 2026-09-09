@@ -994,12 +994,17 @@ func perModelKeys(in map[string]config.ModelSettings) []string {
 type modelSource struct{ app *App }
 
 func (s modelSource) Resolve(repoID string) (string, int64, error) {
-	// Asked before the index, because the index is what a removal changes
-	// first. Between Registry.Remove's write and the last file being unlinked
-	// the model looks merely absent, and a launch that started a moment earlier
-	// would be serving from a directory that is being carried out from under
-	// it — a model server answering requests from unlinked files, after every
-	// surface that reports what this Mac holds has stopped listing it.
+	// Asked before the index, because the index is not what says whether this
+	// model may be launched. The window is precise: Delete calls Pool.Unload
+	// and then Registry.Remove, and between Unload returning and Remove's index
+	// write there is nothing holding p.mu — so an Acquire can take p.mu, enter
+	// startLocked, resolve this model from an index that still lists it, and
+	// launch a server onto a directory that is about to be unlinked. Nothing
+	// else closes that window: the pool's own ErrBusy check is point-in-time
+	// and has already passed, and Registry.Remove drops the entry before it
+	// touches the files. It is sub-millisecond and it is real, and what comes
+	// through it is a model server answering requests from unlinked files after
+	// every surface that reports what this Mac holds has stopped listing it.
 	if s.app.isDeleting(repoID) {
 		return "", 0, fmt.Errorf("%s is being deleted", repoID)
 	}
@@ -1161,20 +1166,33 @@ func (a *App) Download(repoID string) error {
 		// Each branch publishes its final state and deregisters the download
 		// in one step (see finishDownload). Logging stays outside it: the log
 		// is not what another goroutine is waiting to see.
+		//
+		// So does every reading of the disk. dlMu is on the model-load path —
+		// modelSource.Resolve takes it while the pool holds p.mu — and walking
+		// a multi-gigabyte model directory under it would let the size of the
+		// model that just arrived set how long every other model's load waits
+		// for the pool's own lock. That is the rule pool.go states for its
+		// refusal path, and it applies here for the same reason. What is left
+		// inside is the publication itself: the registry write and the
+		// deregistration, which have to be one step or a caller can see a model
+		// finish and still be refused its next Download.
 		switch {
 		case err == nil:
+			// Re-derive the size from disk rather than trusting the manifest,
+			// and read the context length through the registry's own primitive,
+			// so the download path and the rescan apply one key rule — a model
+			// carries its context length from the moment it is ready, not only
+			// after the next startup rescan. Both touch the disk, so both are
+			// done here, before the lock.
+			bytes := dirSize(dest)
+			contextLength := registry.ReadContextLength(dest)
 			var perr error
 			a.finishDownload(dl, func() {
-				// Re-derive the size from disk rather than trusting the manifest.
 				perr = a.Registry.Put(registry.Model{
-					RepoID: repoID,
-					Path:   dest,
-					Bytes:  dirSize(dest),
-					// Read through the registry's own primitive, so the download
-					// path and the rescan apply one key rule; a model carries its
-					// context length from the moment it is ready, not only after
-					// the next startup rescan.
-					ContextLength: registry.ReadContextLength(dest),
+					RepoID:        repoID,
+					Path:          dest,
+					Bytes:         bytes,
+					ContextLength: contextLength,
 					State:         registry.StateReady,
 					Progress:      100,
 					AddedAt:       addedAt,
@@ -1199,9 +1217,12 @@ func (a *App) Download(repoID string) error {
 		case errors.Is(err, context.Canceled):
 			// A cancelled download leaves .part files behind on purpose: they let
 			// the next attempt resume instead of starting over.
+			// Asked before the lock: it validates the model directory, which
+			// is disk work, and dlMu is on the model-load path.
+			restorable := a.canRestoreReady(dest, wasReady)
 			var restored bool
 			a.finishDownload(dl, func() {
-				restored = a.restoreReady(repoID, dest, wasReady, prior)
+				restored = restorable && a.restoreReady(repoID, dest, prior)
 				if !restored {
 					a.Registry.SetState(repoID, registry.StateFailed, 0, "cancelled")
 				}
@@ -1213,9 +1234,10 @@ func (a *App) Download(repoID string) error {
 			}
 
 		default:
+			restorable := a.canRestoreReady(dest, wasReady)
 			var restored bool
 			a.finishDownload(dl, func() {
-				restored = a.restoreReady(repoID, dest, wasReady, prior)
+				restored = restorable && a.restoreReady(repoID, dest, prior)
 				if !restored {
 					a.Registry.SetState(repoID, registry.StateFailed, 0, err.Error())
 				}
@@ -1231,9 +1253,23 @@ func (a *App) Download(repoID string) error {
 	return nil
 }
 
+// canRestoreReady answers the disk half of the question restoreReady acts on:
+// was this model ready before the attempt, and do its files still validate?
+//
+// It is a function of its own so that the caller can ask it before taking
+// dlMu, which the pool waits on for every load. Asking it a moment earlier
+// costs nothing: the download goroutine is the only writer of this directory
+// while it runs, and a Delete that would take the files away is parked on
+// dl.done, which does not close until that goroutine has finished.
+func (a *App) canRestoreReady(dest string, wasReady bool) bool {
+	return wasReady && validateModelDir(dest) == nil
+}
+
 // restoreReady puts a model back into the ready state after a failed or
-// cancelled download attempt, provided it was ready before the attempt and its
-// files still validate. It reports whether the model was restored.
+// cancelled download attempt. It reports whether the model was restored.
+//
+// Callers ask canRestoreReady first; this is the write alone, so that the only
+// thing done under dlMu is the publication.
 //
 // Everything it restores comes from prior — the record the model had before
 // the attempt — rather than from the directory: measuring the directory now
@@ -1242,10 +1278,7 @@ func (a *App) Download(repoID string) error {
 // revision's context length beside the old revision's size. A record that
 // predates the figure still gains it, because the startup rescan re-derives
 // it from the directory that is actually being served.
-func (a *App) restoreReady(repoID, dest string, wasReady bool, prior registry.Model) bool {
-	if !wasReady || validateModelDir(dest) != nil {
-		return false
-	}
+func (a *App) restoreReady(repoID, dest string, prior registry.Model) bool {
 	if perr := a.Registry.Put(registry.Model{
 		RepoID:        repoID,
 		Path:          dest,

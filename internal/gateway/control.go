@@ -905,14 +905,21 @@ func (c *Control) handleDelete(w http.ResponseWriter, r *http.Request) {
 }
 
 // modelErrorStatus maps a model-action error to the right HTTP status:
-// a malformed id is the caller's mistake (400), an absent model is 404, and a
-// genuine conflict (already downloading, or busy serving a request) is 409.
+// a malformed id is the caller's mistake (400), an absent model is 404, a
+// server that is going away is 503, and a genuine conflict (already
+// downloading, being deleted, or busy serving a request) is 409.
 func modelErrorStatus(err error) int {
 	switch {
 	case errors.Is(err, app.ErrInvalidRepoID):
 		return http.StatusBadRequest
 	case errors.Is(err, registry.ErrNotFound):
 		return http.StatusNotFound
+	case errors.Is(err, app.ErrShuttingDown):
+		// Named rather than left to the default arm: a conflict says the state
+		// of this model is the problem and asking again about a different one
+		// would work, and neither is true here. The server is stopping, and
+		// 503 is what says so.
+		return http.StatusServiceUnavailable
 	default:
 		return http.StatusConflict
 	}

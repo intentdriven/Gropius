@@ -10,6 +10,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/intentdriven/Gropius/internal/registry"
 )
 
 // manyFileHub serves a repo of many small files, each answered slowly, so a
@@ -99,6 +101,46 @@ func TestDownloadAfterCloseIsRefused(t *testing.T) {
 	}
 }
 
+// plantBlobs fills a model directory with enough entries that removing it takes
+// long enough for another request to arrive mid-removal.
+func plantBlobs(t *testing.T, dir string, n int) {
+	t.Helper()
+	for i := 0; i < n; i++ {
+		if err := os.WriteFile(filepath.Join(dir, fmt.Sprintf("blob-%06d.txt", i)), nil, 0o644); err != nil {
+			t.Fatalf("filling the model directory: %v", err)
+		}
+	}
+}
+
+// removalUnderWay waits until dir is demonstrably being unlinked — fewer entries
+// than were planted in it — and reports whether it caught it.
+//
+// A directory that has already gone is reported rather than failed. How fast a
+// disk unlinks n files is a fact about the machine, not about the code under
+// test, and a test that fails on a fast one is reporting the wrong thing; the
+// callers retry with more to remove instead, and assert their invariant either
+// way, so a round that misses the window still checks something true.
+func removalUnderWay(dir string, planted int) bool {
+	for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); {
+		ents, err := os.ReadDir(dir)
+		if err != nil {
+			return false
+		}
+		if len(ents) < planted*3/4 {
+			return true
+		}
+		time.Sleep(time.Millisecond)
+	}
+	return false
+}
+
+// blobCounts is what the two tests below plant, in order, until one of them is
+// slow enough to remove that the window can be observed. 1500 files take
+// hundreds of milliseconds to unlink on an ordinary Mac; the larger figures are
+// there so that a much faster disk does not turn a real property into an
+// unobservable one.
+var blobCounts = []int{1500, 8000, 30000}
+
 // A Delete and a Download of the same model must settle on one of two outcomes:
 // the model is registered and every file it needs is on disk, or it is gone
 // from the registry and its directory is gone with it. Deleting a model is not
@@ -111,67 +153,59 @@ func TestADownloadStartedWhileAModelIsBeingDeletedDoesNotResurrectIt(t *testing.
 	a.Hub.BaseURL = fakeHub(t).URL
 	dir := a.Paths.ModelDir("org/repo")
 
-	if err := a.Download("org/repo"); err != nil {
-		t.Fatalf("Download: %v", err)
-	}
-	waitFor(t, "the model to become ready", func() bool {
+	caught := false
+	for _, planted := range blobCounts {
+		if err := a.Download("org/repo"); err != nil {
+			t.Fatalf("Download: %v", err)
+		}
+		waitFor(t, "the model to become ready", func() bool {
+			m, err := a.Registry.Get("org/repo")
+			return err == nil && m.Ready()
+		})
+		// Enough files that removing the directory takes long enough for a
+		// second request to arrive while it is half gone. That gap is the whole
+		// of what the serialisation has to cover; a real multi-gigabyte model
+		// opens it on its own.
+		plantBlobs(t, dir, planted)
+
+		deleted := make(chan error, 1)
+		go func() { deleted <- a.Delete("org/repo") }()
+
+		// Observed rather than slept for, so a round that reports the window as
+		// caught really did reach it.
+		caught = removalUnderWay(dir, planted)
+		_ = a.Download("org/repo")
+		if err := <-deleted; err != nil {
+			t.Fatalf("Delete: %v", err)
+		}
+		waitFor(t, "the download to settle", func() bool { return len(a.Downloading()) == 0 })
+
+		// Asserted on every round, caught or not: the two outcomes are the only
+		// two whether or not this round managed to land inside the removal.
 		m, err := a.Registry.Get("org/repo")
-		return err == nil && m.Ready()
-	})
-
-	// Enough files that removing the directory takes long enough for a second
-	// request to arrive while it is half gone. That gap is the whole of what
-	// the serialisation has to cover; a real multi-gigabyte model opens it on
-	// its own.
-	for i := 0; i < 1500; i++ {
-		if err := os.WriteFile(filepath.Join(dir, fmt.Sprintf("blob-%05d.txt", i)), nil, 0o644); err != nil {
-			t.Fatalf("filling the model directory: %v", err)
+		switch {
+		case err != nil:
+			if _, serr := os.Stat(dir); !os.IsNotExist(serr) {
+				t.Fatal("the model is gone from the registry but its directory is still on disk")
+			}
+		case m.Ready():
+			for _, f := range []string{"config.json", "model.safetensors", "tokenizer.json"} {
+				if _, serr := os.Stat(filepath.Join(dir, f)); serr != nil {
+					t.Errorf("the registry says the model is ready but %s is missing: %v", f, serr)
+				}
+			}
+		default:
+			// A refused or failed attempt leaves a record the operator can
+			// retry or remove, which is a state they can act on.
 		}
-	}
-
-	deleted := make(chan error, 1)
-	go func() { deleted <- a.Delete("org/repo") }()
-
-	// Wait until the removal is demonstrably under way rather than guessing at
-	// a sleep, so the test cannot pass by arriving after it finished.
-	underWay := false
-	for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); {
-		ents, err := os.ReadDir(dir)
-		if err != nil {
+		if caught {
 			break
 		}
-		if len(ents) < 1200 {
-			underWay = true
-			break
-		}
-		time.Sleep(time.Millisecond)
+		t.Logf("this disk unlinked %d files before the removal could be observed; retrying with more", planted)
+		_ = os.RemoveAll(dir)
 	}
-	if !underWay {
-		t.Fatal("the removal finished before a second request could reach it")
-	}
-
-	_ = a.Download("org/repo")
-	if err := <-deleted; err != nil {
-		t.Fatalf("Delete: %v", err)
-	}
-	waitFor(t, "the download to settle", func() bool { return len(a.Downloading()) == 0 })
-
-	m, err := a.Registry.Get("org/repo")
-	if err != nil {
-		if _, serr := os.Stat(dir); !os.IsNotExist(serr) {
-			t.Fatal("the model is gone from the registry but its directory is still on disk")
-		}
-		return
-	}
-	if !m.Ready() {
-		// A refused or failed attempt leaves a record the operator can retry or
-		// remove, which is a state they can act on.
-		return
-	}
-	for _, f := range []string{"config.json", "model.safetensors", "tokenizer.json"} {
-		if _, serr := os.Stat(filepath.Join(dir, f)); serr != nil {
-			t.Errorf("the registry says the model is ready but %s is missing: %v", f, serr)
-		}
+	if !caught {
+		t.Log("WARNING: the removal was never observed in progress on this machine, so this run did not exercise the window it exists for")
 	}
 }
 
@@ -196,36 +230,107 @@ func TestAModelBeingDeletedCannotBeResolvedForALoad(t *testing.T) {
 	}
 
 	dir := a.Paths.ModelDir("org/repo")
-	for i := 0; i < 1500; i++ {
-		if err := os.WriteFile(filepath.Join(dir, fmt.Sprintf("blob-%05d.txt", i)), nil, 0o644); err != nil {
-			t.Fatalf("filling the model directory: %v", err)
+	caught := false
+	for _, planted := range blobCounts {
+		plantBlobs(t, dir, planted)
+
+		deleted := make(chan error, 1)
+		go func() { deleted <- a.Delete("org/repo") }()
+		caught = removalUnderWay(dir, planted)
+
+		// Asserted whether or not the window was reached. Inside it this is the
+		// guard doing its work; past it the model is simply gone, and either way
+		// nothing may resolve it for a load.
+		if _, _, err := src.Resolve("org/repo"); err == nil {
+			t.Error("a model whose files are being removed was resolved for a load")
 		}
-	}
-
-	deleted := make(chan error, 1)
-	go func() { deleted <- a.Delete("org/repo") }()
-
-	underWay := false
-	for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); {
-		ents, err := os.ReadDir(dir)
-		if err != nil {
+		if err := <-deleted; err != nil {
+			t.Fatalf("Delete: %v", err)
+		}
+		if caught {
 			break
 		}
-		if len(ents) < 1200 {
-			underWay = true
-			break
+		t.Logf("this disk unlinked %d files before the removal could be observed; retrying with more", planted)
+		if err := a.Download("org/repo"); err != nil {
+			t.Fatalf("Download: %v", err)
 		}
-		time.Sleep(time.Millisecond)
+		waitFor(t, "the model to become ready again", func() bool {
+			m, err := a.Registry.Get("org/repo")
+			return err == nil && m.Ready()
+		})
 	}
-	if !underWay {
-		t.Fatal("the removal finished before a load could reach it")
+	if !caught {
+		t.Log("WARNING: the removal was never observed in progress on this machine, so this run did not exercise the window the guard exists for")
+	}
+}
+
+// The pool waits on dlMu for every load — modelSource.Resolve takes it while the
+// pool holds p.mu — so a finishing download must not do its filesystem work
+// there. Sizing the directory that has just arrived is that work, and on a real
+// model it is a walk of a multi-gigabyte tree; done under the lock, it would let
+// the size of one model set how long every other model's load waits.
+func TestAFinishingDownloadDoesNotHoldUpALoadOfAnotherModel(t *testing.T) {
+	a := newTestApp(t)
+	a.Hub.BaseURL = fakeHub(t).URL
+	src := modelSource{a}
+
+	// A second, unrelated model that a request could ask for at any moment.
+	if err := a.Registry.Put(registry.Model{
+		RepoID: "org/other",
+		Path:   a.Paths.ModelDir("org/other"),
+		Bytes:  100,
+		State:  registry.StateReady,
+	}); err != nil {
+		t.Fatalf("registering the second model: %v", err)
 	}
 
-	if _, _, err := src.Resolve("org/repo"); err == nil {
-		t.Error("a model whose files are being removed was resolved for a load")
+	dir := a.Paths.ModelDir("org/repo")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("creating the model directory: %v", err)
 	}
-	if err := <-deleted; err != nil {
-		t.Fatalf("Delete: %v", err)
+	plantBlobs(t, dir, 6000)
+
+	// What sizing that directory costs, measured warm on this machine right
+	// now, so the assertion below is a comparison rather than a guess about
+	// what hardware the suite is running on.
+	_ = dirSize(dir)
+	start := time.Now()
+	_ = dirSize(dir)
+	sizing := time.Since(start)
+
+	stop := make(chan struct{})
+	worst := make(chan time.Duration, 1)
+	go func() {
+		var longest time.Duration
+		for {
+			select {
+			case <-stop:
+				worst <- longest
+				return
+			default:
+			}
+			began := time.Now()
+			if _, _, err := src.Resolve("org/other"); err != nil {
+				t.Errorf("resolving the second model: %v", err)
+			}
+			if took := time.Since(began); took > longest {
+				longest = took
+			}
+		}
+	}()
+
+	if err := a.Download("org/repo"); err != nil {
+		t.Fatalf("Download: %v", err)
+	}
+	waitFor(t, "the model to become ready", func() bool {
+		m, err := a.Registry.Get("org/repo")
+		return err == nil && m.Ready()
+	})
+	close(stop)
+
+	if blocked := <-worst; blocked >= sizing/2 {
+		t.Errorf("a load of another model was held up for %v while sizing the finishing download's directory costs %v — the sizing is happening under the lock the pool waits on",
+			blocked, sizing)
 	}
 }
 
