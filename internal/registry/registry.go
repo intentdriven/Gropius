@@ -848,7 +848,24 @@ const MaxKVBytesPerToken = 1 << 24
 //   - Head counts fall back the way the model implementations do: the
 //     key-value head count, else the attention head count; the declared head
 //     dimension, else the hidden size divided by the attention heads.
+//
+// The figure is bounded here, where it is worked out, and not only where it is
+// read back from the index: a claim the scan accepts is charged against this
+// Mac's memory for the whole of the session and would fall to nothing only at
+// the next restart. In shared-cache mode config.json is a file another local
+// account can write (see capability.KVShape's own bounds), so the ceiling is
+// part of reading it, not part of trusting it later.
 func kvBytesPerTokenFrom(cfg map[string]any) int64 {
+	n := kvShapeFrom(cfg).BytesPerToken()
+	if !plausibleKVBytesPerToken(n) {
+		return 0
+	}
+	return n
+}
+
+// kvShapeFrom reads the shape itself, leaving the arithmetic and its own
+// bounds to capability.
+func kvShapeFrom(cfg map[string]any) capability.KVShape {
 	level := cfg
 	if _, present := cfg["num_hidden_layers"]; !present {
 		if text, ok := cfg["text_config"].(map[string]any); ok {
@@ -857,20 +874,20 @@ func kvBytesPerTokenFrom(cfg map[string]any) int64 {
 	}
 	layers, ok := configNumber(level, "num_hidden_layers")
 	if !ok {
-		return 0
+		return capability.KVShape{}
 	}
 	shape := capability.KVShape{FullAttentionLayers: fullAttentionLayers(level, layers)}
 	// A latent cache replaces the per-head arithmetic, so it is read first.
 	if rank, ok := configNumber(level, "kv_lora_rank"); ok {
 		rope, _ := configNumber(level, "qk_rope_head_dim")
 		shape.LatentDim = rank + rope
-		return shape.BytesPerToken()
+		return shape
 	}
 	heads, ok := configNumber(level, "num_key_value_heads")
 	if !ok {
 		heads, ok = configNumber(level, "num_attention_heads")
 		if !ok {
-			return 0
+			return capability.KVShape{}
 		}
 	}
 	shape.KVHeads = heads
@@ -879,18 +896,25 @@ func kvBytesPerTokenFrom(cfg map[string]any) int64 {
 		hidden, hok := configNumber(level, "hidden_size")
 		attention, aok := configNumber(level, "num_attention_heads")
 		if !hok || !aok {
-			return 0
+			return capability.KVShape{}
 		}
 		dim = hidden / attention
 	}
 	shape.HeadDim = dim
-	return shape.BytesPerToken()
+	return shape
 }
 
 // fullAttentionLayers is how many of a model's layers keep a per-token cache.
 // A configuration that declares no hybrid layout gets the whole depth, which
 // over-charges a hybrid model whose spelling is not one of these three and
 // under-charges nothing.
+//
+// An interval wider than the model is deep is not a layout, it is a claim that
+// one layer in a model of any depth attends — a sixty-fourfold under-charge on
+// a 64-layer model, and one that would be charged rather than refused. In
+// shared-cache mode the account writing config.json need not be the account
+// serving from it, so an implausible interval takes the same floor a
+// configuration that says nothing takes.
 func fullAttentionLayers(level map[string]any, layers int64) int64 {
 	if types, ok := level["layer_types"].([]any); ok && len(types) > 0 {
 		var n int64
@@ -904,7 +928,7 @@ func fullAttentionLayers(level map[string]any, layers int64) int64 {
 	if pattern, ok := level["hybrid_override_pattern"].(string); ok && pattern != "" {
 		return int64(strings.Count(pattern, "*"))
 	}
-	if interval, ok := configNumber(level, "full_attention_interval"); ok {
+	if interval, ok := configNumber(level, "full_attention_interval"); ok && interval <= layers {
 		// Rounded up: a depth that does not divide by the interval has a
 		// part-filled last group, and the layer in it attends.
 		return (layers + interval - 1) / interval

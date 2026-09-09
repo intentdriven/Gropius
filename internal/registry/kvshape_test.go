@@ -144,3 +144,53 @@ func TestRescanRecordsTheCacheCost(t *testing.T) {
 		t.Errorf("ContextLength = %d, want 262144", m.ContextLength)
 	}
 }
+
+// A model directory is, in shared-cache mode, a file another local account can
+// write, and the cache figure decides how much of this Mac's memory a model is
+// charged. A claim past what any model could mean yields nothing at the one
+// place the figure is worked out — not at the one place it is read back —
+// because a figure the scan accepts is charged for the whole of this session
+// and only falls to nothing at the next restart, which is a difference an
+// operator would see as the machine quietly changing its mind.
+func TestAnImplausibleCacheFigureNeverEntersTheRegistry(t *testing.T) {
+	const hostile = `{"model_type":"test","num_hidden_layers":1024,"num_key_value_heads":1024,
+	                  "head_dim":65536,"max_position_embeddings":262144}`
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(hostile), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := ReadModelFacts(dir).KVBytesPerToken; got != 0 {
+		t.Errorf("KVBytesPerToken = %d, want 0: %d is past the plausible ceiling %d",
+			got, got, int64(MaxKVBytesPerToken))
+	}
+
+	r, root := newTestRegistry(t)
+	writeModelDirWithConfig(t, root, "org", "hostile", hostile, 1024)
+	if err := r.Rescan(root); err != nil {
+		t.Fatalf("Rescan: %v", err)
+	}
+	m, err := r.Get("org/hostile")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if m.KVBytesPerToken != 0 {
+		t.Errorf("the scan recorded %d, want 0 — the figure is charged from the moment it is scanned",
+			m.KVBytesPerToken)
+	}
+}
+
+// An attention interval wider than the model is deep would count one layer in
+// a model where every layer attends: a 64-fold under-charge, and one that is
+// charged rather than refused. An interval that cannot be one falls back to
+// the floor every configuration that says nothing gets.
+func TestAnAttentionIntervalWiderThanTheModelChargesEveryLayer(t *testing.T) {
+	dir := t.TempDir()
+	config := `{"model_type":"test","num_hidden_layers":64,"full_attention_interval":1000,
+	            "num_key_value_heads":4,"head_dim":256}`
+	if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(config), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := ReadModelFacts(dir).KVBytesPerToken, int64(64*4*256*2*2); got != want {
+		t.Errorf("KVBytesPerToken = %d, want %d — every layer, as for a configuration that declares no layout", got, want)
+	}
+}
