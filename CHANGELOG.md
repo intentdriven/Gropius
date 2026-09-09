@@ -27,9 +27,9 @@ GitHub release notes.
   inside the shared one, and the decision that no account runs another
   account's programs had since moved the private Python runtime into each
   account's own folder. The check now covers the folders that are actually
-  shared — the models, the download cache and the logs, which are still held to
-  the permissions the installer sets — and lets each account's own folders be
-  its own. A single-account install never saw this.
+  shared — the models and the download cache, which are still held to the
+  permissions the installer sets — and lets each account's own folders be its
+  own. A single-account install never saw this.
 
 ### Changed
 

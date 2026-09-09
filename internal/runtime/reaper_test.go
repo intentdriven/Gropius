@@ -32,6 +32,33 @@ func TestPIDLedgerLivesInThisAccountsOwnDirectory(t *testing.T) {
 	}
 }
 
+// A Paths with no account directory falls back to the data root, and a Paths
+// with neither gets a ledger that writes nothing. Joining an empty directory
+// with the file name would otherwise yield the relative "running-servers.pids"
+// — a file in whatever directory the process was started from, which the next
+// launch would read as a list of process groups to kill.
+func TestPIDLedgerNeverFallsBackToTheWorkingDirectory(t *testing.T) {
+	root := t.TempDir()
+	l := &ExecLauncher{Paths: config.Paths{Root: root}}
+	if got, want := l.pidLedger().path, filepath.Join(root, pidFileName); got != want {
+		t.Errorf("ledger path = %q, want the data root's %q when there is no account directory", got, want)
+	}
+
+	inert := newPIDLedger("")
+	if inert.path != "" {
+		t.Fatalf("ledger path = %q, want none: an empty directory must not become a relative path", inert.path)
+	}
+	// Every entry point must be a no-op, writing nothing and killing nothing.
+	inert.add(os.Getpid())
+	inert.remove(os.Getpid())
+	if killed := inert.reapOrphans(); killed != 0 {
+		t.Errorf("an inert ledger reaped %d process groups", killed)
+	}
+	if _, err := os.Stat(pidFileName); !os.IsNotExist(err) {
+		t.Errorf("a ledger was written into the working directory (err=%v)", err)
+	}
+}
+
 // reapOrphans must kill a process group recorded in the ledger, and leave the
 // ledger clean afterwards.
 func TestReapOrphansKillsRecordedProcessGroup(t *testing.T) {

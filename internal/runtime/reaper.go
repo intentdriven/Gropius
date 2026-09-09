@@ -36,12 +36,13 @@ const pidFileName = "running-servers.pids"
 // recorded pgid is stale). Verifying identity before SIGKILL prevents that.
 type pidLedger struct {
 	path string
-	// uid is the effective uid a ledger must be owned by to be trusted. In
-	// shared-cache mode the ledger lives in a group-writable root where another
-	// local account can plant one — permanently, since the sticky bit blocks
-	// our os.Remove — and every identity check below it (boot time, start
-	// time) is readable cross-uid, so only provenance stops a planted ledger
-	// from turning the next launch into a kill of arbitrary process groups.
+	// uid is the effective uid a ledger must be owned by to be trusted. The
+	// ledger now lives in this account's own directory, but the check stays:
+	// every identity check below it (boot time, start time) is readable
+	// cross-uid, so only provenance stops a ledger this account did not write —
+	// left by an older install in a shared root, or planted anywhere the file
+	// can be created — from turning the next launch into a kill of arbitrary
+	// process groups.
 	uid int
 	mu  sync.Mutex
 }
@@ -59,15 +60,36 @@ type pidEntry struct {
 	startNs int64
 }
 
+// newPIDLedger opens the ledger this account keeps in dir.
+//
+// An empty dir yields an INERT ledger rather than a relative path. Without
+// that, filepath.Join("", pidFileName) is "running-servers.pids" — a file in
+// whatever directory the process happens to have been started from, which is
+// neither this account's nor stable across launches, and which reapOrphans
+// would then read as a list of process groups to kill. A ledger nobody wrote
+// is safer than one anybody can leave in a working directory. The only way to
+// reach this is a Paths built without a data root at all, which no shipped path
+// produces; recording nothing costs the orphan sweep and nothing else.
 func newPIDLedger(dir string) *pidLedger {
-	return &pidLedger{path: filepath.Join(dir, pidFileName), uid: os.Geteuid()}
+	l := &pidLedger{uid: os.Geteuid()}
+	if dir != "" {
+		l.path = filepath.Join(dir, pidFileName)
+	}
+	return l
 }
+
+// inert reports whether this ledger has nowhere to write. Every entry point
+// checks it, so an unusable ledger records nothing and kills nothing.
+func (l *pidLedger) inert() bool { return l.path == "" }
 
 // add records a process group id together with the leader's start time and the
 // current boot time, so a later reap can verify identity before killing.
 func (l *pidLedger) add(pgid int) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	if l.inert() {
+		return
+	}
 
 	boot, entries := l.readLocked()
 	// A boot-time change means every prior entry is from a dead session; drop them
@@ -85,6 +107,9 @@ func (l *pidLedger) add(pgid int) {
 func (l *pidLedger) remove(pgid int) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	if l.inert() {
+		return
+	}
 
 	boot, entries := l.readLocked()
 	kept := entries[:0]
@@ -158,11 +183,11 @@ func (l *pidLedger) writeLocked(bootNs int64, entries []pidEntry) {
 		fmt.Fprintf(&b, "%d %d\n", e.pgid, e.startNs)
 	}
 	// Write through a random O_EXCL temp, not a predictable "<path>.tmp". The
-	// ledger lives in the data root, which in shared mode is group-writable
-	// (/Users/Shared/Gropius); another local account could pre-plant
-	// "running-servers.pids.tmp" as a symlink and redirect this write to clobber
-	// a file the server user owns. os.CreateTemp uses a random name with O_EXCL
-	// and mode 0600, closing that hole — the same fix config.Save already uses.
+	// ledger now lives in this account's own directory, but the pattern stays
+	// what config.Save and the registry use: a predictable temp name is a
+	// symlink to redirect this write wherever the directory is ever writable by
+	// anything but its owner. os.CreateTemp uses a random name with O_EXCL and
+	// mode 0600.
 	dir := filepath.Dir(l.path)
 	tmp, err := os.CreateTemp(dir, "running-servers-*.pids.tmp")
 	if err != nil {
@@ -195,6 +220,9 @@ func (l *pidLedger) writeLocked(bootNs int64, entries []pidEntry) {
 func (l *pidLedger) reapOrphans() (killed int) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	if l.inert() {
+		return 0
+	}
 
 	boot, entries := l.readLocked()
 	defer os.Remove(l.path)

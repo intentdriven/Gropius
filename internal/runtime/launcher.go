@@ -179,7 +179,17 @@ func (l *ExecLauncher) pidLedger() *pidLedger {
 	// to another account — and in a shared root the second account's write over
 	// the first account's ledger is refused by the sticky bit and swallowed,
 	// which ends orphan reaping for it without a word.
-	l.ledgerOnce.Do(func() { l.ledger = newPIDLedger(l.Paths.Account) })
+	// Account, falling back to Root for a Paths built by hand without it — the
+	// same fallback config.Paths applies to the state directory. With neither,
+	// newPIDLedger returns an inert ledger rather than a relative path in
+	// whatever directory the process was started from.
+	l.ledgerOnce.Do(func() {
+		dir := l.Paths.Account
+		if dir == "" {
+			dir = l.Paths.Root
+		}
+		l.ledger = newPIDLedger(dir)
+	})
 	return l.ledger
 }
 

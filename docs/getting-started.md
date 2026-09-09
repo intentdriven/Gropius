@@ -195,7 +195,10 @@ After that, whoever launches Gropius first runs the server; everyone else's
 menu-bar app just points at it. One copy on disk, one on the GPU.
 
 The shared folder holds the model files and the download cache they arrive
-through — that is all. Everything belonging to one account stays in that
+through. A folder set up by an earlier version may also hold a `registry.json`
+and a `logs` folder, which nothing uses any more; they are safe to delete, and
+Gropius does not remove them for you. Everything belonging to one account
+stays in that
 account's own `~/Library/Application Support/Gropius`: its settings
 (`config.json`, which holds the API key and the HuggingFace token), its list of
 models (`registry.json`), its model-server logs, its request statistics, and

@@ -1526,6 +1526,15 @@ func (p Paths) AdoptSharedConfig() (bool, error) {
 	if err := writeSettingsFile(p.Config, b); err != nil {
 		return false, err
 	}
+	// Make the copy durable before unlinking the original. writeSettingsFile
+	// fsyncs the file's contents, but the rename that gives it its name lives in
+	// the directory, and a power loss can make the unlink durable while that
+	// rename is still only in the page cache — leaving neither copy, and with it
+	// the API key and the HuggingFace token gone for good. Fsyncing the
+	// directory orders the two.
+	if err := syncDir(acct); err != nil {
+		return false, fmt.Errorf("flush %s: %w", acct, err)
+	}
 	if err := os.Remove(legacy); err != nil {
 		// The copy is in place, so the settings are not lost; what is left is a
 		// stale secret in a directory shared with every account, which the
@@ -1533,6 +1542,21 @@ func (p Paths) AdoptSharedConfig() (bool, error) {
 		return true, fmt.Errorf("remove %s once copied: %w", legacy, err)
 	}
 	return true, nil
+}
+
+// syncDir flushes a directory's own entries to disk, which is what makes a
+// rename or an unlink inside it durable. Opening a directory read-only and
+// calling Sync is the portable spelling on this platform.
+func syncDir(dir string) error {
+	d, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	if err := d.Sync(); err != nil {
+		d.Close()
+		return err
+	}
+	return d.Close()
 }
 
 // privateToThisAccount reports whether a file read out of a group-writable
