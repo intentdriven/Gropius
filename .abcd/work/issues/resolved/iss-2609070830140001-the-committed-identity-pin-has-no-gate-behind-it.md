@@ -9,6 +9,8 @@ found_during: "2026-09-07 repository move"
 origin: researcher-authored
 production_mode: hand-written
 found_at: ".abcd/config/identity.json"
+resolution: "Ported the tool's fenced identity gate into .githooks/pre-commit, ahead of the name guard, with a test that runs the hook against throwaway repositories."
+impact: internal
 ---
 
 The committed identity pin has no gate behind it. `.abcd/config/identity.json`
@@ -76,3 +78,7 @@ Note that `abcd ahoy identity-check` returns success both when the pin matches
 and when no pin exists. A green run before the pin lands is the check declining
 to have an opinion, so the pin and the gate have to be reasoned about as one
 unit rather than as two independent changes.
+
+## Grounds
+
+- pursued: a commit whose user.name/user.email diverges from .abcd/config/identity.json is refused at commit time, a pin present but unreadable blocks, and a repository with no pin is unaffected; TestIdentityGate* in internal/archtest would show it wrong.

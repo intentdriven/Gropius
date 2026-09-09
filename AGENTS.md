@@ -141,6 +141,11 @@ CI (`.github/workflows/ci.yml`) gates on: `gofmt -l .` (must be empty),
   (`feat`/`fix`/`chore`/`refactor`/`docs`/`test`), body explains why. Never
   force-push, never `--no-verify`. New dependencies need explicit sign-off
   before they are added.
+- **The commit gates live in `.githooks/`** (`git config core.hooksPath
+  .githooks`): `pre-commit` refuses a commit whose `user.name`/`user.email`
+  diverge from the identity pinned in `.abcd/config/identity.json` — a pin that
+  is present but unreadable blocks, a repository with no pin is unaffected —
+  and then runs the private name guard.
 - **Releases and tags are kept on different terms.** Only the current release
   stays published; an older one is deleted once it is superseded, and its TAG
   is kept. The tag is what makes a previous version investigable — it can be
