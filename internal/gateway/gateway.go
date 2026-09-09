@@ -631,10 +631,30 @@ func (g *Gateway) handleCompletions(w http.ResponseWriter, r *http.Request) {
 		// statistics, which does not say which model or why — and diagnosing
 		// "my clients are being refused" from the machine doing the refusing
 		// is the whole reason the message was informative in the first place.
-		// Rate-limited because the client sets the rate; see logEvery.
+		// Rate-limited because the client sets the rate; see logEvery. One
+		// allow for both lines, not one each: allow consumes the interval, so
+		// asking twice would let the sparse line through and hold the detailed
+		// one back on the very refusal the operator turned detailed on for.
+		//
+		// Two lines, because what the operator needs at a glance and what they
+		// need while they are diagnosing are not the same thing. Sparse names
+		// the model, which of the pool's refusals it was, and that the client
+		// was not one this server owes an account of itself. The pool's own
+		// message is a figure — it names the resident memory budget in bytes,
+		// or how many requests are already in flight — and those are the very
+		// facts genericRefusal strips out of the answer, because the budget is
+		// a fraction of physical RAM and so says roughly how much memory this
+		// Mac has. They are the same facts whichever way they travel: a
+		// stranger who can drive a refusal must not be able to drive a detailed
+		// description of this Mac into a file at the rate it can send
+		// requests. An operator asks for them by name, by moving the level
+		// (itd-2609091412177263).
 		if g.refusalLog.allow(model) {
+			class := refusalClass(err)
 			g.log.Info("refused a request, and told the client only that it could not be served",
-				"model", model, "class", refusalClass(err), "client", "unentitled", "err", err)
+				"model", model, "class", class, "client", "unentitled")
+			g.log.Debug("refused a request, and told the client only that it could not be served",
+				"model", model, "class", class, "client", "unentitled", "err", err)
 		}
 		writeError(w, http.StatusServiceUnavailable, genericRefusal)
 		return

@@ -27,12 +27,17 @@ restarting. Sparse is the default.
 
 | Level | What it writes |
 | --- | --- |
-| `sparse` | One line for each thing that mattered: the server starting and stopping, a request refused and which refusal it was, a model loading, a model leaving memory and why, a model server that would not start, and a save in Settings. |
+| `sparse` | One line for each thing that mattered: the server starting and stopping, a request refused — which model, which refusal it was, and whether the client was one this server tells the reason to — a model loading, a model leaving memory and why, a model server that would not start, and a save in Settings. |
 | `detailed` | Every sparse line, and the figures they leave out: how long a load took, how many requests were already in flight, the memory budget in bytes, how long a request waited, the error behind a launch that failed, and the drain behind an eviction. |
 
 Sparse is enough to answer "why was my client refused". Detailed is what to
 turn on when the answer is "because there was no room" and you want to know how
 much room there was.
+
+A client on your network is told what Gropius could not do and never why:
+"cannot serve this model right now". A client on this Mac, or one holding the
+API key, still gets the fuller answer. Either way the reason is in this log —
+sparsely, as which refusal it was, and in full at the detailed level.
 
 The figures are on the detailed level rather than the sparse one for a reason
 beyond noise. The memory budget in bytes is roughly how much memory this Mac
