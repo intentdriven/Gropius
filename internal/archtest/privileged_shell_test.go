@@ -238,7 +238,15 @@ func forEachShellScriptLine(t *testing.T, fn func(path string, lineNo int, line 
 	// walkRepoFiles, which every scan of the tree shares: a git worktree
 	// checked out under a dot-directory holds a whole second copy of the tree,
 	// and scanning it fails this test for somebody else's branch.
-	walkRepoFiles(t, root, walkOptions{}, func(path string, _ fs.DirEntry) error {
+	//
+	// .github and .githooks are named back in, as the braced-expansion scan
+	// next door already does. Both hold shell this repository tracks — the
+	// commit hooks are two scripts with shebangs, and a workflow's `run:` block
+	// is shell running on a machine whose PATH nobody here controls — and the
+	// rules these lines feed (no expansion on a line that runs as root, no bare
+	// osascript) are the ones it would be worst to leave them outside of.
+	shellDotDirs := walkOptions{DotDirs: []string{".github", ".githooks"}}
+	walkRepoFiles(t, root, shellDotDirs, func(path string, _ fs.DirEntry) error {
 		b, err := os.ReadFile(path)
 		if err != nil {
 			return err

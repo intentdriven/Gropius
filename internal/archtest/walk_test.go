@@ -1,6 +1,7 @@
 package archtest_test
 
 import (
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -47,6 +48,9 @@ func walkRepoFiles(t *testing.T, root string, opts walkOptions, fn func(path str
 	for _, name := range opts.AlsoSkip {
 		skip[name] = true
 	}
+	if err := checkDotDirs(opts.DotDirs); err != nil {
+		t.Fatalf("walkOptions: %v", err)
+	}
 	keepDot := make(map[string]bool, len(opts.DotDirs))
 	for _, name := range opts.DotDirs {
 		keepDot[name] = true
@@ -79,15 +83,41 @@ func walkRepoFiles(t *testing.T, root string, opts walkOptions, fn func(path str
 }
 
 // walkOptions narrows a single scan's subject. Neither field can reach the
-// worktree hazard by accident: AlsoSkip only ever removes directories, and
-// DotDirs names tracked directories a scan genuinely needs — .github, whose
-// workflows carry shell in their `run:` blocks, is the only one so far. Naming
+// worktree hazard: AlsoSkip only ever removes directories, and DotDirs names
+// tracked directories a scan genuinely needs — .github, whose workflows carry
+// shell in their `run:` blocks, and .githooks, which holds two scripts. Naming
 // one is a line in a diff somebody reviews, which is what the hazard costs.
 type walkOptions struct {
 	// AlsoSkip are directory names this scan's subject does not include.
 	AlsoSkip []string
 	// DotDirs are dot-directories this scan does need despite the rule.
 	DotDirs []string
+}
+
+// forbiddenDotDirs are the dot-directories no scan may name back in, whatever
+// it is looking for.
+//
+// .claude is where the agent worktrees live, which is the whole hazard: a
+// second copy of the tree, on somebody else's branch, untracked. .git is a
+// second copy of the repository's history in a packed form that no scan here
+// can read as source. The record says this rule is wrong the day a scan names
+// .claude (.abcd/work/DECISIONS.md, 2026-09-09), so the falsifier is armed
+// rather than left as prose: naming either fails the scan that named it, with
+// its own diagnosis, instead of quietly widening what every other scan trusts.
+var forbiddenDotDirs = map[string]string{
+	".claude": "the agent worktrees live here — a second copy of the tree, on another branch, untracked; scanning it is the hazard this walker exists to remove",
+	".git":    "the repository's own history, not its source",
+}
+
+// checkDotDirs is separate from walkRepoFiles so that the refusal can be
+// asserted without a test having to fail to prove it.
+func checkDotDirs(names []string) error {
+	for _, name := range names {
+		if why, forbidden := forbiddenDotDirs[name]; forbidden {
+			return fmt.Errorf("DotDirs names %s, which no scan may walk: %s", name, why)
+		}
+	}
+	return nil
 }
 
 // The walker is the thing every other scan now trusts, so it is tested rather
@@ -137,6 +167,22 @@ func TestWalkRepoFilesSkipsDotDirectories(t *testing.T) {
 	want = []string{".github/workflows/ci.yml", "pkg/tracked.txt", "tracked.txt"}
 	if strings.Join(got, " ") != strings.Join(want, " ") {
 		t.Errorf("narrowed walk saw %v, want %v", got, want)
+	}
+}
+
+// The escape hatch has a floor: a scan may name a tracked dot-directory it
+// needs, and may not name the one that holds another branch's copy of the
+// tree. Without this, DotDirs would be a one-line way to undo the rule for
+// everybody.
+func TestWalkOptionsRefusesTheWorktreeDirectory(t *testing.T) {
+	for _, name := range []string{".claude", ".git"} {
+		if err := checkDotDirs([]string{".github", name}); err == nil {
+			t.Errorf("DotDirs accepted %s; naming it walks a second copy of the tree, or the "+
+				"history rather than the source", name)
+		}
+	}
+	if err := checkDotDirs([]string{".github", ".githooks"}); err != nil {
+		t.Errorf("DotDirs refused the tracked dot-directories the shell scans read: %v", err)
 	}
 }
 

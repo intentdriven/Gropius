@@ -8,6 +8,8 @@ source: "user-observation"
 found_during: "manual-capture"
 origin: researcher-authored
 production_mode: hand-written
+resolution: "Both walkers are rooted at the checkout through the shared walker instead of a working-directory-relative '..', and the two allow-lists are collapsed into one repoIDFoldAllowList, so the drifted three-of-five copy is gone."
+impact: internal
 ---
 
 internal/archtest/repo_id_fold_test.go's second walker starts from '..' rather than the repository root, so it walks OUT of the repository entirely. On a machine where the parent directory holds other checkouts, that test's subject includes unrelated projects, and what it asserts depends on what happens to sit beside the repository on that developer's disk. This is filed separately from the dot-directory skip inconsistency (iss-2609081427104462) on purpose: a shared walker fixes the four call sites that disagree about what to skip and does NOT fix this one, because the question here is not which directories to exclude but what this test is meant to look at, which cannot be answered from the code. Filing it apart so it cannot be closed by that refactor and quietly considered handled. Surfaced by a peer session reviewing the walker inconsistency.
@@ -52,3 +54,7 @@ copy has drifted — it carries three of the five entries, so the two added late
 (`gropiusHeaders[strings.ToLower(k)]` and `strings.EqualFold(k, field)`) are
 exempted by the first check and watched by nothing. A staleness check that has
 itself gone stale is worth a line in whichever direction the scope goes.
+
+## Grounds
+
+- pursued: the fold checks now have a subject that does not depend on the test binary working directory, the backstop half covers cmd/, and one list is watched by the staleness check rather than a copy of it; the conjecture is that widening changed no result because cmd/ folds nothing today, shown wrong the moment a legitimate fold appears outside internal/ and the single allow-list has to grow to carry it.
