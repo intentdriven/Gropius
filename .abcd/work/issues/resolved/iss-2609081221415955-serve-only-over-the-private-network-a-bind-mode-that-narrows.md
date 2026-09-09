@@ -9,6 +9,8 @@ found_during: "manual-capture"
 origin: researcher-authored
 production_mode: hand-written
 promoted_to: itd-2609081718469419
+resolution: "Shipped as the third bind choice in Settings: it binds the one address this Mac holds on a private network and this Mac, refuses to choose where more than one matches, and falls back to this Mac alone rather than widening (spc-2609081750378874, adr-2609091123526871)."
+impact: additive
 ---
 
 Serve only over the private network: a bind mode that narrows exposure to the mesh-VPN address so the local network cannot reach the gateway at all. Admissible under adr-2609081118587999 rule 3 precisely because it is a bind rather than an inference, and it must fail closed when the interface is absent at launch. Inherits iss-7 as a prerequisite: a specific-address bind currently leaves the control panel unreachable and needs a hand-edited configuration file. Deferred from the itd-2609081015545349 decomposition and captured so it is not left living only as a sentence in an ADR consequence.
@@ -16,6 +18,7 @@ Serve only over the private network: a bind mode that narrows exposure to the me
 ## Grounds
 
 - pursued: narrowing who reaches the server is the only honest way to reduce exposure, and today it is a trap — a specific-address bind leaves the operator locked out of their own control panel, so the setting that most deserves to be used is the one nobody can use. We expect the reason operators leave the bind wide is that narrowing costs them their own access, not that they do not want it. Shown wrong if the bind stays wide after that cost is removed, which would mean the obstacle was never access but something else: not knowing the setting exists, or not believing the exposure matters.
+- pursued: narrowing exposure is worth choosing now that it costs nothing — the bookkeeping is gone (Gropius selects and shows the address) and so is the old cost of narrowing, since loopback is always in the bind. Shown wrong if operators with the mode available leave the bind wide anyway, which would mean the obstacle was never the bookkeeping; or if the ambiguity refusal fires often enough in the field that the mode refuses more than it serves.
 
 ## Interview outcome (2026-09-08)
 

@@ -60,6 +60,36 @@ GitHub release notes.
 
 ### Added
 
+- **Gropius answers on this Mac whatever else it answers on.** Every bind
+  acquires loopback as well as the address it names, so choosing who on the
+  network may reach the server no longer costs you the ability to reach it
+  yourself. Binding one specific address used to leave the control panel
+  unreachable from anywhere — it is served on loopback only, and the bind took
+  loopback away — so the setting that most deserves to be used was the one that
+  locked you out of your own app, and the recorded recovery was to edit
+  `config.json` by hand. The list of endpoints in the panel changes with it: it
+  is derived from the addresses the server actually acquired, so every address
+  it offers is one the server answers on, and an address that goes away while
+  the server runs stops being offered.
+
+- **A third bind choice: serve on a private network and this Mac, and nothing
+  else.** With it chosen, a machine on your mesh VPN reaches the server and a
+  machine on the local network does not. Gropius reads this Mac's own
+  interfaces to find the address — it never asks the VPN, and it names no
+  product — and it shows you which address it chose. Where two addresses look
+  alike to it, it refuses to choose between them, names both, and serves this
+  Mac; where none matches, it serves this Mac and says why. It never widens.
+  Bonjour is quiet under this choice, because the advert travels over the
+  network the choice excludes. The setting lives in its own `bind_mode` field,
+  so switching it off puts back the bind you had
+  ([how to](docs/mesh-vpn.md), [what each choice binds](docs/bind-address.md)).
+
+- **A reference page for the bind address.**
+  [docs/bind-address.md](docs/bind-address.md) is the table of what each choice
+  binds and who can reach it, what `config.json` carries, what happens when a
+  choice cannot be honoured, and why an API key is required for every choice
+  but this Mac alone.
+
 - **A how-to for serving over a mesh VPN.**
   [docs/mesh-vpn.md](docs/mesh-vpn.md) takes the walk-through's "talk to it from
   another machine" steps and runs them over a mesh network instead of the local

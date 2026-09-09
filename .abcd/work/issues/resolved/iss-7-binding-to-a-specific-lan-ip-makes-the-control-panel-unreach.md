@@ -7,6 +7,8 @@ category: "bug"
 source: "agent-finding"
 found_during: "2026-07 bug-hunt round 2"
 found_at: "cmd/gropius/main.go"
+resolution: "Every bind acquires loopback as well as the address it names, so a specific-address bind no longer strands the loopback-only control panel; the listen address is built with net.JoinHostPort, so an IPv6 literal binds in either spelling (adr-2609091123526871)."
+impact: fix
 ---
 
 A config.json hand-edited to a specific interface address (e.g. Host "192.0.2.5") passes Validate, but after restart the control plane is unreachable from anywhere: the single listener binds only that address (cmd/gropius/main.go), so localhost is connection-refused, while browsing the bound LAN address from the same machine arrives with a non-loopback RemoteAddr and Host header and is 403'd by loopbackOnly (internal/gateway/control.go). The menu bar's "Open Control Panel" always opens localhost. The /v1 API keeps working, which makes the failure look like a UI bug. ExposedToLAN's own comment (internal/config/config.go) treats specific-interface binds as a supported configuration.
@@ -45,3 +47,7 @@ rule 3 governs it: a bind is the narrowing Gropius owns end to end. It needs its
 own record before it is built. The cost is structural — Gropius acquires a
 single listener today (`cmd/gropius/singleton.go`), and this needs two, with the
 port-ownership challenge and the singleton behaviour re-reasoned for a pair.
+
+## Grounds
+
+- pursued: a narrowed bind now keeps the operator's own access — the control panel, the menu-bar app and a client in a second account on this Mac all reach the server over loopback under every mode, and the endpoint list offers only addresses the server answers on. Shown wrong if an operator narrows the bind and still cannot reach the panel, or if a mode appears that cannot take loopback.
