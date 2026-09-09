@@ -188,6 +188,24 @@ GitHub release notes.
 
 ### Added
 
+- **One page that says what is on.** The control panel has a **Posture** tab:
+  one page that states, in the present tense and as fact rather than warning,
+  who can reach this server and by which addresses; whether a request arriving
+  from another machine has to carry the API key and, on its own line because it
+  has a different answer, that a request from this Mac — another account on it
+  included — is served without one; whether Gropius is announcing the server
+  over Bonjour and what that announcement carries; what the request log writes
+  down about a call and what it leaves out; and whether request statistics are
+  being recorded, what a record holds, and for how long and within how much
+  room they are kept. Where an address is on a private network the page says
+  which, and says what the mark cannot see: that sharing the network or
+  publishing the port to the internet changes who reaches the address without
+  changing the address or the mark, and that every address is plain HTTP.
+  Every line is read from the state snapshot the rest of the panel already
+  draws from, so the page adds no observation and changes nothing; the warning
+  for a server that is reachable from the network with no key stays where it
+  is. ([what each line is read from](docs/posture-reference.md))
+
 - **Every model says what kind of model it is, and a client can pick by it.**
   `GET /v1/models` now carries HuggingFace's own `pipeline_tag` and `tags` for
   each model — recorded from the Hub when the model was downloaded, republished

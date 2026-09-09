@@ -50,6 +50,11 @@ type App struct {
 	// value read from the configuration instead would drift from what the
 	// sockets actually are the moment a bind narrowed.
 	bindPlan bind.Plan
+	// startup is the configuration the process started under. Config() is
+	// live and moves with every save; the listeners, the port and the Bonjour
+	// advert do not, and what the panel says about them has to answer from
+	// what was in force when they were made (adr-2609081118587999 rule 4).
+	startup config.Config
 
 	// machineRAM is how much memory this Mac has, or 0 when that cannot be
 	// read. Read once, at construction: a machine does not grow while the
@@ -214,6 +219,7 @@ func New(opts Options) (*App, error) {
 		logLevel:    opts.LogLevel,
 		cfg:         opts.Config,
 		bindPlan:    opts.Bind,
+		startup:     opts.Config,
 		downloads:   map[string]*download{},
 		deleting:    map[string]bool{},
 		measureDir:  dirSize,
@@ -344,6 +350,38 @@ func (a *App) preload(ids []string) {
 // re-binds while the process runs (adr-2609091123526871 rule 9), so there is
 // no second writer for a reader to race.
 func (a *App) Bind() bind.Plan { return a.bindPlan }
+
+// BindPort is the port the listeners were acquired on. A saved port moves
+// Config() at once and the sockets at the next start.
+func (a *App) BindPort() int { return a.startup.Port }
+
+// Advertising reports the decision cmd/gropius made at start about the Bonjour
+// advert. The advert is started once and stopped at shutdown, so a live change
+// to the setting reaches nothing until the next start, and this stays what it
+// was. It does not know whether the start succeeded: a failure to advertise is
+// logged and is not fatal.
+func (a *App) Advertising() bool { return Advertises(a.startup, a.bindPlan) }
+
+// Advertises is the one spelling of whether Gropius advertises itself: the
+// setting is on, the mode is not the private-network one, and the bind reaches
+// another machine. The advert is mDNS on the local link, so under the
+// private-network mode and on any bind that narrowed to this Mac every advert
+// would name an address its recipients cannot reach — while disclosing this
+// Mac's hostname, the port, the model count and whether a key is required to
+// exactly the network the bind excludes (adr-2609091123526871 rule 8).
+//
+// It reads the configured mode and the plan, never the classifier. Both are
+// state Gropius owns end to end, which is what keeps this out of
+// adr-2609081118587999 rule 2.
+func Advertises(cfg config.Config, plan bind.Plan) bool {
+	if !cfg.Advertise {
+		return false
+	}
+	if cfg.BindMode == config.BindModePrivateNetwork {
+		return false
+	}
+	return plan.ReachesOtherMachines()
+}
 
 // Config returns the current settings.
 func (a *App) Config() config.Config {

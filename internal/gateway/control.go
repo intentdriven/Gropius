@@ -386,6 +386,8 @@ func (c *Control) snapshot() State {
 		Bind:      bindState(cfg, c.App.Bind()),
 		Hostname:  hostname(),
 	}
+	st.Bind.Port = c.App.BindPort()
+	st.Bind.Advertising = c.App.Advertising()
 	budget := c.App.Pool.MemoryBudget()
 	// One reading, not two: a stop landing between a models list and a tally
 	// read would count the same server in both, or in neither.
@@ -759,6 +761,32 @@ type BindState struct {
 	// Refusal is why the bind narrowed to this Mac, in the words the resolver
 	// used. Empty when nothing was refused.
 	Refusal string `json:"refusal,omitempty"`
+	// InForce is the mode the RUNNING bind resolved under, as distinct from
+	// Mode, which is the mode chosen: a mode saved and not yet in force is
+	// chosen and not running, and the two differ until the next start.
+	InForce string `json:"mode_in_force"`
+	// Bound is the address the running bind acquired beside loopback, in the
+	// spelling a URL uses, and empty when it acquired none or acquired the
+	// wildcard; Wildcard says it was the wildcard, so the server answers on
+	// every address this Mac holds rather than on one a list can name.
+	Bound    string `json:"bound,omitempty"`
+	Wildcard bool   `json:"wildcard"`
+	// ReachesOtherMachines is the plan's own answer to whether the running
+	// bind acquired an address another machine can connect to. The posture
+	// page reads it for who can reach the server and for whether the advert
+	// runs, and it is asked of the plan rather than of the stored
+	// configuration or of the endpoint list: a mode saved and not yet in force
+	// has changed nothing, and the list omits addresses it cannot name (an
+	// IPv6-only Mac) while the sockets answer on them — the same rule the
+	// exposure warning is held to (adr-2609081118587999 rule 4).
+	ReachesOtherMachines bool `json:"reaches_other_machines"`
+	// Port is the port the listeners were acquired on, and Advertising is
+	// the decision the process made at start about the Bonjour advert. Both
+	// are read from the app's startup configuration rather than from
+	// Config: a saved port moves the stored value at once and the sockets at
+	// the next start, and a saved advertise setting stops nothing until then.
+	Port        int  `json:"port"`
+	Advertising bool `json:"advertising"`
 }
 
 // bindState reads the classifier for the panel's sake, which rule 1 of
@@ -767,7 +795,18 @@ type BindState struct {
 // wrong network or has nothing to select. It decides nothing: no key
 // requirement, no admission, no warning's firing condition reads any of it.
 func bindState(cfg config.Config, plan bind.Plan) BindState {
-	st := BindState{Mode: cfg.BindMode, Refusal: plan.Refusal, Candidates: private.Candidates()}
+	st := BindState{
+		Mode:                 cfg.BindMode,
+		Refusal:              plan.Refusal,
+		Candidates:           private.Candidates(),
+		InForce:              plan.Mode,
+		ReachesOtherMachines: plan.ReachesOtherMachines(),
+	}
+	// boundAddr reads an empty host as the wildcard; a plan that acquired
+	// nothing beside loopback is neither bound nor wild.
+	if !plan.LoopbackOnly() {
+		st.Bound, st.Wildcard = boundAddr(plan.Extra)
+	}
 	// From the plan's mode and not the configuration's. The pane shows the
 	// mode that is CHOSEN, which is the configuration's; a selection is what
 	// the mode that is RUNNING made, and a bind mode saved and not yet in force

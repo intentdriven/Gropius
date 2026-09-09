@@ -6,6 +6,7 @@ import (
 	"net"
 	"time"
 
+	"github.com/intentdriven/Gropius/internal/app"
 	"github.com/intentdriven/Gropius/internal/bind"
 	"github.com/intentdriven/Gropius/internal/config"
 )
@@ -176,27 +177,12 @@ func closeExtra(lns []net.Listener) []net.Listener {
 	return lns[:1]
 }
 
-// advertises reports whether this server announces itself over Bonjour.
-//
-// Three conditions, and the last two are about what the bind turned out to be
-// rather than what it asked for (adr-2609091123526871 rule 8). The advert is
-// mDNS on the local link: under the private-network mode, and on any bind that
-// narrowed to this Mac, every advert would name an address its recipients
-// cannot reach — while disclosing this Mac's hostname, the port, the model
-// count and whether a key is required to exactly the network the bind
-// excludes.
-//
-// It reads the configured mode and the plan, never the classifier. Both are
-// state Gropius owns end to end, which is what keeps this out of
-// adr-2609081118587999 rule 2.
+// advertises reports whether this process advertises itself over Bonjour. The
+// rule lives in internal/app as Advertises, where the control plane reads the
+// same decision for the posture page; this is that rule, applied to the
+// configuration and the plan the process is starting under.
 func advertises(cfg config.Config, plan bind.Plan) bool {
-	if !cfg.Advertise {
-		return false
-	}
-	if cfg.BindMode == config.BindModePrivateNetwork {
-		return false
-	}
-	return plan.ReachesOtherMachines()
+	return app.Advertises(cfg, plan)
 }
 
 // serveAll starts the server on every listener and returns a function that

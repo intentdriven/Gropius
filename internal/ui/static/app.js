@@ -124,6 +124,7 @@ function render() {
   renderSetup();
   renderModels();
   renderConnect();
+  renderPosture();
   renderSettings();
   // Independent of renderSettings, which returns early while the form is
   // being edited: the list of models to choose from is live state, not a
@@ -460,6 +461,224 @@ resp = client.chat.completions.create(
     messages=[{"role": "user", "content": "Hello!"}],
 )
 print(resp.choices[0].message.content)`;
+}
+
+// ── posture ──────────────────────────────────────────────
+// One page that says what is on (itd-2609081718534201). Every line below is
+// derived from the state snapshot and from no other source: no fetch, no
+// second reading, no new way to be wrong. Each line names the snapshot fields
+// it read in `reads`, which internal/ui's tests hold to the Go type the
+// control plane publishes; a line with no fields is a fact about the binary
+// rather than an observation of this server, and there are two of those.
+//
+// What the RUNNING bind is — whether it reaches another machine, which mode
+// is in force, whether it is the wildcard — is read from state.bind, which
+// the control plane fills from the plan the sockets were acquired under. It
+// is never inferred from the stored configuration, which a save changes
+// before a restart applies it, nor from the endpoint list, which omits
+// addresses it cannot name while the sockets answer on them.
+//
+// The lines say what is, in the present tense, and say where Gropius's view
+// stops. They state which network an address is on and nothing about what
+// that network is worth (adr-2609081118587999 rule 1), and nothing here is an
+// input to any decision the server makes: the page reports and gates nothing.
+
+// advertising reads the decision the process made at start about the
+// Bonjour advert, which the bind state carries: the advert is started once
+// and stopped at shutdown, so the stored setting — which a save changes at
+// once — is not what is running. It returns which of the three reasons in
+// that rule (the setting, the mode, the reach) keeps the advert off, or ''
+// when it is on.
+function advertising(state) {
+  const bind = state.bind || {};
+  if (bind.advertising) return '';
+  if (bind.mode_in_force === 'private-network') return 'mode';
+  if (!bind.reaches_other_machines) return 'bind';
+  return 'setting';
+}
+
+// postureLines is the page: an array of {id, heading, text, reads}.
+function postureLines(state) {
+  const c = state.config || {};
+  const bind = state.bind || {};
+  const eps = (state.endpoints || []).map(endpointOf).filter((ep) => ep.url);
+  const urls = eps.map((ep) => ep.url);
+  const lines = [];
+  const list = (items) => items.length < 2 ? items.join('')
+    : `${items.slice(0, -1).join(', ')} and ${items[items.length - 1]}`;
+  const reaches = !!bind.reaches_other_machines;
+
+  // Who can reach it: what the running bind acquired, and the addresses the
+  // list can name. The bind is observable; reachability is not, and the
+  // line says so. Under the wildcard the list is not exhaustive — it names
+  // what it can — and its first entry is a name and not an address.
+  let reach;
+  if (!reaches) {
+    reach = `This server answers on this Mac and on no other address: ${list(urls)}. ` +
+      'A request from another machine reaches nothing.';
+  } else if (bind.wildcard) {
+    reach = `This server answers on every address this Mac holds. The ones Gropius can name are ${list(urls)}; ` +
+      "a name ending in .local is this Mac's name on the local network and not an address. ";
+  } else if (bind.bound) {
+    reach = `This server answers on ${bind.bound} and on this Mac; the addresses clients can use are ${list(urls)}. `;
+  } else {
+    // A bound address the panel cannot write as a URL — one carrying an
+    // interface zone — is answered on all the same, and the list below
+    // leaves it out; the page says so rather than leaving a gap.
+    reach = 'This server answers on this Mac and on one more address, which Gropius cannot write as a URL; ' +
+      `the addresses it can name are ${list(urls)}. `;
+  }
+  if (reaches) {
+    reach += 'Which machines can reach an address is decided by the network it is on, and Gropius does not see that.';
+  }
+  if (bind.refusal) reach += ` The bind narrowed to this Mac: ${bind.refusal}.`;
+  lines.push({ id: 'reach', heading: 'Who can reach it', text: reach,
+    reads: ['endpoints.url', 'bind.reaches_other_machines', 'bind.wildcard', 'bind.bound', 'bind.refusal'] });
+
+  // The private network, when there is one: the mark says which network, and
+  // this line says what that mark cannot see. Sharing and public tunnelling
+  // both change who reaches the address and neither touches the interface.
+  const marked = eps.filter((ep) => ep.network);
+  const chosen = bind.mode === 'private-network';
+  const running = bind.mode_in_force === 'private-network';
+  if (marked.length || chosen || running) {
+    let text = marked.length
+      ? `${list(marked.map((ep) => ep.url))} ${marked.length === 1 ? 'is' : 'are'} on a private network. `
+      : 'No address on a private network is being answered on. ';
+    text += 'Gropius reads that from the interface an address sits on and the range it falls in, and reads ' +
+      'nothing from the network itself. Whether that network has since been shared with machines you do not ' +
+      'own, or whether a feature of the network publishes this port to the internet, Gropius cannot see, ' +
+      'and neither changes the address or the mark.';
+    if (running) {
+      text += bind.selected
+        ? ` The private-network choice selected ${bind.selected}.`
+        : ' The private-network choice is in force and selected no address, so the server answers on this Mac.';
+    } else if (chosen) {
+      text += ' The private-network choice is saved and is not in force until Gropius next starts.';
+    }
+    lines.push({ id: 'private', heading: 'The private network', text,
+      reads: ['endpoints.url', 'endpoints.network', 'bind.mode', 'bind.mode_in_force', 'bind.selected'] });
+  }
+
+  lines.push({ id: 'transport', heading: 'What carries a request', reads: [],
+    text: 'Every address is plain HTTP. Gropius does no TLS: whatever protection a request has on its way ' +
+      'here comes from the network it travelled, and Gropius does not see that either.' });
+
+  lines.push({ id: 'panel', heading: 'This control panel', reads: [],
+    text: 'This panel, and the API it is drawn from, answer on this Mac alone whichever bind is chosen. ' +
+      'Every account on this Mac can open it.' });
+
+  // Two key lines, never one: withAuth admits a loopback connection with a
+  // loopback Host without the key, so this Mac — another account on it
+  // included — is served without it while every other machine is refused.
+  const keySet = !!c.api_key;
+  let fromNetwork;
+  if (keySet) {
+    fromNetwork = reaches
+      ? 'A request arriving from another machine has to carry the API key. A key is set.'
+      : 'A key is set. The bind reaches no other machine, so nothing arrives from one to carry it.';
+  } else {
+    fromNetwork = reaches
+      ? 'No API key is set. A request arriving from another machine is served without one.'
+      : 'No API key is set, and the bind reaches no other machine.';
+  }
+  lines.push({ id: 'key-network', heading: 'A request from another machine', text: fromNetwork,
+    reads: ['config.api_key', 'bind.reaches_other_machines'] });
+  lines.push({ id: 'key-local', heading: 'A request from this Mac', reads: ['config.api_key'],
+    text: keySet
+      ? 'A request from this Mac to a loopback address is served without the key, and that includes a ' +
+        'request from another account on this Mac. The key applies to the network and not to this Mac.'
+      : 'A request from this Mac is served without a key, as every request is.' });
+
+  // The announcement: the one thing Gropius sends to every machine on the
+  // local network, and what it carries. The service is named after this Mac
+  // and published under a name of Gropius's own, never the Mac's own .local
+  // name (internal/discovery); with no name to read, the advert says gropius.
+  const off = advertising(state);
+  const name = state.hostname || 'gropius';
+  let announce;
+  if (!off) {
+    announce = 'Gropius is announcing this server to every machine on the local network, as a Bonjour ' +
+      `service named after this Mac's name, ${name}, shortened where it is too long for a service name. ` +
+      `The announcement carries this Mac's addresses, port ${bind.port}, how many models are ready, whether ` +
+      'a key is required, and the fixed words saying it speaks the OpenAI API under /v1. It carries no ' +
+      'model names and no key.';
+  } else {
+    const why = {
+      setting: 'announcing was switched off when Gropius started',
+      mode: 'the announcement travels over the local network, which the private-network choice excludes',
+      bind: 'the bind reaches no other machine',
+    }[off];
+    announce = `Gropius is not announcing this server: ${why}.`;
+  }
+  announce += ' This line reads the decision made when Gropius started, from the setting and the bind then in ' +
+    'force; a setting changed since then takes effect at the next start, and an announcement that failed to ' +
+    'start is reported in the log and not here.';
+  lines.push({ id: 'announce', heading: 'The local network', text: announce,
+    reads: ['bind.advertising', 'bind.port', 'bind.mode_in_force', 'bind.reaches_other_machines', 'hostname'] });
+
+  // The level is applied live — a save moves it on the next line — so the
+  // stored setting is the level in force, unlike the bind and the advert.
+  const level = c.log_level || 'sparse';
+  lines.push({ id: 'log', heading: 'The request log', reads: ['config.log_level'],
+    text: "Each request to the API's endpoints is written to the server log as its method, path, status and " +
+      'duration. The line carries no client address, no prompt, no answer and no key. The log is at the ' +
+      `${level} level` + (level === 'detailed'
+        ? ', which adds to each line the figures the sparse level leaves out'
+        : ', one line for each thing that mattered') +
+      ", and is kept in the logs folder of this account's Gropius data folder, in a file created for this " +
+      'account alone.' });
+
+  // What is recorded, where, and for how long. The store's figures ride the
+  // snapshot while recording is on, so their absence is the observation — and
+  // a store that could not be opened says so before any figure, because a
+  // refused store reported as an empty one would have the operator believing
+  // records were accumulating.
+  let stats;
+  if (c.statistics) {
+    const store = state.stats_store || {};
+    let kept;
+    if (store.refused) {
+      kept = 'Gropius could not open the store where records are kept, so nothing is on disk and the ' +
+        'figures in the Statistics tab are held in memory; its own log says why';
+    } else if (store.oldest) {
+      kept = `records from ${new Date(store.oldest * 1000).toISOString().slice(0, 10)} onwards, ` +
+        `${bytes(store.bytes)} in ${store.files} file${store.files === 1 ? '' : 's'}`;
+    } else {
+      kept = 'none kept yet';
+    }
+    if (!store.refused && store.stalled) {
+      kept += ', and the disk did not answer in time, so the newest records may be missing from that';
+    }
+    stats = 'Request statistics are being recorded on this Mac: for each request, the model, when it ' +
+      'arrived, how it ended, whether it streamed, the tokens in and out, and how long it took; and beside ' +
+      'those, when a model was loaded or evicted, and the settings in force. A record holds no prompt, no ' +
+      `answer, no key and no client address. Records are kept for ${c.stats_months} months and within ` +
+      `${bytes(c.stats_max_bytes)}, in this account's Gropius data folder; ${kept}. Anyone who can open ` +
+      'this panel can read them, which is every account on this Mac.';
+  } else {
+    stats = 'Request statistics are off: no request is recorded.';
+  }
+  lines.push({ id: 'stats', heading: 'Request statistics', text: stats,
+    reads: ['config.statistics', 'config.stats_months', 'config.stats_max_bytes',
+      'stats_store.refused', 'stats_store.oldest', 'stats_store.bytes', 'stats_store.files', 'stats_store.stalled'] });
+
+  return lines;
+}
+
+// postureShown is the markup last drawn. The snapshot arrives every couple of
+// seconds, and prose someone is reading or selecting must not be torn down
+// and rebuilt under them when nothing in it changed.
+let postureShown = '';
+
+// renderPosture draws the lines into the view's own container and nowhere
+// else: the page is somewhere the operator goes, and it interrupts nothing.
+function renderPosture() {
+  const html = postureLines(state).map((l) =>
+    `<div class="fact"><h3>${escapeHtml(l.heading)}</h3><p>${escapeHtml(l.text)}</p></div>`).join('');
+  if (html === postureShown) return;
+  postureShown = html;
+  $('posture').innerHTML = html;
 }
 
 // ── settings ─────────────────────────────────────────────

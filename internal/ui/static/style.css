@@ -203,6 +203,12 @@ form label.switch input { width: auto; flex: none; }
 .endpoint button { padding: 4px 10px; font-size: 12px; }
 
 .empty { padding: 48px 0; text-align: center; color: var(--muted); }
+
+/* Posture: one fact per block, stated and not styled as a warning — no
+   colour, no icon, the same weight for every line. */
+.fact { padding: 12px 14px; margin-bottom: 8px; border: 1px solid var(--line); }
+.fact h3 { margin: 0 0 6px; }
+.fact p { margin: 0; font-size: 14px; line-height: 1.5; }
 h2 { font-size: 19px; margin-top: 0; }
 h3 { font-size: 14px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin: 26px 0 8px; }
 

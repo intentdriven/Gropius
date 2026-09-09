@@ -198,7 +198,8 @@ all, and so is also what the falsification is read against.
 
 ## Audit Notes
 
-_Empty. Populated by intent-auditor when intent moves to shipped/._
+<!-- abcd-review: OWED receipt=rcp-7c7801af51c9 -->
+Fidelity review OWED (receipt rcp-7c7801af51c9).
 
 ## Grounds
 

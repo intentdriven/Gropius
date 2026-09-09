@@ -118,4 +118,7 @@ so there is no moment at which a network address answers without it.
 
 - [Serve models over a mesh VPN](mesh-vpn.md) — the walk-through for the
   private-network choice.
+- [The posture page](posture-reference.md) — the control panel's one-page
+  statement of what the running bind reaches, what a key is required for,
+  what is announced and what is recorded.
 - [Getting started](getting-started.md) — first run, first model, first request.
