@@ -11,6 +11,19 @@ GitHub release notes.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The committed identity pin now has a gate behind it.** `.abcd/config/identity.json`
+  records the author identity every commit here is expected to carry, and until
+  now nothing enforced it: the pre-commit hook never mentioned identity, so the
+  pin was a record rather than a rule. The hook now checks it first — before the
+  private name guard, which is allowed to be inactive and must not be able to
+  skip the identity check — and refuses a commit whose `user.name` or
+  `user.email` diverges, naming the pin and the command that fixes it. The check
+  is self-contained shell, so it holds without any tool on `PATH`; it fails
+  closed on a pin it cannot read; and a repository with no pin is unaffected.
+  Contributors whose git identity already matches see no change.
+
 ## [0.4.0] - 2026-09-08
 
 ### Added
