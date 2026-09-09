@@ -9,6 +9,8 @@ found_during: "manual-capture"
 origin: researcher-authored
 production_mode: hand-written
 found_at: "internal/config/config.go"
+resolution: "EnsureDirs now applies the os.Root plant defence to the entries that are under the data root and creates this account's own directories plainly, so the shared-cache layout — which straddles the shared root and the account's own folder — is created rather than refused."
+impact: fix
 ---
 
 EnsureDirs refuses to start under a real shared cache: its setgid branch requires every layout entry to be inside the data root, but ExecRoot moved bin/venv/python into this account's home directory, so the first entry it checks reports "is outside the data root" and app.New fails before anything serves.
@@ -40,3 +42,7 @@ p.EnsureDirs() // -> "<exec>/bin is outside the data root <root>"
 
 `app.New` calls `EnsureDirs` first and returns that error, so a Mac with a
 shared cache installed cannot start Gropius at all.
+
+## Grounds
+
+- pursued: we expect EnsureDirs to create the layout NewPaths produces under the real shared root, with the shared data directories still widened to the installer's mode and a planted non-directory under the root still refused; we are wrong if a directory marked shared can be created outside the root, or if a per-user install's layout changed

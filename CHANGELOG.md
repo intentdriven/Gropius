@@ -11,6 +11,18 @@ GitHub release notes.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Gropius starts again on a Mac with a shared model cache.** Two safeguards
+  had come to refuse each other: the startup check that stops another account
+  planting a link under one of Gropius' folders insisted every folder sit
+  inside the shared one, and the decision that no account runs another
+  account's programs had since moved the private Python runtime into each
+  account's own folder. The check now covers the folders that are actually
+  shared — the models, the download cache and the logs, which are still held to
+  the permissions the installer sets — and lets each account's own folders be
+  its own. A single-account install never saw this.
+
 ### Changed
 
 - **Under a shared model cache, every account now keeps its own settings and

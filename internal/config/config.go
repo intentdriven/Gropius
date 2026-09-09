@@ -320,8 +320,17 @@ func (p Paths) ModelDir(repoID string) string {
 
 // EnsureDirs creates every directory in the layout.
 //
-// Every entry is created and inspected relative to an os.Root opened at the
-// data root. Under a setgid (shared) root each must be a real directory: that
+// Every entry that is UNDER the data root is created and inspected relative to
+// an os.Root opened there. Under a shared cache the layout straddles two
+// directories — accountDir holds this account's executables and state files
+// outside the root — and those entries are created plainly: they sit in a
+// directory no other account can write to, so the co-tenant this walk defends
+// against cannot reach them. A shared data directory (one marked widen below)
+// that resolves outside the root is still refused, since widening one to
+// group-writable elsewhere is the very thing being prevented.
+//
+// Under a setgid (shared) root each entry under the root must be a real
+// directory: that
 // root is group-writable, so another local account can plant a symlink under
 // a layout name before it exists (and the account that launched first owns
 // the real ones and can swap them later). A path-based MkdirAll and Chmod
@@ -393,7 +402,26 @@ func (p Paths) EnsureDirs() error {
 	for _, d := range layout {
 		rel, err := filepath.Rel(p.Root, d.abs)
 		if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
-			return fmt.Errorf("%s is outside the data root %s", d.abs, p.Root)
+			// Outside the data root. Under a shared cache the layout straddles
+			// two directories by design: ExecRoot puts this account's
+			// executables in its own Application Support directory, so no
+			// account ever executes another's binaries. Those entries are
+			// created plainly, like the per-user branch above and for the same
+			// reason — the adversary the os.Root walk defends against is a
+			// co-tenant of the group-writable root, and a path outside that root
+			// is one they cannot reach.
+			//
+			// A SHARED data directory outside the root is a different matter and
+			// is still refused: models, the HuggingFace cache and the logs are
+			// what the root exists to hold, and widening one to group-writable
+			// somewhere else is what the refusal was written to stop.
+			if d.widen {
+				return fmt.Errorf("%s is shared with every account but is outside the data root %s", d.abs, p.Root)
+			}
+			if err := os.MkdirAll(d.abs, 0o755); err != nil {
+				return fmt.Errorf("create %s: %w", d.abs, err)
+			}
+			continue
 		}
 		if err := root.Mkdir(rel, 0o755); err != nil && !errors.Is(err, fs.ErrExist) {
 			return fmt.Errorf("create %s: %w", d.abs, err)
