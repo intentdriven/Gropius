@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/intentdriven/Gropius/internal/capability"
@@ -16,11 +17,12 @@ import (
 // whose configuration implies a cache cost per token, served at the window it
 // declares, one sequence at a time.
 func TestTwoLongContextModelsNoLongerCoReside(t *testing.T) {
-	const size, kv, window = 100, 1, 100
-	// The flat charge is 120 each, so a 1,000-byte budget held both with room
-	// to spare. The measured charge is 120 + 7x1x100 = 820 each.
+	const size, kv, window = 100, 1, 500
+	// The flat charge is 120 each, so a 1,000-byte budget holds both with room
+	// to spare. Charged at the window each serves, they cost 120 + 500 = 620
+	// each, and it does not.
 	charge := capability.LoadCostOf(capability.Load{
-		DiskBytes: size, KVBytesPerToken: kv, Window: window, Sequences: 1,
+		DiskBytes: size, KVChargePerToken: kv, Window: window, Sequences: 1,
 	})
 	if 2*capability.LoadCost(size) > 1000 || 2*charge <= 1000 {
 		t.Fatalf("the fixture no longer separates the two charges: flat %d, measured %d, budget 1000",
@@ -31,8 +33,8 @@ func TestTwoLongContextModelsNoLongerCoReside(t *testing.T) {
 	src := &fakeSource{
 		models: map[string]int64{"org/a": size, "org/b": size},
 		facts: map[string]ResolvedModel{
-			"org/a": {Bytes: size, ContextLength: window, KVBytesPerToken: kv},
-			"org/b": {Bytes: size, ContextLength: window, KVBytesPerToken: kv},
+			"org/a": {Bytes: size, ServedContext: window, KVChargePerToken: kv},
+			"org/b": {Bytes: size, ServedContext: window, KVChargePerToken: kv},
 		},
 	}
 	p := newTestPool(t, l, src, PoolOptions{MaxResidentBytes: 1000, DecodeConcurrency: 1})
@@ -76,11 +78,12 @@ func TestTwoModelsWithNoCacheFigureStillCoReside(t *testing.T) {
 // sequence and cannot when each may decode four.
 func TestTheChargeCountsTheSequencesTheServerAdmits(t *testing.T) {
 	const size, kv, window = 100, 1, 100
-	// One sequence costs 120 + 700 = 820, so two fit a 3,000-byte budget.
-	// Four sequences cost 120 + 4x700 = 2,920, and two do not.
+	// The window costs 100 per sequence, so one sequence costs 120 + 100 = 220
+	// and two of those fit a 1,000-byte budget; four sequences cost 120 + 400
+	// = 520 each, and two do not.
 	facts := map[string]ResolvedModel{
-		"org/a": {Bytes: size, ContextLength: window, KVBytesPerToken: kv},
-		"org/b": {Bytes: size, ContextLength: window, KVBytesPerToken: kv},
+		"org/a": {Bytes: size, ServedContext: window, KVChargePerToken: kv},
+		"org/b": {Bytes: size, ServedContext: window, KVChargePerToken: kv},
 	}
 	for _, c := range []struct {
 		sequences int
@@ -88,7 +91,7 @@ func TestTheChargeCountsTheSequencesTheServerAdmits(t *testing.T) {
 	}{{1, 2}, {4, 1}} {
 		l := newFakeLauncher()
 		src := &fakeSource{models: map[string]int64{"org/a": size, "org/b": size}, facts: facts}
-		p := newTestPool(t, l, src, PoolOptions{MaxResidentBytes: 3000, DecodeConcurrency: c.sequences})
+		p := newTestPool(t, l, src, PoolOptions{MaxResidentBytes: 1000, DecodeConcurrency: c.sequences})
 		for _, id := range []string{"org/a", "org/b"} {
 			if _, release, err := p.Acquire(context.Background(), id); err != nil {
 				t.Fatalf("decode concurrency %d: Acquire(%q): %v", c.sequences, id, err)
@@ -102,40 +105,6 @@ func TestTheChargeCountsTheSequencesTheServerAdmits(t *testing.T) {
 	}
 }
 
-// A model that fills the budget by itself still loads. The charge decides what
-// may share this Mac's memory; a model whose window costs more than the whole
-// budget is one that loads alone, and refusing it outright would take a model
-// this Mac serves today away from the person serving it.
-func TestAModelWhoseWindowFillsTheBudgetStillLoadsAlone(t *testing.T) {
-	l := newFakeLauncher()
-	src := &fakeSource{
-		models: map[string]int64{"org/big": 100, "org/small": 100},
-		facts: map[string]ResolvedModel{
-			"org/big": {Bytes: 100, ContextLength: 100000, KVBytesPerToken: 1},
-		},
-	}
-	p := newTestPool(t, l, src, PoolOptions{MaxResidentBytes: 1000, DecodeConcurrency: 1})
-
-	if _, release, err := p.Acquire(context.Background(), "org/big"); err != nil {
-		t.Fatalf("Acquire(org/big): %v", err)
-	} else {
-		release()
-	}
-	if got := p.Resident(); len(got) != 1 {
-		t.Fatalf("Resident() = %+v, want the one model", got)
-	}
-	// And it is alone: the whole budget is spoken for, so anything else has to
-	// take its place rather than sit beside it.
-	if _, release, err := p.Acquire(context.Background(), "org/small"); err != nil {
-		t.Fatalf("Acquire(org/small): %v", err)
-	} else {
-		release()
-	}
-	if got := p.Resident(); len(got) != 1 || got[0].RepoID != "org/small" {
-		t.Errorf("Resident() = %+v, want only org/small", got)
-	}
-}
-
 // What the pool charges a model is what the control plane has to report, or
 // the panel shows room the pool will not give out.
 func TestResidencyReportsTheChargeAndNotTheSize(t *testing.T) {
@@ -143,7 +112,7 @@ func TestResidencyReportsTheChargeAndNotTheSize(t *testing.T) {
 	l := newFakeLauncher()
 	src := &fakeSource{
 		models: map[string]int64{"org/a": size},
-		facts:  map[string]ResolvedModel{"org/a": {Bytes: size, ContextLength: window, KVBytesPerToken: kv}},
+		facts:  map[string]ResolvedModel{"org/a": {Bytes: size, ServedContext: window, KVChargePerToken: kv}},
 	}
 	p := newTestPool(t, l, src, PoolOptions{MaxResidentBytes: 10000, DecodeConcurrency: 1})
 	_, release, err := p.Acquire(context.Background(), "org/a")
@@ -153,7 +122,7 @@ func TestResidencyReportsTheChargeAndNotTheSize(t *testing.T) {
 	release()
 
 	want := capability.LoadCostOf(capability.Load{
-		DiskBytes: size, KVBytesPerToken: kv, Window: window, Sequences: 1, Budget: 10000,
+		DiskBytes: size, KVChargePerToken: kv, Window: window, Sequences: 1,
 	})
 	got := p.Resident()
 	if len(got) != 1 || got[0].Charge != want {
@@ -164,46 +133,33 @@ func TestResidencyReportsTheChargeAndNotTheSize(t *testing.T) {
 	}
 }
 
-// A charge worked out once and never again is a charge that goes stale. The
-// budget is one of its inputs — it is the ceiling on any single model — so a
-// model admitted while the budget was small is charged the whole of it, and
-// raising the budget must give the pool the honest figure back. Until it does,
-// a second model is admitted against a total the pool believes and the machine
-// does not.
-func TestRaisingTheBudgetRechargesTheModelsItWasHoldingDown(t *testing.T) {
-	const size, kv, window = 100, 1, 10000
-	honest := capability.LoadCostOf(capability.Load{
-		DiskBytes: size, KVBytesPerToken: kv, Window: window, Sequences: 1,
-	})
-	facts := map[string]ResolvedModel{
-		"org/a": {Bytes: size, ContextLength: window, KVBytesPerToken: kv},
-		"org/b": {Bytes: size, ContextLength: window, KVBytesPerToken: kv},
-	}
+// The charge does not move with the budget, and this is what makes a stale
+// charge impossible rather than merely unlikely: what a model costs is its
+// weights, the window it is served at and the sequences it admits. A charge
+// that tracked the budget would let a model admitted under a small budget go
+// on being counted at that budget, and the next load would be admitted
+// against a total nothing supports.
+func TestTheChargeDoesNotMoveWithTheBudget(t *testing.T) {
+	const size, kv, window = 100, 1, 500
 	l := newFakeLauncher()
-	src := &fakeSource{models: map[string]int64{"org/a": size, "org/b": size}, facts: facts}
+	src := &fakeSource{
+		models: map[string]int64{"org/a": size},
+		facts:  map[string]ResolvedModel{"org/a": {Bytes: size, ServedContext: window, KVChargePerToken: kv}},
+	}
 	p := newTestPool(t, l, src, PoolOptions{MaxResidentBytes: 1000, DecodeConcurrency: 1})
-
 	if _, release, err := p.Acquire(context.Background(), "org/a"); err != nil {
-		t.Fatalf("Acquire(org/a): %v", err)
+		t.Fatalf("Acquire: %v", err)
 	} else {
 		release()
 	}
-	if got := p.Resident(); len(got) != 1 || got[0].Charge != 1000 {
-		t.Fatalf("Resident() = %+v, want the one model charged the whole 1,000-byte budget", got)
-	}
-
-	// Room for one honest charge and not two.
-	p.SetMemoryBudget(100000)
-	if got := p.Resident(); len(got) != 1 || got[0].Charge != honest {
-		t.Errorf("Resident() = %+v after the raise, want the model charged %d", got, honest)
-	}
-	if _, release, err := p.Acquire(context.Background(), "org/b"); err != nil {
-		t.Fatalf("Acquire(org/b): %v", err)
-	} else {
-		release()
-	}
-	if got := p.Resident(); len(got) != 1 || got[0].RepoID != "org/b" {
-		t.Errorf("Resident() = %+v, want only org/b: two of these do not fit 100,000 bytes", got)
+	want := capability.LoadCostOf(capability.Load{
+		DiskBytes: size, KVChargePerToken: kv, Window: window, Sequences: 1,
+	})
+	for _, budget := range []int64{1000, 100000, 700} {
+		p.SetMemoryBudget(budget)
+		if got := p.Resident(); len(got) != 1 || got[0].Charge != want {
+			t.Errorf("at a budget of %d the model is charged %+v, want %d", budget, got, want)
+		}
 	}
 }
 
@@ -216,7 +172,7 @@ func TestRefreshChargesTakesTheModelsFactsAgain(t *testing.T) {
 	l := newFakeLauncher()
 	src := &fakeSource{
 		models: map[string]int64{"org/a": size},
-		facts:  map[string]ResolvedModel{"org/a": {Bytes: size, ContextLength: 100, KVBytesPerToken: kv}},
+		facts:  map[string]ResolvedModel{"org/a": {Bytes: size, ServedContext: 100, KVChargePerToken: kv}},
 	}
 	p := newTestPool(t, l, src, PoolOptions{MaxResidentBytes: 1000000, DecodeConcurrency: 1})
 	if _, release, err := p.Acquire(context.Background(), "org/a"); err != nil {
@@ -226,14 +182,67 @@ func TestRefreshChargesTakesTheModelsFactsAgain(t *testing.T) {
 	}
 
 	src.mu.Lock()
-	src.facts["org/a"] = ResolvedModel{Bytes: size, ContextLength: 10000, KVBytesPerToken: kv}
+	src.facts["org/a"] = ResolvedModel{Bytes: size, ServedContext: 10000, KVChargePerToken: kv}
 	src.mu.Unlock()
 	p.RefreshCharges()
 
 	want := capability.LoadCostOf(capability.Load{
-		DiskBytes: size, KVBytesPerToken: kv, Window: 10000, Sequences: 1, Budget: 1000000,
+		DiskBytes: size, KVChargePerToken: kv, Window: 10000, Sequences: 1,
 	})
 	if got := p.Resident(); len(got) != 1 || got[0].Charge != want {
 		t.Errorf("Resident() = %+v after the facts changed, want a charge of %d", got, want)
+	}
+}
+
+// A model whose charge at the window it is served does not fit the budget is
+// refused — not quietly charged the budget and loaded anyway. The refusal is
+// the only place an operator learns what would fit, so it names both figures
+// they can change and what each would have to become.
+func TestAModelWhoseServedWindowDoesNotFitIsRefusedWithWhatWouldFit(t *testing.T) {
+	l := newFakeLauncher()
+	src := &fakeSource{
+		models: map[string]int64{"org/big": 100},
+		facts: map[string]ResolvedModel{
+			"org/big": {Bytes: 100, ServedContext: 10000, KVChargePerToken: 1},
+		},
+	}
+	// Weights cost 120 of the 1,000-byte budget, leaving 880 for the cache: at
+	// two batched requests the model may be served 440 tokens, and at 10,000
+	// tokens it may batch nothing.
+	p := newTestPool(t, l, src, PoolOptions{MaxResidentBytes: 1000, DecodeConcurrency: 2})
+
+	_, _, err := p.Acquire(context.Background(), "org/big")
+	if err == nil {
+		t.Fatal("a model whose served window does not fit the budget was loaded anyway")
+	}
+	for _, want := range []string{"10000", "440", "2", "served context", "batched requests"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the refusal does not name %q: %v", want, err)
+		}
+	}
+	if got := len(p.Resident()); got != 0 {
+		t.Errorf("Resident() holds %d models after the refusal, want none", got)
+	}
+}
+
+// The same model at a window the budget can hold loads, which is the whole
+// point of the setting: the operator lowers the window rather than losing the
+// model.
+func TestTheSameModelLoadsAtAWindowThatFits(t *testing.T) {
+	l := newFakeLauncher()
+	src := &fakeSource{
+		models: map[string]int64{"org/big": 100},
+		facts: map[string]ResolvedModel{
+			"org/big": {Bytes: 100, ServedContext: 400, KVChargePerToken: 1},
+		},
+	}
+	p := newTestPool(t, l, src, PoolOptions{MaxResidentBytes: 1000, DecodeConcurrency: 2})
+	if _, release, err := p.Acquire(context.Background(), "org/big"); err != nil {
+		t.Fatalf("Acquire at a window that fits: %v", err)
+	} else {
+		release()
+	}
+	if got := p.Resident(); len(got) != 1 || got[0].Charge != 120+400*2 {
+		t.Errorf("Resident() = %+v, want the model charged its weights and two windows", got)
 	}
 }

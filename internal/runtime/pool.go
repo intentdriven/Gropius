@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"net/http"
 	"sort"
 	"sync"
@@ -35,12 +36,14 @@ type ResolvedModel struct {
 	Path string
 	// Bytes is the model's size on disk.
 	Bytes int64
-	// ContextLength is the window the model declares, and therefore the one
-	// the pool intends to serve: nothing between a client and mlx-lm caps it.
-	ContextLength int64
-	// KVBytesPerToken is what one token of that window costs the attention
-	// cache, as the configuration implies it (registry.ReadKVBytesPerToken).
-	KVBytesPerToken int64
+	// ServedContext is the window Gropius serves this model at: the operator's
+	// per-model setting, or the window the model declares when they have set
+	// none (config.Config.ServedContext). The gateway refuses a request
+	// estimated to be larger, so it is the window the pool charges.
+	ServedContext int64
+	// KVChargePerToken is what one token of that window is charged against the
+	// budget (registry.Model.KVChargePerToken).
+	KVChargePerToken int64
 }
 
 // Upstream is a ready model server the gateway can proxy to.
@@ -489,13 +492,11 @@ func (p *Pool) SetMemoryBudget(n int64) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.maxResident = n
-	// The budget is an input to every resident model's charge — it is the
-	// ceiling on any single one — so the models in memory are charged again
-	// against the new figure. Without this, a model admitted under a small
-	// budget keeps being counted at that budget after a raise, and the next
-	// load is admitted against a total the pool believes and the machine does
-	// not.
-	p.rechargeLocked()
+	// Nothing is recharged here, and that is a property of the charge rather
+	// than an omission: what a model costs is its weights, its window and its
+	// concurrency, none of which the budget touches. A charge that moved with
+	// the budget would be a figure the machine does not support.
+	//
 	// A raise can make room with nothing having to finish, so a request
 	// already waiting acts on it at once rather than at the next release.
 	p.wakeWaitersLocked()
@@ -982,6 +983,55 @@ func (p *Pool) rechargeLocked() {
 	}
 }
 
+// tooLargeLocked explains a model that cannot be held at all, and says what
+// would hold it. Callers must hold p.mu.
+//
+// Two of the three figures in the charge are the operator's to change — the
+// window this model is served at and how many requests its server batches —
+// and both are settings they can reach, so the refusal names the largest of
+// each that would fit rather than leaving them to do the arithmetic from a
+// number of bytes. It names only the model asked for: this text reaches an
+// unauthenticated LAN client, and what else this Mac holds is not its
+// business.
+func (p *Pool) tooLargeLocked(repoID string, m ResolvedModel, need int64) error {
+	base := fmt.Sprintf("%s needs about %s of memory but the budget is %s",
+		repoID, HumanBytes(need), HumanBytes(p.maxResident))
+	sequences := int64(p.opts.DecodeConcurrency)
+	perToken := mulPositive(m.KVChargePerToken, sequences)
+	room := p.maxResident - capability.LoadCost(m.Bytes)
+	if perToken <= 0 || room <= 0 || m.ServedContext <= 0 {
+		// Nothing but the weights to give back: no window and no concurrency
+		// makes this model fit this budget.
+		return fmt.Errorf("%s — raise the memory budget or choose a smaller quantization", base)
+	}
+	window := room / perToken
+	fits := fmt.Sprintf("lower this model's served context from %d to about %d tokens",
+		m.ServedContext, window)
+	if perSequence := mulPositive(m.KVChargePerToken, m.ServedContext); perSequence > 0 {
+		if n := room / perSequence; n >= 1 && sequences > 1 {
+			fits += fmt.Sprintf(", lower batched requests from %d to %d", sequences, n)
+		}
+	}
+	if window <= 0 {
+		return fmt.Errorf("%s at its served context of %d tokens and %d batched requests — raise the memory budget or choose a smaller quantization",
+			base, m.ServedContext, sequences)
+	}
+	return fmt.Errorf("%s at its served context of %d tokens and %d batched requests — %s, or raise the memory budget",
+		base, m.ServedContext, sequences, fits)
+}
+
+// mulPositive multiplies two figures that must both be positive to mean
+// anything, saturating rather than wrapping.
+func mulPositive(a, b int64) int64 {
+	if a <= 0 || b <= 0 {
+		return 0
+	}
+	if a > math.MaxInt64/b {
+		return math.MaxInt64
+	}
+	return a * b
+}
+
 // chargeLocked is what a model costs the budget in force. Callers must hold
 // p.mu, because the budget it is measured against is the one the pool holds
 // there and may be replaced while the pool runs.
@@ -992,11 +1042,10 @@ func (p *Pool) rechargeLocked() {
 // model is charged.
 func (p *Pool) chargeLocked(m ResolvedModel) int64 {
 	return capability.LoadCostOf(capability.Load{
-		DiskBytes:       m.Bytes,
-		KVBytesPerToken: m.KVBytesPerToken,
-		Window:          m.ContextLength,
-		Sequences:       int64(p.opts.DecodeConcurrency),
-		Budget:          p.maxResident,
+		DiskBytes:        m.Bytes,
+		KVChargePerToken: m.KVChargePerToken,
+		Window:           m.ServedContext,
+		Sequences:        int64(p.opts.DecodeConcurrency),
 	})
 }
 
@@ -1015,9 +1064,7 @@ func (p *Pool) startLocked(repoID string, waited time.Duration, adm admission, c
 
 	need := p.chargeLocked(m)
 	if need > p.maxResident {
-		return nil, fmt.Errorf(
-			"%s needs about %s of memory but the limit is %s — raise the memory budget or choose a smaller quantization",
-			repoID, HumanBytes(need), HumanBytes(p.maxResident))
+		return nil, p.tooLargeLocked(repoID, m, need)
 	}
 	// Plan the eviction before the precheck, and refuse from the plan alone.
 	// Precheck stats the launcher's files, and this runs under p.mu — the

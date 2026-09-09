@@ -385,6 +385,12 @@ func (a *App) SetConfig(c config.Config) error {
 	// already waiting rather than leaving them to sit out a grace nobody wants
 	// any more.
 	a.Pool.SetEvictionGrace(a.enforcedGrace(c))
+	// A served window is an input to what a model is charged, and this save may
+	// have changed one. The models in memory are charged again from what the
+	// settings now say, so the panel reports what the pool is enforcing rather
+	// than what it was enforcing before the save — the gateway already refuses
+	// against the new window from the next request.
+	a.Pool.RefreshCharges()
 	return nil
 }
 
@@ -844,19 +850,18 @@ func (a *App) pinnedCharge(pinned []string) (sum int64, unsized []string) {
 }
 
 // chargeOf is what one model costs the memory budget, asked of the one place
-// that answers it. Every figure the pool charges is here too — the model's own
-// window and cache cost, the decode concurrency its server is launched with,
-// and the budget as the ceiling — because a pinned set the app says fits and
-// the pool then refuses is the disagreement this single home exists to
-// prevent. The size is a parameter because a model still downloading is
-// charged the size it declares rather than the bytes so far.
+// that answers it. Every figure the pool charges is here too — the window this
+// model is served at, what a token of it costs, and the decode concurrency its
+// server is launched with — because a pinned set the app says fits and the
+// pool then refuses is the disagreement this single home exists to prevent.
+// The size is a parameter because a model still downloading is charged the
+// size it declares rather than the bytes so far.
 func (a *App) chargeOf(m registry.Model, size int64) int64 {
 	return capability.LoadCostOf(capability.Load{
-		DiskBytes:       size,
-		KVBytesPerToken: m.KVBytesPerToken,
-		Window:          m.ContextLength,
-		Sequences:       int64(a.Pool.DecodeConcurrency()),
-		Budget:          a.Pool.MemoryBudget(),
+		DiskBytes:        size,
+		KVChargePerToken: m.KVChargePerToken,
+		Window:           a.Config().ServedContext(m.RepoID, m.ContextLength),
+		Sequences:        int64(a.Pool.DecodeConcurrency()),
 	})
 }
 
@@ -1020,11 +1025,14 @@ func (s modelSource) Resolve(repoID string) (runtime.ResolvedModel, error) {
 	if !m.Ready() {
 		return runtime.ResolvedModel{}, fmt.Errorf("%s is not ready (%s)", repoID, m.State)
 	}
+	// The window is the one the operator has this model served at, which is
+	// the model's own declared cap unless they have lowered it: the pool
+	// charges what the gateway will let a client fill.
 	return runtime.ResolvedModel{
-		Path:            m.Path,
-		Bytes:           m.Bytes,
-		ContextLength:   m.ContextLength,
-		KVBytesPerToken: m.KVBytesPerToken,
+		Path:             m.Path,
+		Bytes:            m.Bytes,
+		ServedContext:    s.app.Config().ServedContext(m.RepoID, m.ContextLength),
+		KVChargePerToken: m.KVChargePerToken,
 	}, nil
 }
 
@@ -1199,14 +1207,14 @@ func (a *App) Download(repoID string) error {
 			var perr error
 			a.finishDownload(dl, func() {
 				perr = a.Registry.Put(registry.Model{
-					RepoID:          repoID,
-					Path:            dest,
-					Bytes:           bytes,
-					ContextLength:   facts.ContextLength,
-					KVBytesPerToken: facts.KVBytesPerToken,
-					State:           registry.StateReady,
-					Progress:        100,
-					AddedAt:         addedAt,
+					RepoID:           repoID,
+					Path:             dest,
+					Bytes:            bytes,
+					ContextLength:    facts.ContextLength,
+					KVChargePerToken: facts.KVChargePerToken,
+					State:            registry.StateReady,
+					Progress:         100,
+					AddedAt:          addedAt,
 				})
 			})
 			if perr != nil {
@@ -1297,14 +1305,14 @@ func (a *App) canRestoreReady(dest string, wasReady bool) bool {
 // it from the directory that is actually being served.
 func (a *App) restoreReady(repoID, dest string, prior registry.Model) bool {
 	if perr := a.Registry.Put(registry.Model{
-		RepoID:          repoID,
-		Path:            dest,
-		Bytes:           prior.Bytes,
-		ContextLength:   prior.ContextLength,
-		KVBytesPerToken: prior.KVBytesPerToken,
-		State:           registry.StateReady,
-		Progress:        100,
-		AddedAt:         prior.AddedAt,
+		RepoID:           repoID,
+		Path:             dest,
+		Bytes:            prior.Bytes,
+		ContextLength:    prior.ContextLength,
+		KVChargePerToken: prior.KVChargePerToken,
+		State:            registry.StateReady,
+		Progress:         100,
+		AddedAt:          prior.AddedAt,
 	}); perr != nil {
 		a.Log.Error("could not restore the ready model record", "model", repoID, "err", perr)
 		return false

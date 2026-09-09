@@ -60,23 +60,25 @@ type Model struct {
 	// an unknown figure absent from the JSON rather than published as 0,
 	// which a client that trims its history would read as "no context".
 	ContextLength int64 `json:"context_length,omitempty"`
-	// KVBytesPerToken is what one token of prompt costs this model's attention
-	// cache at f16, worked out from its own configuration (see
-	// capability.KVShape). It is a floor rather than an estimate — every model
-	// the lab measured held more — and the memory budget charges it with a
-	// safety factor. Zero means the configuration does not say enough to work
-	// it out, and such a model is charged the flat figure instead.
-	KVBytesPerToken int64 `json:"kv_bytes_per_token,omitempty"`
+	// KVChargePerToken is what one token of prompt is charged against the
+	// memory budget for this model's attention cache: the f16 arithmetic its
+	// own configuration implies, times the safety factor its cache kind earned
+	// (capability.KVShape.ChargedBytesPerToken). Zero means the configuration
+	// does not say enough to work it out, and such a model is charged the flat
+	// figure instead.
+	KVChargePerToken int64 `json:"kv_charge_per_token,omitempty"`
 }
 
 // MaxContextLength bounds the context length Gropius will believe. A model
 // directory's config.json is, in shared-cache mode, a file another local
 // account can write, and the figure it declares is served to the LAN — so a
 // hostile or corrupt configuration must not be able to hand a client an
-// absurd number to size buffers from. 8,388,608 tokens is far above any
-// window in use (the lab verified prompts of about 122,000 tokens) and far
-// below anything that could be mistaken for a real one.
-const MaxContextLength = 1 << 23
+// absurd number to size buffers from.
+//
+// One ceiling, held in config, because the window an operator asks to be
+// served is bounded by the same figure and two ceilings for one quantity is
+// how a served window comes to be accepted that a declared one is not.
+const MaxContextLength = config.MaxContextLength
 
 // Ready reports whether the model can be served.
 func (m Model) Ready() bool { return m.State == StateReady }
@@ -173,8 +175,8 @@ func Open(path string) (*Registry, error) {
 		}
 		// And the cache figure with it, for the same reason: it is persisted,
 		// and it decides how much of this Mac's memory a load is charged.
-		if !plausibleKVBytesPerToken(m.KVBytesPerToken) {
-			m.KVBytesPerToken = 0
+		if !plausibleKVChargePerToken(m.KVChargePerToken) {
+			m.KVChargePerToken = 0
 		}
 		r.models[key(m.RepoID)] = m
 	}
@@ -536,13 +538,13 @@ func (r *Registry) Rescan(modelsDir string) error {
 				continue
 			}
 			found[repoID] = Model{
-				RepoID:          repoID,
-				Path:            dir,
-				Bytes:           size,
-				ContextLength:   facts.ContextLength,
-				KVBytesPerToken: facts.KVBytesPerToken,
-				State:           StateReady,
-				AddedAt:         time.Now(),
+				RepoID:           repoID,
+				Path:             dir,
+				Bytes:            size,
+				ContextLength:    facts.ContextLength,
+				KVChargePerToken: facts.KVChargePerToken,
+				State:            StateReady,
+				AddedAt:          time.Now(),
 			}
 		}
 	}
@@ -560,7 +562,7 @@ func (r *Registry) Rescan(modelsDir string) error {
 			// recorded by a build that predates the figure gains it at the
 			// next startup rescan rather than only on a re-download.
 			existing.ContextLength = m.ContextLength
-			existing.KVBytesPerToken = m.KVBytesPerToken
+			existing.KVChargePerToken = m.KVChargePerToken
 			existing.State = StateReady
 			existing.Err = ""
 			r.models[key(repoID)] = existing
@@ -676,8 +678,8 @@ func inspectModelDir(dir string) (complete bool, size int64, facts ModelFacts) {
 // whether it is one: the window it declares, and what a token of prompt costs
 // its attention cache.
 type ModelFacts struct {
-	ContextLength   int64
-	KVBytesPerToken int64
+	ContextLength    int64
+	KVChargePerToken int64
 }
 
 // ReadModelFacts reads both figures out of the model configuration in dir, in
@@ -696,8 +698,8 @@ func ReadModelFacts(dir string) ModelFacts {
 // factsFrom reads both figures out of one decoded configuration.
 func factsFrom(cfg map[string]any) ModelFacts {
 	return ModelFacts{
-		ContextLength:   contextLengthFrom(cfg),
-		KVBytesPerToken: kvBytesPerTokenFrom(cfg),
+		ContextLength:    contextLengthFrom(cfg),
+		KVChargePerToken: kvChargePerTokenFrom(cfg),
 	}
 }
 
@@ -817,16 +819,16 @@ func plausibleContextLength(n int64) bool {
 	return n > 0 && n <= MaxContextLength
 }
 
-// MaxKVBytesPerToken bounds the cache cost the registry will believe, for the
+// MaxKVChargePerToken bounds the cache cost the registry will believe, for the
 // reason MaxContextLength bounds the window: the figure is persisted and, in
 // shared-cache mode, derived from a file another local account can write, and
 // it decides how much of this Mac's memory one model is charged. 16 MB per
-// token is far above any real model (the largest of the four the lab measured
-// implies about 940 KB in its most expensive reading) and far below anything
-// that could be mistaken for one.
-const MaxKVBytesPerToken = 1 << 24
+// token is far above any real model — the most expensive reading of the four
+// the lab measured implies about 940 KB, which is 6.6 MB once charged — and
+// far below anything that could be mistaken for one.
+const MaxKVChargePerToken = 1 << 24
 
-// kvBytesPerTokenFrom applies the key rules, sampled on 2026-09-06 against the
+// kvChargePerTokenFrom applies the key rules, sampled on 2026-09-06 against the
 // four models the lab benchmarked (research note 2026-09-06-context-windows
 // and the nominal caps beside it). It reads the shape and leaves the
 // arithmetic to capability.KVShape, which is where the charge lives.
@@ -855,9 +857,9 @@ const MaxKVBytesPerToken = 1 << 24
 // the next restart. In shared-cache mode config.json is a file another local
 // account can write (see capability.KVShape's own bounds), so the ceiling is
 // part of reading it, not part of trusting it later.
-func kvBytesPerTokenFrom(cfg map[string]any) int64 {
-	n := kvShapeFrom(cfg).BytesPerToken()
-	if !plausibleKVBytesPerToken(n) {
+func kvChargePerTokenFrom(cfg map[string]any) int64 {
+	n := kvShapeFrom(cfg).ChargedBytesPerToken()
+	if !plausibleKVChargePerToken(n) {
 		return 0
 	}
 	return n
@@ -949,10 +951,10 @@ func configNumber(level map[string]any, key string) (int64, bool) {
 	return int64(n), true
 }
 
-// plausibleKVBytesPerToken is the bound applied wherever a cache cost enters
+// plausibleKVChargePerToken is the bound applied wherever a cache cost enters
 // the registry: on a scan, and again when one is read back from the index.
-func plausibleKVBytesPerToken(n int64) bool {
-	return n >= 0 && n <= MaxKVBytesPerToken
+func plausibleKVChargePerToken(n int64) bool {
+	return n >= 0 && n <= MaxKVChargePerToken
 }
 
 // CheckShards reports an error unless every weight shard named by

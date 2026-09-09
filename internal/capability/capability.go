@@ -30,15 +30,25 @@ func LoadCost(diskBytes int64) int64 {
 	return diskBytes + diskBytes/5 // 1.2x
 }
 
-// KVSafetyFactor multiplies the cache figure a model's configuration implies.
+// The safety factors multiply the cache figure a model's configuration
+// implies, because that arithmetic is a floor and not an estimate: the
+// 2026-09-06 context-window campaign measured every one of four models holding
+// more than its configuration implies per token — the linear-attention states,
+// the activations kept for the batch, allocator granularity.
 //
-// The arithmetic below is a floor, not an estimate: the 2026-09-06
-// context-window campaign measured every one of four models holding two to
-// seven times what its configuration implies per token (the linear-attention
-// states, the activations kept for the batch, allocator granularity). The
-// factor is that measured range taken at its top. A model measured holding
-// more than seven times its configuration figure would show it wrong.
-const KVSafetyFactor = 7
+// Two factors, because the four models divide by cache kind and not by size.
+// The three that cache keys and values per head measured 2.0, 3.1 and 4.8
+// times their configurations; the one that caches a compressed latent measured
+// 6.7 times, and its own arithmetic is the smallest of the four, so it has the
+// least margin to spare. A single factor of seven would charge the first three
+// half again as much as their evidence supports.
+//
+// A model of either kind measured holding more than its factor allows would
+// show this wrong.
+const (
+	kvSafetyFactor       = 5
+	kvLatentSafetyFactor = 7
+)
 
 // kvElementBytes is the width of one cached element. The caches are f16
 // whatever the weights are quantized to.
@@ -72,6 +82,21 @@ type KVShape struct {
 	LatentDim int64
 }
 
+// ChargedBytesPerToken is what one token of prompt is charged against the
+// memory budget: the configuration's own arithmetic, multiplied by the safety
+// factor its cache kind earned. It is the figure every other surface carries,
+// so that the factor is applied once, here, where the evidence for it is.
+func (s KVShape) ChargedBytesPerToken() int64 {
+	per := s.BytesPerToken()
+	if per <= 0 {
+		return 0
+	}
+	if s.LatentDim > 0 {
+		return per * kvLatentSafetyFactor
+	}
+	return per * kvSafetyFactor
+}
+
 // BytesPerToken is the cache one token costs at f16, or 0 when the
 // configuration does not say enough to work it out.
 func (s KVShape) BytesPerToken() int64 {
@@ -96,19 +121,18 @@ func (s KVShape) BytesPerToken() int64 {
 type Load struct {
 	// DiskBytes is the model directory's size.
 	DiskBytes int64
-	// KVBytesPerToken is the floor its configuration implies (KVShape).
-	// Zero means the configuration could not be read.
-	KVBytesPerToken int64
-	// Window is the context the pool intends to serve — the model's own
-	// declared maximum, since nothing between a client and mlx-lm caps it.
+	// KVChargePerToken is what one token of this model's window is charged
+	// (KVShape.ChargedBytesPerToken). Zero means the configuration could not
+	// be read.
+	KVChargePerToken int64
+	// Window is the context the pool serves this model at: the operator's
+	// served-context setting, or the model's declared maximum when they have
+	// set none (config.Config.ServedContext).
 	Window int64
 	// Sequences is how many of those windows may be in flight at once: the
 	// decode concurrency each model server is launched with. Each sequence
 	// holds its own cache.
 	Sequences int64
-	// Budget is the memory budget the charge will be measured against, and
-	// the ceiling on it. Zero means no ceiling.
-	Budget int64
 }
 
 // LoadCostOf is the memory a loaded model is charged against the budget: its
@@ -129,27 +153,21 @@ type Load struct {
 // prefill needs at any size. The headroom covers that intercept for every
 // model measured; the cache term covers the growth.
 //
-// Two ceilings bound it. A configuration that says nothing about its cache
-// yields the flat charge, because a guess would be worse than the figure that
-// has always been used. And no single model is charged more than the whole
-// budget: the charge decides what may share this Mac's memory, and a model
-// that fills the budget by itself is one that loads alone, not one that can
-// never load — but never below the flat charge, so a model whose weights do
-// not fit is refused as it always was.
+// One fallback and no ceiling. A configuration that says nothing about its
+// cache yields the flat charge, because a guess would be worse than the figure
+// that has always been used. Nothing else is capped: a charge held down to the
+// budget would be a figure the machine does not support — the pool would
+// believe a model cost whatever the budget happened to be and admit the next
+// one against it — so a model whose window does not fit is refused by the pool
+// with a message saying what would fit, and never quietly charged less than it
+// costs.
 func LoadCostOf(l Load) int64 {
 	flat := LoadCost(l.DiskBytes)
-	cache := mulSaturating(mulSaturating(mulSaturating(l.KVBytesPerToken, KVSafetyFactor), l.Window), l.Sequences)
+	cache := mulSaturating(mulSaturating(l.KVChargePerToken, l.Window), l.Sequences)
 	if cache <= 0 {
 		return flat
 	}
-	charge := addSaturating(flat, cache)
-	if l.Budget > 0 && charge > l.Budget {
-		if flat > l.Budget {
-			return flat
-		}
-		return l.Budget
-	}
-	return charge
+	return addSaturating(flat, cache)
 }
 
 // mulSaturating multiplies without wrapping: a product that will not fit is

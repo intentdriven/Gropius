@@ -13,9 +13,14 @@ import (
 // its nominal-caps evidence.
 func TestKVBytesPerTokenReadsTheConfigurationsShape(t *testing.T) {
 	cases := []struct {
-		name   string
+		name string
+		// config is the model configuration, and want the f16 arithmetic it
+		// implies per token — the figure the campaign's nominal-caps evidence
+		// records. What is stored is that figure times the safety factor its
+		// cache kind earned, which is what latent selects.
 		config string
 		want   int64
+		latent bool
 	}{
 		{
 			// Qwen3-Coder-Next: 12 full-attention layers of 48, declared as
@@ -51,7 +56,7 @@ func TestKVBytesPerTokenReadsTheConfigurationsShape(t *testing.T) {
 			name: "a latent cache is charged as a latent cache",
 			config: `{"model_type":"glm4_moe_lite","num_hidden_layers":47,"kv_lora_rank":512,
 			          "qk_rope_head_dim":64,"num_key_value_heads":20,"v_head_dim":256}`,
-			want: 54144,
+			want: 54144, latent: true,
 		},
 		{
 			// Qwen3.8-27B: 16 full-attention layers of 64.
@@ -106,8 +111,13 @@ func TestKVBytesPerTokenReadsTheConfigurationsShape(t *testing.T) {
 			if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(c.config), 0o644); err != nil {
 				t.Fatal(err)
 			}
-			if got := ReadModelFacts(dir).KVBytesPerToken; got != c.want {
-				t.Errorf("KVBytesPerToken = %d, want %d", got, c.want)
+			factor := int64(5)
+			if c.latent {
+				factor = 7
+			}
+			if got, want := ReadModelFacts(dir).KVChargePerToken, c.want*factor; got != want {
+				t.Errorf("KVChargePerToken = %d, want %d (%d from the configuration, times %d)",
+					got, want, c.want, factor)
 			}
 		})
 	}
@@ -137,8 +147,8 @@ func TestRescanRecordsTheCacheCost(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
-	if m.KVBytesPerToken != 24576 {
-		t.Errorf("KVBytesPerToken = %d, want 24576", m.KVBytesPerToken)
+	if m.KVChargePerToken != 24576*5 {
+		t.Errorf("KVChargePerToken = %d, want %d", m.KVChargePerToken, 24576*5)
 	}
 	if m.ContextLength != 262144 {
 		t.Errorf("ContextLength = %d, want 262144", m.ContextLength)
@@ -159,9 +169,9 @@ func TestAnImplausibleCacheFigureNeverEntersTheRegistry(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(hostile), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if got := ReadModelFacts(dir).KVBytesPerToken; got != 0 {
-		t.Errorf("KVBytesPerToken = %d, want 0: %d is past the plausible ceiling %d",
-			got, got, int64(MaxKVBytesPerToken))
+	if got := ReadModelFacts(dir).KVChargePerToken; got != 0 {
+		t.Errorf("KVChargePerToken = %d, want 0: %d is past the plausible ceiling %d",
+			got, got, int64(MaxKVChargePerToken))
 	}
 
 	r, root := newTestRegistry(t)
@@ -173,9 +183,9 @@ func TestAnImplausibleCacheFigureNeverEntersTheRegistry(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
-	if m.KVBytesPerToken != 0 {
+	if m.KVChargePerToken != 0 {
 		t.Errorf("the scan recorded %d, want 0 — the figure is charged from the moment it is scanned",
-			m.KVBytesPerToken)
+			m.KVChargePerToken)
 	}
 }
 
@@ -190,7 +200,7 @@ func TestAnAttentionIntervalWiderThanTheModelChargesEveryLayer(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(config), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if got, want := ReadModelFacts(dir).KVBytesPerToken, int64(64*4*256*2*2); got != want {
-		t.Errorf("KVBytesPerToken = %d, want %d — every layer, as for a configuration that declares no layout", got, want)
+	if got, want := ReadModelFacts(dir).KVChargePerToken, int64(64*4*256*2*2*5); got != want {
+		t.Errorf("KVChargePerToken = %d, want %d — every layer, as for a configuration that declares no layout", got, want)
 	}
 }

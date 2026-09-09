@@ -17,8 +17,11 @@ type measuredModel struct {
 	// weights is the model directory's size on disk, in bytes.
 	weights int64
 	// kv is the KV bytes per token its config.json implies at f16 — the floor,
-	// not an estimate: every model measured above it.
-	kv int64
+	// not an estimate: every model measured above it — and latent says whether
+	// that figure is a compressed latent cache rather than keys and values per
+	// head, which is what decides the safety factor.
+	kv     int64
+	latent bool
 	// window is the largest prompt verified through the gateway, in tokens.
 	window int64
 	// slope is the measured growth per thousand tokens, in bytes, and
@@ -41,7 +44,7 @@ var measured = []measuredModel{
 		window: 253106, slope: 11 * measuredGB / 1000, intercept: 34 * measuredGB / 10, peak: 28 * measuredGB,
 	},
 	{
-		name: "GLM-4.7-Flash 8bit", weights: 31841402692, kv: 54144,
+		name: "GLM-4.7-Flash 8bit", weights: 31841402692, kv: 54144, latent: true,
 		window: 81100, slope: 337 * measuredGB / 1000, intercept: 15 * measuredGB / 10, peak: 59 * measuredGB,
 	},
 	{
@@ -60,10 +63,10 @@ var measured = []measuredModel{
 func TestChargeCoversWhatEachMeasuredModelTook(t *testing.T) {
 	for _, m := range measured {
 		got := LoadCostOf(Load{
-			DiskBytes:       m.weights,
-			KVBytesPerToken: m.kv,
-			Window:          m.window,
-			Sequences:       1,
+			DiskBytes:        m.weights,
+			KVChargePerToken: m.shape().ChargedBytesPerToken(),
+			Window:           m.window,
+			Sequences:        1,
 		})
 		if got < m.peak {
 			t.Errorf("%s: charge %d under-charges the %d it was measured taking at %d tokens",
@@ -93,12 +96,43 @@ func TestTheFlatChargeUnderChargesTheDenseModelAtItsWindow(t *testing.T) {
 // its top; a model whose measured slope exceeded it would show it wrong.
 func TestTheSafetyFactorCoversEveryMeasuredSlope(t *testing.T) {
 	for _, m := range measured {
-		floor := KVSafetyFactor * m.kv * 1000
-		if floor < m.slope {
+		charged := m.shape().ChargedBytesPerToken() * 1000
+		if charged < m.slope {
 			t.Errorf("%s: the charged slope %d B per 1K tokens is under the measured %d",
-				m.name, floor, m.slope)
+				m.name, charged, m.slope)
 		}
 	}
+}
+
+// Two factors, because the four models divide cleanly in two. The three that
+// cache keys and values per head measured 2.0, 3.1 and 4.8 times what their
+// configurations imply; the one that caches a compressed latent measured 6.7.
+// One factor for both would charge the first three half again as much as their
+// own evidence supports.
+func TestTheSafetyFactorIsTheOneItsCacheKindEarned(t *testing.T) {
+	gqa := KVShape{FullAttentionLayers: 1, KVHeads: 1, HeadDim: 1}
+	if got, want := gqa.ChargedBytesPerToken(), 5*gqa.BytesPerToken(); got != want {
+		t.Errorf("a key-and-value cache is charged %d, want %d (five times its configuration)", got, want)
+	}
+	latent := KVShape{FullAttentionLayers: 1, LatentDim: 1}
+	if got, want := latent.ChargedBytesPerToken(), 7*latent.BytesPerToken(); got != want {
+		t.Errorf("a latent cache is charged %d, want %d (seven times its configuration)", got, want)
+	}
+	// Nothing to work from stays nothing: a factor times zero must not become
+	// a cache cost of its own.
+	if got := (KVShape{}).ChargedBytesPerToken(); got != 0 {
+		t.Errorf("an unreadable shape is charged %d, want 0", got)
+	}
+}
+
+// shape is the model's configuration as the charge reads it. Only the cache
+// kind and the resulting per-token figure matter here, so the layers are
+// folded into one and the figure carried whole.
+func (m measuredModel) shape() KVShape {
+	if m.latent {
+		return KVShape{FullAttentionLayers: 1, LatentDim: m.kv / 2}
+	}
+	return KVShape{FullAttentionLayers: 1, KVHeads: 1, HeadDim: m.kv / 4}
 }
 
 // The weights and their fifth stand in for the working set prefill needs
@@ -123,8 +157,8 @@ func TestAModelWithNoConfigurationKeepsTheFlatCharge(t *testing.T) {
 		load Load
 	}{
 		{"no cache figure", Load{DiskBytes: size, Window: 100000, Sequences: 4}},
-		{"no window", Load{DiskBytes: size, KVBytesPerToken: 24576, Sequences: 4}},
-		{"no sequences", Load{DiskBytes: size, KVBytesPerToken: 24576, Window: 100000}},
+		{"no window", Load{DiskBytes: size, KVChargePerToken: 24576, Sequences: 4}},
+		{"no sequences", Load{DiskBytes: size, KVChargePerToken: 24576, Window: 100000}},
 	}
 	for _, c := range cases {
 		if got, want := LoadCostOf(c.load), LoadCost(size); got != want {
@@ -137,7 +171,7 @@ func TestAModelWithNoConfigurationKeepsTheFlatCharge(t *testing.T) {
 // charged per sequence — the campaign measured a second concurrent 64K prompt
 // costing more than the first one's own growth, not less.
 func TestEachAdmittedSequenceIsChargedItsOwnCache(t *testing.T) {
-	l := Load{DiskBytes: 10 * gb, KVBytesPerToken: 24576, Window: 100000, Sequences: 1}
+	l := Load{DiskBytes: 10 * gb, KVChargePerToken: 24576, Window: 100000, Sequences: 1}
 	one := LoadCostOf(l)
 	l.Sequences = 4
 	four := LoadCostOf(l)
@@ -147,21 +181,16 @@ func TestEachAdmittedSequenceIsChargedItsOwnCache(t *testing.T) {
 	}
 }
 
-// A charge larger than the whole budget would refuse a model this Mac can
-// hold: the model loads, it just cannot share the machine with anything. The
-// budget is therefore the ceiling on one model's charge — but only above the
-// flat charge, so a model whose weights genuinely do not fit is still refused.
-func TestOneModelIsNeverChargedMoreThanTheWholeBudget(t *testing.T) {
-	const budget = 40 * gb
-	l := Load{DiskBytes: 10 * gb, KVBytesPerToken: 65536, Window: 262144, Sequences: 4, Budget: budget}
-	if got := LoadCostOf(l); got != budget {
-		t.Errorf("charge = %d, want it held at the budget %d", got, budget)
-	}
-	// Weights that do not fit are still refused: the ceiling never charges a
-	// model less than the weights it will actually put in memory.
-	l.DiskBytes = 60 * gb
-	if got, want := LoadCostOf(l), LoadCost(60*gb); got != want {
-		t.Errorf("charge = %d for weights past the budget, want the flat %d so the load is refused", got, want)
+// No ceiling. A charge is what the model will cost, however large, because a
+// charge held down to the budget is a figure the machine does not support: the
+// pool would believe a model cost whatever the budget happened to be and admit
+// the next one against it. A model that does not fit is refused by the pool,
+// which says what would fit — the charge itself never lies about the cost.
+func TestNothingHoldsAChargeDownToTheBudget(t *testing.T) {
+	l := Load{DiskBytes: 10 * gb, KVChargePerToken: 65536, Window: 262144, Sequences: 4}
+	want := LoadCost(10*gb) + 4*65536*262144
+	if got := LoadCostOf(l); got != want {
+		t.Errorf("charge = %d, want the honest %d", got, want)
 	}
 }
 
