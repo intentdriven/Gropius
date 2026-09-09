@@ -326,25 +326,37 @@ func TestEnsureDirsRefusesSymlinkedLayoutDirUnderSetgidRoot(t *testing.T) {
 	}
 }
 
-// sharedLayout is the layout NewPaths produces under the real shared root: a
-// setgid data root holding what every account shares, and this account's own
-// directory holding what it does not. It is built by hand because the shared
-// root is one fixed path that a test may not write to.
+// sharedLayout stands a temporary directory in for the shared root and returns
+// the layout NewPaths derives for it: a setgid data root holding what every
+// account shares, and this account's own directory holding what it does not.
+//
+// The derivation is the real one — the seam is the shared root's path, not the
+// rule — so a NewPaths that stopped splitting the layout, or split it
+// differently, is caught here rather than agreeing with a hand-written copy of
+// itself.
 func sharedLayout(t *testing.T) (Paths, string, string) {
 	t.Helper()
 	root := t.TempDir()
 	if err := os.Chmod(root, 0o775|os.ModeSetgid|os.ModeSticky); err != nil {
 		t.Fatal(err)
 	}
-	acct := t.TempDir() // stands in for this account's Application Support directory
+	withSharedRoot(t, root)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	acct := filepath.Join(home, "Library", "Application Support", "Gropius")
 	p := NewPaths(root)
-	p.Bin = filepath.Join(acct, "bin")
-	p.Venv = filepath.Join(acct, "venv")
-	p.Python = filepath.Join(acct, "python")
-	p.Config = filepath.Join(acct, "config.json")
-	p.State = filepath.Join(acct, "registry.json")
-	p.Stats = filepath.Join(acct, "stats")
+	if p.Bin == filepath.Join(root, "bin") {
+		t.Fatal("NewPaths did not split the layout for the shared root")
+	}
 	return p, root, acct
+}
+
+// withSharedRoot points the shared-root rule at dir for the duration of a test.
+func withSharedRoot(t *testing.T, dir string) {
+	t.Helper()
+	prev := sharedRoot
+	sharedRoot = dir
+	t.Cleanup(func() { sharedRoot = prev })
 }
 
 // The layout under a shared cache straddles two directories: what every account

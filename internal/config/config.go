@@ -48,6 +48,25 @@ type Paths struct {
 // `make install-shared`), every account shares one set of models.
 const SharedRoot = "/Users/Shared/Gropius"
 
+// sharedRoot is the shared root everything actually compares against, so a
+// test can stand a temporary directory in its place and exercise the real
+// derivation rather than a hand-copied one. It is unexported and never written
+// outside this package's own tests: the shipped binary holds one value, the
+// constant above.
+var sharedRoot = SharedRoot
+
+// userSupportDir is this account's own Gropius directory in Application
+// Support — the one place a per-user install lives, and the one place a shared
+// install keeps what an account does not share. It is derived once here so the
+// default root and accountDir cannot come to disagree about where it is.
+func userSupportDir() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("resolve home dir: %w", err)
+	}
+	return filepath.Join(home, "Library", "Application Support", "Gropius"), nil
+}
+
 // DefaultRoot returns where Gropius keeps its data.
 //
 // Order: $GROPIUS_ROOT, then the shared directory if an administrator created
@@ -57,14 +76,10 @@ func DefaultRoot() (string, error) {
 	if env := os.Getenv("GROPIUS_ROOT"); env != "" {
 		return env, nil
 	}
-	if sharedRootShape(SharedRoot) == nil && writableDir(SharedRoot) {
-		return SharedRoot, nil
+	if sharedRootShape(sharedRoot) == nil && writableDir(sharedRoot) {
+		return sharedRoot, nil
 	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", fmt.Errorf("resolve home dir: %w", err)
-	}
-	return filepath.Join(home, "Library", "Application Support", "Gropius"), nil
+	return userSupportDir()
 }
 
 // sharedRootShape reports whether dir is a shared root an administrator
@@ -160,14 +175,14 @@ func ExecRoot(root string) string { return accountDir(root) }
 // caller's own refusal is what stops the unsafe write: this function decides
 // where to look, never whether the place is safe.
 func accountDir(root string) string {
-	if !sameDir(root, SharedRoot) {
+	if !sameDir(root, sharedRoot) {
 		return root
 	}
-	home, err := os.UserHomeDir()
+	dir, err := userSupportDir()
 	if err != nil {
 		return root
 	}
-	return filepath.Join(home, "Library", "Application Support", "Gropius")
+	return dir
 }
 
 // NewPaths derives the layout from a root directory.
@@ -363,16 +378,23 @@ func (p Paths) EnsureDirs() error {
 	if err := os.MkdirAll(p.Root, 0o755); err != nil {
 		return fmt.Errorf("create %s: %w", p.Root, err)
 	}
-	// This account's own state directory, created closed. Under the shared root
-	// it is the one directory holding things no other account may have —
-	// config.json's API key and HuggingFace token, and the registry that decides
-	// what this account's gateway serves — and it is created here so those files
-	// are never written into a directory a co-tenant can read. Everywhere else
-	// it IS the root, created just above, and nothing changes.
+	// This account's own state directory, created closed and closed if it is
+	// already there. Under the shared root it is the one directory holding
+	// things no other account may have — config.json's API key and HuggingFace
+	// token, and the registry that decides what this account's gateway serves.
+	// The chmod is not belt and braces: an account that ran a per-user install
+	// before joining a shared cache already has this directory at 0755, and
+	// MkdirAll would leave it there. Everywhere else it IS the root, created
+	// just above, and nothing changes.
+	//
+	// A chmod that fails is not fatal, as for every other mode in this
+	// function: the files inside are written 0600 whatever the directory says,
+	// and a directory this account cannot re-mode is one it does not own.
 	if acct := p.accountStateDir(); acct != filepath.Clean(p.Root) {
 		if err := os.MkdirAll(acct, 0o700); err != nil {
 			return fmt.Errorf("create %s: %w", acct, err)
 		}
+		_ = os.Chmod(acct, 0o700)
 	}
 	layout := []struct {
 		abs   string
@@ -1433,9 +1455,15 @@ func (p Paths) accountStateDir() string { return filepath.Dir(p.Config) }
 //     or something planted under that name. Neither is adopted.
 //   - The read is the hardened one (ReadRegular): a symlink, a FIFO, or an
 //     oversized file is refused rather than followed or blocked on.
-//   - The original is left where it is. It cannot reliably be removed under the
-//     sticky bit anyway, and leaving it means a downgrade to the previous build
-//     still finds the settings it wrote.
+//   - The original is REMOVED once the copy is in place. The sticky bit stops
+//     other accounts unlinking it, not its owner, and its owner is the only
+//     account that ever gets here — so leaving it would leave a copy of an API
+//     key and a HuggingFace token in a group-writable directory for as long as
+//     the install lasts, still live for anything that reads that path. An
+//     operator who rotates the key and later runs an older build would put the
+//     superseded key back into service; starting that build from the shipping
+//     defaults, which generates a fresh key for an exposed bind, is the safer
+//     of the two failures.
 //
 // Adoption happens only when this account has no settings of its own yet, so it
 // can never overwrite what the operator has saved since.
@@ -1471,6 +1499,12 @@ func (p Paths) AdoptSharedConfig() (bool, error) {
 	}
 	if err := writeSettingsFile(p.Config, b); err != nil {
 		return false, err
+	}
+	if err := os.Remove(legacy); err != nil {
+		// The copy is in place, so the settings are not lost; what is left is a
+		// stale secret in a directory shared with every account, which the
+		// operator should hear about.
+		return true, fmt.Errorf("remove %s once copied: %w", legacy, err)
 	}
 	return true, nil
 }

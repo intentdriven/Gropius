@@ -37,8 +37,10 @@ GitHub release notes.
   account sets is now unreadable by the others, rather than shared by accident.
   On an account's first start after this change, its model list is rebuilt from
   the models already in the shared folder, so nothing is downloaded twice, and
-  the settings it had kept in the shared folder are carried over into its own —
-  only ever its own: settings belonging to another account are left alone.
+  the settings it had kept in the shared folder are moved into its own — only
+  ever its own: settings belonging to another account are left untouched and
+  unread. Moved, not copied: a key left in the shared folder would still be
+  readable there, and would come back into service under an older build.
   **A single-account install is unaffected.** In an existing shared install the
   second and later accounts genuinely behave differently, which is the point:
   they can now save what they change.

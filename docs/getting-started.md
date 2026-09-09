@@ -194,12 +194,19 @@ make install-shared     # creates /Users/Shared/Gropius, needs your password
 After that, whoever launches Gropius first runs the server; everyone else's
 menu-bar app just points at it. One copy on disk, one on the GPU.
 
-The models are what is shared, and only the models. Each account keeps its own
-settings and its own list of models in its own folder, so an API key or a
-HuggingFace token one account sets is never readable by another. The first time
-an account runs with the shared cache, its model list starts empty and is
-rebuilt from the models already in the shared folder — nothing is downloaded
-again, and nothing an account has set is visible to anyone else on the Mac.
+The shared folder holds the model files, the download cache they arrive
+through, and the server's own log files. Everything belonging to one account
+stays in that account's own `~/Library/Application Support/Gropius`: its
+settings (`config.json`, which holds the API key and the HuggingFace token),
+its list of models (`registry.json`), its request statistics, and the private
+Python runtime it starts model servers with. So an API key or a token one
+account sets is never readable by another.
+
+The first time an account runs with the shared cache, its list of models starts
+empty and is rebuilt from the models already in the shared folder — nothing is
+downloaded again. If that account had used the shared cache before this became
+the rule, the settings it kept in the shared folder are moved into its own on
+that first start, and are no longer readable by anyone else on the Mac.
 
 Request statistics stay with the account that runs the server: if that account
 has recording on, its records cover every request the server handled, from any

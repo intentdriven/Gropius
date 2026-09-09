@@ -14,13 +14,16 @@ import (
 // resolve to the account's own directory — the rule ExecRoot and StatsDir
 // already follow, for the same reason.
 func TestSharedModeStateIsPerAccount(t *testing.T) {
+	root := t.TempDir()
+	withSharedRoot(t, root)
+
 	homeA := t.TempDir()
 	t.Setenv("HOME", homeA)
-	a := NewPaths(SharedRoot)
+	a := NewPaths(root)
 
 	homeB := t.TempDir()
 	t.Setenv("HOME", homeB)
-	b := NewPaths(SharedRoot)
+	b := NewPaths(root)
 
 	for name, got := range map[string]string{"Config": a.Config, "State": a.State} {
 		if dir := filepath.Dir(got); dir != filepath.Join(homeA, "Library", "Application Support", "Gropius") {
@@ -31,8 +34,8 @@ func TestSharedModeStateIsPerAccount(t *testing.T) {
 		t.Errorf("two accounts share one state file: config %q, registry %q — every account must keep its own", a.Config, a.State)
 	}
 	// The models stay shared: that is what the shared root exists for.
-	if b.Models != filepath.Join(SharedRoot, "models") {
-		t.Errorf("Models = %q, want them to stay in the shared root", b.Models)
+	if a.Models != filepath.Join(root, "models") || b.Models != a.Models {
+		t.Errorf("Models = %q and %q, want one shared directory in the root", a.Models, b.Models)
 	}
 }
 
@@ -40,17 +43,17 @@ func TestSharedModeStateIsPerAccount(t *testing.T) {
 // settings and write its own after account A has run, and A's secrets must
 // never reach B.
 //
-// The shared root itself is the real one: nothing here writes to it, because
-// every state path this test touches resolves into the account's own temporary
-// home. The sticky-bit half of the fault — account B's os.Rename over a file
-// account A owns failing EPERM — cannot be reproduced in a unit test, which
-// runs under a single uid; what is reproduced is the layout rule that keeps the
-// two accounts off one file in the first place.
+// The sticky-bit half of the fault — account B's os.Rename over a file account
+// A owns failing EPERM — cannot be reproduced in a unit test, which runs under
+// a single uid; what is reproduced is the layout rule that keeps the two
+// accounts off one file in the first place.
 func TestTwoAccountsKeepTheirOwnSharedModeSettings(t *testing.T) {
+	root := t.TempDir()
+	withSharedRoot(t, root)
 	homeA, homeB := t.TempDir(), t.TempDir()
 
 	t.Setenv("HOME", homeA)
-	a := NewPaths(SharedRoot)
+	a := NewPaths(root)
 	alice := Default()
 	alice.APIKey = "key-belonging-to-the-first-account"
 	alice.Port = 12001
@@ -59,7 +62,7 @@ func TestTwoAccountsKeepTheirOwnSharedModeSettings(t *testing.T) {
 	}
 
 	t.Setenv("HOME", homeB)
-	b := NewPaths(SharedRoot)
+	b := NewPaths(root)
 	got, _, err := Load(b.Config)
 	if err != nil {
 		t.Fatalf("the second account could not load its settings after the first had run: %v", err)
@@ -77,7 +80,7 @@ func TestTwoAccountsKeepTheirOwnSharedModeSettings(t *testing.T) {
 	}
 
 	t.Setenv("HOME", homeA)
-	back, _, err := Load(NewPaths(SharedRoot).Config)
+	back, _, err := Load(NewPaths(root).Config)
 	if err != nil {
 		t.Fatalf("reload the first account's settings: %v", err)
 	}
@@ -136,24 +139,38 @@ func TestSingleUserLayoutIsUnchanged(t *testing.T) {
 	}
 }
 
-// EnsureDirs creates this account's own state directory, and closes it: it
-// holds the API key and the HuggingFace token, and under the shared root it is
-// the one directory that must never be readable by a co-tenant account.
-func TestEnsureDirsCreatesThisAccountsStateDirectoryClosed(t *testing.T) {
-	root := t.TempDir()
-	acct := filepath.Join(t.TempDir(), "Gropius")
-	p := NewPaths(root)
-	p.Config = filepath.Join(acct, "config.json")
-	p.State = filepath.Join(acct, "registry.json")
-	if err := p.EnsureDirs(); err != nil {
-		t.Fatalf("EnsureDirs: %v", err)
-	}
-	fi, err := os.Stat(acct)
-	if err != nil {
-		t.Fatalf("EnsureDirs did not create this account's state directory: %v", err)
-	}
-	if fi.Mode().Perm() != 0o700 {
-		t.Errorf("%s mode = %v, want 0700 — it holds this account's API key and token", acct, fi.Mode().Perm())
+// EnsureDirs creates this account's own state directory closed, and closes one
+// that is already open: it holds the API key and the HuggingFace token, and
+// under the shared root it is the one directory that must never be readable by
+// a co-tenant account. An account that ran a per-user install before joining a
+// shared cache already has that directory at 0755, which MkdirAll would leave
+// alone, so the mode is asserted rather than assumed.
+func TestEnsureDirsClosesThisAccountsStateDirectory(t *testing.T) {
+	for name, existing := range map[string]os.FileMode{"fresh": 0, "left over from a per-user install": 0o755} {
+		t.Run(name, func(t *testing.T) {
+			p, _, acct := sharedLayout(t)
+			if existing != 0 {
+				if err := os.MkdirAll(acct, existing); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Chmod(acct, existing); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := p.EnsureDirs(); err != nil {
+				t.Fatalf("EnsureDirs: %v", err)
+			}
+			fi, err := os.Stat(acct)
+			if err != nil {
+				t.Fatalf("EnsureDirs did not create this account's state directory: %v", err)
+			}
+			if fi.Mode().Perm() != 0o700 {
+				t.Errorf("%s mode = %v, want 0700 — it holds this account's API key and token", acct, fi.Mode().Perm())
+			}
+			if filepath.Dir(p.Config) != acct {
+				t.Errorf("config.json is at %q, want it in %q", p.Config, acct)
+			}
+		})
 	}
 }
 
@@ -162,11 +179,7 @@ func TestEnsureDirsCreatesThisAccountsStateDirectoryClosed(t *testing.T) {
 // else, so the first start after the change copies them into the account's own
 // directory rather than starting from the shipping defaults.
 func TestSharedRootSettingsAreAdoptedByTheAccountThatOwnsThem(t *testing.T) {
-	root := t.TempDir()
-	acct := filepath.Join(t.TempDir(), "Gropius")
-	p := NewPaths(root)
-	p.Config = filepath.Join(acct, "config.json")
-	p.State = filepath.Join(acct, "registry.json")
+	p, root, _ := sharedLayout(t)
 
 	legacy := Default()
 	legacy.APIKey = "the-key-this-account-set-before-the-upgrade"
@@ -192,11 +205,13 @@ func TestSharedRootSettingsAreAdoptedByTheAccountThatOwnsThem(t *testing.T) {
 	if fi, err := os.Stat(p.Config); err != nil || fi.Mode().Perm() != 0o600 {
 		t.Errorf("the adopted copy is %v (err=%v), want mode 0600", fi.Mode().Perm(), err)
 	}
-	// The original is left where it was. A downgrade to the previous build must
-	// still find these settings, and under a sticky shared root this account
-	// could not reliably remove the file anyway.
-	if _, err := os.Stat(filepath.Join(root, "config.json")); err != nil {
-		t.Errorf("the original settings file was not left in place: %v", err)
+	// The original is gone. The sticky bit stops OTHER accounts unlinking it,
+	// and adoption only ever runs for its owner, so leaving it would leave a
+	// copy of this account's API key and HuggingFace token sitting in a
+	// group-writable directory — and would put a superseded key back into
+	// service for anyone who later ran an older build.
+	if _, err := os.Stat(filepath.Join(root, "config.json")); !os.IsNotExist(err) {
+		t.Errorf("the settings were copied but left behind in the shared root (err=%v)", err)
 	}
 
 	// Adoption happens once. A later start must not overwrite what the account
@@ -223,11 +238,7 @@ func TestSharedRootSettingsAreAdoptedByTheAccountThatOwnsThem(t *testing.T) {
 // other state file uses: anything that is not a regular file is refused rather
 // than followed or blocked on.
 func TestSharedRootSettingsAdoptionRefusesAPlantedFile(t *testing.T) {
-	root := t.TempDir()
-	acct := filepath.Join(t.TempDir(), "Gropius")
-	p := NewPaths(root)
-	p.Config = filepath.Join(acct, "config.json")
-	p.State = filepath.Join(acct, "registry.json")
+	p, root, _ := sharedLayout(t)
 
 	elsewhere := filepath.Join(t.TempDir(), "elsewhere.json")
 	if err := Save(elsewhere, Default()); err != nil {

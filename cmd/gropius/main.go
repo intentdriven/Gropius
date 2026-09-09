@@ -85,11 +85,17 @@ func main() {
 	// operator's API key and token left behind. Nothing is adopted from another
 	// account, and a failure here is not fatal: it means this account starts
 	// from the defaults, which is what it would have done anyway.
-	if adopted, err := paths.AdoptSharedConfig(); err != nil {
-		log.Warn("could not read the settings this account left in the shared folder — starting from the shipping defaults",
-			"path", paths.Config, "err", err)
-	} else if adopted {
+	adopted, err := paths.AdoptSharedConfig()
+	if adopted {
 		log.Info("this account's settings now live in its own folder, not the shared one", "path", paths.Config)
+	}
+	if err != nil {
+		// Two failures, one line: the settings could not be read (this account
+		// starts from the shipping defaults, as it would have anyway), or they
+		// were copied and the original could not be removed — which leaves a
+		// superseded API key and HuggingFace token in the shared folder.
+		log.Warn("could not carry this account's settings out of the shared folder",
+			"path", paths.Config, "err", err)
 	}
 
 	start := loadStartupConfig(paths.Config)
