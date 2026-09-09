@@ -52,6 +52,19 @@ func acquireBind(plan bind.Plan, port int, wait time.Duration, holder func() por
 			return []net.Listener{ln}, plan, true, nil
 		}
 
+		// A name resolving to the address the loopback listener already holds
+		// is this Mac, not a contended port. internal/bind folds away the
+		// loopback spellings it can read, but a name is whatever the resolver
+		// says it is — an alias for 127.0.0.1 in a hosts file is an ordinary
+		// developer-machine state — and taking it for a peer meant colliding
+		// with our own socket, releasing loopback, probing a port nothing was
+		// listening on any more, and exiting: the iss-7 trap, reached from a
+		// new direction. Nothing is refused here, because nothing was: the
+		// operator asked for this Mac by name and this Mac is bound.
+		if resolvesTo(addrs[1], ln.Addr()) {
+			return []net.Listener{ln}, plan.WithoutExtra(""), true, nil
+		}
+
 		second, err := net.Listen("tcp", addrs[1])
 		if err == nil {
 			return []net.Listener{ln, second}, plan, true, nil
@@ -79,6 +92,17 @@ func acquireBind(plan bind.Plan, port int, wait time.Duration, holder func() por
 			time.Sleep(retry)
 		}
 	}
+}
+
+// resolvesTo reports whether a listen address names the address a listener
+// already holds. A value that will not resolve is not this listener's: the
+// listen below is where that is reported, with the resolver's own message.
+func resolvesTo(addr string, held net.Addr) bool {
+	a, err := net.ResolveTCPAddr("tcp", addr)
+	if err != nil {
+		return false
+	}
+	return a.String() == held.String()
 }
 
 // advertises reports whether this server announces itself over Bonjour.

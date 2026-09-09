@@ -554,8 +554,15 @@ function bindSelectBody(chosen, storedHost) {
 // transition touches the address.
 function privateBindLabel(bind) {
   const found = (bind && bind.candidates) || [];
+  // What the running mode bound comes first: the address a private network
+  // hands out can change under a running server, and the pane has to name the
+  // one being answered on rather than the one that matches now.
+  const bound = (bind && bind.selected) || '';
+  if (bound) return `A private network (${bound}) — and this Mac`;
   if (found.length === 1) return `A private network (${found[0]}) — and this Mac`;
-  if (found.length > 1) return `A private network — ${found.length} addresses match, so Gropius will not choose`;
+  // Named rather than counted: a refusal the operator can act on is one that
+  // says which addresses it would not choose between.
+  if (found.length > 1) return `A private network — ${found.join(', ')} all match, so Gropius will not choose`;
   return 'A private network — no matching address on this Mac';
 }
 

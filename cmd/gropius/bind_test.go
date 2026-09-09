@@ -303,3 +303,39 @@ func TestWhatGropiusAdvertisesItselfOn(t *testing.T) {
 		})
 	}
 }
+
+// A Host that is a NAME resolving to the address the loopback listener already
+// holds is this Mac, not a contended port.
+//
+// internal/bind folds away the loopback spellings it can read — the literal
+// address, and "localhost" and its variants — but a name is whatever the
+// resolver says it is, and a developer machine with an alias for 127.0.0.1 in
+// its hosts file is an ordinary state. Without this the process collided with
+// its own socket: EADDRINUSE on the second listener, loopback released, a probe
+// of a port nothing was listening on any more, five seconds of retries, and
+// exit 1 — no panel, no app, and the file to hand-edit, which is the iss-7
+// trap this whole record exists to close.
+//
+// "localhost" stands in for the alias: it resolves the same way, and a test
+// cannot edit the hosts file.
+func TestANameThatResolvesToLoopbackIsThisMacAndNotAContendedPort(t *testing.T) {
+	port := freePort(t)
+	start := time.Now()
+	lns, plan, claimed, err := acquireBind(bind.Plan{Loopback: "127.0.0.1", Extra: "localhost"}, port, 5*time.Second, func() portHolder { return holderNone })
+	if err != nil {
+		t.Fatalf("acquireBind failed on a name that resolves to loopback: %v — the app exits 1 on this path", err)
+	}
+	defer closeAll(lns)
+	if !claimed || len(lns) != 1 {
+		t.Fatalf("claimed=%v with %d listeners, want the one loopback listener", claimed, len(lns))
+	}
+	if !plan.LoopbackOnly() {
+		t.Errorf("plan = %+v, want this Mac only", plan)
+	}
+	if plan.Refusal != "" {
+		t.Errorf("Refusal = %q — nothing was refused: the operator asked for this Mac by name and got this Mac", plan.Refusal)
+	}
+	if el := time.Since(start); el > 2*time.Second {
+		t.Errorf("acquireBind took %s — it went round the contended-port path rather than recognising its own address", el)
+	}
+}

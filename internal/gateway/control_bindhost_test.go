@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"encoding/json"
 	"net/http"
 	"testing"
 
@@ -78,5 +79,25 @@ func TestSettingsCarriesTheBindModeWithoutDisturbingTheHost(t *testing.T) {
 	}
 	if got := a.Config(); got.BindMode != config.BindModeHost || got.Host != "192.0.2.5" {
 		t.Errorf("after switching the mode off: BindMode = %q, Host = %q — want the bind the operator had", got.BindMode, got.Host)
+	}
+}
+
+// A save answers "restart" for every field that is consumed at startup, and
+// the bind is now two of them. A mode-only save that answered false told an
+// API client the bind had changed when the listeners had not moved.
+func TestABindModeSaveSaysARestartIsNeeded(t *testing.T) {
+	cfg := config.Default()
+	srv, _ := newTestControlApp(t, cfg)
+
+	resp := postJSON(t, srv, "/api/settings", `{"host":"0.0.0.0","bind_mode":"private-network","port":11535,"api_key":"a-key","decode_concurrency":4,"idle_timeout_sec":0}`)
+	defer resp.Body.Close()
+	var body struct {
+		Restart bool `json:"restart"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if !body.Restart {
+		t.Error("restart = false after a save that changed only the bind mode — the addresses are taken at startup, so nothing about the bind changed yet")
 	}
 }

@@ -278,11 +278,14 @@ func (c *Control) snapshot() State {
 		ResidentBytes:   resident,
 		OverBudget:      resident > budget,
 	}
-	// Not on a bind that narrowed to this Mac. The warning is about who can
-	// reach the server, and nobody off this Mac can: it softens on the sockets
-	// this process holds, which is state Gropius owns end to end, and never on
-	// an inference about another process (adr-2609081118587999 rule 4).
-	if cfg.ExposedToLAN() && cfg.APIKey == "" && !c.App.Bind().LoopbackOnly() {
+	// Asked of the sockets, not of the stored configuration. The endpoint list
+	// beside this warning is derived from what was acquired, and the two have
+	// to read the same source: a bind saved and not yet in force would
+	// otherwise silence the warning while the list went on handing out the LAN
+	// addresses the process is still answering on. It softens only on state
+	// Gropius owns end to end, and never on an inference about another process
+	// (adr-2609081118587999 rule 4).
+	if c.App.Bind().ReachesOtherMachines() && cfg.APIKey == "" {
 		st.Warnings = append(st.Warnings,
 			"This server is reachable by anyone on your network and requires no API key. Set one in Settings to restrict access.")
 	}
@@ -625,7 +628,11 @@ type BindState struct {
 // requirement, no admission, no warning's firing condition reads any of it.
 func bindState(cfg config.Config, plan bind.Plan) BindState {
 	st := BindState{Mode: cfg.BindMode, Refusal: plan.Refusal, Candidates: private.Candidates()}
-	if cfg.BindMode == config.BindModePrivateNetwork {
+	// From the plan's mode and not the configuration's. The pane shows the
+	// mode that is CHOSEN, which is the configuration's; a selection is what
+	// the mode that is RUNNING made, and a bind mode saved and not yet in force
+	// has selected nothing at all.
+	if plan.Mode == config.BindModePrivateNetwork {
 		st.Selected = plan.Extra
 	}
 	return st
@@ -1095,11 +1102,12 @@ func (c *Control) handleSetSettings(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	// Host and port bind the server, decode concurrency and idle timeout are
-	// pool options — all four are consumed only at startup, and SetConfig
-	// cannot apply them live.
+	// Host, the bind mode and the port bind the server; decode concurrency and
+	// idle timeout are pool options — all five are consumed only at startup,
+	// and SetConfig cannot apply them live.
 	restart := incoming.Port != current.Port ||
 		incoming.Host != current.Host ||
+		incoming.BindMode != current.BindMode ||
 		incoming.DecodeConcurrency != current.DecodeConcurrency ||
 		incoming.IdleTimeoutSec != current.IdleTimeoutSec
 	out := map[string]any{

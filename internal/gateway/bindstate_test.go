@@ -122,3 +122,47 @@ func containsSubstring(list []string, want string) bool {
 	}
 	return false
 }
+
+// The warning and the endpoint list beside it must read the same source, and
+// that source is the sockets this process holds.
+//
+// The gap is reachable without a restart: the operator clears the API key and
+// switches the bind to this Mac, the stored configuration goes quiet, and the
+// listeners do not move — so the panel would go on handing out LAN URLs for an
+// unauthenticated server with nothing said about it. What is bound is what
+// decides, in both places.
+func TestTheKeylessWarningFollowsTheSocketsAndNotTheStoredBind(t *testing.T) {
+	stubIfaces(t, testIface("lo0", "127.0.0.1"), testIface("en0", "192.0.2.5"))
+	cfg := config.Default()
+	cfg.Host = "127.0.0.1" // saved, and not yet in force
+	cfg.APIKey = ""
+
+	ctrl := newTestControlAppWithBind(t, cfg, bind.ForHost("0.0.0.0"))
+	st := ctrl.snapshot()
+	if !containsSubstring(warningsOf(st), "reachable by anyone on your network") {
+		t.Errorf("warnings = %v — the process is still bound to the wildcard, and the list beside this says so", warningsOf(st))
+	}
+	if len(st.Endpoints) < 2 {
+		t.Fatalf("endpoints = %v — this test is only meaningful while the list offers a LAN address", urls(st.Endpoints))
+	}
+}
+
+// BindState says what the RUNNING bind is, so the mode that produced the plan
+// has to come from the plan. Reading it from the live configuration let a
+// wildcard bind be reported as the private-network mode's selection —
+// "the mode selected 0.0.0.0" — on the surface the amendment's second
+// condition rests on, and a hand-edited file or a save is enough to reach it.
+func TestASelectionIsOnlyEverReportedForTheModeThatProducedIt(t *testing.T) {
+	stubIfaces(t, testIface("lo0", "127.0.0.1"), testIface("utun4", "100.101.102.103"))
+	cfg := config.Default()
+	cfg.Host = "0.0.0.0"
+	cfg.BindMode = config.BindModePrivateNetwork // saved, and not yet in force
+
+	got := bindState(cfg, bind.ForHost("0.0.0.0"))
+	if got.Selected != "" {
+		t.Errorf("Selected = %q — the running bind came from the Host field, so the mode selected nothing", got.Selected)
+	}
+	if got.Mode != config.BindModePrivateNetwork {
+		t.Errorf("Mode = %q, want the mode the pane has to show as chosen", got.Mode)
+	}
+}

@@ -45,6 +45,16 @@ type Plan struct {
 	// wider bind. Empty when nothing was refused, which includes a bind the
 	// operator asked to be loopback-only.
 	Refusal string
+	// Mode is the bind mode that produced this plan: config.BindModeHost for a
+	// plan built from the Host field, config.BindModePrivateNetwork for one the
+	// private-network mode resolved.
+	//
+	// It travels with the plan because the plan is what the process is running
+	// and the configuration is what is stored, and the two diverge the moment a
+	// save changes the mode: reading the mode from the configuration reported a
+	// wildcard bind as the private-network mode's selection, on the surface
+	// that selection has to be checkable from.
+	Mode string
 	// Candidates is every address the private-network mode found carrying the
 	// shape it looks for. It is reported whether the mode selected one or
 	// refused to choose between several, because the selection is always
@@ -68,7 +78,7 @@ type Plan struct {
 // the configuration did not come through Load, and the closed answer is to
 // serve this Mac and say why.
 func ForHost(host string) Plan {
-	p := Plan{Loopback: LoopbackAddr}
+	p := Plan{Loopback: LoopbackAddr, Mode: config.BindModeHost}
 	bare, ok := bareHost(host)
 	switch {
 	case !ok:
@@ -90,7 +100,7 @@ func ForHost(host string) Plan {
 // wider set. Candidates travel either way: a selection has to be shown to be
 // checked, and a refusal has to name what it refused to choose between.
 func Private(selected string, candidates []string, refusal string) Plan {
-	p := Plan{Loopback: LoopbackAddr, Candidates: candidates}
+	p := Plan{Loopback: LoopbackAddr, Mode: config.BindModePrivateNetwork, Candidates: candidates}
 	if selected == "" {
 		p.Refusal = refusal
 		return p
@@ -111,6 +121,23 @@ func (p Plan) WithoutExtra(reason string) Plan {
 	p.Extra = ""
 	p.Refusal = reason
 	return p
+}
+
+// ReachesOtherMachines reports whether this bind answers anywhere a machine
+// other than this one can connect to.
+//
+// It is a question about the sockets, so it is asked of the plan and never of
+// the stored configuration: the two diverge as soon as a bind is saved and not
+// yet in force, and everything that tells an operator how open their server is
+// has to answer from what is actually bound. The loopback listener is this Mac
+// by definition, and the second address is measured with the same
+// spelling-aware test the configuration uses, so "::1" and "127.0.0.53" are
+// this Mac too.
+func (p Plan) ReachesOtherMachines() bool {
+	if p.Extra == "" {
+		return false
+	}
+	return config.Config{Host: p.Extra}.ExposedToLAN()
 }
 
 // LoopbackOnly reports whether this plan serves this Mac and nothing else.

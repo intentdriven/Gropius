@@ -85,9 +85,18 @@ func TestThePrivateChoiceIsOfferedOnlyWhereThereIsAnAddressToChoose(t *testing.T
 			wantInText: "no",
 		},
 		{
-			name:       "several match: offered, and says it will not choose",
+			name:       "several match: offered, and names them rather than counting them",
 			bind:       `{"mode":"","candidates":["100.101.102.103","100.64.7.7"]}`,
-			wantInText: "2",
+			wantInText: "100.64.7.7",
+		},
+		{
+			// What the running mode bound, not what it would bind now. The
+			// address a private network hands out changes, and the pane has to
+			// name the one the server is answering on — which is the whole of
+			// the amendment's second condition.
+			name:       "the mode is running: the address it bound, not the one that matches now",
+			bind:       `{"mode":"private-network","selected":"100.101.102.103","candidates":["100.64.7.7"]}`,
+			wantInText: "100.101.102.103",
 		},
 	}
 	for _, c := range cases {
