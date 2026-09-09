@@ -513,7 +513,14 @@ func (g *Gateway) handleCompletions(w http.ResponseWriter, r *http.Request) {
 			// file locations, the venv interpreter path, os.PathError from the
 			// child process) rooted under the serving account's home directory.
 			// Log it server-side; the network response stays generic.
-			g.log.Error("model launch failed", "model", model, "err", err)
+			//
+			// Two lines, because the log is a file now and not only a terminal
+			// nobody is watching. That a model would not start is the event,
+			// and it is sparse; what the child process said is the figure, and
+			// it goes to the detailed level with the rest of them — an
+			// operator who has turned detailed on has asked for the paths.
+			g.log.Error("model launch failed", "model", model)
+			g.log.Debug("model launch failed", "model", model, "err", err)
 			writeError(w, http.StatusServiceUnavailable, "the model could not be started")
 			return
 		}
