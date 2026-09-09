@@ -326,6 +326,82 @@ func TestEnsureDirsRefusesSymlinkedLayoutDirUnderSetgidRoot(t *testing.T) {
 	}
 }
 
+// sharedLayout is the layout NewPaths produces under the real shared root: a
+// setgid data root holding what every account shares, and this account's own
+// directory holding what it does not. It is built by hand because the shared
+// root is one fixed path that a test may not write to.
+func sharedLayout(t *testing.T) (Paths, string, string) {
+	t.Helper()
+	root := t.TempDir()
+	if err := os.Chmod(root, 0o775|os.ModeSetgid|os.ModeSticky); err != nil {
+		t.Fatal(err)
+	}
+	acct := t.TempDir() // stands in for this account's Application Support directory
+	p := NewPaths(root)
+	p.Bin = filepath.Join(acct, "bin")
+	p.Venv = filepath.Join(acct, "venv")
+	p.Python = filepath.Join(acct, "python")
+	p.Config = filepath.Join(acct, "config.json")
+	p.State = filepath.Join(acct, "registry.json")
+	p.Stats = filepath.Join(acct, "stats")
+	return p, root, acct
+}
+
+// The layout under a shared cache straddles two directories: what every account
+// shares sits in the setgid root, and this account's executables, settings and
+// registry sit in its own directory, which is outside it. EnsureDirs has to
+// create both. It used to refuse the whole layout on the first entry that was
+// not under the root — so with the executables moved out, a Mac with a shared
+// cache installed could not start Gropius at all.
+func TestEnsureDirsUnderASharedRootCreatesThisAccountsOwnDirectories(t *testing.T) {
+	p, root, acct := sharedLayout(t)
+	if err := p.EnsureDirs(); err != nil {
+		t.Fatalf("EnsureDirs refused the layout a shared cache actually produces: %v", err)
+	}
+	for _, d := range []string{p.Bin, p.Venv, p.Python} {
+		if fi, err := os.Stat(d); err != nil || !fi.IsDir() {
+			t.Errorf("expected %s to exist (err=%v)", d, err)
+		}
+		if !strings.HasPrefix(d, acct) {
+			t.Errorf("%s should be in this account's own directory", d)
+		}
+	}
+	// The shared half is unchanged: still widened to match the installer's mode,
+	// so the next account can write what this one created.
+	for _, d := range []string{p.Models, filepath.Dir(p.HFCache), p.HFCache, p.Logs} {
+		fi, err := os.Stat(d)
+		if err != nil {
+			t.Fatalf("stat %s: %v", d, err)
+		}
+		if fi.Mode()&0o020 == 0 || fi.Mode()&os.ModeSetgid == 0 || fi.Mode()&os.ModeSticky == 0 {
+			t.Errorf("%s mode = %v, want group-writable setgid sticky", d, fi.Mode())
+		}
+		if !strings.HasPrefix(d, root) {
+			t.Errorf("%s should stay in the shared root", d)
+		}
+	}
+	// Executables are never widened, wherever they live.
+	if fi, err := os.Stat(p.Bin); err != nil || fi.Mode()&0o020 != 0 {
+		t.Errorf("bin mode = %v (err=%v), must not be group-writable", fi.Mode(), err)
+	}
+}
+
+// A shared data directory that is not under the shared root is a layout nobody
+// can have meant: models, the HuggingFace cache and the logs are what the root
+// exists to hold, and one resolved outside it would be widened to
+// group-writable somewhere no co-tenant was ever meant to reach. The refusal
+// that used to cover every entry is kept for exactly these.
+func TestEnsureDirsRefusesASharedDataDirOutsideTheRoot(t *testing.T) {
+	p, _, acct := sharedLayout(t)
+	p.Models = filepath.Join(acct, "models")
+	if err := p.EnsureDirs(); err == nil {
+		t.Fatal("EnsureDirs accepted a shared data directory outside the shared root")
+	}
+	if _, err := os.Stat(p.Models); !os.IsNotExist(err) {
+		t.Errorf("the refused directory was created anyway (err=%v)", err)
+	}
+}
+
 // /Users/Shared is world-writable on stock macOS, so any unprivileged account
 // can pre-create the shared root and own every other account's data. Only a
 // directory the installer's `sudo mkdir` produced — root-owned and not
