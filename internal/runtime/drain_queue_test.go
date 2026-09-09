@@ -351,9 +351,12 @@ func TestAServerThatWillNotDieIsReportedAsStuck(t *testing.T) {
 		r := p.Residency()
 		return r.StuckServers == 0 && r.ExitingBytes == 0
 	})
-	if got := logged.String(); !strings.Contains(got, "has now exited") {
-		t.Errorf("the late exit was not reported: %q", got)
-	}
+	// Waited for rather than read once: the credit happens under p.mu and the
+	// line is written after it is released, so a reader that has just seen the
+	// tally fall can be ahead of the log by a few instructions.
+	waitFor(t, "the late exit to be reported", func() bool {
+		return strings.Contains(logged.String(), "has now exited")
+	})
 }
 
 // Shutting down while such a server is still there names it in the log: it

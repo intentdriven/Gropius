@@ -225,7 +225,7 @@ func TestAModelBeingDeletedCannotBeResolvedForALoad(t *testing.T) {
 		m, err := a.Registry.Get("org/repo")
 		return err == nil && m.Ready()
 	})
-	if _, _, err := src.Resolve("org/repo"); err != nil {
+	if _, err := src.Resolve("org/repo"); err != nil {
 		t.Fatalf("a ready model must be resolvable: %v", err)
 	}
 
@@ -241,7 +241,7 @@ func TestAModelBeingDeletedCannotBeResolvedForALoad(t *testing.T) {
 		// Asserted whether or not the window was reached. Inside it this is the
 		// guard doing its work; past it the model is simply gone, and either way
 		// nothing may resolve it for a load.
-		if _, _, err := src.Resolve("org/repo"); err == nil {
+		if _, err := src.Resolve("org/repo"); err == nil {
 			t.Error("a model whose files are being removed was resolved for a load")
 		}
 		if err := <-deleted; err != nil {
@@ -321,7 +321,7 @@ func TestAFinishingDownloadDoesNotHoldUpALoadOfAnotherModel(t *testing.T) {
 	// under dlMu, this load would be behind it.
 	loaded := make(chan error, 1)
 	go func() {
-		_, _, err := src.Resolve("org/other")
+		_, err := src.Resolve("org/other")
 		loaded <- err
 	}()
 	select {

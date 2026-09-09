@@ -52,7 +52,9 @@ type sizedSource struct {
 	size int64
 }
 
-func (s sizedSource) Resolve(string) (string, int64, error) { return s.path, s.size, nil }
+func (s sizedSource) Resolve(string) (runtime.ResolvedModel, error) {
+	return runtime.ResolvedModel{Path: s.path, Bytes: s.size}, nil
+}
 
 // Memory held by a model server that was stopped and would not go is memory the
 // pool will not hand out, and it belongs to no model in the list — so a panel

@@ -411,6 +411,16 @@
     </fieldset>
 
     <fieldset class="group">
+      <legend>Served context</legend>
+      <p class="hint">The context window Gropius serves each model at, in tokens. Leave a
+        field blank to serve the window the model itself declares. A request whose prompt
+        and answer are estimated to be larger is refused, and the memory budget charges
+        the cache this window costs — so lowering it is how a long-context model is made
+        to fit a Mac that will not hold it at its full window.</p>
+      <div id="contextList"></div>
+    </fieldset>
+
+    <fieldset class="group">
       <legend>Pinned models</legend>
       <p class="hint">A pinned model stays in memory: Gropius never unloads it to make
         room for another, and the idle timeout above does not touch it. A request for a

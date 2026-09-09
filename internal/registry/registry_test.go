@@ -1145,15 +1145,15 @@ func TestOpenDropsAnImplausibleStoredContextLength(t *testing.T) {
 // The registry owns the only decoder of a model's config.json, so the app
 // layer's download paths read the figure through this one primitive rather
 // than a second copy of the key rule.
-func TestReadContextLengthReadsAModelDirectory(t *testing.T) {
+func TestReadModelFactsReadsAModelDirectory(t *testing.T) {
 	dir := t.TempDir()
 	md := writeModelDirWithConfig(t, dir, "org", "m",
 		`{"model_type":"t","max_position_embeddings":131072}`, 8)
-	if got := ReadContextLength(md); got != 131072 {
-		t.Errorf("ReadContextLength = %d, want 131072", got)
+	if got := ReadModelFacts(md).ContextLength; got != 131072 {
+		t.Errorf("ContextLength = %d, want 131072", got)
 	}
-	if got := ReadContextLength(filepath.Join(dir, "org", "absent")); got != 0 {
-		t.Errorf("ReadContextLength of a missing directory = %d, want 0", got)
+	if got := ReadModelFacts(filepath.Join(dir, "org", "absent")).ContextLength; got != 0 {
+		t.Errorf("ContextLength of a missing directory = %d, want 0", got)
 	}
 }
 

@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net/http"
 	"os"
 	"strconv"
@@ -19,6 +20,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/intentdriven/Gropius/internal/capability"
 	"github.com/intentdriven/Gropius/internal/config"
 	"github.com/intentdriven/Gropius/internal/registry"
 	"github.com/intentdriven/Gropius/internal/runtime"
@@ -320,6 +322,7 @@ func (g *Gateway) handleHealth(w http.ResponseWriter, r *http.Request) {
 // enumerates the HuggingFace cache directory rather than the loaded model (and
 // throws CacheNotFound when that directory is absent).
 func (g *Gateway) handleListModels(w http.ResponseWriter, r *http.Request) {
+	cfg := g.cfg()
 	ready := g.models.Ready()
 	// Residency is reported to a client the install has admitted on its key,
 	// and to any client on this machine. The three-state value is not itself a
@@ -404,6 +407,14 @@ func (g *Gateway) handleListModels(w http.ResponseWriter, r *http.Request) {
 		if m.ContextLength > 0 && m.ContextLength <= registry.MaxContextLength {
 			entry["context_length"] = m.ContextLength
 			entry["max_model_len"] = m.ContextLength
+		}
+		// And the window this Mac will actually serve, which is the figure a
+		// client should size its prompts to: the operator's setting, or the
+		// declared window when they have set none. A request estimated above
+		// it is refused, so publishing it is what lets a client stay inside
+		// the limit rather than discover it.
+		if served := cfg.ServedContext(m.RepoID, m.ContextLength); served > 0 {
+			entry["served_context"] = served
 		}
 		// What HuggingFace says this model is, in HuggingFace's own words, and
 		// what this server makes of them. The two tag fields are absent when
@@ -580,6 +591,17 @@ func (g *Gateway) handleCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	obs.resolved(model)
 	obs.streaming(streamRequested(payload))
+
+	// Refused before the pool is asked for anything. A request larger than the
+	// window this model is served at cannot be served whatever happens next,
+	// and acquiring first would load a model — evicting another to do it — for
+	// a request that is about to be turned away. Streaming and non-streaming
+	// take this line together, because the stream is not opened until below.
+	if msg := g.overServedContext(cfg, model, len(raw), payload); msg != "" {
+		obs.failed(stats.ClassClientError)
+		writeError(w, http.StatusBadRequest, msg)
+		return
+	}
 
 	up, release, err := g.pool.Acquire(r.Context(), model)
 	if err != nil {
@@ -1318,6 +1340,130 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 	})
 }
 
+// overServedContext reports why a request cannot be served at this model's
+// window, or "" when it can be.
+//
+// The size is estimated from the encoded request body rather than counted:
+// tokenising every request on the gateway's hot path would cost more than the
+// check is worth, and the estimator is the one prefillBudget already sizes its
+// deadline with. On English text it over-counts, because the whole body is
+// measured and every byte of JSON syntax and role name counts towards the
+// estimate, so a request close to the window can be refused when an exact
+// count would have let it through.
+//
+// It under-counts on text whose tokens are shorter in bytes than four —
+// densely packed CJK is about three — so such a prompt can be about a third
+// larger than the window and still pass. What that costs is bounded and
+// accounted for rather than caught later: the body is capped at
+// maxRequestBody, so the overshoot is bounded by the same fraction, and the
+// memory budget charges five to seven times the cache the configuration
+// implies, which is far more than a third of headroom. There is no backstop
+// underneath this: mlx-lm was measured accepting an abandoned 256K prompt
+// until the machine swapped, so nothing rejects an over-long prompt if this
+// does not.
+//
+// max_tokens counts against the same window because generated tokens are
+// written into the same cache. A model that declares no window and has been
+// given no setting has nothing to enforce, and nothing is refused for it.
+func (g *Gateway) overServedContext(cfg config.Config, model string, bodyBytes int, payload map[string]json.RawMessage) string {
+	var declared int64
+	if m, err := g.models.Get(model); err == nil {
+		declared = m.ContextLength
+	}
+	window := cfg.ServedContext(model, declared)
+	if window <= 0 {
+		return ""
+	}
+	// Saturating, because both terms are the client's to choose: a max_tokens
+	// of the largest integer there is made this sum negative, and a negative
+	// estimate is under every window.
+	estimate := capability.AddSaturating(int64(estimatedTokens(bodyBytes)), requestedMaxTokens(payload))
+	if estimate <= window {
+		return ""
+	}
+	return fmt.Sprintf(
+		"this request is about %s tokens, more than the %s this model is served at. "+
+			"Send a shorter prompt or a smaller max_tokens, or raise this model's served context in Settings.",
+		humanCount(estimate), humanCount(window))
+}
+
+// requestedMaxTokens is the answer length the request asked for, or 0 when it
+// asked for none. Both spellings are read: max_tokens is what most clients
+// send and what mlx-lm reads, max_completion_tokens what newer OpenAI clients
+// send, and a request carrying both is measured by the larger.
+//
+// Read as a JSON number rather than as an integer. JSON has one number type,
+// so 1e9 and 1000.0 ask for exactly what 1000000000 and 1000 ask for; decoded
+// into an int64 they fail to parse, and a value that failed to parse was
+// silently taken as no answer at all — which is how a request asking for a
+// billion tokens of answer got past a thousand-token window.
+func requestedMaxTokens(payload map[string]json.RawMessage) int64 {
+	var most int64
+	for _, key := range []string{"max_tokens", "max_completion_tokens"} {
+		raw, ok := payload[key]
+		if !ok {
+			continue
+		}
+		if n := asTokenCount(raw); n > most {
+			most = n
+		}
+	}
+	return most
+}
+
+// asTokenCount reads one JSON number as a token count: an integer, a float, or
+// a figure larger than any int64, which saturates rather than becoming
+// whatever the conversion happens to produce. Anything that is not a number —
+// a string, null, an object — is 0, which is the request asking for nothing in
+// particular and is what the model server will read too.
+func asTokenCount(raw json.RawMessage) int64 {
+	var n json.Number
+	if err := json.Unmarshal(raw, &n); err != nil {
+		return 0
+	}
+	if i, err := n.Int64(); err == nil {
+		return i
+	}
+	f, err := n.Float64()
+	if err != nil || f <= 0 {
+		return 0
+	}
+	if f >= math.MaxInt64 {
+		return math.MaxInt64
+	}
+	return int64(f)
+}
+
+// humanCount renders a token count with thousands separators, because these
+// two figures are read side by side by a person deciding what to send.
+func humanCount(n int64) string {
+	s := strconv.FormatInt(n, 10)
+	if len(s) <= 3 {
+		return s
+	}
+	var b strings.Builder
+	lead := len(s) % 3
+	if lead > 0 {
+		b.WriteString(s[:lead])
+	}
+	for i := lead; i < len(s); i += 3 {
+		if b.Len() > 0 {
+			b.WriteByte(',')
+		}
+		b.WriteString(s[i : i+3])
+	}
+	return b.String()
+}
+
+// estimatedTokens is how many tokens a request body of this size is taken to
+// be, at four bytes per token — the usual ballpark for English text, and
+// deliberately crude. One estimator, because the deadline a request is given
+// and the window it is measured against must not disagree about how big it is.
+func estimatedTokens(bodyBytes int) int {
+	const bytesPerToken = 4
+	return bodyBytes / bytesPerToken
+}
+
 // prefillBudget returns how long to wait for a model server to return response
 // headers for a request whose encoded body is bodyBytes long.
 //
@@ -1346,11 +1492,10 @@ func prefillBudget(bodyBytes, overrideSec int) time.Duration {
 	}
 	const (
 		base            = 10 * time.Minute
-		bytesPerToken   = 4
 		tokensPerSecond = 150
 		fixedOverhead   = time.Minute
 	)
-	tokens := bodyBytes / bytesPerToken
+	tokens := estimatedTokens(bodyBytes)
 	derived := time.Duration(tokens/tokensPerSecond)*time.Second + fixedOverhead
 	if derived < base {
 		return base
