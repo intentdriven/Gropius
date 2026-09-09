@@ -665,8 +665,16 @@ func (p *Pool) acquire(ctx context.Context, repoID string, mayWait bool) (*Upstr
 		timer.Stop()
 		p.mu.Lock()
 	}
+	// served records what a queued load is about to be told, for the log line
+	// below: how old the waiter was at the moment it got room, against the two
+	// figures that bound it. A waiter served at its grace and one served at its
+	// maximum are the same success to the client and the opposite outcomes to
+	// this queue's fairness rule, and nothing else on this path tells them
+	// apart (iss-2609081516178867).
+	var servedGrace, servedMax time.Duration
 	if w != nil {
 		waited = p.waitedBy(w)
+		servedGrace, servedMax = p.grace, p.maxWait
 		p.leaveQueueLocked(w)
 	}
 	// Refuse once the backlog for this model is already at its ceiling. Every
@@ -692,6 +700,13 @@ func (p *Pool) acquire(ctx context.Context, repoID string, mayWait bool) (*Upstr
 	// free model as cold whenever another goroutine happened to hold the lock.
 	entered := p.opts.now()
 	p.mu.Unlock()
+
+	// Written off the lock, like the refusal above and for the same reason: a
+	// slow log sink must not stall every other caller of the pool's one lock.
+	if w != nil {
+		p.opts.Log.Debug("a queued model load got room",
+			"model", repoID, "waited", waited, "grace", servedGrace, "max_wait", servedMax)
+	}
 
 	release := func() {
 		p.mu.Lock()
@@ -1233,6 +1248,18 @@ func (p *Pool) waitedBy(w *loadWaiter) time.Duration {
 // passage of time: the waiter's own age reaching the grace, the oldest
 // protected candidate's grace running out, and the maximum wait expiring. The
 // floor keeps a stopped clock from spinning.
+//
+// A signal is not what this is for, though — it is the backstop for a change
+// that nothing signals, so no term of it may rest on one arriving. That is why
+// a model with a request in flight, or one still loading, bounds the delay by
+// the grace rather than dropping out of it: those states end when a request or
+// a load ends, which is an event and not a moment this function can compute, so
+// there is no deadline to sleep to and skipping them left the fallback — the
+// whole maximum wait — as the answer. A waiter already past its own grace,
+// behind a single busy candidate, then parked for twenty seconds on a state
+// that lasts as long as one request (iss-2609081516178867). Re-checking at the
+// grace is the cadence the rest of this function already runs at and costs a
+// parked waiter one locked look per grace, not a spin.
 func (p *Pool) wakeDelayLocked(w *loadWaiter) time.Duration {
 	waited := time.Since(w.arrived)
 	delay := p.maxWait - waited
@@ -1241,7 +1268,16 @@ func (p *Pool) wakeDelayLocked(w *loadWaiter) time.Duration {
 	}
 	now := p.opts.now()
 	for _, e := range p.entries {
-		if e.inFlight > 0 || !isReady(e) || p.isPinnedLocked(e.repoID) {
+		// A pinned model is not a candidate however long anyone waits, so it
+		// bounds nothing. Checked first, ahead of the transient states below,
+		// because those are transient only for a model that could be taken.
+		if p.isPinnedLocked(e.repoID) {
+			continue
+		}
+		if e.inFlight > 0 || !isReady(e) {
+			if p.grace < delay {
+				delay = p.grace
+			}
 			continue
 		}
 		if left := p.grace - now.Sub(e.lastUsed); left > 0 && left < delay {

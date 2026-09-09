@@ -159,56 +159,170 @@ func TestARequestIsServedOnceTheProtectedModelFallsPastItsGrace(t *testing.T) {
 func TestATrickleOfRequestsCannotStarveAWaitingRequest(t *testing.T) {
 	l := newFakeLauncher()
 	grace := 300 * time.Millisecond
+	maxWait := 20 * time.Second
 	p := newTestPool(t, l, graceModels(), PoolOptions{
 		MaxResidentBytes: graceBudget,
 		EvictionGrace:    grace,
-		MaxEvictionWait:  20 * time.Second,
+		MaxEvictionWait:  maxWait,
 	})
 
 	warm(t, p, "org/a")
 
-	stop := make(chan struct{})
+	// The trickle is stopped by cancelling its own context, not only by a
+	// channel it reads between requests. Its loop is sequential and its Acquire
+	// blocks, so a stop the blocked call cannot see does not stop it — and by
+	// the time this test asks it to finish, the trickle's request for org/a is
+	// a request for room that org/b holds in flight, which is a wait no signal
+	// can shorten. This test then waited out the whole maximum wait for a
+	// goroutine it had already asked to stop (iss-2609081020327017).
+	trickleCtx, stopTrickle := context.WithCancel(context.Background())
+	defer stopTrickle()
+
+	// The three probes a future failure is read with: how old the waiter was
+	// when it was served, when the trickle last actually got the model, and how
+	// the trickle ended. Without the second, "the clause lost" and "the premise
+	// collapsed and the clause was never tested" are the same line.
+	var probeMu sync.Mutex
+	var lastAcquired time.Time
+	var trickleErr error
+
 	trickled := make(chan struct{})
 	go func() {
 		defer close(trickled)
 		for {
 			select {
-			case <-stop:
+			case <-trickleCtx.Done():
 				return
 			case <-time.After(40 * time.Millisecond):
 			}
 			// Keep asking for the resident model, which is what renews its own
 			// idleness clock. Once it has been evicted the acquire fails or
 			// reloads it; either way the starving waiter has been served.
-			if _, release, err := p.Acquire(context.Background(), "org/a"); err == nil {
-				release()
+			_, release, err := p.Acquire(trickleCtx, "org/a")
+			probeMu.Lock()
+			if err == nil {
+				lastAcquired = time.Now()
 			} else {
+				trickleErr = err
+			}
+			probeMu.Unlock()
+			if err != nil {
 				return
 			}
+			release()
 		}
 	}()
 
 	start := time.Now()
 	up, release, err := p.Acquire(context.Background(), "org/b")
-	close(stop)
+	// Read before the shutdown handshake below, not after it: this is the
+	// waiter's service time, and waiting for the trickle to wind up is not part
+	// of it.
+	took := time.Since(start)
+	stopTrickle()
 	<-trickled
 	if err != nil {
 		t.Fatalf("Acquire(org/b) was starved by a trickle of requests to another model: %v", err)
 	}
 	release()
 
-	took := time.Since(start)
+	probeMu.Lock()
+	lastOK, why := lastAcquired, trickleErr
+	probeMu.Unlock()
+	probes := func() string {
+		last := "never — the trickle got the model no time at all"
+		if !lastOK.IsZero() {
+			last = fmt.Sprintf("%s into the wait", lastOK.Sub(start))
+		}
+		ended := "still running when the wait ended"
+		if why != nil {
+			ended = why.Error()
+		}
+		return fmt.Sprintf("waiter age at service %s (grace %s, maximum wait %s); "+
+			"the trickle's last successful acquire: %s; the trickle ended with: %s",
+			took, grace, maxWait, last, ended)
+	}
+
+	if lastOK.IsZero() {
+		t.Errorf("the trickle never once got org/a, so nothing was competing with the waiter and this test measured something other than its name: %s", probes())
+	}
 	if took < grace/2 {
-		t.Errorf("the waiter was served after %s, before its own age passed the grace", took)
+		t.Errorf("the waiter was served after %s, before its own age passed the grace: %s", took, probes())
 	}
 	// Bounded by its own age passing the grace, not by the maximum wait. The
-	// margin is wide because the bound this holds is "far short of the
-	// maximum", and a tight one would be a timing flake rather than a fact.
+	// margin stays wide on purpose: the property is "far short of the maximum",
+	// and 5s is a twenty-fifth of that maximum while being far more than the
+	// 300ms grace plus a fake launcher's load — so a slow runner cannot fail it
+	// and a waiter parked to the maximum cannot pass it. Tightening it towards
+	// the grace would trade a fact for a timing flake.
 	if took > 5*time.Second {
-		t.Errorf("the waiter took %s to be served, want it bounded by its own age passing the grace", took)
+		t.Errorf("the waiter took %s to be served, want it bounded by its own age passing the grace: %s", took, probes())
 	}
 	if up.Waits.QueueWait < grace/2 {
-		t.Errorf("Waits.QueueWait = %s, want the wait it paid", up.Waits.QueueWait)
+		t.Errorf("Waits.QueueWait = %s, want the wait it paid: %s", up.Waits.QueueWait, probes())
+	}
+}
+
+// Criterion 4, taken from the pool's own arithmetic instead of from the clock:
+// a waiter that is already past its grace must not park for the whole maximum
+// wait merely because the one model it could evict has a request in flight at
+// the instant it looks.
+//
+// wakeDelayLocked exists as the backstop for a change that nothing signals, and
+// it takes the minimum of three terms. Past the grace the waiter's own term is
+// non-positive and drops out, which is right — that moment has gone. The
+// candidate loop then skipped every entry with a request in flight, so on a
+// pool whose sole candidate was momentarily busy no term contributed at all and
+// the delay fell back to the maximum wait: a twenty-second hole in the backstop,
+// entered by a state that lasts as long as one request. In flight is the most
+// transient condition a candidate has, not a settled one.
+//
+// Nothing here is a race against wall time. The candidate's idleness runs on
+// the pool's injected clock, which this test freezes; the waiter's age is a
+// real-time stamp this test writes, because a waiter is clocked on real time by
+// design (see loadWaiter). Both terms are therefore set by the test, and the
+// margin between the answer wanted and the answer the fallback gives is the
+// whole maximum wait.
+func TestAWaiterPastItsGraceDoesNotParkToTheMaximumBehindAnInFlightModel(t *testing.T) {
+	l := newFakeLauncher()
+	clock := &testClock{now: time.Unix(1_700_000_000, 0)}
+	grace := 300 * time.Millisecond
+	maxWait := 20 * time.Second
+	p := newTestPool(t, l, graceModels(), PoolOptions{
+		MaxResidentBytes: graceBudget,
+		EvictionGrace:    grace,
+		MaxEvictionWait:  maxWait,
+		now:              clock.Now,
+	})
+
+	// org/a resident with a request in flight: the release is deliberately held
+	// back, so the pool's only eviction candidate is busy.
+	_, release, err := p.Acquire(context.Background(), "org/a")
+	if err != nil {
+		t.Fatalf("Acquire(org/a): %v", err)
+	}
+	defer release()
+
+	// A waiter for org/b that arrived two graces ago, which is the state the
+	// fallback needs: its own age clause has already fired and contributes
+	// nothing further.
+	age := 2 * grace
+	w := &loadWaiter{
+		arrived: time.Now().Add(-age),
+		need:    LoadCost(200),
+		signal:  make(chan struct{}, 1),
+	}
+
+	p.mu.Lock()
+	p.waiters = append(p.waiters, w)
+	delay := p.wakeDelayLocked(w)
+	p.waiters = nil
+	p.mu.Unlock()
+
+	if delay > grace {
+		t.Errorf("a waiter %s old, behind a model with a request in flight, was parked for %s; "+
+			"want a re-check within the grace (%s), not a sleep bounded by the maximum wait (%s)",
+			age, delay, grace, maxWait)
 	}
 }
 
