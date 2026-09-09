@@ -9,6 +9,7 @@
 // Built as a single-file SwiftUI app so it compiles with swiftc and packages
 // into a .app without an Xcode project. See build.sh.
 
+import AppKit
 import Network
 import SwiftUI
 import Security
@@ -73,6 +74,18 @@ struct Message: Identifiable, Codable, Equatable {
     /// Thinking models (e.g. Qwen3) stream their reasoning separately; we keep it
     /// so a reply that spends its whole budget reasoning is not shown as blank.
     var reasoning: String = ""
+    /// Which model answered, for the assistant's turns. VoiceOver reads it out
+    /// — the side of the window a bubble sits on and the color it is tinted
+    /// with are not available to a screen reader, so the speaker has to be in
+    /// the label, and naming the model that actually answered means a
+    /// conversation that switched models still reads correctly.
+    ///
+    /// Optional on purpose: Codable's synthesized decoder falls back for a
+    /// missing key only on an optional property, and a saved conversation
+    /// written before this field existed must still load. A non-optional with a
+    /// default would throw, and the loader swallows that — the whole history
+    /// would quietly disappear.
+    var model: String? = nil
 }
 
 /// A saved chat: a title plus its messages.
@@ -83,9 +96,42 @@ struct Conversation: Identifiable, Codable {
     var createdAt = Date()
 }
 
+/// The residency value the models list carries for a model that is already in
+/// memory. The server publishes three — `loaded`, `loading`, `not_loaded` — and
+/// only this one means a request is served without a wait. A test in the
+/// server's suite holds it to the value the pool reports.
+let residencyLoaded = "loaded"
+
+/// The SSE comment the server sends, about once a second, while it is loading a
+/// model to serve a streaming request; the data frames follow once the model is
+/// up.
+///
+/// A colon starts a comment in the SSE format, so this rides the existing
+/// stream without changing its content type or its status code, and a client
+/// that knows nothing about it ignores the line as the format says to. The wire
+/// form's one home is `gateway.LoadingComment` on the server; a test in the
+/// server's suite holds this declaration to it.
+let modelLoadingComment = ": loading"
+
 /// GET /v1/models
 private struct ModelsResponse: Decodable {
-    struct Model: Decodable { let id: String }
+    struct Model: Decodable {
+        let id: String
+        /// Residency: `loaded`, `loading` or `not_loaded`. Absent on a server
+        /// that does not publish residency to this client, which is not the
+        /// same as "not loaded" — it is "not said", and nothing is claimed
+        /// from it.
+        let state: String?
+        /// Whether the model can serve a chat request at all. Absent on a
+        /// server that does not publish the capability.
+        let chat: Bool?
+
+        /// Absent means yes. A server that publishes no capability is an older
+        /// one, and every model it serves must still be offered — defaulting
+        /// the other way would empty the picker against every server already
+        /// installed.
+        var chattable: Bool { chat ?? true }
+    }
     let data: [Model]
 }
 
@@ -404,12 +450,35 @@ final class AppModel: ObservableObject {
     @Published var conversations: [Conversation] = []
     @Published var selectedID: UUID?
 
+    /// Every model the server serves, and the subset the picker offers. They
+    /// differ by the chat capability: a model that cannot serve a chat request
+    /// stays callable over the API by name and simply is not offered here.
     @Published var models: [String] = []
+    @Published var chatModels: [String] = []
     @Published var input: String = ""
     @Published var status: String = "Not connected"
     @Published var connected: Bool = false
     @Published var connecting: Bool = false
     @Published var sending: Bool = false
+
+    /// What the client is waiting for, once a message has been sent.
+    ///
+    /// Loading a model into memory takes seconds to a minute; generating an
+    /// answer from a model already in memory starts at once. The two look
+    /// identical from the outside — nothing arrives — so they are told apart
+    /// here and shown differently, and `loading` is only ever entered on
+    /// evidence: an SSE comment from the server, or a residency reading that
+    /// says the chosen model is not in memory.
+    enum Activity: Equatable { case idle, loading, generating }
+    @Published var activity: Activity = .idle
+
+    /// The line shown in place of the bare spinner while a model is loading,
+    /// or nil when there is nothing to say beyond "working".
+    var loadingLabel: String? {
+        guard sending, activity == .loading else { return nil }
+        let name = selectedModel.split(separator: "/").last.map(String.init) ?? selectedModel
+        return name.isEmpty ? "Loading the model…" : "Loading \(name)…"
+    }
 
     /// Coarse connection health, for the status dot.
     enum Connection { case online, warning, offline }
@@ -419,6 +488,10 @@ final class AppModel: ObservableObject {
     }
 
     private var streamTask: Task<Void, Never>?
+    /// The residency poll that runs while a request is in flight. It is a
+    /// fallback for a server that sends no loading comments, and it is stopped
+    /// the moment the stream says anything at all.
+    private var residencyTask: Task<Void, Never>?
 
     init() {
         // Migrate a key saved by an earlier build (plaintext UserDefaults) into
@@ -574,13 +647,21 @@ final class AppModel: ObservableObject {
             }
             let list = try JSONDecoder().decode(ModelsResponse.self, from: data)
             models = list.data.map(\.id).sorted()
-            if selectedModel.isEmpty || !models.contains(selectedModel) {
-                selectedModel = models.first ?? ""
+            // The picker offers what can chat. The rest stay served — an API
+            // client that asks for an OCR model by name still gets it — they
+            // are just not put in front of someone about to type a sentence.
+            chatModels = list.data.filter(\.chattable).map(\.id).sorted()
+            if selectedModel.isEmpty || !chatModels.contains(selectedModel) {
+                selectedModel = chatModels.first ?? ""
             }
             connected = true
-            status = models.isEmpty
-                ? "Connected, but no models are downloaded yet."
-                : "Connected · \(models.count) model\(models.count == 1 ? "" : "s")"
+            if models.isEmpty {
+                status = "Connected, but no models are downloaded yet."
+            } else if chatModels.isEmpty {
+                status = "Connected · \(models.count) model\(models.count == 1 ? "" : "s"), none of them for chat"
+            } else {
+                status = "Connected · \(models.count) model\(models.count == 1 ? "" : "s")"
+            }
         } catch {
             connected = false
             status = "Could not reach \(base). Is Gropius running and on the same network?"
@@ -596,17 +677,76 @@ final class AppModel: ObservableObject {
         if conversations[idx].title == "New Chat" {
             conversations[idx].title = String(prompt.prefix(48))
         }
-        conversations[idx].messages.append(Message(role: .assistant))
+        conversations[idx].messages.append(Message(role: .assistant, model: selectedModel))
         save()
 
         sending = true
+        // Nothing is known about the wait yet, and `idle` is what says so: the
+        // reply shows the plain spinner, which is what this client did before
+        // either signal existed and what it keeps doing against a server that
+        // offers neither. `generating` is reserved for a stream that has
+        // actually produced a frame, so that it can be trusted as the one state
+        // a late load marker must not undo.
+        activity = .idle
         streamTask = Task { await stream(convoID: convoID) }
+        startResidencyPoll(for: selectedModel)
     }
 
     func stop() { streamTask?.cancel() }
 
+    /// The server has said something about this request, so the residency poll
+    /// has nothing left to add: the stream itself is now the better witness.
+    private func streamSpoke() {
+        residencyTask?.cancel()
+        residencyTask = nil
+    }
+
+    /// Watch the models list while the request waits, for a server that sends
+    /// no loading comments.
+    ///
+    /// Residency is a snapshot and it is not always published — a server that
+    /// does not publish it to this client says nothing — so an absent or
+    /// unreadable answer changes nothing. Only a definite "not in memory" moves
+    /// the client into the loading state, and a definite "in memory" moves it
+    /// back to knowing nothing rather than to `generating`: a snapshot can be
+    /// stale by the time the request lands, and `generating` is the stream's
+    /// word to say, not the poll's.
+    private func startResidencyPoll(for model: String) {
+        residencyTask?.cancel()
+        guard !model.isEmpty else { residencyTask = nil; return }
+        residencyTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(1))
+                guard !Task.isCancelled, let self, self.sending else { return }
+                guard let state = await self.residency(of: model) else { continue }
+                guard !Task.isCancelled, self.sending else { return }
+                self.activity = state == residencyLoaded ? .idle : .loading
+            }
+        }
+    }
+
+    /// One reading of a model's residency, or nil when the server did not say.
+    private func residency(of model: String) async -> String? {
+        guard var req = request("/models") else { return nil }
+        req.httpMethod = "GET"
+        req.timeoutInterval = 10
+        guard let (data, resp) = try? await URLSession.shared.data(for: req),
+              (resp as? HTTPURLResponse)?.statusCode == 200,
+              let list = try? JSONDecoder().decode(ModelsResponse.self, from: data)
+        else { return nil }
+        // The server folds repository ids case-insensitively, and the id sent
+        // in the request came out of this same listing; comparing the same way
+        // keeps a spelling difference from reading as a different model.
+        return list.data.first { $0.id.caseInsensitiveCompare(model) == .orderedSame }?.state
+    }
+
     private func stream(convoID: UUID) async {
-        defer { sending = false; save() }
+        defer {
+            sending = false
+            activity = .idle
+            streamSpoke()
+            save()
+        }
 
         guard let ci0 = conversations.firstIndex(where: { $0.id == convoID }) else { return }
         let assistantIndex = conversations[ci0].messages.count - 1
@@ -655,9 +795,39 @@ final class AppModel: ObservableObject {
             var lineBuf = [UInt8]()
             var total = 0
 
+            // An SSE comment, stripped of its colon and the optional space
+            // after it. Both spellings are the same comment on the wire.
+            func comment(_ line: String) -> String {
+                String(line.dropFirst()).trimmingCharacters(in: .whitespaces)
+            }
+            let loadingMarker = comment(modelLoadingComment)
+
             func handle(_ line: String) -> Bool {
-                guard line.hasPrefix("data: ") else { return false }
-                let payload = String(line.dropFirst(6))
+                // A line beginning with a colon is a comment, which the SSE
+                // format says to ignore. Exactly one of them is not ignored
+                // here: the load marker. Every OTHER comment is passed over
+                // without touching this request's state at all -- a bare ":"
+                // keep-alive is the commonest thing an SSE server sends through
+                // a long silence, and treating it as the server having spoken
+                // would cancel the residency poll and put the user back in
+                // front of the bare spinner this state exists to replace.
+                if line.hasPrefix(":") {
+                    guard comment(line).hasPrefix(loadingMarker) else { return false }
+                    streamSpoke()
+                    // A load marker that arrives after the answer has started
+                    // is stale -- a comment the server buffered, or one flushed
+                    // late behind the first frames. The reply is generating and
+                    // does not go back.
+                    if activity != .generating { activity = .loading }
+                    return false
+                }
+                guard line.hasPrefix("data:") else { return false }
+                // The first data frame ends the load, whatever the comments
+                // said: the model is answering.
+                streamSpoke()
+                activity = .generating
+                var payload = String(line.dropFirst(5))
+                if payload.hasPrefix(" ") { payload.removeFirst() }
                 if payload == "[DONE]" { return true }
                 guard let d = payload.data(using: .utf8),
                       let chunk = try? JSONDecoder().decode(StreamChunk.self, from: d),
@@ -790,10 +960,10 @@ struct ChatDetail: View {
                           pulsing: model.connection == .online,
                           tooltip: model.status)
             }
-            if model.connected && !model.models.isEmpty {
+            if model.connected && !model.chatModels.isEmpty {
                 ToolbarItem {
                     Picker("", selection: $model.selectedModel) {
-                        ForEach(model.models, id: \.self) { Text(short($0)).tag($0) }
+                        ForEach(model.chatModels, id: \.self) { Text(short($0)).tag($0) }
                     }
                     .labelsHidden().frame(minWidth: 140)
                     .help("Model")
@@ -819,7 +989,12 @@ struct ChatDetail: View {
                         EmptyState(model: model, openSettings: { showSettings = true })
                     }
                     ForEach(model.currentMessages) { m in
-                        MessageRow(message: m).id(m.id)
+                        // Only the message being streamed can be waiting on a
+                        // load, so only it is told about one.
+                        MessageRow(message: m,
+                                   loadingLabel: m.id == model.currentMessages.last?.id
+                                       ? model.loadingLabel : nil)
+                            .id(m.id)
                     }
                 }
                 .padding(12)
@@ -838,33 +1013,46 @@ struct ChatDetail: View {
     private var composer: some View {
         VStack(alignment: .leading, spacing: 6) {
             composerRow
-            // A disabled text field explains nothing by itself. Say why it is
+            // A disabled control explains nothing by itself. Say why it is
             // disabled and where the fix is, rather than leaving the user to
-            // guess at a box that will not take a keystroke.
+            // guess at a box that will not take a keystroke, or at a send
+            // button that does nothing when clicked.
             if !model.connected {
-                HStack(spacing: 5) {
-                    Image(systemName: "exclamationmark.circle")
-                    Text("Not connected, so messages can't be sent yet.")
-                    Button("Open Settings…") { showSettings = true }
-                        .buttonStyle(.link)
-                }
-                .font(.caption)
-                .foregroundStyle(.secondary)
+                hint("Not connected, so messages can't be sent yet.", offerSettings: true)
+            } else if model.selectedModel.isEmpty {
+                hint(model.models.isEmpty
+                     ? "This server has no models downloaded yet, so there is nothing to send to."
+                     : "None of this server's models can hold a conversation, so there is nothing "
+                       + "to send to. They stay callable over the API by name.",
+                     offerSettings: false)
             }
         }
         .padding(12)
     }
 
+    private func hint(_ text: String, offerSettings: Bool) -> some View {
+        HStack(spacing: 5) {
+            Image(systemName: "exclamationmark.circle")
+            Text(text)
+            if offerSettings {
+                Button("Open Settings…") { showSettings = true }
+                    .buttonStyle(.link)
+            }
+        }
+        .font(.caption)
+        .foregroundStyle(.secondary)
+    }
+
     private var composerRow: some View {
         HStack(alignment: .bottom, spacing: 8) {
-            TextField(model.connected ? "Message…" : "Connect to a server to start typing",
-                      text: $model.input, axis: .vertical)
-                .textFieldStyle(.plain)
-                .lineLimit(1...6)
-                .padding(8)
-                .background(RoundedRectangle(cornerRadius: 8).fill(.quaternary))
-                .onSubmit { model.send() }
-                .disabled(!model.connected)
+            ComposerField(
+                text: $model.input,
+                isEnabled: model.connected,
+                // The disabled placeholder is half the explanation of why the
+                // field will not take a keystroke; the line under the composer
+                // is the other half.
+                placeholder: model.connected ? "Message…" : "Connect to a server to start typing",
+                onSubmit: { model.send() })
             if model.sending {
                 Button { model.stop() } label: {
                     Image(systemName: "stop.fill")
@@ -880,7 +1068,12 @@ struct ChatDetail: View {
                         .frame(width: 26, height: 26)
                 }
                 .glassButton(prominent: true)
-                .disabled(!model.connected || model.input.trimmingCharacters(in: .whitespaces).isEmpty)
+                // No chosen model means send() would return without doing
+                // anything. A button that silently no-ops is worse than one
+                // that is visibly unavailable with the reason written under it.
+                .disabled(!model.connected
+                          || model.selectedModel.isEmpty
+                          || model.input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 .help("Send")
             }
         }
@@ -896,6 +1089,263 @@ struct ChatDetail: View {
 
     private func short(_ id: String) -> String {
         id.contains("/") ? String(id.split(separator: "/").last!) : id
+    }
+}
+
+/// The message composer: a bordered, multi-line text input that grows with what
+/// is typed into it.
+///
+/// It is an NSTextView rather than a SwiftUI TextField because three of the
+/// things a composer has to do are AppKit's to give: Return sends while
+/// Shift-Return inserts a newline (a key command a text field cannot intercept
+/// without giving up its own editing), the control grows line by line to a
+/// ceiling and then scrolls, and it reports its own first-responder state so the
+/// focus ring can be drawn where macOS draws one. The surface is drawn from the
+/// platform's own colors, so it follows light and dark, the chosen accent, and
+/// Increase Contrast.
+struct ComposerField: View {
+    @Binding var text: String
+    var isEnabled: Bool
+    var placeholder: String
+    var onSubmit: () -> Void
+
+    @State private var height: CGFloat = ComposerField.minHeight
+    @State private var focused = false
+    @Environment(\.colorSchemeContrast) private var contrast
+
+    /// One line, and roughly seven before it starts scrolling instead.
+    static let minHeight: CGFloat = 21
+    static let maxHeight: CGFloat = 150
+    private static let corner: CGFloat = 7
+    private static let inset = NSSize(width: 6, height: 5)
+    /// NSTextContainer's own default padding, which the text sits behind. The
+    /// placeholder has to clear the same distance or it lands off the caret.
+    private static let lineFragmentPadding: CGFloat = 5
+
+    var body: some View {
+        ZStack(alignment: .topLeading) {
+            ComposerTextView(text: $text,
+                             height: $height,
+                             focused: $focused,
+                             isEnabled: isEnabled,
+                             minHeight: Self.minHeight,
+                             maxHeight: Self.maxHeight,
+                             inset: Self.inset,
+                             onSubmit: onSubmit)
+                .frame(height: height)
+            if text.isEmpty {
+                Text(placeholder)
+                    .foregroundStyle(isEnabled ? .secondary : .tertiary)
+                    .padding(.leading, Self.inset.width + Self.lineFragmentPadding)
+                    .padding(.top, Self.inset.height)
+                    .allowsHitTesting(false)
+            }
+        }
+        .padding(4)
+        .background(surface)
+        .animation(.easeOut(duration: 0.12), value: height)
+        .accessibilityLabel("Message")
+    }
+
+    /// The field's own surface: a text background inside a hairline, and the
+    /// accent color for the focus ring. Disabled it drops to the window's
+    /// background, so a field that will not take a keystroke does not look like
+    /// one that will.
+    @ViewBuilder private var surface: some View {
+        let shape = RoundedRectangle(cornerRadius: Self.corner, style: .continuous)
+        let showFocus = focused && isEnabled
+        let increased = contrast == .increased
+        shape
+            .fill(Color(nsColor: isEnabled ? .textBackgroundColor : .windowBackgroundColor))
+            .overlay(
+                shape.strokeBorder(
+                    showFocus ? Color.accentColor : Color(nsColor: .separatorColor),
+                    lineWidth: showFocus ? 2 : (increased ? 1.5 : 1)))
+    }
+}
+
+/// The AppKit half of ComposerField.
+struct ComposerTextView: NSViewRepresentable {
+    @Binding var text: String
+    @Binding var height: CGFloat
+    @Binding var focused: Bool
+    var isEnabled: Bool
+    var minHeight: CGFloat
+    var maxHeight: CGFloat
+    var inset: NSSize
+    var onSubmit: () -> Void
+
+    func makeCoordinator() -> Coordinator { Coordinator(self) }
+
+    func makeNSView(context: Context) -> NSScrollView {
+        // The TextKit 1 stack, assembled by hand. The height the composer grows
+        // to is measured off the layout manager, and a text view left to choose
+        // its own stack would answer that question from whichever one it picked
+        // — on a newer system, one that has no layout manager to ask.
+        let storage = NSTextStorage()
+        let layout = NSLayoutManager()
+        storage.addLayoutManager(layout)
+        let container = NSTextContainer(size: NSSize(width: 0, height: CGFloat.greatestFiniteMagnitude))
+        container.widthTracksTextView = true
+        layout.addTextContainer(container)
+
+        let view = ComposerNSTextView(frame: .zero, textContainer: container)
+        view.delegate = context.coordinator
+        view.isRichText = false
+        view.allowsUndo = true
+        view.drawsBackground = false
+        view.font = NSFont.preferredFont(forTextStyle: .body)
+        view.textContainerInset = inset
+        view.isVerticallyResizable = true
+        view.isHorizontallyResizable = false
+        view.autoresizingMask = [NSView.AutoresizingMask.width]
+        view.minSize = NSSize(width: 0, height: 0)
+        view.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude,
+                              height: CGFloat.greatestFiniteMagnitude)
+        view.string = text
+        let coordinator = context.coordinator
+        view.onFocusChange = { isFocused in
+            // Reported from becomeFirstResponder, which can run inside a
+            // SwiftUI update; handing it to the next turn keeps it out of one.
+            DispatchQueue.main.async { coordinator.parent.focused = isFocused }
+        }
+        // The height is a function of the width as well as of the text: the
+        // same sentence needs two lines in a narrow window and one in a wide
+        // one. Typing is not the only thing that changes it, so the frame is
+        // watched too -- without this, dragging the window narrower re-wraps
+        // the text inside a control still sized for the old width, and the
+        // last line is clipped.
+        view.postsFrameChangedNotifications = true
+        NotificationCenter.default.addObserver(
+            coordinator,
+            selector: #selector(Coordinator.textViewFrameChanged(_:)),
+            name: NSView.frameDidChangeNotification,
+            object: view)
+
+        let scroll = NSScrollView()
+        scroll.drawsBackground = false
+        scroll.borderType = .noBorder
+        scroll.hasVerticalScroller = true
+        scroll.hasHorizontalScroller = false
+        scroll.autohidesScrollers = true
+        scroll.documentView = view
+        return scroll
+    }
+
+    func updateNSView(_ scroll: NSScrollView, context: Context) {
+        guard let view = scroll.documentView as? ComposerNSTextView else { return }
+        context.coordinator.parent = self
+        // Only when it actually differs: assigning the same string would reset
+        // the selection under the caret on every redraw.
+        if view.string != text {
+            // An input method mid-composition owns this buffer, and the marked
+            // text in it is not in `string` yet. Assigning underneath it leaves
+            // the composition and the model disagreeing about what is in the
+            // box. The only thing that replaces the string is the composer
+            // being emptied after a send — which the arrow button can do while
+            // a composition is open — so the composition is ended first rather
+            // than left to reappear over a message already sent.
+            if view.hasMarkedText() { view.inputContext?.discardMarkedText() }
+            view.string = text
+        }
+        view.isEditable = isEnabled
+        view.isSelectable = isEnabled
+        view.textColor = isEnabled ? .textColor : .disabledControlTextColor
+        // A disabled composer must not keep the keyboard: left first responder
+        // it would draw a focus ring around a field that ignores every key.
+        if !isEnabled, view.window?.firstResponder === view {
+            view.window?.makeFirstResponder(nil)
+        }
+        context.coordinator.updateHeight(view)
+    }
+
+    /// NotificationCenter holds its observer unowned, so the registration is
+    /// undone when the view goes rather than left pointing at a coordinator
+    /// that may not outlive it.
+    static func dismantleNSView(_ scroll: NSScrollView, coordinator: Coordinator) {
+        NotificationCenter.default.removeObserver(coordinator,
+                                                  name: NSView.frameDidChangeNotification,
+                                                  object: scroll.documentView)
+    }
+
+    final class Coordinator: NSObject, NSTextViewDelegate {
+        var parent: ComposerTextView
+
+        init(_ parent: ComposerTextView) { self.parent = parent }
+
+        func textDidChange(_ notification: Notification) {
+            guard let view = notification.object as? NSTextView else { return }
+            parent.text = view.string
+            updateHeight(view)
+        }
+
+        /// The control got wider or narrower, so the same text wraps into a
+        /// different number of lines and needs a different height.
+        @objc func textViewFrameChanged(_ notification: Notification) {
+            guard let view = notification.object as? NSTextView else { return }
+            updateHeight(view)
+        }
+
+        /// Return sends, Shift-Return inserts a newline.
+        ///
+        /// Both are handled here rather than left to the key bindings: the
+        /// system maps Shift-Return to insertNewlineIgnoringFieldEditor:, but a
+        /// remapped keyboard or a text input method can deliver it as an
+        /// ordinary insertNewline: with the shift flag still on the event, and
+        /// a composer that sent the message on that would eat the newline the
+        /// user asked for.
+        func textView(_ view: NSTextView, doCommandBy selector: Selector) -> Bool {
+            switch selector {
+            case #selector(NSResponder.insertNewline(_:)):
+                // Return belongs to the input method while a composition is
+                // open: in Japanese, Chinese and Korean input it is how a
+                // candidate is committed, and sending on it would fire the
+                // message on the keystroke that was choosing the word.
+                if view.hasMarkedText() { return false }
+                if NSApp.currentEvent?.modifierFlags.contains(.shift) == true {
+                    view.insertNewlineIgnoringFieldEditor(nil)
+                    return true
+                }
+                parent.onSubmit()
+                return true
+            case #selector(NSResponder.insertNewlineIgnoringFieldEditor(_:)):
+                view.insertNewlineIgnoringFieldEditor(nil)
+                return true
+            default:
+                return false
+            }
+        }
+
+        /// Grow to the height the wrapped text needs, up to the ceiling; past
+        /// it the scroll view takes over.
+        func updateHeight(_ view: NSTextView) {
+            guard let layout = view.layoutManager, let container = view.textContainer else { return }
+            layout.ensureLayout(for: container)
+            let used = layout.usedRect(for: container).height + view.textContainerInset.height * 2
+            let wanted = min(max(used.rounded(.up), parent.minHeight), parent.maxHeight)
+            guard abs(wanted - parent.height) > 0.5 else { return }
+            // Never from inside a SwiftUI update, which is where updateNSView
+            // calls this from.
+            DispatchQueue.main.async { [parent] in parent.height = wanted }
+        }
+    }
+}
+
+/// An NSTextView that says when it has the keyboard, so the composer can draw a
+/// focus ring. NSTextView reports this to nobody otherwise.
+final class ComposerNSTextView: NSTextView {
+    var onFocusChange: ((Bool) -> Void)?
+
+    override func becomeFirstResponder() -> Bool {
+        let accepted = super.becomeFirstResponder()
+        if accepted { onFocusChange?(true) }
+        return accepted
+    }
+
+    override func resignFirstResponder() -> Bool {
+        let resigned = super.resignFirstResponder()
+        if resigned { onFocusChange?(false) }
+        return resigned
     }
 }
 
@@ -984,16 +1434,28 @@ struct EmptyState: View {
 
 struct MessageRow: View {
     let message: Message
+    /// Set only on the message currently being waited on, and only while the
+    /// wait is a model load rather than generation. nil the rest of the time,
+    /// which is the plain spinner this client has always shown.
+    var loadingLabel: String? = nil
     @State private var showReasoning = false
+    /// System Settings → Accessibility → Display → Increase contrast. The
+    /// tinted bubble is the one thing here that could go thin under it, so it
+    /// is read and answered rather than left to chance.
+    @Environment(\.colorSchemeContrast) private var contrast
     private var isUser: Bool { message.role == .user }
     // Thinking is in progress while the assistant has streamed reasoning but no
     // answer text yet.
     private var isThinking: Bool { !isUser && displayText.isEmpty }
 
-    // Bubble colors, independent of the system accent (which may be anything):
-    // iMessage blue for sent, green for replies.
-    private static let sentBlue = Color(red: 0.039, green: 0.518, blue: 1.0)
-    private static let replyGreen = Color(red: 0.204, green: 0.780, blue: 0.349)
+    /// A rounded rectangle rather than a tailed speech balloon, and a modest
+    /// radius rather than a capsule: the shape macOS uses for a grouped surface,
+    /// which is what this is. Alignment and tint are what say who spoke.
+    private static let corner: CGFloat = 12
+    private static let maxBubbleWidth: CGFloat = 560
+    /// How much of the row the other speaker's side keeps, so a bubble never
+    /// runs the full width and the alignment stays legible.
+    private static let gutter: CGFloat = 56
 
     // Models often stream leading/trailing newlines (e.g. after the reasoning),
     // which would show as an empty line inside the bubble. Trim for display.
@@ -1004,9 +1466,19 @@ struct MessageRow: View {
         message.reasoning.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    /// Who spoke, for VoiceOver. Alignment and tint carry this for everyone
+    /// else and carry it to a screen reader not at all, so it goes in the
+    /// label. A message saved before the model was recorded says "The model",
+    /// which is true and is better than naming the wrong one.
+    private var speaker: String {
+        if isUser { return "You" }
+        guard let id = message.model, !id.isEmpty else { return "The model" }
+        return id.split(separator: "/").last.map(String.init) ?? id
+    }
+
     var body: some View {
-        HStack {
-            if isUser { Spacer(minLength: 64) }
+        HStack(spacing: 0) {
+            if isUser { Spacer(minLength: Self.gutter) }
             VStack(alignment: isUser ? .trailing : .leading, spacing: 5) {
                 // Thinking-model reasoning collapses behind a "Thinking…" line with
                 // a disclosure toggle. Collapsed by default.
@@ -1016,18 +1488,48 @@ struct MessageRow: View {
                 // Only spin when nothing at all has arrived yet; once reasoning is
                 // streaming, the "Thinking…" line is the activity indicator.
                 if displayText.isEmpty && !isUser && displayReasoning.isEmpty {
-                    ProgressView().controlSize(.small).padding(.vertical, 6).padding(.horizontal, 4)
+                    waiting
                 } else if !displayText.isEmpty {
                     Text(displayText)
                         .textSelection(.enabled)
-                        .foregroundStyle(.white)
-                        .padding(.horizontal, 13)
+                        // The label color, not a color of this view's choosing:
+                        // it is the one foreground guaranteed to read against
+                        // every accent, in both appearances and under Increase
+                        // Contrast.
+                        .foregroundStyle(.primary)
+                        .multilineTextAlignment(.leading)
+                        // Long messages wrap rather than clip: the text keeps
+                        // whatever height its wrapped lines need.
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(.horizontal, 12)
                         .padding(.vertical, 8)
                         .background(bubble)
-                        .frame(maxWidth: 560, alignment: isUser ? .trailing : .leading)
+                        .frame(maxWidth: Self.maxBubbleWidth,
+                               alignment: isUser ? .trailing : .leading)
+                        .accessibilityLabel("\(speaker) said: \(displayText)")
                 }
             }
-            if !isUser { Spacer(minLength: 64) }
+            if !isUser { Spacer(minLength: Self.gutter) }
+        }
+    }
+
+    /// Nothing has arrived yet. A bare spinner says only "working"; with a
+    /// label it says what the work is, which is the whole difference between a
+    /// wait a user can account for and one that reads as a hang.
+    @ViewBuilder private var waiting: some View {
+        if let loadingLabel {
+            HStack(spacing: 7) {
+                ProgressView().controlSize(.small)
+                Text(loadingLabel)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .background(bubble)
+            .accessibilityElement(children: .combine)
+        } else {
+            ProgressView().controlSize(.small).padding(.vertical, 6).padding(.horizontal, 4)
         }
     }
 
@@ -1061,9 +1563,34 @@ struct MessageRow: View {
         .frame(maxWidth: 560, alignment: .leading)
     }
 
+    /// The bubble's surface. Every color in it is one the platform supplies:
+    /// the person's side is a tint of the accent color chosen in System
+    /// Settings, the model's side a step of the same hierarchy the rest of the
+    /// window's fills come from. Nothing is a fixed value, so all of it follows
+    /// light and dark, a changed accent, and Increase Contrast — which is
+    /// answered explicitly, because a tint is the one thing here thin enough to
+    /// disappear under it.
+    ///
+    /// The model's side is deliberately NOT a named background color:
+    /// controlBackgroundColor and textBackgroundColor are both white in the
+    /// light appearance, which is the transcript's own background, and a bubble
+    /// the same color as what it sits on is not a bubble. A hierarchical fill
+    /// is a step away from whatever the surface underneath is, in either
+    /// appearance.
     @ViewBuilder private var bubble: some View {
-        let shape = RoundedRectangle(cornerRadius: 18, style: .continuous)
-        shape.fill(isUser ? Self.sentBlue : Self.replyGreen)
+        let shape = RoundedRectangle(cornerRadius: Self.corner, style: .continuous)
+        let increased = contrast == .increased
+        if isUser {
+            shape
+                .fill(Color.accentColor.opacity(increased ? 0.34 : 0.18))
+                .overlay(shape.strokeBorder(Color.accentColor.opacity(increased ? 0.95 : 0.4),
+                                            lineWidth: increased ? 1.5 : 1))
+        } else {
+            shape
+                .fill(increased ? AnyShapeStyle(.tertiary) : AnyShapeStyle(.quaternary))
+                .overlay(shape.strokeBorder(Color(nsColor: .separatorColor),
+                                            lineWidth: increased ? 1.5 : 1))
+        }
     }
 }
 

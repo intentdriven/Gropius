@@ -42,8 +42,31 @@ open dist/GropiusChat.app
    macOS asks for permission to search the local network the first time
    Settings opens. Without it the list stays empty, and typing the address
    still works.
-3. Pick a model from the top-right menu and start typing. Enter sends; the arrow
-   button too. The stop button interrupts a reply in progress.
+3. Pick a model from the top-right menu and start typing. The message box grows
+   with what you write and starts scrolling at about seven lines. **Return**
+   sends; **Shift-Return** starts a new line; the arrow button sends too. The
+   stop button interrupts a reply in progress. Until a server answers, the box
+   is greyed out and says so.
+
+   The menu offers the models that can hold a conversation. Where a server says
+   a model cannot, that model is left out of the menu and stays callable over
+   the API by the name it is listed under — it is simply not put in front of
+   you here. A server that says nothing about the matter offers everything it
+   serves.
+
+Your messages sit on the right in a bubble tinted with your accent colour, the
+model's on the left in a plain one. Both are drawn from the system's own
+colours, so they follow light and dark, whichever accent you have chosen, and
+Increase Contrast.
+
+Loading a model into memory takes seconds to a minute. While that is happening
+the reply reads **Loading**, with the model's name, rather than showing the same
+spinner a slow answer shows — so a first message to a cold model reads as
+provisioning rather than as a hang. It comes from the residency the models list
+publishes: the client reads it once a second while it waits, and stops the
+moment the answer starts. A server that does not publish residency to this
+client — see [the models list reference](../docs/models-list.md) — shows the
+plain spinner instead.
 
 Thinking models (Qwen3, etc.) stream their reasoning; a grey **Thoughts** row
 above the answer expands to show it, so a reply that spends its whole budget

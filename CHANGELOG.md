@@ -14,6 +14,26 @@ GitHub release notes.
 
 ### Changed
 
+- **The chat client reads as a Mac app, and says when it is waiting on a
+  model.** The message box is a real multi-line control — bordered, with focused
+  and disabled states you can see, growing with what you type and scrolling once
+  it is about seven lines, **Return** to send and **Shift-Return** for a new
+  line — instead of a plain field on a grey rectangle. Messages are bubbles
+  again: yours on the right tinted with the accent colour you chose, the model's
+  on the left in a neutral one, both drawn from the system's own colours so they
+  follow light and dark, a changed accent and Increase Contrast, rather than the
+  two fixed shades of another chat app they were. And a first message to a model
+  that is not yet in memory now reads **Loading**, with the model's name, rather
+  than showing the same spinner a slow answer shows — a wait that looked like a
+  hang. The client works it out from the residency the models list already
+  publishes, read once a second while it waits and dropped the moment the answer
+  starts; where a server publishes no residency it shows the plain spinner, as
+  before. And the model menu now honours a chat capability where a server
+  publishes one: a model marked as unable to hold a conversation is left out of
+  the menu and stays callable over the API by name, while a server that says
+  nothing about the matter offers everything it serves — which is every Gropius
+  in the field today.
+
 - **A request waiting for memory now looks again by itself, rather than only
   when something wakes it.** The pool wakes every waiting request whenever room
   might have appeared, and each request sleeps in between for as long as it can
