@@ -83,6 +83,8 @@ default runtime — rather than to narrate it.
   second server does not start but becomes a client of the one already running.
 - One release published at a time, so there is no rollback target and no way to
   fetch the version currently installed.
+- The verbs are reached through a per-user link, so they are as available as
+  that account's own bin directory is — which is not a given on every Mac.
 
 ## Acceptance Criteria
 
@@ -104,20 +106,38 @@ default runtime — rather than to narrate it.
   shell, when any verb would otherwise prompt, then nothing reads standard
   input: the run either uses the system authorisation panel, or refuses and
   names the flag that would have answered it.
+- Given the install completes, when it puts the verbs within reach, then it
+  creates a link in this account's own bin directory and elevates for nothing:
+  the authorisation panel exists for the firewall, which is a machine-wide
+  setting with no per-account equivalent, and a per-user link has one.
+- Given that bin directory is not on this account's search path, when the
+  install finishes, then it says so and names the line that would put it there,
+  rather than leaving a link that resolves for nobody.
 - Given a Mac where provisioning already completed, when Alice runs the install
   again, then it repairs what is missing rather than reinstalling what is not,
   and says which of the two it did.
 - Given provisioning fails part way, when the command returns, then it exits
   non-zero, says which stage failed and why, and names the command that retries
-  it — rather than leaving the app to report the failure later in a banner.
+  it. The app's own check on the next launch may still repair it and report
+  ready; the terminal's verdict is what was true when it exited and is not
+  revisited.
 
-**Diagnosing**
+**Reporting**
 
+- Given something calls it repeatedly — the menu bar, a script, a person — when
+  `gropius status` runs, then it answers only what is true right now: serving or
+  not, on which address, which models are resident. It runs no check that costs
+  more than reading state that already exists, so that polling it is safe.
+- Given a caller that parses rather than reads, when `gropius status --json`
+  runs, then the same facts are emitted as machine-readable output, and that
+  output is the contract rather than the human text.
 - Given a Mac where the LAN receives empty responses, when Alice runs
-  `gropius doctor`, then the report distinguishes what was verified from what
-  was only observed, and the firewall entry is reported as observed rather than
-  verified, because the system query answers "permitted" for a path that has no
-  entry and for a path that does not exist.
+  `gropius doctor`, then it runs the expensive checks and the report
+  distinguishes what was verified from what was only observed. The firewall
+  entry is reported as observed and never as a verdict, because the system
+  query answers "permitted" for a path that has no entry and for a path that
+  does not exist — so a check built on it would confirm a healthy grant at
+  exactly the moment an update invalidated one.
 - Given a check that cannot be determined at all, of which Local Network
   Privacy is the known case, when doctor reports, then it says the state cannot
   be determined from here rather than omitting the check or guessing it.
@@ -134,15 +154,15 @@ default runtime — rather than to narrate it.
 **Removing**
 
 - Given Alice runs `gropius uninstall`, when it completes, then the bundle, the
-  runtime, the configuration and the firewall entry are gone, the downloaded
-  models are still there, and the output states their total size and the flag
-  that would have removed them.
+  runtime, the configuration, the firewall entry and the per-user link are
+  gone, the downloaded models are still there, and the output states their
+  total size and the flag that would have removed them.
 - Given `--purge`, when standard input is not a terminal and `--yes` was not
   passed, then nothing is deleted and the refusal names the flag.
-- Given a shared-cache installation, when Alice runs uninstall, then files
-  belonging to another account are not removed and the command says what it
-  left behind and why, rather than reporting a success that removed half a
-  directory.
+- Given a shared-cache installation, when Alice runs uninstall, then the shared
+  root is not touched at all, and the output names what remains there, its
+  size, and the one deliberate command that removes it. Removing another
+  account's models is a separate act, not the unelevated half of this one.
 - Given any removal, when it runs, then it never elevates, never invokes an
   external removal command, and never derives a deletion path from an
   environment variable or a flag, because a directory that any local account
@@ -151,27 +171,46 @@ default runtime — rather than to narrate it.
 **Holding the boundary**
 
 - Given any lifecycle verb, when it invokes a system tool, then the tool is
-  named by absolute path, so that what runs does not depend on which directory
-  a caller's search path happens to resolve first.
-- Given the HTTP control plane, when its routes are enumerated, then no
-  lifecycle verb is reachable from it, and a test fails if a lifecycle package
-  becomes reachable from the gateway's dependency graph.
+  named by absolute path — every one of them, not only those an attacker could
+  reach. Two records make that the rule rather than the cautious reading:
+  iss-2609081435387952, where a group-writable directory on a shared Mac is an
+  account-to-account boundary, and iss-9, where a release election silently got
+  a different `grep` than it meant with no attacker involved at all.
 - Given a bundle is being replaced, when the swap runs, then the staging name
   is unguessable, the installed bundle is renamed aside before the new one is
   moved into place, and the set-aside copy is removed only after the new one is
-  in place, so that no failure leaves the Mac with no application.
+  in place, so that no failure leaves the Mac with no application. The rename
+  itself must be one that refuses an existing directory and replaces a symlink
+  rather than following it, which the shell cannot express and which is why
+  this criterion lives here rather than in the installer script.
+- Given the lifecycle verbs, when their packages are placed, then none is
+  reachable from the HTTP control plane, so that no route can ever drive a
+  self-replacement or an elevation.
 
 ## Open Questions
 
-- Whether the lifecycle verbs are reachable as `gropius` on the search path at
-  all, or only at the binary's path inside the bundle. A symlink needs
-  elevation, has to choose between two install destinations, and becomes a
-  fourth thing uninstall must clean up.
-- Whether `doctor` may report at all on a signal it cannot verify, or whether
-  the accepted decision on environment detection (adr-2609081118587999) reads
-  the firewall query as a warning's firing condition and closes it. The
-  criteria above take the first reading — report as observed, never verdict —
-  and that reading needs recording as a decision rather than assuming.
+- **The enforcement tests for the last two boundary criteria are deliberately
+  not in the first cut.** Both want an architecture test that walks the tree,
+  and `internal/archtest` currently holds seven hand-rolled walkers that
+  disagree about what to exclude — a problem recorded as iss-2609081427104462,
+  with iss-2609081441311030 for the one that walks out of the repository
+  entirely. Writing these two now makes an eighth and ninth. The order that
+  costs one conversion instead of two: the in-flight change to that package
+  lands, the shared walker replaces the hand-rolled exclusions, and these
+  criteria are then written against it from the start. Until then the two
+  criteria are held as behaviour with no armed detector, and this note is the
+  record saying so rather than a gap nobody declared.
+- **The doctor carve-out needs its own decision before the spec is written.**
+  Reporting the firewall entry as observed is a detection over state Gropius
+  does not own, and adr-2609081118587999 closes a warning's firing condition to
+  exactly that class of signal. The argument for a carve-out has to stand on
+  its own: a diagnostic a person invokes deliberately, that changes no
+  behaviour, admits no request and gates nothing, is not a warning firing on
+  inferred state — it is a report of what was seen, labelled as such, next to
+  the commands that would settle it. That reasoning is untested. It cannot lean
+  on the way the installer's authorisation panel avoided the same tension,
+  because that avoided it by never reading the state at all, which a diagnostic
+  cannot do and remain a diagnostic.
 
 ## Audit Notes
 
