@@ -1,8 +1,8 @@
 ---
 id: itd-2609081303525417
 slug: this-mac-always-reaches-its-own-server-alice-narrows-gropius
-spec_id: null
-kind: null
+spec_id: spc-2609091240035356
+kind: standalone
 suggested_kind: null
 reclassification_history: []
 builds_on: []
@@ -63,7 +63,7 @@ exposure matters.
 
 ## Scope Conditions
 
-- macOS on a Mac serving one or more user accounts, where a second account
+- macOS on a Mac serving one or more user accounts, where a second account <!-- cond: cond-2609091240039473 -->
   reaching the server over loopback is a case that occurs. Loopback is the
   boundary the claim rests on: this is a statement about one machine, and it
   says nothing about any network.
@@ -88,6 +88,13 @@ exposure matters.
 
 ## Open Questions
 
+All three resolved on 2026-09-09 by adr-2609091123526871, taken at interview:
+two listeners, loopback acquired first as the singleton's contention point and
+the challenge probe's target; a second address that cannot be acquired serves
+loopback only, loudly, without exiting; iss-7 is resolved at its cause, and the
+unbracketed IPv6 fault is closed by building every address with JoinHostPort.
+
+
 - Whether this is two listeners or one wildcard listener with a refusal rule.
   Two listeners is the honest reading of "the bind is the narrowing"; a wildcard
   plus a filter puts the narrowing in a code path rather than in the socket,
@@ -103,3 +110,7 @@ exposure matters.
 ## Audit Notes
 
 _Empty. Populated by intent-auditor when intent moves to shipped/._
+
+## Grounds
+
+- pursued: we expect operators to narrow the bind once narrowing stops locking them out of their own panel and second account; shown wrong if binds stay wide after loopback is guaranteed, which would mean the obstacle was never access.
