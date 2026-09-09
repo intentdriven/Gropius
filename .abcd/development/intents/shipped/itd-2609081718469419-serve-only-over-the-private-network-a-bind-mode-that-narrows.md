@@ -127,7 +127,8 @@ them and this mode buys nothing the plain bind does not.
 
 ## Audit Notes
 
-_Empty. Populated by intent-auditor when intent moves to shipped/._
+<!-- abcd-review: OWED receipt=rcp-c2bdc5190c49 -->
+Fidelity review OWED (receipt rcp-c2bdc5190c49).
 
 ## Grounds
 

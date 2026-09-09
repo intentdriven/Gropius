@@ -276,14 +276,21 @@ rules.
   loaded to its budget can still run out of memory under long prompts served
   concurrently.
 - A request for a model that does not fit in what is left unloads the
-  least-recently-used idle model, at once, to make room. The memory of the model
-  being unloaded is credited back as the replacement starts, so the two overlap
-  for the seconds it takes the first to exit and the budget is not a hard
-  ceiling in that moment. A model with a request
-  in flight is never the one chosen, a model still loading is not either, and a
-  pinned model is not either. If nothing can be freed, the request is refused
-  with an error naming the memory pressure. That refusal names no model: which
-  models this Mac is protecting stays off the network.
+  least-recently-used idle model, at once, to make room. The memory is not free
+  until that model's server process has gone, so the request waits those
+  seconds before its own model starts, rather than the two overlapping. A model
+  with a request in flight is never the one chosen, a model still loading is
+  not either, and a pinned model is not either. If nothing can be freed, the
+  request is refused with an error naming the memory pressure. That refusal
+  names no model: which models this Mac is protecting stays off the network.
+- Requests waiting for a server to exit are waiting for memory like any other,
+  and share the same queue: a small number of places overall, and a smaller
+  number per caller. Callers that present no API key — which is every caller on
+  an install without one — count as one caller between them, so a burst of
+  requests for several different models that are not loaded can see the third
+  and later ones refused straight away rather than queued. The refusal is the
+  ordinary "not enough memory" one, and a retry a moment later usually
+  succeeds. Requests for models already in memory are unaffected.
 - **Eviction grace** (**Settings**, off by default) changes when that unload
   happens. With it on, a model is protected for a set interval after it
   finishes a request, and a request that needs its memory waits for another

@@ -11,8 +11,25 @@ GitHub release notes.
 
 ## [Unreleased]
 
-
 ### Changed
+
+- **BREAKING: every per-model setting now lives in one place in `config.json`,
+  and the settings from before this change are dropped.** Sampling overrides,
+  pinned models and the system-message-merging switches were three separate
+  sections of the settings file — `model_sampling`, `pinned` and `per_model` —
+  each with its own ceiling, its own handling of an unusable entry and its own
+  rules, held together by nothing but care. They are one `models` section now,
+  keyed by the model's repository id, with a model's sampling override, its pin
+  and its merging switch sitting side by side on the same entry. Gropius is
+  before 1.0 and carries no migration code, so the three old sections are no
+  longer read: the control panel warns that they are not in force and names
+  them, the startup log says the same, and the next time you save settings they
+  are gone from the file. A settings request that posts one of the old sections
+  is refused rather than answered "saved", naming the section and where it
+  lives now. Per-model sampling defaults, pinned models and merging switches
+  set before this change must be set again in **Settings**. Everything else in
+  the file — the API key, the bind address, the memory budget, the machine-wide
+  sampling defaults, the preload list — is untouched.
 
 - **The chat client reads as a Mac app, and says when it is waiting on a
   model.** The message box is a real multi-line control — bordered, with focused
@@ -122,6 +139,37 @@ GitHub release notes.
   downloaded again. See [docs/chat-models.md](docs/chat-models.md) and
   [docs/models-list.md](docs/models-list.md).
 
+- **Gropius answers on this Mac whatever else it answers on.** Every bind
+  acquires loopback as well as the address it names, so choosing who on the
+  network may reach the server no longer costs you the ability to reach it
+  yourself. Binding one specific address used to leave the control panel
+  unreachable from anywhere — it is served on loopback only, and the bind took
+  loopback away — so the setting that most deserves to be used was the one that
+  locked you out of your own app, and the recorded recovery was to edit
+  `config.json` by hand. The list of endpoints in the panel changes with it: it
+  is derived from the addresses the server actually acquired, so every address
+  it offers is one the server answers on, and an address that goes away while
+  the server runs stops being offered.
+
+- **A third bind choice: serve on a private network and this Mac, and nothing
+  else.** With it chosen, a machine on your mesh VPN reaches the server and a
+  machine on the local network does not. Gropius reads this Mac's own
+  interfaces to find the address — it never asks the VPN, and it names no
+  product — and it shows you which address it chose. Where two addresses look
+  alike to it, it refuses to choose between them, names both, and serves this
+  Mac; where none matches, it serves this Mac and says why. It never widens.
+  Bonjour is quiet under this choice, because the advert travels over the
+  network the choice excludes. The setting lives in its own `bind_mode` field,
+  so switching it off puts back the bind you had
+  ([how to](docs/mesh-vpn.md), [what each choice binds](docs/bind-address.md)).
+
+- **A reference page for the bind address.**
+  [docs/bind-address.md](docs/bind-address.md) is the table of what each choice
+  binds and who can reach it, what `config.json` carries, what happens when a
+  choice cannot be honoured, and when an API key is required — which follows
+  what the server answers on rather than what is stored, so a choice that
+  narrowed to this Mac is asked for none.
+
 - **A how-to for serving over a mesh VPN.**
   [docs/mesh-vpn.md](docs/mesh-vpn.md) takes the walk-through's "talk to it from
   another machine" steps and runs them over a mesh network instead of the local
@@ -146,6 +194,53 @@ GitHub release notes.
   until now nothing on the client side listened.
 
 ### Fixed
+
+- **A swapped-out model keeps its share of the memory budget until it is
+  really gone.** Evicting a model handed its memory back on paper the moment it
+  left the pool, and the replacement was started straight away — while the
+  first server was still shutting down and still holding its weights. On a
+  server that does not stop at once the two overlapped by the whole of the
+  first one's footprint, which is the memory blowup the budget exists to
+  prevent. The model being replaced is now told to go at once, as before, but
+  the request that wanted its room waits for the process to actually exit
+  before its own model is started — and so does a request whose own model
+  failed to load, which leaves a server shutting down in just the same way. A
+  request that has not got that long to wait no longer takes a model down on
+  its way to being refused, and requests waiting for a server to exit count
+  towards the same queue limit as every other request waiting for memory.
+
+- **The panel says when a stopped model server is still holding memory.** A
+  server that survives being stopped and then killed keeps its memory until the
+  system lets go of it, which makes the budget smaller than the models on
+  screen account for. Settings now reports how much is held that way and by how
+  many servers, and the log says so once when it happens, again if the server
+  does go later, and again at shutdown. Meanwhile models go on loading and
+  swapping inside what is left, rather than every request for room being
+  refused from then on. If such a server never goes, restarting Gropius is the
+  remedy.
+
+- **A burst of requests for several models that are not loaded can be refused
+  rather than queued.** Requests waiting for memory share a queue with a small
+  number of places overall and a smaller number per caller, and callers that
+  present no API key count as one caller between them. Because a request now
+  waits for the model it is replacing to actually exit, it occupies one of
+  those places for a moment where it previously did not, so the third and later
+  requests of such a burst can get the ordinary "not enough memory" refusal
+  straight away. A retry a moment later succeeds, and requests for models
+  already in memory are unaffected.
+
+- **Model servers left behind by a crash are cleaned up even after the Mac's
+  clock has been corrected.** If Gropius is force-quit or crashes, the model
+  servers it started keep holding their memory, and the next start kills them
+  using a small file recording what was running. That file was stamped with the
+  system's boot time — a figure macOS quietly adjusts whenever the clock is
+  stepped, which happens on the first time sync after a start-up and after
+  sleep. A stamp that no longer matched read as "a previous boot", and the
+  clean-up did nothing: the abandoned servers held their memory until the Mac
+  was restarted. The stamp is now the identifier macOS gives each boot, which
+  does not move, and the per-process check that stops the clean-up ever killing
+  something it did not start is unchanged. A file left by an earlier version is
+  ignored rather than acted on.
 
 - **The committed identity pin now has a gate behind it.** `.abcd/config/identity.json`
   records the author identity every commit here is expected to carry, and until

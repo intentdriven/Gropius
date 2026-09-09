@@ -130,7 +130,7 @@ func TestLoweringTheBudgetLeavesTheModelsAndReportsOverBudget(t *testing.T) {
 		}
 		release()
 	}
-	charge := 2 * runtime.LoadCost(4*gb)
+	charge := 2 * capability.LoadCost(4*gb)
 
 	body := fmt.Sprintf(`{"host":"127.0.0.1","port":11535,"api_key":"","decode_concurrency":4,`+
 		`"idle_timeout_sec":0,"max_resident_bytes":%d}`, charge-gb)

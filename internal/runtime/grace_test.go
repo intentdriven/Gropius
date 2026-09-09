@@ -11,6 +11,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/intentdriven/Gropius/internal/capability"
 )
 
 // graceModels are three models of the same charged size, with a budget that
@@ -20,7 +22,7 @@ func graceModels() *fakeSource {
 	return &fakeSource{models: map[string]int64{"org/a": 200, "org/b": 200, "org/c": 200}}
 }
 
-// LoadCost is 1.2x, so each of the models above is charged 240 against this.
+// capability.LoadCost is 1.2x, so each of the models above is charged 240 against this.
 const graceBudget = 250
 
 // waitUntil polls a condition, so a test says what it is waiting for rather
@@ -323,7 +325,7 @@ func TestAWaiterPastItsGraceDoesNotParkToTheMaximumBehindAnInFlightModel(t *test
 			age := 2 * tc.grace
 			w := &loadWaiter{
 				arrived: time.Now().Add(-age),
-				need:    LoadCost(200),
+				need:    capability.LoadCost(200),
 				signal:  make(chan struct{}, 1),
 			}
 
@@ -373,8 +375,8 @@ func TestAWaiterBehindAnotherWaiterAlsoRechecksWithinTheGrace(t *testing.T) {
 	warm(t, p, "org/a")
 	clock.advance(10 * grace)
 
-	head := &loadWaiter{arrived: time.Now().Add(-4 * grace), need: LoadCost(200), signal: make(chan struct{}, 1)}
-	behind := &loadWaiter{arrived: time.Now().Add(-2 * grace), need: LoadCost(200), signal: make(chan struct{}, 1)}
+	head := &loadWaiter{arrived: time.Now().Add(-4 * grace), need: capability.LoadCost(200), signal: make(chan struct{}, 1)}
+	behind := &loadWaiter{arrived: time.Now().Add(-2 * grace), need: capability.LoadCost(200), signal: make(chan struct{}, 1)}
 
 	p.mu.Lock()
 	p.waiters = append(p.waiters, head, behind)
@@ -807,7 +809,7 @@ func fairnessModels() *fakeSource {
 	}}
 }
 
-// LoadCost is 1.2x: the small models are charged 240 and the big one 480,
+// capability.LoadCost is 1.2x: the small models are charged 240 and the big one 480,
 // against a budget of 500 that holds two small ones or one big one.
 const fairnessBudget = 500
 

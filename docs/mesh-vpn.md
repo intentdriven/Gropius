@@ -19,10 +19,10 @@ This page names Tailscale where an example helps; Gropius names no product, beca
 ## Serve on the mesh address
 
 1. Click the menu-bar icon and choose **Open Control Panel**.
-2. Go to **Settings → Bind address** and choose
-   **0.0.0.0 — reachable from your whole network**. Gropius binds either to this
-   Mac alone or to every address it has, so the mesh address arrives with the
-   local network attached.
+2. Go to **Settings → Bind address** and choose **A private network**. The
+   choice is labelled with the address it would bind, which is the one your mesh
+   VPN gave this Mac. Choose **0.0.0.0 — reachable from your whole network**
+   instead if you want the local network to reach the server as well.
 3. Under **API key**, click **Generate a key**, then **Save settings**. Every
    request from a network has to carry it. (Gropius generates and saves a key
    itself if you leave a bind other than loopback without one, rather than
@@ -44,7 +44,32 @@ This page names Tailscale where an example helps; Gropius names no product, beca
 
 The control panel does not travel with the API: it and its `/api/*` endpoints
 answer on loopback, so what a machine on the mesh reaches is the model API and
-not the panel.
+not the panel. Loopback is in the bind whichever choice you make, so narrowing
+the server to the mesh keeps the panel, the menu-bar app, and a client in
+another user account on this Mac.
+
+## Serve on the mesh address, and not on the local network
+
+**A private network** binds the mesh address and this Mac, and no other address
+this Mac holds. A machine at the next desk cannot reach the server; your own
+laptop, over the mesh, can.
+
+Three things to know before you choose it.
+
+- **It selects one address, and shows you which.** Gropius reads this Mac's
+  interfaces, not your VPN. If two addresses look alike to it — a mesh VPN and
+  a corporate VPN can — it refuses to choose, names both, and serves this Mac.
+  Bind the address you meant directly in that case: write it into `config.json`
+  as `host`.
+- **It narrows and never widens.** With no matching address on this Mac at
+  launch, Gropius serves this Mac and says so in **Settings** and in the log.
+  It does not fall back to the local network.
+- **Bonjour goes quiet.** The advert travels over the local network, which this
+  choice excludes, so it would name an address its recipients cannot reach.
+  Point clients at the address or at the name your mesh VPN gives this Mac.
+
+The full table of what each choice binds is in the
+[bind address reference](bind-address.md).
 
 ## What the mark beside an address means
 
@@ -80,5 +105,7 @@ network an address is on and leaves the rest to you.
 ## Where to go next
 
 - [Getting started](getting-started.md) — the walk-through this page extends.
+- [Bind address reference](bind-address.md) — what each choice binds, what
+  `config.json` carries, and what happens when a choice cannot be honoured.
 - [Record request statistics on this Mac](request-statistics.md) — what a served
   request leaves behind, and who on this Mac can read it.

@@ -22,10 +22,10 @@ func TestIgnoredSettingsAreReported(t *testing.T) {
 	}
 
 	warnStartupNotices(log, config.Notices{
-		Ignored: []string{"sampling.top_p", "model_sampling[org/x].top_k"},
+		Ignored: []string{"sampling.top_p", "models[org/x].sampling.top_k"},
 	})
 	out := buf.String()
-	if !strings.Contains(out, "sampling.top_p") || !strings.Contains(out, "model_sampling[org/x].top_k") {
+	if !strings.Contains(out, "sampling.top_p") || !strings.Contains(out, "models[org/x].sampling.top_k") {
 		t.Errorf("log line %q does not name the ignored fields", out)
 	}
 	if !strings.Contains(out, "level=WARN") {
@@ -42,14 +42,14 @@ func TestRepairedSettingsAreReportedAsInForce(t *testing.T) {
 	log := slog.New(slog.NewTextHandler(&buf, nil))
 
 	warnStartupNotices(log, config.Notices{
-		Ignored:  []string{"pinned[../../etc]"},
+		Ignored:  []string{"models[../../etc]"},
 		Repaired: []string{"api_key (trimmed to the 512-byte ceiling)"},
 	})
 
 	var ignored, repaired string
 	for _, line := range strings.Split(strings.TrimSpace(buf.String()), "\n") {
 		switch {
-		case strings.Contains(line, "pinned[../../etc]"):
+		case strings.Contains(line, "models[../../etc]"):
 			ignored = line
 		case strings.Contains(line, "api_key"):
 			repaired = line

@@ -21,6 +21,9 @@ down as
 It applies from the next request. Clear the box and save to switch it off
 again; the request after that goes to the model exactly as it arrives.
 
+In `config.json` the switch is `"merge_system_messages": true` on the model's
+entry under `models`, beside anything else set for that model.
+
 ## What it does to a request
 
 For requests to that model, Gropius gathers the instruction (`system`)

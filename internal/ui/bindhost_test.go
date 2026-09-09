@@ -113,9 +113,13 @@ func TestTheBindSelectDoesNotAccumulateOptions(t *testing.T) {
 // the tests above would still pass.
 func TestRenderSettingsAddsTheOptionBeforeAssigningTheHost(t *testing.T) {
 	body := extractFunction(t, readPanelSource(t), "renderSettings")
+	// The assignment reads bindSelectValue rather than c.host because the
+	// select now carries a mode as well as an address, and the mode is not a
+	// host. What is being asserted is unchanged: the option exists before the
+	// value that needs it is assigned.
 	const (
 		render = `renderBindOptions($('setHost'), c.host);`
-		assign = `$('setHost').value = c.host;`
+		assign = `$('setHost').value = bindSelectValue(c);`
 	)
 	at := strings.Index(body, render)
 	if at < 0 {

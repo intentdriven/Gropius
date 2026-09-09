@@ -534,6 +534,75 @@ function extraBindOption(host, offered) {
   return host;
 }
 
+// PRIVATE_BIND is the third choice in the bind select. It is a MODE, not an
+// address: it is posted in bind_mode and never in host, because a word in host
+// passes the server's host validation as a name and then fails to listen.
+const PRIVATE_BIND = 'private-network';
+
+// bindSelectValue is what the select shows for a configuration: the mode when
+// a mode is in force, and the bind address otherwise.
+function bindSelectValue(c) {
+  return c.bind_mode === PRIVATE_BIND ? PRIVATE_BIND : c.host;
+}
+
+// bindSelectBody is the pair of fields a save posts for the chosen bind.
+//
+// Choosing the mode leaves host as it was stored, so that switching the mode
+// off puts back the bind the operator had — and so that a save is never
+// refused, or silently changed, over a field they did not touch.
+function bindSelectBody(chosen, storedHost) {
+  return chosen === PRIVATE_BIND
+    ? { host: storedHost, bind_mode: PRIVATE_BIND }
+    : { host: chosen, bind_mode: '' };
+}
+
+// privateBindLabel says what the mode would bind, or why it cannot.
+//
+// It states which network an address is on and nothing about what that network
+// is worth: Gropius cannot see whether the network has been published to the
+// internet or shared with machines the operator does not own, and neither
+// transition touches the address.
+function privateBindLabel(bind) {
+  const found = (bind && bind.candidates) || [];
+  // What the running mode bound comes first: the address a private network
+  // hands out can change under a running server, and the pane has to name the
+  // one being answered on rather than the one that matches now.
+  const bound = (bind && bind.selected) || '';
+  if (bound) return `A private network (${bound}) — and this Mac`;
+  if (found.length === 1) return `A private network (${found[0]}) — and this Mac`;
+  // Named rather than counted: a refusal the operator can act on is one that
+  // says which addresses it would not choose between.
+  if (found.length > 1) return `A private network — ${found.join(', ')} all match, so Gropius will not choose`;
+  return 'A private network — no matching address on this Mac';
+}
+
+// privateBindDisabled reports whether the choice cannot be made at all.
+//
+// A mode already in force stays selectable with nothing to select: a select
+// cannot show a value it does not offer, so disabling it there would blank the
+// control and post the mode away on the next save — the fault the bind select
+// was fixed for.
+function privateBindDisabled(bind) {
+  const found = (bind && bind.candidates) || [];
+  return found.length === 0 && (!bind || bind.mode !== PRIVATE_BIND);
+}
+
+// bindNoticeText is what the pane says when the bind narrowed: the reason the
+// server gave, or nothing at all when nothing was refused.
+function bindNoticeText(bind) {
+  return (bind && bind.refusal) || '';
+}
+
+// renderBindMode labels the third choice with what it would bind, and takes it
+// away when there is nothing to bind.
+function renderBindMode(select, bind) {
+  for (const opt of Array.from(select.options)) {
+    if (opt.value !== PRIVATE_BIND) continue;
+    opt.textContent = privateBindLabel(bind);
+    opt.disabled = privateBindDisabled(bind);
+  }
+}
+
 // renderBindOptions makes the bind-address select offer the host in force,
 // labeled with the address itself, so the value round-trips and the pane shows
 // the bind Gropius is actually serving on rather than a blank control.
@@ -561,7 +630,11 @@ function renderSettings() {
   const c = state.config;
   // Before the assignment, never after: an unoffered value assigns as "".
   renderBindOptions($('setHost'), c.host);
-  $('setHost').value = c.host;
+  renderBindMode($('setHost'), state.bind);
+  const notice = bindNoticeText(state.bind);
+  $('bindNotice').textContent = notice;
+  $('bindNotice').hidden = notice === '';
+  $('setHost').value = bindSelectValue(c);
   $('setPort').value = c.port;
   $('setKey').value  = c.api_key || '';
   $('setIdle').value = c.idle_timeout_sec;
@@ -591,7 +664,10 @@ function renderSettings() {
   $('setStatsMB').value = Math.round((c.stats_max_bytes || 0) / (1024 * 1024));
   renderStatsStore();
   writeSampling('input', c.sampling);
-  overrides = { ...(c.model_sampling || {}) };
+  overrides = {};
+  Object.entries(c.models || {}).forEach(([id, ms]) => {
+    if (ms && ms.sampling) overrides[id] = ms.sampling;
+  });
   renderOverrides();
   renderMergeSwitches();
   renderPinSwitches();
@@ -631,7 +707,7 @@ function renderPinSwitches() {
 // Mac, then one per pin that names a model this Mac does not have.
 //
 // The second half is not a nicety. The form carries through every pin it does
-// not list (see pinnedModels), so a pin with no box could never be removed —
+// not list (see modelSettings), so a pin with no box could never be removed —
 // and a model deleted after it was pinned, or pinned before it was downloaded,
 // leaves exactly that. Showing it is what makes every pin removable by the
 // form that made it.
@@ -664,21 +740,9 @@ function checkedPinModels() {
   return pinBoxes().filter((cb) => cb.checked).map((cb) => cb.dataset.model);
 }
 
-// pinnedModels returns the whole pinned list a save posts. The server replaces
-// what it holds with this, so a model whose box is clear is simply left out —
-// a list cannot be shortened by omission any other way. A pin for a model the
-// form does not list is carried through, because a model can be pinned before
-// it is downloaded and a form with no box for it has nothing to say about it.
-function pinnedModels(current, listed, checked) {
-  const shown = new Set((listed || []).map(foldRepoID));
-  const out = (current || []).filter((id) => !shown.has(foldRepoID(id)));
-  (checked || []).forEach((id) => out.push(id));
-  return out;
-}
-
 // pinnedCharge is what the pinned models cost against the memory budget: each
 // one's size plus a fifth, which is what the pool charges a loaded model
-// (runtime.LoadCost). A model still downloading is charged the size it
+// (capability.LoadCost). A model still downloading is charged the size it
 // declares, because ticking its box now is a promise about the memory it will
 // take when it lands. A pin naming a model this Mac does not have at all has
 // no size to charge.
@@ -800,7 +864,7 @@ function updatePinBudget() {
 function renderMergeSwitches() {
   const box = $('mergeList');
   const models = state.models || [];
-  const per = state.config.per_model || {};
+  const per = state.config.models || {};
   box.innerHTML = '';
   if (!models.length) {
     box.innerHTML = '<p class="hint">Download a model and it appears here.</p>';
@@ -837,32 +901,52 @@ function checkedMergeModels() {
   return mergeBoxes().filter((cb) => cb.checked).map((cb) => cb.dataset.model);
 }
 
-// perModelSettings returns the whole per-model map a save posts. The server
-// replaces what it holds with this, so a model whose box is clear is simply
-// left out and its merging goes off — a map cannot be switched off by omission
-// any other way.
+// modelSettings returns the whole per-model map a save posts: one map holding
+// every setting that belongs to a model rather than to the machine — merging,
+// pinning and the sampling override.
 //
-// Two things are therefore carried through rather than rebuilt. Settings this
-// form does not own stay on the model that has them, so ticking a box never
-// wipes a model's other settings. And a model the form does not list keeps
-// everything it has, because a model can be given settings before it is
-// downloaded and a form with no box for it has nothing to say about it.
-function perModelSettings(current, listed, checked) {
-  const shown = new Set(listed || []);
+// The server replaces what it holds with this, so a model whose box is clear
+// is simply left out and the setting goes off — a map cannot be switched off
+// by omission any other way. Two things are therefore carried through rather
+// than rebuilt. A setting this form does not own stays on the model that has
+// it, so ticking one box never wipes another setting. And a model the form
+// does not list keeps everything it has, because a model can be given settings
+// before it is downloaded and a form with no box for it has nothing to say
+// about it.
+//
+// The sampling overrides are not a box but a whole editor, which holds every
+// override there is while it is open, so they are assigned rather than
+// toggled: a model missing from them has had its override removed.
+function modelSettings(current, overrides, listedMerge, checkedMerge, listedPin, checkedPin) {
   const out = {};
   Object.keys(current || {}).forEach((id) => {
-    if (!shown.has(id)) {
-      out[id] = current[id];
-      return;
-    }
-    const rest = Object.assign({}, current[id]);
-    delete rest.merge_system_messages;
-    if (Object.keys(rest).length) out[id] = rest;
+    out[id] = Object.assign({}, current[id]);
+    delete out[id].sampling;
   });
-  (checked || []).forEach((id) => {
-    out[id] = Object.assign({}, out[id] || {}, { merge_system_messages: true });
+  Object.keys(overrides || {}).forEach((id) => {
+    out[id] = Object.assign({}, out[id] || {}, { sampling: overrides[id] });
+  });
+  applyModelSwitch(out, 'merge_system_messages', listedMerge, checkedMerge);
+  applyModelSwitch(out, 'pinned', listedPin, checkedPin);
+  // A model left with no settings at all is left out entirely, so that
+  // clearing every box for a model removes it rather than storing an empty
+  // object under its name.
+  Object.keys(out).forEach((id) => {
+    if (!Object.keys(out[id]).length) delete out[id];
   });
   return out;
+}
+
+// applyModelSwitch writes one row of boxes into the map being posted: every
+// model the form drew a box for loses the setting, and every model whose box
+// is ticked gets it back. A model with no box is not touched.
+function applyModelSwitch(models, field, listed, checked) {
+  (listed || []).forEach((id) => {
+    if (models[id]) delete models[id][field];
+  });
+  (checked || []).forEach((id) => {
+    models[id] = Object.assign({}, models[id] || {}, { [field]: true });
+  });
 }
 
 function renderOverrides() {
@@ -1050,7 +1134,9 @@ $('settingsForm').addEventListener('submit', async (e) => {
   // preserved server-side — sending advertise:true here used to silently
   // re-enable LAN advertising on every save.
   const body = {
-    host:               $('setHost').value,
+    // The bind is two fields — an address and a mode — and the select carries
+    // whichever one the operator chose.
+    ...bindSelectBody($('setHost').value, state.config.host),
     port:               parseInt($('setPort').value, 10),
     api_key:            $('setKey').value,
     idle_timeout_sec:   parseInt($('setIdle').value, 10) || 0,
@@ -1070,9 +1156,11 @@ $('settingsForm').addEventListener('submit', async (e) => {
     // A blank sampling field is sent as null, not as zero: the model server is
     // handed a flag only for a parameter that has a value.
     sampling:           readSampling('input'),
-    model_sampling:     overrides,
-    per_model:         perModelSettings(state.config.per_model, listedMergeModels(), checkedMergeModels()),
-    pinned:            pinnedModels(state.pinned, listedPinModels(), checkedPinModels()),
+    models: modelSettings(
+      state.config.models, overrides,
+      listedMergeModels(), checkedMergeModels(),
+      listedPinModels(), checkedPinModels(),
+    ),
   };
   try {
     const res = await api('/api/settings', {

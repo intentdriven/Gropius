@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/intentdriven/Gropius/internal/capability"
 	"github.com/intentdriven/Gropius/internal/config"
 	"github.com/intentdriven/Gropius/internal/registry"
 	"github.com/intentdriven/Gropius/internal/runtime"
@@ -722,19 +723,49 @@ func TestSetConfigCanonicalizesPerModelKeys(t *testing.T) {
 	}
 
 	c := a.Config()
-	c.PerModel = map[string]config.ModelSettings{
+	c.Models = map[string]config.ModelSettings{
 		"ORG/repo": {MergeSystemMessages: true},
 	}
 	if err := a.SetConfig(c); err != nil {
 		t.Fatalf("SetConfig: %v", err)
 	}
 
-	got := a.Config().PerModel
+	got := a.Config().Models
 	if len(got) != 1 {
-		t.Fatalf("PerModel = %+v, want one entry", got)
+		t.Fatalf("Models = %+v, want one entry", got)
 	}
 	if !got["org/Repo"].MergeSystemMessages {
-		t.Errorf("PerModel = %+v, want the setting under the registry's spelling %q", got, "org/Repo")
+		t.Errorf("Models = %+v, want the setting under the registry's spelling %q", got, "org/Repo")
+	}
+}
+
+// A model whose every box is cleared has no settings, and the save stores
+// none: an empty object under its name would hold a slot against the ceiling,
+// come back to the panel on the next state request and be written to
+// config.json for good. The file path drops one the same way.
+func TestSetConfigDropsAModelEntryWithNoSettingsOnIt(t *testing.T) {
+	a := newTestApp(t)
+
+	c := a.Config()
+	c.Models = map[string]config.ModelSettings{
+		"org/empty":  {},
+		"org/pinned": {Pinned: true},
+	}
+	if err := a.SetConfig(c); err != nil {
+		t.Fatalf("SetConfig: %v", err)
+	}
+	if _, kept := a.Config().Models["org/empty"]; kept {
+		t.Errorf("an entry with no settings on it was stored: %+v", a.Config().Models)
+	}
+	if !a.Config().Models["org/pinned"].Pinned {
+		t.Errorf("the entry beside it was dropped too: %+v", a.Config().Models)
+	}
+	written, err := os.ReadFile(a.Paths.Config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(written), "org/empty") {
+		t.Errorf("the empty entry reached config.json: %s", written)
 	}
 }
 
@@ -751,7 +782,7 @@ func TestSetConfigRejectsInvalidPerModelKeyAndLeavesTheFileAlone(t *testing.T) {
 	}
 
 	c := a.Config()
-	c.PerModel = map[string]config.ModelSettings{"../../etc": {MergeSystemMessages: true}}
+	c.Models = map[string]config.ModelSettings{"../../etc": {MergeSystemMessages: true}}
 	if err := a.SetConfig(c); err == nil {
 		t.Fatal("expected a per-model key that is not a model id to be refused")
 	}
@@ -763,8 +794,8 @@ func TestSetConfigRejectsInvalidPerModelKeyAndLeavesTheFileAlone(t *testing.T) {
 	if string(after) != string(before) {
 		t.Errorf("the refused save rewrote the settings file:\n before %s\n after  %s", before, after)
 	}
-	if len(a.Config().PerModel) != 0 {
-		t.Errorf("the refused save reached the live config: %+v", a.Config().PerModel)
+	if len(a.Config().Models) != 0 {
+		t.Errorf("the refused save reached the live config: %+v", a.Config().Models)
 	}
 }
 
@@ -785,7 +816,7 @@ func TestNewCanonicalizesPerModelKeysFromDisk(t *testing.T) {
 	os.WriteFile(filepath.Join(dir, "model.safetensors"), make([]byte, 512), 0o644)
 
 	cfg := config.Default()
-	cfg.PerModel = map[string]config.ModelSettings{
+	cfg.Models = map[string]config.ModelSettings{
 		"MLX-Community/existing-4bit": {MergeSystemMessages: true},
 	}
 	a, err := New(Options{Paths: paths, Config: cfg})
@@ -794,7 +825,7 @@ func TestNewCanonicalizesPerModelKeysFromDisk(t *testing.T) {
 	}
 	defer a.Close()
 
-	got := a.Config().PerModel
+	got := a.Config().Models
 	if !got["mlx-community/Existing-4bit"].MergeSystemMessages {
 		t.Errorf("per-model settings = %+v, want the setting under the registry's spelling", got)
 	}
@@ -807,7 +838,7 @@ func TestNewCanonicalizesPerModelKeysFromDisk(t *testing.T) {
 func TestNewDropsAPerModelKeyThatNamesNoModel(t *testing.T) {
 	paths := config.NewPaths(t.TempDir())
 	cfg := config.Default()
-	cfg.PerModel = map[string]config.ModelSettings{
+	cfg.Models = map[string]config.ModelSettings{
 		"../../etc":                   {MergeSystemMessages: true},
 		"mlx-community/Qwen3-8B-4bit": {MergeSystemMessages: true},
 	}
@@ -817,7 +848,7 @@ func TestNewDropsAPerModelKeyThatNamesNoModel(t *testing.T) {
 	}
 	defer a.Close()
 
-	got := a.Config().PerModel
+	got := a.Config().Models
 	if _, bad := got["../../etc"]; bad {
 		t.Errorf("a key that names no model survived startup: %+v", got)
 	}
@@ -848,7 +879,7 @@ func TestSetConfigReportsAFoldedDuplicateDeterministically(t *testing.T) {
 	}
 
 	c := a.Config()
-	c.PerModel = map[string]config.ModelSettings{
+	c.Models = map[string]config.ModelSettings{
 		"ORG/repo":  {MergeSystemMessages: true},
 		"org/repo":  {},
 		"ORG/other": {MergeSystemMessages: true},
@@ -905,12 +936,12 @@ func TestSetConfigRefusesPinsThatDoNotFitTheMemoryBudget(t *testing.T) {
 	}
 
 	overshooting := base.Clone()
-	overshooting.Pinned = []string{"org/writer", "org/reviewer"}
+	overshooting.Models = pinnedModels("org/writer", "org/reviewer")
 	err = a.SetConfig(overshooting)
 	if err == nil {
 		t.Fatal("SetConfig accepted a pinned set larger than the whole memory budget")
 	}
-	sum := runtime.HumanBytes(2 * runtime.LoadCost(each))
+	sum := runtime.HumanBytes(2 * capability.LoadCost(each))
 	budget := runtime.HumanBytes(a.Pool.MemoryBudget())
 	if !strings.Contains(err.Error(), sum) || !strings.Contains(err.Error(), budget) {
 		t.Errorf("error = %q, want it to give the pinned sum %s and the budget %s", err, sum, budget)
@@ -923,7 +954,7 @@ func TestSetConfigRefusesPinsThatDoNotFitTheMemoryBudget(t *testing.T) {
 	if !bytes.Equal(before, after) {
 		t.Error("a refused save rewrote config.json")
 	}
-	if got := a.Config().Pinned; len(got) != 0 {
+	if got := a.Config().PinnedIDs(); len(got) != 0 {
 		t.Errorf("the refused pins reached the live configuration: %v", got)
 	}
 	if got := a.Pool.Pinned(); len(got) != 0 {
@@ -939,12 +970,12 @@ func TestSetConfigAcceptsPinsThatFitAndOnesNotYetDownloaded(t *testing.T) {
 	putReady(t, a, "org/small", 1<<20)
 
 	c := a.Config()
-	c.Pinned = []string{"org/small", "org/not-downloaded"}
+	c.Models = pinnedModels("org/small", "org/not-downloaded")
 	if err := a.SetConfig(c); err != nil {
 		t.Fatalf("SetConfig: %v", err)
 	}
-	if got := a.Config().Pinned; !reflect.DeepEqual(got, c.Pinned) {
-		t.Errorf("Pinned = %v, want %v", got, c.Pinned)
+	if got, want := a.Config().PinnedIDs(), c.PinnedIDs(); !reflect.DeepEqual(got, want) {
+		t.Errorf("PinnedIDs = %v, want %v", got, want)
 	}
 }
 
@@ -957,13 +988,13 @@ func TestSetConfigCanonicalizesPinnedModelIDs(t *testing.T) {
 	putReady(t, a, "org/Writer", 1<<20)
 
 	c := a.Config()
-	c.Pinned = []string{"ORG/writer", "org/not-downloaded"}
+	c.Models = pinnedModels("ORG/writer", "org/not-downloaded")
 	if err := a.SetConfig(c); err != nil {
 		t.Fatalf("SetConfig: %v", err)
 	}
 	want := []string{"org/Writer", "org/not-downloaded"}
-	if got := a.Config().Pinned; !reflect.DeepEqual(got, want) {
-		t.Errorf("Pinned = %v, want %v", got, want)
+	if got := a.Config().PinnedIDs(); !reflect.DeepEqual(got, want) {
+		t.Errorf("PinnedIDs = %v, want %v", got, want)
 	}
 	if got := a.Pool.Pinned(); !reflect.DeepEqual(got, want) {
 		t.Errorf("the pool holds %v, want %v", got, want)
@@ -977,7 +1008,7 @@ func TestSetConfigAppliesPinsToThePoolWithoutARestart(t *testing.T) {
 	putReady(t, a, "org/keeper", 1<<20)
 
 	c := a.Config()
-	c.Pinned = []string{"org/keeper"}
+	c.Models = pinnedModels("org/keeper")
 	if err := a.SetConfig(c); err != nil {
 		t.Fatalf("SetConfig: %v", err)
 	}
@@ -986,7 +1017,7 @@ func TestSetConfigAppliesPinsToThePoolWithoutARestart(t *testing.T) {
 	}
 
 	// And clearing the list unprotects it, again without a restart.
-	c.Pinned = nil
+	c.Models = nil
 	if err := a.SetConfig(c); err != nil {
 		t.Fatalf("SetConfig: %v", err)
 	}
@@ -999,7 +1030,7 @@ func TestSetConfigAppliesPinsToThePoolWithoutARestart(t *testing.T) {
 // the operator saves Settings again.
 func TestPinsFromTheSettingsFileReachThePoolAtStartup(t *testing.T) {
 	cfg := config.Default()
-	cfg.Pinned = []string{"org/keeper"}
+	cfg.Models = pinnedModels("org/keeper")
 	a, err := New(Options{Paths: config.NewPaths(t.TempDir()), Config: cfg})
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -1022,7 +1053,7 @@ func TestPinsFromTheSettingsFileAreFoldedOntoTheRegistrySpelling(t *testing.T) {
 	seedReadyModel(t, paths, "org/Writer", 1<<20)
 
 	cfg := config.Default()
-	cfg.Pinned = []string{"ORG/writer", "org/not-downloaded"}
+	cfg.Models = pinnedModels("ORG/writer", "org/not-downloaded")
 	a, err := New(Options{Paths: paths, Config: cfg})
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -1030,7 +1061,7 @@ func TestPinsFromTheSettingsFileAreFoldedOntoTheRegistrySpelling(t *testing.T) {
 	t.Cleanup(func() { a.Close() })
 
 	want := []string{"org/Writer", "org/not-downloaded"}
-	if got := a.Config().Pinned; !reflect.DeepEqual(got, want) {
+	if got := a.Config().PinnedIDs(); !reflect.DeepEqual(got, want) {
 		t.Errorf("Pinned = %v after startup, want %v", got, want)
 	}
 	if got := a.Pool.Pinned(); !reflect.DeepEqual(got, want) {
@@ -1050,15 +1081,15 @@ func TestDuplicatePinsFromTheSettingsFileAreDropped(t *testing.T) {
 	seedReadyModel(t, paths, "org/writer", 1<<20)
 
 	cfg := config.Default()
-	cfg.Pinned = []string{"org/writer", "ORG/Writer"}
+	cfg.Models = pinnedModels("org/writer", "ORG/Writer")
 	a, err := New(Options{Paths: paths, Config: cfg})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
 	t.Cleanup(func() { a.Close() })
 
-	if got := a.Config().Pinned; !reflect.DeepEqual(got, []string{"org/writer"}) {
-		t.Errorf("Pinned = %v, want one spelling of the one model", got)
+	if got := a.Config().PinnedIDs(); !reflect.DeepEqual(got, []string{"org/writer"}) {
+		t.Errorf("PinnedIDs = %v, want one spelling of the one model", got)
 	}
 }
 
@@ -1077,12 +1108,12 @@ func TestSetConfigChargesAModelThatIsStillDownloading(t *testing.T) {
 	}
 
 	c := a.Config()
-	c.Pinned = []string{"org/incoming"}
+	c.Models = pinnedModels("org/incoming")
 	err := a.SetConfig(c)
 	if err == nil {
 		t.Fatal("SetConfig accepted a pin on a download far larger than the whole budget")
 	}
-	if want := runtime.HumanBytes(runtime.LoadCost(1 << 50)); !strings.Contains(err.Error(), want) {
+	if want := runtime.HumanBytes(capability.LoadCost(1 << 50)); !strings.Contains(err.Error(), want) {
 		t.Errorf("error = %q, want it to charge the declared download size %s", err, want)
 	}
 }
@@ -1097,7 +1128,7 @@ func TestStartupWarnsWhenThePinnedSetCannotFit(t *testing.T) {
 
 	var logged bytes.Buffer
 	cfg := config.Default()
-	cfg.Pinned = []string{"org/enormous"}
+	cfg.Models = pinnedModels("org/enormous")
 	a, err := New(Options{
 		Paths:  paths,
 		Config: cfg,
@@ -1154,7 +1185,7 @@ func TestAnInheritedOverBudgetPinnedSetDoesNotBlockAnUnrelatedSave(t *testing.T)
 	seedReadyModel(t, paths, "org/enormous", 1<<50)
 
 	cfg := config.Default()
-	cfg.Pinned = []string{"org/enormous"}
+	cfg.Models = pinnedModels("org/enormous")
 	a, err := New(Options{Paths: paths, Config: cfg})
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -1177,14 +1208,16 @@ func TestAnInheritedOverBudgetPinnedSetDoesNotBlockAnUnrelatedSave(t *testing.T)
 		t.Fatal(err)
 	}
 	c = a.Config()
-	c.Pinned = append(append([]string(nil), c.Pinned...), "org/second")
+	// A fresh map: the settings map behind Config() is the live one, so adding
+	// to it in place would put the pin in force before SetConfig saw it.
+	c.Models = pinnedModels(append(c.PinnedIDs(), "org/second")...)
 	if err := a.SetConfig(c); err == nil {
 		t.Error("adding a pin to a set that already does not fit was accepted")
 	}
 
 	// And so is shedding one, which leaves the set no worse than it was.
 	c = a.Config()
-	c.Pinned = nil
+	c.Models = nil
 	if err := a.SetConfig(c); err != nil {
 		t.Errorf("unpinning was refused: %v", err)
 	}
@@ -1204,7 +1237,7 @@ func TestAPinOnAFailedDownloadIsChargedNothing(t *testing.T) {
 	}
 
 	c := a.Config()
-	c.Pinned = []string{"org/broken"}
+	c.Models = pinnedModels("org/broken")
 	if err := a.SetConfig(c); err != nil {
 		t.Errorf("a pin on a model that can never load was charged the memory it never takes: %v", err)
 	}
@@ -1223,7 +1256,7 @@ func TestAPinOnAModelOfUnknownSizeIsRefusedWhenItIsAdded(t *testing.T) {
 	}
 
 	c := a.Config()
-	c.Pinned = []string{"org/sizeless"}
+	c.Models = pinnedModels("org/sizeless")
 	err := a.SetConfig(c)
 	if err == nil {
 		t.Fatal("a pin on a model of unknown size was accepted")
@@ -1246,22 +1279,22 @@ func TestThePinnedFitCheckIsInclusiveOfTheBudget(t *testing.T) {
 
 	putReady(t, a, "org/exact", fits)
 	c := a.Config()
-	c.Pinned = []string{"org/exact"}
+	c.Models = pinnedModels("org/exact")
 	if err := a.SetConfig(c); err != nil {
 		t.Errorf("a pinned model charged %s against a budget of %s was refused: %v",
-			runtime.HumanBytes(runtime.LoadCost(fits)), runtime.HumanBytes(budget), err)
+			runtime.HumanBytes(capability.LoadCost(fits)), runtime.HumanBytes(budget), err)
 	}
 
 	putReady(t, a, "org/exact", over)
 	c = a.Config()
-	c.Pinned = nil
+	c.Models = nil
 	if err := a.SetConfig(c); err != nil {
 		t.Fatal(err)
 	}
-	c.Pinned = []string{"org/exact"}
+	c.Models = pinnedModels("org/exact")
 	if err := a.SetConfig(c); err == nil {
 		t.Errorf("a pinned model charged %s against a budget of %s was accepted",
-			runtime.HumanBytes(runtime.LoadCost(over)), runtime.HumanBytes(budget))
+			runtime.HumanBytes(capability.LoadCost(over)), runtime.HumanBytes(budget))
 	}
 }
 
@@ -1282,23 +1315,23 @@ func TestOverlappingSavesLeaveThePoolAgreeingWithTheSettings(t *testing.T) {
 			defer wg.Done()
 			c := a.Config()
 			if i%2 == 0 {
-				c.Pinned = []string{"org/one"}
+				c.Models = pinnedModels("org/one")
 			} else {
-				c.Pinned = []string{"org/two"}
+				c.Models = pinnedModels("org/two")
 			}
 			_ = a.SetConfig(c)
 		}(i)
 	}
 	wg.Wait()
 
-	if got, want := a.Pool.Pinned(), a.Config().Pinned; !reflect.DeepEqual(got, want) {
+	if got, want := a.Pool.Pinned(), a.Config().PinnedIDs(); !reflect.DeepEqual(got, want) {
 		t.Errorf("the pool enforces %v while the settings say %v", got, want)
 	}
 	stored, _, err := config.Load(a.Paths.Config)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, want := stored.Pinned, a.Config().Pinned; !reflect.DeepEqual(got, want) {
+	if got, want := stored.PinnedIDs(), a.Config().PinnedIDs(); !reflect.DeepEqual(got, want) {
 		t.Errorf("config.json holds %v while the running settings say %v", got, want)
 	}
 }
@@ -1314,7 +1347,7 @@ func TestAPinTakesTheRegistrySpellingWhenItsModelArrives(t *testing.T) {
 	a.Hub.BaseURL = hub.URL
 
 	c := a.Config()
-	c.Pinned = []string{"ORG/Repo"}
+	c.Models = pinnedModels("ORG/Repo")
 	if err := a.SetConfig(c); err != nil {
 		t.Fatalf("SetConfig: %v", err)
 	}
@@ -1327,7 +1360,7 @@ func TestAPinTakesTheRegistrySpellingWhenItsModelArrives(t *testing.T) {
 		return err == nil && m.State == registry.StateReady
 	})
 	waitFor(t, "the pin to take the registry's spelling", func() bool {
-		return reflect.DeepEqual(a.Config().Pinned, []string{"org/repo"})
+		return reflect.DeepEqual(a.Config().PinnedIDs(), []string{"org/repo"})
 	})
 	if got := a.Pool.Pinned(); !reflect.DeepEqual(got, []string{"org/repo"}) {
 		t.Errorf("the pool holds %v, want the registry's spelling", got)
@@ -1343,7 +1376,7 @@ func TestAPinnedSetThatStopsFittingIsReportedToTheOperator(t *testing.T) {
 	putReady(t, a, "org/small", 1<<20)
 
 	c := a.Config()
-	c.Pinned = []string{"org/small", "org/enormous"}
+	c.Models = pinnedModels("org/small", "org/enormous")
 	if err := a.SetConfig(c); err != nil {
 		t.Fatalf("SetConfig: %v", err)
 	}
@@ -1480,4 +1513,17 @@ func TestRestoredReadyModelKeepsItsCategory(t *testing.T) {
 	if m.PipelineTag != "text-generation" || strings.Join(m.Tags, ",") != "conversational" {
 		t.Errorf("the restored record carries %q/%v, want the category it had", m.PipelineTag, m.Tags)
 	}
+}
+
+// pinnedModels is the per-model settings map that pins exactly these models,
+// which is what most of these tests want to say about a configuration. Pinning
+// is a field on a model's settings rather than a list of its own
+// (iss-2609062213413447), and spelling that out at every call site would say
+// nothing the field name does not.
+func pinnedModels(ids ...string) map[string]config.ModelSettings {
+	out := make(map[string]config.ModelSettings, len(ids))
+	for _, id := range ids {
+		out[id] = config.ModelSettings{Pinned: true}
+	}
+	return out
 }
