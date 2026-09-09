@@ -70,7 +70,8 @@ Cross-machine LAN use works; TLS and notarized distribution are not yet included
   ([what the views mean](docs/statistics-explained.md)).
 - **Network-shared** — bind the LAN, discoverable over Bonjour, optional API key.
 - **Multi-account** — other user accounts on the same Mac share one copy of each
-  model on disk and on the GPU.
+  model on disk and on the GPU. The models are shared; each account keeps its
+  own settings and its own model list, so no key or token crosses accounts.
 
 ## Install
 

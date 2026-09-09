@@ -11,6 +11,26 @@ GitHub release notes.
 
 ## [Unreleased]
 
+### Changed
+
+- **Under a shared model cache, every account now keeps its own settings and
+  its own model list.** They used to be one `config.json` and one
+  `registry.json` beside the models, which worked for whichever account ran
+  first and for no other: the second account could not read the first's
+  settings, and the shared folder's sticky bit — the thing that stops one
+  account deleting another's models — made its every attempt to save its model
+  list fail. It could serve, and it could record nothing. Both files now live
+  in the account's own folder, where it owns them; the models stay shared,
+  which is what the shared cache is for. A HuggingFace token or an API key one
+  account sets is now unreadable by the others, rather than shared by accident.
+  On an account's first start after this change, its model list is rebuilt from
+  the models already in the shared folder, so nothing is downloaded twice, and
+  the settings it had kept in the shared folder are carried over into its own —
+  only ever its own: settings belonging to another account are left alone.
+  **A single-account install is unaffected.** In an existing shared install the
+  second and later accounts genuinely behave differently, which is the point:
+  they can now save what they change.
+
 ## [0.4.0] - 2026-09-08
 
 ### Added
