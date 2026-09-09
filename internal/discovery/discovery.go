@@ -4,7 +4,6 @@ package discovery
 
 import (
 	"context"
-	"fmt"
 	"log/slog"
 	"strconv"
 	"strings"
@@ -92,10 +91,21 @@ type Advertiser struct {
 	AuthRequired func() bool
 	Log          *slog.Logger
 
+	// announce registers the service. nil means the real dnssd path; tests
+	// substitute a fake so the lifecycle can be driven without a socket.
+	announce announcer
+	// interval is how often the advertised TXT record is re-derived from the
+	// callbacks. Zero means defaultRefreshInterval.
+	interval time.Duration
+
 	mu     sync.Mutex
 	cancel context.CancelFunc
 	done   chan struct{}
 }
+
+// defaultRefreshInterval is how often the advertised auth/model hints are
+// re-derived from the live callbacks.
+const defaultRefreshInterval = 15 * time.Second
 
 // txtRecord builds the TXT map from the live callbacks.
 func (a *Advertiser) txtRecord() map[string]string {
@@ -131,6 +141,9 @@ func (a *Advertiser) Start(ctx context.Context) error {
 	if a.Log == nil {
 		a.Log = slog.Default()
 	}
+	if a.announce == nil {
+		a.announce = dnssdAnnouncer{}
+	}
 
 	host := config.LocalHostName()
 	if host == "" {
@@ -156,62 +169,222 @@ func (a *Advertiser) Start(ctx context.Context) error {
 		// of <LocalHostName>.local is left completely alone.
 		Host: serviceHost(host),
 		Port: a.Port,
-		Text: a.txtRecord(),
-	}
-	service, err := dnssd.NewService(cfg)
-	if err != nil {
-		return fmt.Errorf("build mDNS service: %w", err)
-	}
-
-	responder, err := dnssd.NewResponder()
-	if err != nil {
-		return fmt.Errorf("create mDNS responder: %w", err)
-	}
-	handle, err := responder.Add(service)
-	if err != nil {
-		return fmt.Errorf("add mDNS service: %w", err)
 	}
 
 	rctx, cancel := context.WithCancel(ctx)
+	ad, err := a.publish(rctx, cfg, a.txtRecord())
+	if err != nil {
+		cancel()
+		return err
+	}
+
 	a.cancel = cancel
 	a.done = make(chan struct{})
-
-	go func() {
-		defer close(a.done)
-		// Respond blocks until the context is cancelled. On darwin it logs a
-		// benign "unable to wait for link updates" (netlink is Linux-only).
-		if err := responder.Respond(rctx); err != nil && rctx.Err() == nil {
-			a.Log.Warn("mDNS advertising stopped", "err", err)
-		}
-	}()
-
-	// Keep the advertised auth/model hints in step with runtime config changes.
-	go a.refresh(rctx, responder, handle, cfg.Text)
+	go a.refresh(rctx, cfg, ad, a.done)
 
 	a.Log.Info("advertising on the local network",
 		"service", ServiceType, "name", cfg.Name, "port", a.Port)
 	return nil
 }
 
+// advertisement is one registration together with the responder goroutine
+// serving it. Registering and responding are separate steps in dnssd — Register
+// only builds the service and hands it over, while the probe and the first
+// announcement happen inside Respond — so a registration can be sound and its
+// responder still fail immediately, and the two states are tracked apart.
+type advertisement struct {
+	reg    registration
+	text   map[string]string
+	cancel context.CancelFunc
+	done   chan struct{}
+
+	// err is why the responder stopped on its own. Written before done is
+	// closed and read only after it, so the close orders the two.
+	err error
+
+	// spent records that this registration was withdrawn deliberately. dnssd
+	// closes its sockets on the way out of a cancelled Respond, so a withdrawn
+	// registration cannot be served again — only one that stopped by itself
+	// can. Read and written by the refresh goroutine alone.
+	spent bool
+}
+
+// publish registers the service carrying text and starts responding for it.
+func (a *Advertiser) publish(ctx context.Context, cfg dnssd.Config, text map[string]string) (*advertisement, error) {
+	cfg.Text = text
+	reg, err := a.announce.Register(cfg)
+	if err != nil {
+		return nil, err
+	}
+	ad := &advertisement{reg: reg, text: text}
+	a.serve(ctx, ad)
+	return ad, nil
+}
+
+// serve starts the responder goroutine for an already-built registration.
+//
+// It is separate from publish because a responder that failed can be started
+// again on the SAME registration. dnssd closes its sockets only on the way out
+// of a Respond that ran to cancellation, so a Respond that returns early leaves
+// its socket pair open with no way to reach it from here; re-serving the
+// registration we already have is what keeps a network outage from opening a
+// fresh pair on every retry.
+func (a *Advertiser) serve(ctx context.Context, ad *advertisement) {
+	rctx, cancel := context.WithCancel(ctx)
+	ad.cancel = cancel
+	ad.done = make(chan struct{})
+	ad.err = nil
+	reg := ad.reg
+	go func() {
+		defer close(ad.done)
+		// Respond blocks until the context is cancelled, unless probing or the
+		// first announcement fails. On darwin it logs a benign "unable to wait
+		// for link updates" (netlink is Linux-only).
+		if err := reg.Respond(rctx); err != nil && rctx.Err() == nil {
+			ad.err = err
+		}
+	}()
+}
+
+// withdraw cancels the responder and waits for it to actually exit, so its
+// goodbye is on the wire before anything else touches the same name. It is safe
+// on a responder that has already stopped by itself.
+func (ad *advertisement) withdraw() {
+	ad.spent = true
+	ad.cancel()
+	<-ad.done
+}
+
 // refresh periodically re-publishes the TXT record when the advertised auth
 // state or model count changes, so a runtime config change (e.g. setting an API
 // key in the control panel) is reflected to clients rather than left stale.
-func (a *Advertiser) refresh(ctx context.Context, r dnssd.Responder, h dnssd.ServiceHandle, last map[string]string) {
-	tick := time.NewTicker(15 * time.Second)
+//
+// A change is published by withdrawing the whole advertisement and registering
+// it afresh, never by editing the service a running responder is reading — see
+// the comment on registration. The cost is one goodbye plus a re-probe per
+// change, so peers watching a browse see the service blink; the hints change
+// rarely (an API key toggled, the servable-model count moving), which is what
+// makes that price acceptable.
+//
+// Everything happens in this one goroutine, so a withdraw can never overlap the
+// registration that replaces it, and Stop — which cancels ctx and waits on done
+// — cannot be outrun by a refresh that resurrects the service.
+//
+// The loop also watches the responder itself. Registering a service and serving
+// it are two steps in dnssd: the probe and the first announcement happen inside
+// Respond, so a re-registration can be accepted and then die on a network that
+// has gone away. A responder that stops on its own means the Mac is on no
+// browser's list, and the next tick puts it back.
+func (a *Advertiser) refresh(ctx context.Context, cfg dnssd.Config, ad *advertisement, done chan struct{}) {
+	defer close(done)
+	defer func() {
+		if ad != nil {
+			ad.withdraw()
+		}
+	}()
+
+	interval := a.interval
+	if interval <= 0 {
+		interval = defaultRefreshInterval
+	}
+	tick := time.NewTicker(interval)
 	defer tick.Stop()
+
+	// serving says whether a responder is currently up for ad. down says the
+	// service is known to be off the network, and exists so that an outage —
+	// which persists, and fails identically every interval — is reported on the
+	// way in and on the way out rather than every tick in between.
+	serving, down := true, false
+	last := ad.text
+
 	for {
+		var stopped <-chan struct{}
+		if serving {
+			stopped = ad.done
+		}
+
 		select {
 		case <-ctx.Done():
 			return
+
+		case <-stopped:
+			// Both this and ctx.Done() are ready during a Stop, and select
+			// picks between ready cases at random. A responder that stopped
+			// because it was told to is not an outage and is not reported.
+			if ctx.Err() != nil {
+				return
+			}
+			// It gave up by itself: probing failed, or the network went away
+			// under it. Nothing is advertised now.
+			serving = false
+			ad.cancel()
+			if !down {
+				down = true
+				a.Log.Warn("the network advertisement has stopped, retrying", "err", ad.err)
+			}
+
 		case <-tick.C:
+			// Recovery is reported here rather than at the moment of serving,
+			// because serving is asynchronous: the responder that has just been
+			// started may fail the same way the last one did. Having survived a
+			// whole interval is the first evidence there is.
+			if down && serving {
+				down = false
+				a.Log.Info("network advertisement republished",
+					"auth", last["auth"], "models", last["models"])
+			}
+
 			cur := a.txtRecord()
-			if sameText(last, cur) {
+			changed := !sameText(last, cur)
+			// No churn: withdrawing costs peers a cache flush, so only an
+			// actual change is worth one.
+			if serving && !changed {
 				continue
 			}
-			h.UpdateText(cur, r)
-			last = cur
-			a.Log.Info("updated network advertisement",
-				"auth", cur["auth"], "models", cur["models"])
+			if serving {
+				ad.withdraw()
+				serving = false
+			}
+			// Stop may have fired while the goodbye was going out. Do not put
+			// back a service that has just been taken off the network.
+			if ctx.Err() != nil {
+				return
+			}
+
+			var err error
+			switch {
+			case ad != nil && !ad.spent && sameText(ad.text, cur):
+				// The registration still says the right thing; only its
+				// responder died. Serve it again rather than building another,
+				// which would open a second socket pair and strand the first.
+				a.serve(ctx, ad)
+			default:
+				var next *advertisement
+				next, err = a.publish(ctx, cfg, cur)
+				if err == nil {
+					ad = next
+				}
+			}
+			if err != nil {
+				// The service is advertised nowhere. Leave serving false so the
+				// next tick tries again rather than reporting it published.
+				if !down {
+					down = true
+					a.Log.Warn("could not publish the network advertisement, retrying", "err", err)
+				}
+				continue
+			}
+			serving, last = true, cur
+
+			// Stop can have fired while the registration was going through.
+			// Say nothing about a service that is about to be torn down.
+			if ctx.Err() != nil {
+				return
+			}
+			if changed {
+				a.Log.Info("updated network advertisement",
+					"auth", cur["auth"], "models", cur["models"])
+			}
 		}
 	}
 }

@@ -145,6 +145,31 @@ GitHub release notes.
   that reached its terminal event is now recorded as delivered, with its
   counts, whatever happens to the tidying-up after it.
 
+
+- **The Bonjour advertisement is republished, not edited, when what it says
+  changes.** Setting or clearing the API key, or a change in how many models
+  are servable, used to rewrite the advertised record in place while the
+  responder was still reading it — an unsynchronised write against a
+  concurrent read, whose worst case is a garbled or missing answer to a
+  machine that happens to be browsing at that moment. Gropius now takes the
+  advertisement off the network, waits for it to be gone, and publishes it
+  afresh. The visible cost is that the service disappears and reappears in a
+  browser such as Bonjour Browser for the moment the change takes, which is
+  why it is done only when the record's contents have actually changed. A
+  republication that fails is retried on the next refresh rather than leaving
+  the Mac undiscoverable until it is restarted.
+
+- **An advertisement that stops on its own is put back.** Claiming a name on
+  the network is a separate step from being handed the service, and it happens
+  a moment later — so an advertisement could be accepted and then fail, on a
+  Mac whose Wi-Fi had just dropped or whose network changed under it. The Mac
+  then stayed off every browser's list until the next time the advertised
+  hints changed, or until Gropius was restarted. It now watches its own
+  advertisement and puts it back on the network as soon as it can, reusing
+  what it already claimed rather than starting over each time. An outage is
+  reported once when it begins and once when it ends, instead of every fifteen
+  seconds for as long as the network is away.
+
 ## [0.4.0] - 2026-09-08
 
 ### Added

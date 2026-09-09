@@ -7,6 +7,8 @@ category: "bug"
 source: "agent-finding"
 found_during: "2026-08 bug-hunt round 10"
 found_at: "internal/discovery/discovery.go"
+resolution: "Advertiser.refresh now withdraws the advertisement and re-registers it on a TXT change, so nothing edits a service a running dnssd responder is reading."
+impact: fix
 ---
 
 `Advertiser.refresh` (internal/discovery/discovery.go, around line 175) calls
@@ -48,3 +50,7 @@ peers' mDNS caches and to any in-flight browse on the network, which is a
 real tradeoff for the maintainer to weigh, not a size a bug fix should make
 unilaterally. No new dependency and no vendored-library edit are required
 either way.
+
+## Grounds
+
+- pursued: a TXT change publishes as goodbye then a fresh registration, serialised in one goroutine, not resurrected by a refresh racing Stop, and retried on the next tick if it fails; what would show it wrong is peers seeing the service blink during a browse often enough to lose or fail to resolve the entry around a settings change.
