@@ -21,6 +21,14 @@ GitHub release notes.
   answer ends, the reason is logged once, and the connection to the model
   server is closed.
 
+- **Two settings saves at once no longer lose one of the changes.** Each save
+  read the settings in force, applied what was posted to a copy of them and
+  wrote the result back, so two saves that overlapped — two browser tabs, or
+  the panel and a script — each wrote a configuration that had never seen the
+  other's change, and the second silently reverted a setting nobody had
+  touched. The list of models a save says need reloading was worked out against
+  the same stale picture. Saves are now taken one at a time, start to finish.
+
 - **Clicking Load again no longer takes a second place in the queue for
   memory.** Loading a model takes minutes and the button answers at once, so an
   operator who saw nothing happen clicked it again — and with eviction grace

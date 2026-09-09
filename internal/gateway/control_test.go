@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -9,6 +10,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -735,6 +737,70 @@ func TestEndpointURLRefusesAHostNoURLCanCarry(t *testing.T) {
 	for host, want := range accepted {
 		if got := endpointURL(host, 11535); got != want {
 			t.Errorf("endpointURL(%q) = %q, want %q — refusing this one would drop an address the server answers on", host, got, want)
+		}
+	}
+}
+
+// A save reads the current settings, decodes the posted body into a copy of
+// them, and writes the result back — so two saves that overlap each write a
+// configuration that never saw the other's change, and whichever calls
+// SetConfig last silently reverts a field it was never asked about. Two
+// browser tabs, or the panel and a script, are enough.
+func TestConcurrentSavesEachKeepTheirOwnField(t *testing.T) {
+	srv, a := newTestControlApp(t, config.Default())
+
+	// A pair of saves is repeated rather than sent once: the window between
+	// reading the settings and writing them is short, so one pair can
+	// interleave harmlessly and prove nothing.
+	for i := range 40 {
+		idle, decode := 60+i, 1+i%8
+		bodies := []string{
+			fmt.Sprintf(`{"idle_timeout_sec":%d}`, idle),
+			fmt.Sprintf(`{"decode_concurrency":%d}`, decode),
+		}
+		results := make(chan error, len(bodies))
+		var wg sync.WaitGroup
+		for _, body := range bodies {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				req, err := http.NewRequest(http.MethodPost, srv.URL+"/api/settings",
+					strings.NewReader(body))
+				if err != nil {
+					results <- err
+					return
+				}
+				req.Header.Set("Content-Type", "application/json")
+				resp, err := srv.Client().Do(req)
+				if err != nil {
+					results <- err
+					return
+				}
+				defer resp.Body.Close()
+				io.Copy(io.Discard, resp.Body)
+				if resp.StatusCode != http.StatusOK {
+					results <- fmt.Errorf("POST %s: status %d", body, resp.StatusCode)
+					return
+				}
+				results <- nil
+			}()
+		}
+		wg.Wait()
+		close(results)
+		for err := range results {
+			if err != nil {
+				t.Fatalf("round %d: %v", i, err)
+			}
+		}
+
+		got := a.Config()
+		if got.IdleTimeoutSec != idle {
+			t.Fatalf("round %d: idle_timeout_sec = %d, want %d — the save that set it was overwritten by one that never saw it",
+				i, got.IdleTimeoutSec, idle)
+		}
+		if got.DecodeConcurrency != decode {
+			t.Fatalf("round %d: decode_concurrency = %d, want %d — the save that set it was overwritten by one that never saw it",
+				i, got.DecodeConcurrency, decode)
 		}
 	}
 }

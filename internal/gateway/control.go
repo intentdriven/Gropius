@@ -47,6 +47,26 @@ type Control struct {
 	// they drain.
 	loadMu  sync.Mutex
 	loading map[string]bool
+
+	// settingsMu serialises the whole settings write path: read the settings
+	// in force, decode the posted body into a copy of them, hand the result to
+	// SetConfig, and work out what the change means for the models already
+	// loaded.
+	//
+	// App.SetConfig has a lock of its own, and it cannot be the one that does
+	// this: the snapshot every save starts from is taken before SetConfig is
+	// called, so two overlapping saves each write a configuration that never
+	// saw the other's change and the second reverts a field it was never asked
+	// about — the form posts a whole configuration, so the field need not even
+	// appear in the body. The reload_models list has the same staleness: it
+	// compares the incoming settings against that snapshot.
+	//
+	// This handler is the only caller of SetConfig there is, so serialising it
+	// here serialises every settings write. It is held across SetConfig, which
+	// takes App's own save lock inside it; nothing taken under that lock
+	// reaches back into the control plane, so this adds no order anything can
+	// invert.
+	settingsMu sync.Mutex
 }
 
 // Handler returns the control plane and web UI, restricted to loopback.
@@ -1007,8 +1027,6 @@ func (c *Control) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 }
 
 func (c *Control) handleSetSettings(w http.ResponseWriter, r *http.Request) {
-	current := c.App.Config()
-
 	// Everything saved here is written to config.json, which Load refuses to
 	// read above this size — so a larger body could only produce a file the
 	// next start cannot read, and a start that cannot read it locks the server
@@ -1023,6 +1041,27 @@ func (c *Control) handleSetSettings(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+
+	// The body is read before the lock is taken and the answer written after
+	// it is released: a client that uploads or reads slowly is not something
+	// the next save should have to wait behind.
+	out, err := c.applySettings(raw)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+// applySettings is the settings write path, from the settings in force to what
+// the save is answered with, run start to finish under settingsMu. It returns
+// what the panel is told, or the refusal to report to the caller — every one of
+// which is the caller's own mistake, and so a 400.
+func (c *Control) applySettings(raw []byte) (map[string]any, error) {
+	c.settingsMu.Lock()
+	defer c.settingsMu.Unlock()
+
+	current := c.App.Config()
 
 	// Decode INTO a copy of the current config, not a fresh zero value: the
 	// settings form posts only the fields it owns, so any field it omits — e.g.
@@ -1050,8 +1089,7 @@ func (c *Control) handleSetSettings(w http.ResponseWriter, r *http.Request) {
 		incoming.PerModel = nil
 	}
 	if err := json.Unmarshal(raw, &incoming); err != nil {
-		writeError(w, http.StatusBadRequest, "settings body is not valid JSON")
-		return
+		return nil, errors.New("settings body is not valid JSON")
 	}
 	// The UI is served the redacted placeholder; echoing it back must not
 	// overwrite the real secret with literal asterisks.
@@ -1063,8 +1101,7 @@ func (c *Control) handleSetSettings(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := c.App.SetConfig(incoming); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
-		return
+		return nil, err
 	}
 	// Host and port bind the server, decode concurrency and idle timeout are
 	// pool options — all four are consumed only at startup, and SetConfig
@@ -1084,7 +1121,7 @@ func (c *Control) handleSetSettings(w http.ResponseWriter, r *http.Request) {
 	if warn := c.App.MemoryBudgetWarning(); warn != "" {
 		out["warning"] = warn
 	}
-	writeJSON(w, http.StatusOK, out)
+	return out, nil
 }
 
 // namesModelSampling reports whether the posted body carries a model_sampling
