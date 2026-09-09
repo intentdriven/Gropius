@@ -99,8 +99,9 @@ Cross-machine LAN use works; TLS and notarized distribution are not yet included
 
 ## Install
 
-One line — installs `Gropius.app` (the menu-bar server) to `/Applications`, allows
-it through the firewall, and launches it:
+One line — installs `Gropius.app` (the menu-bar server) to `/Applications`, or to
+your own `~/Applications` when your account is not an administrator, allows it
+through the firewall, and launches it:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/intentdriven/Gropius/main/install.sh | bash
@@ -178,11 +179,13 @@ the control panel warns you while this is so. Set a key in **Settings** to requi
 user accounts) never need a key. The control panel and its `/api/*` endpoints are
 bound to loopback only and are never reachable from the LAN.
 
-Setting a key also turns on the models list's residency fields, which say which
-models are loaded and how busy they are. With no key set, the list still names
-every downloaded model and says nothing about what this Mac is doing with them —
-though a client on an open server can still time a request to find out. Keeping
-activity private means setting the key, not leaving the fields off.
+The models list's residency fields, which say which models are loaded and how
+busy they are, are served to a client on this Mac — loopback, other user
+accounts included — whether or not a key is set, and to a client on the network
+when a key is set. With no key set, a client on the network still gets every
+downloaded model's name and nothing about what this Mac is doing with them —
+though it can still time a request to find out. Keeping activity private from
+the network means setting the key, not leaving the fields off.
 
 The server's request log records the method, path, status and duration of a
 request, and never the client's network address.
@@ -210,7 +213,9 @@ is written down as
 - [`cmd/gropius/`](cmd/gropius/) — menu-bar app + singleton election.
 - [`internal/`](internal/) — the engine: `hub` (HuggingFace client + downloader),
   `runtime` (Python/MLX provisioning + process pool), `gateway` (OpenAI + control
-  API), `registry`, `discovery`, `config`, `capability`, `ui`, `app`.
+  API), `registry`, `discovery`, `bind` and `netshape` (which addresses are
+  bound, and which network each sits on), `stats` (request statistics),
+  `applog` (the server's own log), `config`, `capability`, `ui`, `app`.
 - [`docs/`](docs/) — getting-started guide, how-to pages and reference.
 
 Design decisions and the empirical facts behind them: [`DECISIONS.md`](.abcd/development/decisions/DECISIONS.md).
