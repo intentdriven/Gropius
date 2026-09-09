@@ -282,7 +282,7 @@ func TestWhatGropiusAdvertisesItselfOn(t *testing.T) {
 		{
 			"the private-network mode, with an address bound",
 			func(c *config.Config) { c.BindMode = config.BindModePrivateNetwork },
-			bind.Private("100.101.102.103", []string{"100.101.102.103"}, ""),
+			bind.Private("100.101.102.103", []string{"100.101.102.103"}, ""), // abcd-lint:allow: RFC 6598 shared address space, the classifier's own range
 			false,
 		},
 		{
@@ -305,20 +305,28 @@ func TestWhatGropiusAdvertisesItselfOn(t *testing.T) {
 }
 
 // A Host that is a NAME resolving to the address the loopback listener already
-// holds is this Mac, not a contended port.
+// holds is this Mac, not a contended port — and the operator is told, because
+// they did not ask for this.
 //
 // internal/bind folds away the loopback spellings it can read — the literal
 // address, and "localhost" and its variants — but a name is whatever the
-// resolver says it is, and a developer machine with an alias for 127.0.0.1 in
-// its hosts file is an ordinary state. Without this the process collided with
+// resolver says it is. Without the first half of this the process collided with
 // its own socket: EADDRINUSE on the second listener, loopback released, a probe
 // of a port nothing was listening on any more, five seconds of retries, and
-// exit 1 — no panel, no app, and the file to hand-edit, which is the iss-7
-// trap this whole record exists to close.
+// exit 1 — no panel, no app, and the file to hand-edit, which is the iss-7 trap
+// this whole record exists to close.
 //
-// "localhost" stands in for the alias: it resolves the same way, and a test
+// Without the second half it narrowed in silence. A name is a bind Gropius
+// treats as exposed — it generates an API key for it — and the resolver is what
+// decided it means loopback: a stale hosts entry, split-horizon DNS, or a
+// resolver another account on this Mac controls. So the operator sets a bind
+// they believe serves the network, and serves this Mac, with no log line and
+// nothing in the panel. Every other narrowing says which address it dropped and
+// why, and this one is the narrowing least likely to be intended.
+//
+// "localhost" stands in for the name: it resolves the same way, and a test
 // cannot edit the hosts file.
-func TestANameThatResolvesToLoopbackIsThisMacAndNotAContendedPort(t *testing.T) {
+func TestANameThatResolvesToLoopbackNarrowsAndSaysSo(t *testing.T) {
 	port := freePort(t)
 	start := time.Now()
 	lns, plan, claimed, err := acquireBind(bind.Plan{Loopback: "127.0.0.1", Extra: "localhost"}, port, 5*time.Second, func() portHolder { return holderNone })
@@ -332,8 +340,13 @@ func TestANameThatResolvesToLoopbackIsThisMacAndNotAContendedPort(t *testing.T) 
 	if !plan.LoopbackOnly() {
 		t.Errorf("plan = %+v, want this Mac only", plan)
 	}
-	if plan.Refusal != "" {
-		t.Errorf("Refusal = %q — nothing was refused: the operator asked for this Mac by name and got this Mac", plan.Refusal)
+	// The log line and the panel notice are both keyed on the refusal, so an
+	// empty one is a silent narrowing on both surfaces at once.
+	if !strings.Contains(plan.Refusal, "localhost") {
+		t.Errorf("Refusal = %q, want it to name the bind address the operator wrote", plan.Refusal)
+	}
+	if !strings.Contains(plan.Refusal, "127.0.0.1") {
+		t.Errorf("Refusal = %q, want it to name what that address resolved to — that is the fact the operator does not have", plan.Refusal)
 	}
 	if el := time.Since(start); el > 2*time.Second {
 		t.Errorf("acquireBind took %s — it went round the contended-port path rather than recognising its own address", el)

@@ -24,9 +24,9 @@ func TestEveryPlanAcquiresLoopbackFirst(t *testing.T) {
 		"a specific address":                 ForHost("192.0.2.5"),
 		"a name":                             ForHost("alices-mac.local"),
 		"an IPv6 wildcard":                   ForHost("[::]"),
-		"an IPv6 literal":                    ForHost("[fd00::1]"),
+		"an IPv6 literal":                    ForHost("[2001:db8::1]"),
 		"a host that cannot bind":            ForHost("not an ip"),
-		"the private mode":                   Private("100.101.102.103", []string{"100.101.102.103"}, ""),
+		"the private mode":                   Private("100.101.102.103", []string{"100.101.102.103"}, ""), // abcd-lint:allow: RFC 6598 shared address space, the classifier's own range
 		"the private mode with no candidate": Private("", nil, "nothing matched"),
 	}
 	for what, p := range plans {
@@ -99,22 +99,22 @@ func TestEveryAddressAPlanNamesIsOneAListenerTakes(t *testing.T) {
 // (adr-2609081118587999, amendment). The candidates travel with the plan in
 // every case, because the selection is always shown.
 func TestThePrivateModeSelectsRefusesOrFallsBackToThisMac(t *testing.T) {
-	one := Private("100.101.102.103", []string{"100.101.102.103"}, "")
-	if one.Extra != "100.101.102.103" || one.LoopbackOnly() {
+	one := Private("100.101.102.103", []string{"100.101.102.103"}, "") // abcd-lint:allow: RFC 6598 shared address space, the classifier's own range
+	if one.Extra != "100.101.102.103" || one.LoopbackOnly() {          // abcd-lint:allow: RFC 6598 shared address space, the classifier's own range
 		t.Errorf("one candidate: plan = %+v, want it acquired beside loopback", one)
 	}
 	if one.Refusal != "" {
 		t.Errorf("one candidate: Refusal = %q, want none", one.Refusal)
 	}
 
-	several := Private("", []string{"100.101.102.103", "100.64.7.7"}, "more than one address matched")
+	several := Private("", []string{"100.101.102.103", "100.64.7.7"}, "more than one address matched") // abcd-lint:allow: RFC 6598 shared address space, the classifier's own range
 	if !several.LoopbackOnly() {
 		t.Errorf("several candidates: plan = %+v, want this Mac only — it never picks one", several)
 	}
 	if several.Refusal == "" {
 		t.Error("several candidates: no Refusal — a refusal that says nothing is one the operator cannot act on")
 	}
-	if !reflect.DeepEqual(several.Candidates, []string{"100.101.102.103", "100.64.7.7"}) {
+	if !reflect.DeepEqual(several.Candidates, []string{"100.101.102.103", "100.64.7.7"}) { // abcd-lint:allow: RFC 6598 shared address space, the classifier's own range
 		t.Errorf("several candidates: Candidates = %v, want both — a refusal names what it refused to choose between", several.Candidates)
 	}
 
@@ -128,7 +128,7 @@ func TestThePrivateModeSelectsRefusesOrFallsBackToThisMac(t *testing.T) {
 // wider bind. config.Validate refuses such a value first, so this is the
 // belt-and-braces path; the direction it errs in is the point.
 func TestAHostThatCannotBindNarrowsRatherThanWidens(t *testing.T) {
-	for _, host := range []string{"not an ip", "192.0.2.5:8080", "", "10.0.0.1\r\nX-Injected: yes"} {
+	for _, host := range []string{"not an ip", "192.0.2.5:8080", "", "192.0.2.5\r\nX-Injected: yes"} {
 		p := ForHost(host)
 		if !p.LoopbackOnly() {
 			t.Errorf("ForHost(%q) = %+v, want this Mac only", host, p)

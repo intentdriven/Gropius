@@ -156,6 +156,24 @@ control plane and load a second copy of every model, which is the outcome the
 singleton exists to prevent, and it is worth one extra code path to avoid during
 the upgrade in which it is possible.
 
+**The residual this leaves, accepted.** A foreign process holding *only* the
+second address — that exact address and port, and not loopback — is
+indistinguishable at the socket from the older-build case that this path exists
+for. Loopback is released, the probe contacts loopback and finds nothing there
+any more, the wait expires, and Gropius exits 1 with no panel: the iss-7
+outcome, on a machine where another program happens to have taken one address
+and one port. It is accepted rather than fixed because the alternative is to
+keep loopback and serve while an unidentified process holds the address the
+operator asked for, which is the hijack `probePortHolder` exists to refuse. The
+recovery is the same as for any held port — stop the other process, or change
+the port — and the log line names the address it could not take.
+
+A narrower fix exists and is deliberately not taken here: probe the *second*
+address as well before releasing loopback, so a holder that is not a Gropius is
+told apart from one that is. It is a change to the port-ownership challenge,
+which contacts loopback by design, and it belongs to whoever revisits that
+handshake rather than to this record.
+
 ### 4. The endpoint list is derived from what was acquired
 
 `gateway.Endpoints` reads the bind, then asserts loopback separately. It now
@@ -219,6 +237,25 @@ nothing off this Mac can reach — and the panel says which of the two happened,
 so the operator is not left to reconcile them. The alternative is in the section
 below.
 
+**A second cost, and it is the one that widens rather than tightens.** Every
+bind now holds loopback, and the gateway exempts loopback from the bearer check
+— that exemption is what makes a second user account on this Mac a client, and
+it is why the private-network mode's interview named that account as a case
+that must keep working. Put together: under the private-network mode, and under
+a specific-address bind, **any other macOS account on this Mac reaches `/v1`
+without the API key, and reaches the loopback-only control plane.** That was
+already true of the wildcard bind, which holds loopback and always has; it is
+new for the two narrow binds, which previously did not hold loopback and
+therefore admitted nobody at all on it.
+
+It is accepted because it is what "this Mac is always in the bind" *means* —
+the panel, the menu bar and the second account all reach the server the same
+way, and no check can tell them apart, because from the socket they are the
+same connection. What it is not is a detail to leave implicit: an operator who
+narrows the bind to keep other people out may be sharing the Mac with them.
+`docs/bind-address.md` states it in the operator's own terms, under "This Mac is
+always in the bind".
+
 ### 8. Bonjour does not advertise in the private-network mode
 
 The advert is mDNS on the local link. The mode's whole content is that the local
@@ -233,6 +270,24 @@ This is the strong branch of the intent's eighth criterion — it does not
 advertise to networks the bind excludes — reached by not advertising rather than
 by scoping the advert, which `internal/discovery` cannot do today. It reads the
 configured mode, never the detection.
+
+**Scope, said plainly: this reasoning is applied to the private-network mode and
+to a bind that narrowed to this Mac, and to nothing else.** A hand-edited
+specific-address bind still advertises. The advert is honest there in the way
+that matters — it goes out on the local link, and a specific LAN bind answers on
+that link — but it is not narrowed to the bound address: the advert carries this
+Mac's name, a client resolves that name to every address the machine holds, and
+a client that picks a different one is refused. That is a dead address offered
+by discovery rather than by the endpoint list, and it is a smaller version of the
+same fault. It is left because the alternative today is to switch discovery off
+for every narrow bind, including the LAN-narrowed install where the advert is
+genuinely useful, and because scoping an advert to one interface is a change to
+`internal/discovery` rather than to the bind.
+
+**It is also a start-time property.** The advert is started or not started once,
+in `runServer`, from the mode and the plan as they are at launch. Changing the
+mode in Settings does not withdraw a running advert; the change takes effect at
+the next start, like the bind it describes.
 
 ### 9. Nothing re-binds after launch
 
@@ -330,4 +385,8 @@ failure this repository spent 2026-09-08 correcting.
   an address or a name.
 - An address that disappears after launch is still bound and no longer served,
   and nothing says so beyond the endpoint list dropping it. The posture page
-  (itd-2609081718534201) is where that report belongs and it is not built.
+  (itd-2609081718534201) is where that report belongs and it is not built. The
+  dropping itself reaches IPv4 literals only: `internal/netshape` enumerates
+  IPv4, so a bound name or IPv6 literal has nothing to be compared against and
+  stays listed after it goes away. `docs/bind-address.md` says so rather than
+  leaving the page's claim wider than the code.

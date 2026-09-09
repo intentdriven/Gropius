@@ -228,19 +228,33 @@ func TestEveryPackageIsOnOneSideOfTheRule(t *testing.T) {
 }
 
 // The carve-out is one package wide, and this is what holds it there: the
-// classifier is imported by the endpoint list's package, by the resolver, and
-// by nothing else in the module. A second importer is a second place the
-// detection reaches enforcement, and it fails here rather than being noticed
-// in review.
-func TestOnlyTheEndpointListAndTheResolverImportTheClassifier(t *testing.T) {
+// classifier is imported by the endpoint list's package and by the resolver,
+// the resolver is imported by the endpoint list's package and by the command
+// that acquires listeners, and by nothing else in the module. A second
+// importer of either is a second place the detection reaches enforcement, and
+// it fails here rather than being noticed in review.
+//
+// This is the rule an alias cannot walk past: it reads import PATHS out of `go
+// list`, so the name a file binds the package to is irrelevant to it. The
+// source-scoped rules below need their own defence against that, and have one.
+func TestTheClassifierAndTheResolverAreImportedOnlyWhereTheyMayBe(t *testing.T) {
+	const (
+		gatewayPkg = "github.com/intentdriven/Gropius/internal/gateway"
+		commandPkg = "github.com/intentdriven/Gropius/cmd/gropius"
+	)
+	allowed := map[string]map[string]bool{
+		// The endpoint list lives in the gateway, and the resolver is what
+		// produces the plan it reports.
+		detectionPkg: {gatewayPkg: true, resolverPkg: true},
+		// The gateway asks it what the mode could bind now, for the panel; the
+		// command asks it what to acquire. Both are named declarations below.
+		resolverPkg: {gatewayPkg: true, commandPkg: true},
+	}
 	out, err := exec.Command("go", "list", "-f", "{{.ImportPath}} {{join .Imports \" \"}}", "github.com/intentdriven/Gropius/...").CombinedOutput()
 	if err != nil {
 		t.Fatalf("go list: %v\n%s", err, out)
 	}
-	allowed := map[string]bool{
-		"github.com/intentdriven/Gropius/internal/gateway": true,
-		resolverPkg: true,
-	}
+	seen := map[string]int{}
 	for _, line := range strings.Split(string(out), "\n") {
 		fields := strings.Fields(line)
 		if len(fields) == 0 {
@@ -248,9 +262,23 @@ func TestOnlyTheEndpointListAndTheResolverImportTheClassifier(t *testing.T) {
 		}
 		pkg := fields[0]
 		for _, imp := range fields[1:] {
-			if imp == detectionPkg && !allowed[pkg] {
-				t.Errorf("%s imports %s — the classifier is read by the endpoint list and by the private-network resolver, and by nothing else (adr-2609081118587999 rule 2 and its amendment)", pkg, detectionPkg)
+			may, watched := allowed[imp]
+			if !watched {
+				continue
 			}
+			seen[imp]++
+			if !may[pkg] {
+				t.Errorf("%s imports %s, which is not one of the packages that may (adr-2609081118587999 rule 2 and its amendment, adr-2609091123526871 rule 10)", pkg, imp)
+			}
+		}
+	}
+	// The other direction: a rule that matches nothing reads as coverage and
+	// is not. Both packages have importers by construction — the gateway's
+	// endpoint list and the command's acquisition — so zero means the scan is
+	// pointed at the wrong module.
+	for pkg := range allowed {
+		if seen[pkg] == 0 {
+			t.Errorf("nothing in this module imports %s any more — this rule is asserting nothing", pkg)
 		}
 	}
 }
@@ -503,13 +531,20 @@ type detectionRef struct {
 func (r detectionRef) site() string { return r.file + "::" + r.where }
 
 // scanForDetection reports every place a package's non-test source names the
-// detection: the classifier by package name, the field its answer travels on,
-// and the type its answer travels in. The field and the type are matched as
-// bare identifiers rather than as selector expressions, because a selector is
-// only one of the ways to touch either — `Endpoint{Network: x}` names both and
-// contains no selector at all.
+// detection: the classifier and the resolver by the name the FILE binds them
+// to, the field the answer travels on, and the type it travels in. The field
+// and the type are matched as bare identifiers rather than as selector
+// expressions, because a selector is only one of the ways to touch either —
+// `Endpoint{Network: x}` names both and contains no selector at all.
+//
+// The qualifier is resolved per file rather than matched as a literal word.
+// An alias is the ordinary way past a scan that looks for "netshape" or
+// "private", and it costs one line: `import p ".../internal/bind/private"`
+// renames every call site in the file, and this rule reported nothing at all
+// for it until it read the import.
 func scanForDetection(t *testing.T, dir string) []detectionRef {
 	t.Helper()
+	qualifiers := packageQualifiers(t, dir)
 	var out []detectionRef
 	for _, u := range declUnits(t, dir) {
 		add := func(what string) {
@@ -518,11 +553,10 @@ func scanForDetection(t *testing.T, dir string) []detectionRef {
 		ast.Inspect(u.node, func(n ast.Node) bool {
 			switch v := n.(type) {
 			case *ast.SelectorExpr:
-				if id, ok := v.X.(*ast.Ident); ok && id.Name == detectionName {
-					add(detectionName + "." + v.Sel.Name)
-				}
-				if id, ok := v.X.(*ast.Ident); ok && id.Name == resolverName {
-					add(resolverName + "." + v.Sel.Name)
+				if id, ok := v.X.(*ast.Ident); ok {
+					if canonical, isPkg := qualifiers[u.file][id.Name]; isPkg {
+						add(canonical + "." + v.Sel.Name)
+					}
 				}
 			case *ast.Ident:
 				switch v.Name {
@@ -534,6 +568,51 @@ func scanForDetection(t *testing.T, dir string) []detectionRef {
 			}
 			return true
 		})
+	}
+	return out
+}
+
+// packageQualifiers maps each non-test file in a directory to the identifiers
+// that mean the classifier or the resolver in it, and to which of the two each
+// one means.
+//
+// The canonical names are always in the set, so a file that never imports
+// either package still trips on writing one of them down; an alias is added to
+// the set for the file that declares it. A dot-import is a finding rather than
+// something to skip: its calls carry no qualifier at all, so the scan would go
+// quiet exactly where it is needed — the same reasoning, and the same answer,
+// as the subprocess pinning rule's treatment of `os/exec`.
+func packageQualifiers(t *testing.T, dir string) map[string]map[string]string {
+	t.Helper()
+	out := map[string]map[string]string{}
+	watched := map[string]string{detectionPkg: detectionName, resolverPkg: resolverName}
+	for path, file := range parsePkgFiles(t, dir) {
+		base := filepath.Base(path)
+		names := map[string]string{detectionName: detectionName, resolverName: resolverName}
+		for _, spec := range file.Imports {
+			imported, err := strconv.Unquote(spec.Path.Value)
+			if err != nil {
+				continue
+			}
+			canonical, ok := watched[imported]
+			if !ok {
+				continue
+			}
+			if spec.Name == nil {
+				continue // imported under its own name, already in the set
+			}
+			switch spec.Name.Name {
+			case "_":
+				// A blank import references nothing, so there is nothing to
+				// find; it is also a dependency, which the import rule above
+				// is what covers.
+			case ".":
+				t.Errorf("%s dot-imports %s, so its uses carry no qualifier and this scan cannot see them at all. Import it under a name", base, imported)
+			default:
+				names[spec.Name.Name] = canonical
+			}
+		}
+		out[base] = names
 	}
 	return out
 }

@@ -59,10 +59,19 @@ func acquireBind(plan bind.Plan, port int, wait time.Duration, holder func() por
 		// developer-machine state — and taking it for a peer meant colliding
 		// with our own socket, releasing loopback, probing a port nothing was
 		// listening on any more, and exiting: the iss-7 trap, reached from a
-		// new direction. Nothing is refused here, because nothing was: the
-		// operator asked for this Mac by name and this Mac is bound.
-		if resolvesTo(addrs[1], ln.Addr()) {
-			return []net.Listener{ln}, plan.WithoutExtra(""), true, nil
+		// new direction.
+		//
+		// It narrows, and it says so, because the operator did not ask for
+		// this: a name is a bind Gropius treats as exposed and generates a key
+		// for, and what turned it into loopback was the resolver — a stale
+		// hosts entry, split-horizon DNS, or a resolver another account on
+		// this Mac controls. Serving this Mac while the operator believes they
+		// serve the network is the narrowing least likely to be intended, so
+		// it is the last one that may happen quietly.
+		if to, ok := resolvedAddr(addrs[1]); ok && to.String() == ln.Addr().String() {
+			return []net.Listener{ln}, plan.WithoutExtra(fmt.Sprintf(
+				"the bind address %q resolves to %s, which is the address this Mac already answers on — serving this Mac and nothing else",
+				plan.Extra, to.IP)), true, nil
 		}
 
 		second, err := net.Listen("tcp", addrs[1])
@@ -94,15 +103,16 @@ func acquireBind(plan bind.Plan, port int, wait time.Duration, holder func() por
 	}
 }
 
-// resolvesTo reports whether a listen address names the address a listener
-// already holds. A value that will not resolve is not this listener's: the
-// listen below is where that is reported, with the resolver's own message.
-func resolvesTo(addr string, held net.Addr) bool {
+// resolvedAddr is what a listen address resolves to on this Mac right now, and
+// whether it resolves at all. A value that will not resolve is not this
+// listener's address: the listen below is where that is reported, with the
+// resolver's own message.
+func resolvedAddr(addr string) (*net.TCPAddr, bool) {
 	a, err := net.ResolveTCPAddr("tcp", addr)
 	if err != nil {
-		return false
+		return nil, false
 	}
-	return a.String() == held.String()
+	return a, true
 }
 
 // advertises reports whether this server announces itself over Bonjour.

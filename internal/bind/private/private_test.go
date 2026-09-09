@@ -44,18 +44,18 @@ func privateMode() config.Config {
 // loopback address.
 func TestOneCandidateIsBoundBesideLoopback(t *testing.T) {
 	stubInterfaces(t,
-		iface("utun4", "100.101.102.103"),
+		iface("utun4", "100.101.102.103"), // abcd-lint:allow: RFC 6598 shared address space, the classifier's own range
 		iface("en0", "192.0.2.5"),
 		iface("lo0", "127.0.0.1"),
 	)
 	p := Resolve(privateMode())
-	if got, want := p.Addrs(11535), []string{"127.0.0.1:11535", "100.101.102.103:11535"}; !reflect.DeepEqual(got, want) {
+	if got, want := p.Addrs(11535), []string{"127.0.0.1:11535", "100.101.102.103:11535"}; !reflect.DeepEqual(got, want) { // abcd-lint:allow: RFC 6598 shared address space, the classifier's own range
 		t.Errorf("Addrs() = %v, want %v — the mode binds the private-network address and this Mac, and nothing else", got, want)
 	}
 	if p.Refusal != "" {
 		t.Errorf("Refusal = %q, want none: one candidate is not an ambiguity", p.Refusal)
 	}
-	if !reflect.DeepEqual(p.Candidates, []string{"100.101.102.103"}) {
+	if !reflect.DeepEqual(p.Candidates, []string{"100.101.102.103"}) { // abcd-lint:allow: RFC 6598 shared address space, the classifier's own range
 		t.Errorf("Candidates = %v, want the address it selected — the selection is always shown", p.Candidates)
 	}
 }
@@ -67,15 +67,15 @@ func TestOneCandidateIsBoundBesideLoopback(t *testing.T) {
 // narrowed to their own.
 func TestSeveralCandidatesRefuseTheModeAndNameThem(t *testing.T) {
 	stubInterfaces(t,
-		iface("utun4", "100.101.102.103"),
-		iface("utun7", "100.64.7.7"),
+		iface("utun4", "100.101.102.103"), // abcd-lint:allow: RFC 6598 shared address space, the classifier's own range
+		iface("utun7", "100.64.7.7"),      // abcd-lint:allow: RFC 6598 shared address space, the classifier's own range
 		iface("en0", "192.0.2.5"),
 	)
 	p := Resolve(privateMode())
 	if got, want := p.Addrs(11535), []string{"127.0.0.1:11535"}; !reflect.DeepEqual(got, want) {
 		t.Errorf("Addrs() = %v, want %v — it serves this Mac rather than choosing between the candidates", got, want)
 	}
-	if !reflect.DeepEqual(p.Candidates, []string{"100.101.102.103", "100.64.7.7"}) {
+	if !reflect.DeepEqual(p.Candidates, []string{"100.101.102.103", "100.64.7.7"}) { // abcd-lint:allow: RFC 6598 shared address space, the classifier's own range
 		t.Errorf("Candidates = %v, want both — a refusal names what it refused to choose between", p.Candidates)
 	}
 	if p.Refusal == "" {
@@ -95,7 +95,7 @@ func TestNoCandidateServesThisMacAndNeverWider(t *testing.T) {
 		case "a tunnel that is not on the range":
 			ifaces = []netshape.Interface{iface("utun0", "192.0.2.9")}
 		case "the range on a physical interface":
-			ifaces = []netshape.Interface{iface("en0", "100.101.102.103")}
+			ifaces = []netshape.Interface{iface("en0", "100.101.102.103")} // abcd-lint:allow: RFC 6598 shared address space, the classifier's own range
 		}
 		stubInterfaces(t, ifaces...)
 		p := Resolve(privateMode())
@@ -113,7 +113,7 @@ func TestNoCandidateServesThisMacAndNeverWider(t *testing.T) {
 // utun is left behind still carrying its address, and binding it would serve
 // an address nothing reaches while reporting the mode as running.
 func TestAnInterfaceThatIsDownIsNotACandidate(t *testing.T) {
-	down := iface("utun4", "100.101.102.103")
+	down := iface("utun4", "100.101.102.103") // abcd-lint:allow: RFC 6598 shared address space, the classifier's own range
 	down.Flags = 0
 	stubInterfaces(t, down)
 	if p := Resolve(privateMode()); !p.LoopbackOnly() {
@@ -126,7 +126,7 @@ func TestAnInterfaceThatIsDownIsNotACandidate(t *testing.T) {
 // half that this package owns: the mode does not route around acquisition, it
 // produces a plan like every other mode.
 func TestEveryOtherModeIsTheHostField(t *testing.T) {
-	stubInterfaces(t, iface("utun4", "100.101.102.103"))
+	stubInterfaces(t, iface("utun4", "100.101.102.103")) // abcd-lint:allow: RFC 6598 shared address space, the classifier's own range
 	cases := map[string][]string{
 		"0.0.0.0":   {"127.0.0.1:11535", "0.0.0.0:11535"},
 		"127.0.0.1": {"127.0.0.1:11535"},
@@ -153,7 +153,7 @@ func TestARefusalSaysWhatHappenedAndPromisesNothing(t *testing.T) {
 	}
 	stubInterfaces(t, iface("en0", "192.0.2.5"))
 	none := Resolve(privateMode()).Refusal
-	stubInterfaces(t, iface("utun4", "100.101.102.103"), iface("utun7", "100.64.7.7"))
+	stubInterfaces(t, iface("utun4", "100.101.102.103"), iface("utun7", "100.64.7.7")) // abcd-lint:allow: RFC 6598 shared address space, the classifier's own range
 	several := Resolve(privateMode()).Refusal
 	for _, text := range []string{none, several} {
 		for _, word := range forbidden {
@@ -172,8 +172,8 @@ func TestCandidatesFollowsTheMachineRatherThanCachingIt(t *testing.T) {
 	if got := Candidates(); len(got) != 0 {
 		t.Errorf("Candidates() = %v, want none", got)
 	}
-	stubInterfaces(t, iface("en0", "192.0.2.5"), iface("utun4", "100.101.102.103"))
-	if got := Candidates(); !reflect.DeepEqual(got, []string{"100.101.102.103"}) {
+	stubInterfaces(t, iface("en0", "192.0.2.5"), iface("utun4", "100.101.102.103")) // abcd-lint:allow: RFC 6598 shared address space, the classifier's own range
+	if got := Candidates(); !reflect.DeepEqual(got, []string{"100.101.102.103"}) {  // abcd-lint:allow: RFC 6598 shared address space, the classifier's own range
 		t.Errorf("Candidates() = %v, want the tunnel that just came up", got)
 	}
 }

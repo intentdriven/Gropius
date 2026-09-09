@@ -25,6 +25,14 @@ reach the server over loopback.
 No other machine gains anything by it. Loopback is this Mac and this Mac alone,
 on any network, under any bind.
 
+What it does give is every account on this Mac. A request arriving over loopback
+is exempt from the API key — that is what lets the control panel and the menu
+bar work, and it cannot tell them from a client another user account on this Mac
+is running. So under every choice, including the two narrow ones, anyone who can
+log in to this Mac can use the model API and open the control panel without the
+key. Narrowing the bind keeps other machines out; it does not keep other
+accounts on this one out.
+
 The control panel is loopback-only under every choice, so what a machine
 elsewhere reaches is the model API and not the panel.
 
@@ -53,14 +61,25 @@ never falls back to a wider bind: the choice can only narrow.
 
 An address that goes away while the server runs is not re-bound and not
 replaced. The server stops receiving on it, and the **Connect** tab stops
-offering it.
+offering it — for an IPv4 address, which is what Gropius enumerates. A bind
+written as a host name or an IPv6 literal keeps its place in the list after it
+goes away, because there is nothing to check it against.
 
 ## What Bonjour does
 
 Gropius advertises itself over Bonjour under the wildcard choice, and not under
-the other two. The advert travels over the local network, which is the network
-the narrower choices exclude, so it would name an address its recipients cannot
-reach. Clients on a private network are pointed at an address or a name instead.
+the private-network choice or a bind that narrowed to this Mac. The advert
+travels over the local network, which is the network those exclude, so it would
+name an address its recipients cannot reach. Clients on a private network are
+pointed at an address or a name instead.
+
+A bind to one specific address written into `host` does advertise. The advert
+carries this Mac's name rather than the bound address, so a client that resolves
+the name to one of this Mac's other addresses is refused; point such a client at
+the bound address.
+
+Advertising is decided at startup, like the bind. Changing the choice does not
+stop an advert that is already running.
 
 ## What `config.json` carries
 

@@ -22,15 +22,15 @@ import (
 // configuration's Host field, which under this mode is whatever the operator
 // last set and is not what the server bound.
 func TestThePanelIsToldWhichAddressTheModeSelected(t *testing.T) {
-	stubIfaces(t, testIface("lo0", "127.0.0.1"), testIface("utun4", "100.101.102.103"))
+	stubIfaces(t, testIface("lo0", "127.0.0.1"), testIface("utun4", "100.101.102.103")) // abcd-lint:allow: RFC 6598 shared address space, the classifier's own range
 	cfg := config.Default()
 	cfg.BindMode = config.BindModePrivateNetwork
 
-	got := bindState(cfg, bind.Private("100.101.102.103", []string{"100.101.102.103"}, ""))
+	got := bindState(cfg, bind.Private("100.101.102.103", []string{"100.101.102.103"}, "")) // abcd-lint:allow: RFC 6598 shared address space, the classifier's own range
 	if got.Mode != config.BindModePrivateNetwork {
 		t.Errorf("Mode = %q, want the mode in force", got.Mode)
 	}
-	if got.Selected != "100.101.102.103" {
+	if got.Selected != "100.101.102.103" { // abcd-lint:allow: RFC 6598 shared address space, the classifier's own range
 		t.Errorf("Selected = %q, want the address the mode bound — a selection nobody can see is one nobody can check", got.Selected)
 	}
 	if got.Refusal != "" {
@@ -70,8 +70,8 @@ func TestTheCandidatesAreReadLiveAndUnderEveryMode(t *testing.T) {
 	if got := bindState(cfg, plan).Candidates; len(got) != 0 {
 		t.Errorf("Candidates = %v on a machine with no private network, want none", got)
 	}
-	stubIfaces(t, testIface("lo0", "127.0.0.1"), testIface("utun4", "100.101.102.103"))
-	if got, want := bindState(cfg, plan).Candidates, []string{"100.101.102.103"}; !reflect.DeepEqual(got, want) {
+	stubIfaces(t, testIface("lo0", "127.0.0.1"), testIface("utun4", "100.101.102.103"))                           // abcd-lint:allow: RFC 6598 shared address space, the classifier's own range
+	if got, want := bindState(cfg, plan).Candidates, []string{"100.101.102.103"}; !reflect.DeepEqual(got, want) { // abcd-lint:allow: RFC 6598 shared address space, the classifier's own range
 		t.Errorf("Candidates = %v after a tunnel came up, want %v — the pane is stale otherwise", got, want)
 	}
 }
@@ -93,7 +93,7 @@ func TestTheKeylessWarningIsAboutWhatWasActuallyBound(t *testing.T) {
 		t.Errorf("warnings = %v — the mode fell back to this Mac, so nobody on the network can reach it", w)
 	}
 
-	bound := newTestControlAppWithBind(t, cfg, bind.Private("100.101.102.103", []string{"100.101.102.103"}, ""))
+	bound := newTestControlAppWithBind(t, cfg, bind.Private("100.101.102.103", []string{"100.101.102.103"}, "")) // abcd-lint:allow: RFC 6598 shared address space, the classifier's own range
 	if w := warningsOf(bound.snapshot()); !containsSubstring(w, "reachable by anyone on your network") {
 		t.Errorf("warnings = %v — the mode bound an address other machines reach with no key set", w)
 	}
@@ -153,7 +153,7 @@ func TestTheKeylessWarningFollowsTheSocketsAndNotTheStoredBind(t *testing.T) {
 // "the mode selected 0.0.0.0" — on the surface the amendment's second
 // condition rests on, and a hand-edited file or a save is enough to reach it.
 func TestASelectionIsOnlyEverReportedForTheModeThatProducedIt(t *testing.T) {
-	stubIfaces(t, testIface("lo0", "127.0.0.1"), testIface("utun4", "100.101.102.103"))
+	stubIfaces(t, testIface("lo0", "127.0.0.1"), testIface("utun4", "100.101.102.103")) // abcd-lint:allow: RFC 6598 shared address space, the classifier's own range
 	cfg := config.Default()
 	cfg.Host = "0.0.0.0"
 	cfg.BindMode = config.BindModePrivateNetwork // saved, and not yet in force

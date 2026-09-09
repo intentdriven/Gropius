@@ -438,9 +438,9 @@ func TestABindThatNarrowedListsOnlyWhatItAnswersOn(t *testing.T) {
 		t.Errorf("Endpoints() = %#v, want %#v — the mode fell back to this Mac and the list has to say so", got, want)
 	}
 
-	selected := bind.Private("100.101.102.103", []string{"100.101.102.103"}, "")
+	selected := bind.Private("100.101.102.103", []string{"100.101.102.103"}, "") // abcd-lint:allow: RFC 6598 shared address space, the classifier's own range
 	want := []Endpoint{
-		{URL: "http://100.101.102.103:11535/v1", Network: netshape.PrivateNetwork},
+		{URL: "http://100.101.102.103:11535/v1", Network: netshape.PrivateNetwork}, // abcd-lint:allow: RFC 6598 shared address space, the classifier's own range
 		{URL: "http://127.0.0.1:11535/v1"},
 	}
 	if got := Endpoints(cfg, selected); !reflect.DeepEqual(got, want) {
@@ -454,11 +454,11 @@ func TestABindThatNarrowedListsOnlyWhatItAnswersOn(t *testing.T) {
 // address this Mac no longer holds rather than going on naming it.
 func TestAnAcquiredAddressThatWentAwayIsNoLongerOffered(t *testing.T) {
 	cfg := config.Default()
-	cfg.Host = "100.101.102.103"
+	cfg.Host = "100.101.102.103" // abcd-lint:allow: RFC 6598 shared address space, the classifier's own range
 	cfg.Port = 11535
-	plan := bind.ForHost("100.101.102.103")
+	plan := bind.ForHost("100.101.102.103") // abcd-lint:allow: RFC 6598 shared address space, the classifier's own range
 
-	stubIfaces(t, testIface("lo0", "127.0.0.1"), testIface("utun4", "100.101.102.103"))
+	stubIfaces(t, testIface("lo0", "127.0.0.1"), testIface("utun4", "100.101.102.103")) // abcd-lint:allow: RFC 6598 shared address space, the classifier's own range
 	if got, want := len(Endpoints(cfg, plan)), 2; got != want {
 		t.Fatalf("with the tunnel up the list has %d entries, want %d", got, want)
 	}

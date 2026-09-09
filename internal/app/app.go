@@ -283,7 +283,6 @@ func (a *App) preload(ids []string) {
 	}
 }
 
-// Config returns the current settings.
 // Bind is the set of addresses this process acquired, as it turned out: with a
 // second address dropped, and the reason recorded, when the bind narrowed.
 //
@@ -291,8 +290,13 @@ func (a *App) preload(ids []string) {
 // the configuration, because the two can differ — a private-network mode with
 // no address to select serves this Mac, and a panel that reported the
 // configuration would say it was serving something else.
+//
+// No lock: it is written once, at construction, and never again. Nothing
+// re-binds while the process runs (adr-2609091123526871 rule 9), so there is
+// no second writer for a reader to race.
 func (a *App) Bind() bind.Plan { return a.bindPlan }
 
+// Config returns the current settings.
 func (a *App) Config() config.Config {
 	a.cfgMu.RLock()
 	defer a.cfgMu.RUnlock()

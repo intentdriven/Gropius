@@ -70,8 +70,8 @@ func TestThePrivateChoiceIsOfferedOnlyWhereThereIsAnAddressToChoose(t *testing.T
 	}{
 		{
 			name:       "one address matches: it is named",
-			bind:       `{"mode":"","candidates":["100.101.102.103"]}`,
-			wantInText: "100.101.102.103",
+			bind:       `{"mode":"","candidates":["100.101.102.103"]}`, // abcd-lint:allow: RFC 6598 shared address space, the classifier's own range
+			wantInText: "100.101.102.103",                              // abcd-lint:allow: RFC 6598 shared address space, the classifier's own range
 		},
 		{
 			name:       "nothing matches: the choice is not offered",
@@ -86,8 +86,8 @@ func TestThePrivateChoiceIsOfferedOnlyWhereThereIsAnAddressToChoose(t *testing.T
 		},
 		{
 			name:       "several match: offered, and names them rather than counting them",
-			bind:       `{"mode":"","candidates":["100.101.102.103","100.64.7.7"]}`,
-			wantInText: "100.64.7.7",
+			bind:       `{"mode":"","candidates":["100.101.102.103","100.64.7.7"]}`, // abcd-lint:allow: RFC 6598 shared address space, the classifier's own range
+			wantInText: "100.64.7.7",                                                // abcd-lint:allow: RFC 6598 shared address space, the classifier's own range
 		},
 		{
 			// What the running mode bound, not what it would bind now. The
@@ -95,8 +95,8 @@ func TestThePrivateChoiceIsOfferedOnlyWhereThereIsAnAddressToChoose(t *testing.T
 			// name the one the server is answering on — which is the whole of
 			// the amendment's second condition.
 			name:       "the mode is running: the address it bound, not the one that matches now",
-			bind:       `{"mode":"private-network","selected":"100.101.102.103","candidates":["100.64.7.7"]}`,
-			wantInText: "100.101.102.103",
+			bind:       `{"mode":"private-network","selected":"100.101.102.103","candidates":["100.64.7.7"]}`, // abcd-lint:allow: RFC 6598 shared address space, the classifier's own range
+			wantInText: "100.101.102.103",                                                                     // abcd-lint:allow: RFC 6598 shared address space, the classifier's own range
 		},
 	}
 	for _, c := range cases {
@@ -246,7 +246,7 @@ func sameJSON(t *testing.T, got, want string) bool {
 func TestThePaneSaysWhenTheBindNarrowed(t *testing.T) {
 	cases := []struct{ bind, want string }{
 		{`{"mode":"private-network","candidates":[],"refusal":"no address on this Mac is on a private network"}`, `"no address on this Mac is on a private network"`},
-		{`{"mode":"private-network","candidates":["100.101.102.103"],"selected":"100.101.102.103"}`, `""`},
+		{`{"mode":"private-network","candidates":["100.101.102.103"],"selected":"100.101.102.103"}`, `""`}, // abcd-lint:allow: RFC 6598 shared address space, the classifier's own range
 		{`{"mode":"","candidates":[]}`, `""`},
 	}
 	for _, c := range cases {
