@@ -284,7 +284,7 @@ func warnDroppedSettings(log *slog.Logger, dropped []string) {
 
 // runServer is the primary instance: it owns the models and the GPU.
 func runServer(lns []net.Listener, plan bind.Plan, paths config.Paths, cfg config.Config, headless bool, log *slog.Logger) error {
-	a, err := app.New(app.Options{Paths: paths, Config: cfg, Log: log})
+	a, err := app.New(app.Options{Paths: paths, Config: cfg, Log: log, Bind: plan})
 	if err != nil {
 		return err
 	}

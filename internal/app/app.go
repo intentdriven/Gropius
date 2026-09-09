@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/intentdriven/Gropius/internal/bind"
 	"github.com/intentdriven/Gropius/internal/capability"
 	"github.com/intentdriven/Gropius/internal/config"
 	"github.com/intentdriven/Gropius/internal/hub"
@@ -37,6 +38,13 @@ type App struct {
 	// not a file, not its own directory — until that switch is on.
 	StatsStore *stats.FileStore
 	Log        *slog.Logger
+
+	// bindPlan is the set of addresses this process acquired at startup, which
+	// is what the endpoint list and the panel report. It is fixed for the life
+	// of the process: nothing re-binds (adr-2609091123526871 rule 9), so a
+	// value read from the configuration instead would drift from what the
+	// sockets actually are the moment a bind narrowed.
+	bindPlan bind.Plan
 
 	// machineRAM is how much memory this Mac has, or 0 when that cannot be
 	// read. Read once, at construction: a machine does not grow while the
@@ -99,12 +107,20 @@ type Options struct {
 	// test that cannot see a launched process cannot see whether that wiring
 	// is connected.
 	Launcher runtime.Launcher
+	// Bind is the set of addresses the process acquired. The zero value means
+	// "whatever Config.Host names", which is what every caller that does not
+	// acquire listeners — every test — wants, and what the app did before a
+	// bind became a set.
+	Bind bind.Plan
 }
 
 // New wires the application together.
 func New(opts Options) (*App, error) {
 	if opts.Log == nil {
 		opts.Log = slog.Default()
+	}
+	if opts.Bind.Loopback == "" {
+		opts.Bind = bind.ForHost(opts.Config.Host)
 	}
 	if err := opts.Paths.EnsureDirs(); err != nil {
 		return nil, err
@@ -149,6 +165,7 @@ func New(opts Options) (*App, error) {
 		StatsStore:  store,
 		Log:         opts.Log,
 		cfg:         opts.Config,
+		bindPlan:    opts.Bind,
 		downloads:   map[string]*download{},
 	}
 
@@ -267,6 +284,15 @@ func (a *App) preload(ids []string) {
 }
 
 // Config returns the current settings.
+// Bind is the set of addresses this process acquired, as it turned out: with a
+// second address dropped, and the reason recorded, when the bind narrowed.
+//
+// It is read rather than derived, and it is read from here rather than from
+// the configuration, because the two can differ — a private-network mode with
+// no address to select serves this Mac, and a panel that reported the
+// configuration would say it was serving something else.
+func (a *App) Bind() bind.Plan { return a.bindPlan }
+
 func (a *App) Config() config.Config {
 	a.cfgMu.RLock()
 	defer a.cfgMu.RUnlock()

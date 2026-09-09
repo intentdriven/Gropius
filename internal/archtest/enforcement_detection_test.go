@@ -270,12 +270,20 @@ var gatewayMayReadTheDetection = map[string]bool{
 	// The type itself, and the state field that carries it to the panel.
 	"control.go::type Endpoint": true,
 	"control.go::type State":    true,
+	// The bind's own report. It carries what the private-network mode
+	// selected and what it could select now, which is the amendment's second
+	// condition — the choice is always shown — and it is the one place in this
+	// package that names the resolver. It decides nothing: no key requirement,
+	// no admission and no warning's firing condition reads it.
+	"control.go::type BindState": true,
+	"control.go::func bindState": true,
 	// The endpoint list and the three helpers it is built from. Adding a name
 	// to this map is the decision the ADR governs, and it should be as hard to
 	// do quietly as changing the ADR. Anything that decides who may reach this
 	// server belongs nowhere near it.
 	"control.go::func Endpoints":           true,
 	"control.go::func networkOf":           true,
+	"control.go::func stillHeld":           true,
 	"control.go::func hasLocalNetworkAddr": true,
 	"control.go::func appendLocalName":     true,
 	"control.go::func appendEndpoint":      true,

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/intentdriven/Gropius/internal/app"
+	"github.com/intentdriven/Gropius/internal/bind"
 	"github.com/intentdriven/Gropius/internal/config"
 	"github.com/intentdriven/Gropius/internal/registry"
 )
@@ -347,7 +348,7 @@ func TestEndpointsIncludeLoopbackAndHostname(t *testing.T) {
 	cfg := config.Default()
 	cfg.Port = 11535
 
-	eps := Endpoints(cfg)
+	eps := Endpoints(cfg, bind.ForHost(cfg.Host))
 	var hasLoopback, hasLocal bool
 	for _, e := range eps {
 		if strings.Contains(e.URL, "127.0.0.1:11535/v1") {
@@ -370,7 +371,7 @@ func TestLoopbackOnlyConfigAdvertisesNoLANAddress(t *testing.T) {
 	cfg := config.Default()
 	cfg.Host = "127.0.0.1"
 
-	for _, e := range Endpoints(cfg) {
+	for _, e := range Endpoints(cfg, bind.ForHost(cfg.Host)) {
 		if strings.Contains(e.URL, "192.168.") || strings.Contains(e.URL, "10.") {
 			t.Errorf("a loopback-bound server advertised a LAN address: %s", e.URL)
 		}

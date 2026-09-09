@@ -15,6 +15,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/intentdriven/Gropius/internal/bind"
 	"github.com/intentdriven/Gropius/internal/config"
 	"github.com/intentdriven/Gropius/internal/netshape"
 )
@@ -74,7 +75,7 @@ func TestPrivateEndpointIsMarkedAndLANEndpointsAreNot(t *testing.T) {
 	cfg.Port = 11535
 
 	marks := map[string]string{}
-	for _, e := range Endpoints(cfg) {
+	for _, e := range Endpoints(cfg, bind.ForHost(cfg.Host)) {
 		marks[e.URL] = e.Network
 	}
 
@@ -124,7 +125,7 @@ func TestNoMarkOnHalfASignal(t *testing.T) {
 			stubIfaces(t, c.ifaces...)
 			cfg := config.Default()
 			cfg.Port = 11535
-			for _, e := range Endpoints(cfg) {
+			for _, e := range Endpoints(cfg, bind.ForHost(cfg.Host)) {
 				if e.URL == c.url && e.Network != "" {
 					t.Errorf("%s is marked %q on half a signal", e.URL, e.Network)
 				}
@@ -152,7 +153,7 @@ func TestTheMarkNamesNoVendorAndPromisesNothing(t *testing.T) {
 		"encrypt", "secure", "safe", "only", "vpn", "private and",
 	}
 
-	for _, e := range Endpoints(cfg) {
+	for _, e := range Endpoints(cfg, bind.ForHost(cfg.Host)) {
 		if !allowed[e.Network] {
 			t.Errorf("endpoint %s carries the mark %q, which is not one of the names the panel may show", e.URL, e.Network)
 		}
@@ -187,7 +188,7 @@ func TestWithNoPrivateNetworkTheListIsUnchanged(t *testing.T) {
 		Endpoint{URL: "http://127.0.0.1:11535/v1"},
 	)
 
-	if got := Endpoints(cfg); !reflect.DeepEqual(got, want) {
+	if got := Endpoints(cfg, bind.ForHost(cfg.Host)); !reflect.DeepEqual(got, want) {
 		t.Errorf("Endpoints() = %#v, want %#v", got, want)
 	}
 }
@@ -214,15 +215,16 @@ func TestASpecificBindListsOnlyWhatItAnswersOn(t *testing.T) {
 			},
 		},
 		{
-			name:   "an empty host is the wildcard too",
+			// An empty host is not a bind. It used to reach a listener as
+			// ":11535" and take every interface, which is why this list read
+			// it as the wildcard; config.Validate has refused it since, so no
+			// running server carries one, and the bind plan narrows what it
+			// cannot bind to this Mac rather than guessing wide. Every other
+			// unbindable Host in this file takes the same closed direction.
+			name:   "an empty host is not a bind, and narrows to this Mac",
 			host:   "",
 			ifaces: laptopOnAMeshVPN(),
-			local:  true,
-			want: []Endpoint{
-				{URL: "http://192.168.1.5:11535/v1"},
-				{URL: "http://100.101.102.103:11535/v1", Network: netshape.PrivateNetwork},
-				{URL: "http://127.0.0.1:11535/v1"},
-			},
+			want:   []Endpoint{{URL: "http://127.0.0.1:11535/v1"}},
 		},
 		{
 			name:   "a specific LAN address: that address and loopback, and no mesh address",
@@ -320,7 +322,7 @@ func TestASpecificBindListsOnlyWhatItAnswersOn(t *testing.T) {
 					want = append([]Endpoint{{URL: d}}, want...)
 				}
 			}
-			got := Endpoints(cfg)
+			got := Endpoints(cfg, bind.ForHost(cfg.Host))
 			if !reflect.DeepEqual(got, want) {
 				t.Fatalf("Endpoints() with Host %q = %#v, want %#v", c.host, got, want)
 			}
@@ -349,7 +351,7 @@ func TestEndpointsReflectTheCurrentInterfaceList(t *testing.T) {
 	cfg := config.Default()
 	cfg.Port = 11535
 
-	before := Endpoints(cfg)
+	before := Endpoints(cfg, bind.ForHost(cfg.Host))
 	for _, e := range before {
 		if e.Network != "" {
 			t.Fatalf("%s is marked %q before any tunnel exists", e.URL, e.Network)
@@ -361,7 +363,7 @@ func TestEndpointsReflectTheCurrentInterfaceList(t *testing.T) {
 
 	// The private network comes up.
 	ifaces = append(ifaces, testIface("utun4", "100.101.102.103"))
-	after := Endpoints(cfg)
+	after := Endpoints(cfg, bind.ForHost(cfg.Host))
 	var marked bool
 	for _, e := range after {
 		if e.URL == "http://100.101.102.103:11535/v1" && e.Network == netshape.PrivateNetwork {
@@ -374,7 +376,7 @@ func TestEndpointsReflectTheCurrentInterfaceList(t *testing.T) {
 
 	// And goes away again.
 	ifaces = ifaces[:1]
-	for _, e := range Endpoints(cfg) {
+	for _, e := range Endpoints(cfg, bind.ForHost(cfg.Host)) {
 		if e.Network != "" {
 			t.Errorf("%s is still marked %q after the private network went away — something is cached", e.URL, e.Network)
 		}
@@ -390,50 +392,94 @@ func contains(haystack []string, needle string) bool {
 	return false
 }
 
-// Loopback is listed under every bind, including a specific non-loopback one
-// where this server does not in fact answer on it — spc-2609081222104376 says
-// "loopback, which is always listed and always answers", and the second half
-// of that is not true of a bind to one address.
+// The fourth criterion, true by construction rather than by exception:
+// loopback is listed under every bind because every bind answers on it
+// (adr-2609091123526871 rule 1). This test used to record the opposite — that
+// loopback was listed under a bind that refused it — as a known divergence
+// handed to iss-7. iss-7 was resolved at its cause instead: the bind acquires
+// loopback as well, so the entry the panel has always shown is now one the
+// server actually answers on.
 //
-// It is left as the spec has it, and stated here rather than buried in a
-// table's expectations, because it is a known divergence from the intent's
-// fourth criterion and not an oversight. Two things hold it in place: today a
-// specific bind leaves the control panel unreachable from anywhere (iss-7), so
-// nobody reads this list under that bind at all; and the entry is unmarked, so
-// it is a dead address and never a dead address wearing a mark, which is the
-// failure the intent actually names. Whoever resolves iss-7 should decide it —
-// dropping loopback under a specific non-loopback bind is a two-line change
-// and this test is what will fail.
-func TestLoopbackIsListedUnderEveryBindIncludingOneItDoesNotAnswerOn(t *testing.T) {
+// It stays last in the list, and unmarked. The menu bar hands out the first
+// entry, which is the one another machine should use; loopback is the entry
+// this Mac uses, and it is on no network worth naming.
+func TestLoopbackIsListedUnderEveryBindBecauseEveryBindAnswersOnIt(t *testing.T) {
 	stubIfaces(t, laptopOnAMeshVPN()...)
 	for _, host := range []string{"0.0.0.0", "192.168.1.5", "100.101.102.103", "127.0.0.1"} {
 		cfg := config.Default()
 		cfg.Host = host
 		cfg.Port = 11535
-		eps := Endpoints(cfg)
+		eps := Endpoints(cfg, bind.ForHost(host))
 		last := eps[len(eps)-1]
 		if last.URL != "http://127.0.0.1:11535/v1" {
 			t.Errorf("Endpoints() with Host %q ends with %q, want the loopback URL last", host, last.URL)
 		}
 		if last.Network != "" {
-			t.Errorf("the loopback entry is marked %q — a mark on an address this server may not answer on is the failure the intent names", last.Network)
+			t.Errorf("the loopback entry is marked %q — a mark belongs on an address that is on a network, and loopback is on none", last.Network)
 		}
 	}
 }
 
+// The list is what the server acquired, not what the configuration asked for.
+// A bind that narrowed — the private-network mode with no address to select,
+// an address that has gone away — offers loopback and nothing else, because
+// that is what answers. Offering the address the mode was chosen for would be
+// the dead address this list exists to stop handing out, and it would say the
+// mode is running when it is not.
+func TestABindThatNarrowedListsOnlyWhatItAnswersOn(t *testing.T) {
+	stubIfaces(t, laptopOnAMeshVPN()...)
+	cfg := config.Default()
+	cfg.Host = "0.0.0.0"
+	cfg.BindMode = config.BindModePrivateNetwork
+	cfg.Port = 11535
+
+	narrowed := bind.Private("", nil, "no address on this Mac is on a private network")
+	if got, want := urls(Endpoints(cfg, narrowed)), []string{"http://127.0.0.1:11535/v1"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("Endpoints() = %#v, want %#v — the mode fell back to this Mac and the list has to say so", got, want)
+	}
+
+	selected := bind.Private("100.101.102.103", []string{"100.101.102.103"}, "")
+	want := []Endpoint{
+		{URL: "http://100.101.102.103:11535/v1", Network: netshape.PrivateNetwork},
+		{URL: "http://127.0.0.1:11535/v1"},
+	}
+	if got := Endpoints(cfg, selected); !reflect.DeepEqual(got, want) {
+		t.Errorf("Endpoints() = %#v, want %#v — the mode binds the selected address and this Mac", got, want)
+	}
+}
+
+// Criterion 7 of the private-network intent, and the other half of the
+// dead-address rule: nothing re-binds, so a listener outlives the address it
+// was taken on. The served set never widens, and the list stops offering an
+// address this Mac no longer holds rather than going on naming it.
+func TestAnAcquiredAddressThatWentAwayIsNoLongerOffered(t *testing.T) {
+	cfg := config.Default()
+	cfg.Host = "100.101.102.103"
+	cfg.Port = 11535
+	plan := bind.ForHost("100.101.102.103")
+
+	stubIfaces(t, testIface("lo0", "127.0.0.1"), testIface("utun4", "100.101.102.103"))
+	if got, want := len(Endpoints(cfg, plan)), 2; got != want {
+		t.Fatalf("with the tunnel up the list has %d entries, want %d", got, want)
+	}
+	stubIfaces(t, testIface("lo0", "127.0.0.1"), testIface("en0", "192.168.1.5"))
+	if got, want := urls(Endpoints(cfg, plan)), []string{"http://127.0.0.1:11535/v1"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("Endpoints() = %#v after the tunnel went away, want %#v — the socket is still open and nothing arrives on it", got, want)
+	}
+}
+
 // A bind host is not a URL host, and the two differ in exactly the case an
-// operator hits: cmd/gropius builds the listener as "<host>:<port>", so an
-// IPv6 address only binds when the configuration carries it bracketed —
-// "[::1]:11535" listens and "::1:11535" does not — and iss-7 pushes operators
-// towards writing exactly that into config.json by hand. net.JoinHostPort then
-// brackets it a second time, and the first entry of this list is the menu-bar
-// title, the clipboard, and the panel's curl and Python base URL.
+// operator hits: the bind spelling of an IPv6 address may be bracketed and the
+// URL spelling must be, so a value pasted through unchanged is bracketed twice
+// or not at all. The first entry of this list is the menu-bar title, the
+// clipboard, and the panel's curl and Python base URL, so a mangled one is
+// handed out everywhere at once.
 //
-// Only the bracketed spellings appear below. This table used to carry a case
-// for Host "::1" asserting "http://[::1]:11535/v1", which was an assertion
-// about a bind that cannot exist: measured, net.Listen("tcp", "::1:11535")
-// fails with "too many colons in address", so no running server ever has that
-// Host, and config.ValidBindHost now refuses it before Load will keep it.
+// Both spellings of an IPv6 literal appear below, and both are binds now: the
+// listen address is built with net.JoinHostPort, which brackets what needs it
+// (adr-2609091123526871 rule 5). Before that they were not equivalent —
+// "::1:11535" came back from net.SplitHostPort as "too many colons in address"
+// and the process exited — which is iss-7's second fault.
 //
 // The rest of the table is the same fault seen from the other side: boundAddr
 // passed anything net.ParseIP refused through verbatim, so a host that cannot
@@ -448,14 +494,14 @@ func TestABindHostBecomesAWellFormedURLOrNoURLAtAll(t *testing.T) {
 		want   []string
 	}{
 		{
-			// A "[::1]" bind is loopback, and the loopback it answers on is
-			// ::1 — not 127.0.0.1, which it refuses. ExposedToLAN read the
-			// bracketed spelling as LAN-exposed, so the machine's addresses
-			// were enumerated for a server nothing off this Mac can reach.
-			name:   "a bracketed IPv6 loopback bind lists the loopback it answers on",
+			// A "[::1]" bind is loopback, and it answers on both loopback
+			// addresses: 127.0.0.1 because every bind acquires it, and ::1
+			// because that is what this bind names. Listing one and refusing
+			// the other was the dead-address fault in both directions at once.
+			name:   "a bracketed IPv6 loopback bind lists both loopback addresses",
 			host:   "[::1]",
 			ifaces: []netshape.Interface{testIface("lo0", "127.0.0.1", "::1"), testIface("en0", "192.168.1.5")},
-			want:   []string{"http://[::1]:11535/v1"},
+			want:   []string{"http://[::1]:11535/v1", "http://127.0.0.1:11535/v1"},
 		},
 		{
 			// The name resolves to both loopback addresses for a client on
@@ -468,9 +514,8 @@ func TestABindHostBecomesAWellFormedURLOrNoURLAtAll(t *testing.T) {
 		{
 			// URLHost refuses a zone — "%" introduces an escape in a URL — so
 			// the bound address is one this list cannot describe truthfully
-			// and is left off. What is left is the same divergence
-			// TestLoopbackIsListedUnderEveryBindIncludingOneItDoesNotAnswerOn
-			// records: loopback listed in an IPv4 spelling the bind refuses.
+			// and is left off. What is left is 127.0.0.1, which this bind does
+			// answer on: every bind acquires it, zone or no zone.
 			name:   "a zoned loopback bind is loopback, and its address is not listable",
 			host:   "[::1%lo0]",
 			ifaces: []netshape.Interface{testIface("lo0", "127.0.0.1", "::1"), testIface("en0", "192.168.1.5")},
@@ -545,7 +590,7 @@ func TestABindHostBecomesAWellFormedURLOrNoURLAtAll(t *testing.T) {
 					want = append(want, u)
 				}
 			}
-			got := urls(Endpoints(cfg))
+			got := urls(Endpoints(cfg, bind.ForHost(cfg.Host)))
 			if !reflect.DeepEqual(got, want) {
 				t.Errorf("Endpoints() with Host %q = %#v, want %#v", c.host, got, want)
 			}
