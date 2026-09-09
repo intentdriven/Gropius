@@ -1,0 +1,17 @@
+# gitleaks configuration for this repository.
+#
+# CI scans the whole history of the ref under test (see the gitleaks job in
+# .github/workflows/ci.yml), and a finding is anchored to the commit that
+# introduced the string: removing it later retracts nothing, so a fixture that
+# looks like a key fails every later ref for ever unless it is allowed here.
+#
+# The default rules stay in force. What is allowed is the two marker strings
+# the log tests plant — an API key and a HuggingFace token shaped like real
+# ones — to prove that neither reaches the server's log. They are fixed,
+# public, and exist to be searched for; nothing real has that shape.
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Marker strings the log tests plant to prove a key never reaches the log"
+regexes = ['''sk-(marker|test)-2f9c4a1e7b3d''']
