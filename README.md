@@ -80,6 +80,12 @@ Cross-machine LAN use works; TLS and notarized distribution are not yet included
   so the local one cannot reach the server at all. Every bind includes this
   Mac, so narrowing one never costs you the control panel
   ([what each choice binds](docs/bind-address.md)).
+- **One page that says what is on** — the control panel's Posture tab states,
+  as fact rather than warning, who can reach the server and by which addresses,
+  what a request has to carry from the network and from this Mac, what is
+  announced over Bonjour, what the request log writes down, and what is
+  recorded and for how long — and says where Gropius's own view stops
+  ([what each line is read from](docs/posture-reference.md)).
 - **Multi-account** — other user accounts on the same Mac share one copy of each
   model on disk and on the GPU. The models are shared; each account keeps its
   own settings and its own model list, so no key or token crosses accounts.

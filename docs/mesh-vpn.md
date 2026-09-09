@@ -107,5 +107,9 @@ network an address is on and leaves the rest to you.
 - [Getting started](getting-started.md) — the walk-through this page extends.
 - [Bind address reference](bind-address.md) — what each choice binds, what
   `config.json` carries, and what happens when a choice cannot be honoured.
+- [The posture page](posture-reference.md) — the control panel's one-page
+  statement of what is on: the addresses answered on, what a key is required
+  for, what is announced and what is recorded, with the four things above
+  stated as the limits of what Gropius can see.
 - [Record request statistics on this Mac](request-statistics.md) — what a served
   request leaves behind, and who on this Mac can read it.
