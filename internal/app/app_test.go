@@ -737,6 +737,36 @@ func TestSetConfigCanonicalizesPerModelKeys(t *testing.T) {
 	}
 }
 
+// A model whose every box is cleared has no settings, and the save stores
+// none: an empty object under its name would hold a slot against the ceiling,
+// come back to the panel on the next state request and be written to
+// config.json for good. The file path drops one the same way.
+func TestSetConfigDropsAModelEntryWithNoSettingsOnIt(t *testing.T) {
+	a := newTestApp(t)
+
+	c := a.Config()
+	c.Models = map[string]config.ModelSettings{
+		"org/empty":  {},
+		"org/pinned": {Pinned: true},
+	}
+	if err := a.SetConfig(c); err != nil {
+		t.Fatalf("SetConfig: %v", err)
+	}
+	if _, kept := a.Config().Models["org/empty"]; kept {
+		t.Errorf("an entry with no settings on it was stored: %+v", a.Config().Models)
+	}
+	if !a.Config().Models["org/pinned"].Pinned {
+		t.Errorf("the entry beside it was dropped too: %+v", a.Config().Models)
+	}
+	written, err := os.ReadFile(a.Paths.Config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(written), "org/empty") {
+		t.Errorf("the empty entry reached config.json: %s", written)
+	}
+}
+
 // A key that names no model is refused, and the refusal leaves the settings
 // file exactly as it was — a rejected save must not half-apply.
 func TestSetConfigRejectsInvalidPerModelKeyAndLeavesTheFileAlone(t *testing.T) {

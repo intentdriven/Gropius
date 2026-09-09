@@ -23,12 +23,14 @@ GitHub release notes.
   keyed by the model's repository id, with a model's sampling override, its pin
   and its merging switch sitting side by side on the same entry. Gropius is
   before 1.0 and carries no migration code, so the three old sections are no
-  longer read: they are named in the log at the next start, and the next time
-  you save settings they are gone from the file. Per-model sampling defaults,
-  pinned models and merging switches set before this change must be set again
-  in **Settings**. Everything else in the file — the API key, the bind address,
-  the memory budget, the machine-wide sampling defaults, the preload list — is
-  untouched.
+  longer read: the control panel warns that they are not in force and names
+  them, the startup log says the same, and the next time you save settings they
+  are gone from the file. A settings request that posts one of the old sections
+  is refused rather than answered "saved", naming the section and where it
+  lives now. Per-model sampling defaults, pinned models and merging switches
+  set before this change must be set again in **Settings**. Everything else in
+  the file — the API key, the bind address, the memory budget, the machine-wide
+  sampling defaults, the preload list — is untouched.
 
 - **The chat client reads as a Mac app, and says when it is waiting on a
   model.** The message box is a real multi-line control — bordered, with focused

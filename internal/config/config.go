@@ -639,9 +639,10 @@ type ModelSettings struct {
 	Sampling Sampling `json:"sampling,omitzero"`
 }
 
-// IsZero reports whether a model's settings say nothing at all, so that an
-// entry left with no settings on it can be dropped rather than written to
-// config.json as an empty object.
+// IsZero reports whether a model's settings say nothing at all. An entry like
+// that is dropped rather than stored — by sanitizeModels on the way in from
+// the file, and by the settings path on the way in from a save — so an empty
+// object neither holds a slot against the ceiling nor reaches config.json.
 //
 // Declared rather than inherited: Sampling has an IsZero of its own, and an
 // embedded or promoted one would report a pinned model with no sampling
@@ -773,13 +774,20 @@ func (c *Config) sanitizeModels() []string {
 				strconv.Itoa(MaxModels)+"-model ceiling)")
 			continue
 		}
-		seen[folded] = id
 		ms := c.Models[id].Clone()
 		sampling, names := ms.Sampling.Sanitized()
 		ms.Sampling = sampling
 		for _, n := range names {
 			dropped = append(dropped, "models["+id+"].sampling."+n)
 		}
+		// An entry that says nothing is not kept, and is not reported either:
+		// nothing was ignored, because nothing was asked for. Keeping it would
+		// let empty objects fill the map to its ceiling and stand between the
+		// operator and a model they do want settings for.
+		if ms.IsZero() {
+			continue
+		}
+		seen[folded] = id
 		kept[id] = ms
 	}
 	if len(kept) == 0 {
@@ -1431,7 +1439,7 @@ func Load(path string) (Config, Notices, error) {
 	var n Notices
 	// Ignored: the setting is not in force at all, and setting it again is the
 	// only way to get it.
-	n.Ignored = append(n.Ignored, supersededSettings(b)...)
+	n.Ignored = append(n.Ignored, SupersededSettings(b)...)
 	n.Ignored = append(n.Ignored, cfg.sanitizeSampling()...)
 	n.Ignored = append(n.Ignored, cfg.sanitizeModels()...)
 	n.Ignored = append(n.Ignored, cfg.sanitizePreload()...)
@@ -1457,20 +1465,27 @@ func Load(path string) (Config, Notices, error) {
 // the operator rather than by a compatibility path nobody would ever be able
 // to delete: the old keys are not read, and the next save writes the new shape.
 var superseded = map[string]string{
-	"model_sampling": "per-model sampling now lives in models[<id>].sampling",
-	"per_model":      "per-model settings now live in models[<id>]",
-	"pinned":         "pinning is now models[<id>].pinned",
+	"model_sampling": "replaced by models[<id>].sampling",
+	"per_model":      "replaced by models[<id>]",
+	"pinned":         "replaced by models[<id>].pinned",
 }
 
-// supersededSettings names the superseded keys a settings file still carries,
-// so an operator is told once — at the start that ignored them — rather than
-// left to wonder why a model is no longer pinned.
+// SupersededSettings names the superseded keys a settings body or file still
+// carries, each with what carries it now.
+//
+// One function for both surfaces, because they owe the same answer. On the
+// file path Load reports them as ignored, so an operator is told once — at the
+// start that ignored them — rather than left to wonder why a model is no
+// longer pinned. On the settings path the endpoint refuses the body outright:
+// a caller posting one of these keys is a script or a shell of someone's own,
+// and answering "saved" to a save that changed nothing is the one reply that
+// leaves them believing it worked.
 //
 // Read off the raw bytes, because the fields are gone from the type and
 // encoding/json says nothing about a key it does not know. Matched the way
 // encoding/json matches a field name, case-insensitively, so a hand-edited
 // "Pinned" is reported rather than silently dropped.
-func supersededSettings(b []byte) []string {
+func SupersededSettings(b []byte) []string {
 	var named map[string]json.RawMessage
 	if err := json.Unmarshal(b, &named); err != nil {
 		return nil
@@ -1479,7 +1494,7 @@ func supersededSettings(b []byte) []string {
 	for _, key := range slices.Sorted(maps.Keys(superseded)) {
 		for k := range named {
 			if strings.EqualFold(k, key) {
-				out = append(out, key+" ("+superseded[key]+"; set it again)")
+				out = append(out, key+" ("+superseded[key]+")")
 				break
 			}
 		}

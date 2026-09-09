@@ -762,10 +762,11 @@ func (a *App) adoptModelSpelling() {
 	for _, id := range perModelKeys(models) {
 		canonical := a.canonicalModelKey(id)
 		changed = changed || canonical != id
-		// A canonical spelling that is already taken is left alone: two
-		// entries for one model is what canonicalModels refuses at a save,
-		// and merging them here would decide for the operator which of the
-		// two sets of settings wins.
+		// The entry that already holds the canonical spelling keeps it, and
+		// the colliding one stays under the spelling it was written with
+		// rather than overwriting it. Two entries for one model is what
+		// canonicalModels refuses at a save, and choosing a winner here would
+		// decide for the operator which set of settings survives.
 		if _, dup := folded[canonical]; dup {
 			folded[id] = models[id]
 			continue
@@ -859,7 +860,17 @@ func (a *App) canonicalModels(in map[string]config.ModelSettings) (map[string]co
 		if _, dup := out[canonical]; dup {
 			return nil, fmt.Errorf("settings name %s more than once", canonical)
 		}
+		// An entry with nothing on it is not stored, the way config.Load does
+		// not keep one read from the file: a model with every box cleared has
+		// no settings, and writing an empty object under its name would hold a
+		// slot against the ceiling and come back on the next save.
+		if in[id].IsZero() {
+			continue
+		}
 		out[canonical] = in[id]
+	}
+	if len(out) == 0 {
+		return nil, nil
 	}
 	return out, nil
 }

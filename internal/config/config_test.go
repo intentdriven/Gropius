@@ -633,6 +633,33 @@ func TestLoadReportsTheSupersededPerModelKeysAndKeepsEverythingElse(t *testing.T
 	}
 }
 
+// An entry with nothing on it is not settings for a model, it is a name in a
+// map. It is dropped rather than kept — an empty object holds a slot against
+// the ceiling and comes back on the next save — and dropped silently, because
+// nothing was ignored: nothing was asked for.
+func TestLoadDropsAModelEntryWithNoSettingsOnIt(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	body := `{"port":11535,"host":"0.0.0.0","decode_concurrency":4,"models":{` +
+		`"org/empty":{},"org/pinned":{"pinned":true}}}`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, notices, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if _, kept := cfg.Models["org/empty"]; kept {
+		t.Errorf("an entry with no settings on it was kept: %+v", cfg.Models)
+	}
+	if !cfg.Models["org/pinned"].Pinned {
+		t.Errorf("the entry beside it was dropped too: %+v", cfg.Models)
+	}
+	if len(notices.All()) != 0 {
+		t.Errorf("notices = %v, want nothing said about an entry that asked for nothing", notices.All())
+	}
+}
+
 // Two spellings of one model id would make the effective settings depend on
 // map iteration order, so the later one in sorted order is dropped.
 func TestLoadDropsADuplicatePerModelSpelling(t *testing.T) {

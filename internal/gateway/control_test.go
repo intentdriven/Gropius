@@ -748,8 +748,9 @@ func TestEndpointURLRefusesAHostNoURLCanCarry(t *testing.T) {
 // without a warning on this channel the trim is invisible on the surface the
 // operator is actually looking at.
 func TestStateWarnsAboutASettingRepairedOnLoad(t *testing.T) {
-	srv, _ := newTestControlAppRepaired(t, config.Default(),
-		[]string{"api_key (trimmed to the 512-byte ceiling)"})
+	srv, _ := newTestControlAppNoticed(t, config.Default(), config.Notices{
+		Repaired: []string{"api_key (trimmed to the 512-byte ceiling)"},
+	})
 
 	var found string
 	for _, w := range stateOf(t, srv).Warnings {
@@ -769,8 +770,9 @@ func TestStateWarnsAboutASettingRepairedOnLoad(t *testing.T) {
 // carries anything that needed repairing — and a warning that outlives the fix
 // is the same class of untruth as the wording it replaced.
 func TestASuccessfulSaveClearsTheRepairWarning(t *testing.T) {
-	srv, _ := newTestControlAppRepaired(t, config.Default(),
-		[]string{"api_key (trimmed to the 512-byte ceiling)"})
+	srv, _ := newTestControlAppNoticed(t, config.Default(), config.Notices{
+		Repaired: []string{"api_key (trimmed to the 512-byte ceiling)"},
+	})
 
 	resp := postJSON(t, srv, "/api/settings", `{"idle_timeout_sec":120}`)
 	defer resp.Body.Close()
@@ -786,9 +788,98 @@ func TestASuccessfulSaveClearsTheRepairWarning(t *testing.T) {
 	}
 }
 
-// newTestControlAppRepaired is newTestControlApp with the settings the load
-// had to repair, which is what the panel warns about.
-func newTestControlAppRepaired(t *testing.T, cfg config.Config, repaired []string) (*httptest.Server, *app.App) {
+// A setting this build ignored is not in force at all, and the operator has to
+// hear that on the surface they are looking at. A per-model setting whose key
+// this build no longer reads is the case that makes it urgent: a model that
+// was pinned is not pinned any more, and nothing on the panel would say so —
+// the operator finds out when a request is refused for memory the pin was
+// supposed to be holding.
+func TestStateWarnsAboutASettingIgnoredOnLoad(t *testing.T) {
+	srv, _ := newTestControlAppNoticed(t, config.Default(), config.Notices{
+		Ignored: []string{"pinned (replaced by models[<id>].pinned)"},
+	})
+
+	var found string
+	for _, w := range stateOf(t, srv).Warnings {
+		if strings.Contains(w, "pinned") {
+			found = w
+		}
+	}
+	if found == "" {
+		t.Fatalf("no warning named the ignored setting: %v", stateOf(t, srv).Warnings)
+	}
+	if !strings.Contains(found, "not in force") {
+		t.Errorf("the warning %q does not say the setting is not in force", found)
+	}
+	if !strings.Contains(found, "again") {
+		t.Errorf("the warning %q does not say the setting must be set again", found)
+	}
+}
+
+// The ignored warning is cleared by a save, like the repair warning beside it:
+// the save rewrites config.json without the keys this build ignores, so there
+// is nothing left in the file to warn about.
+func TestASuccessfulSaveClearsTheIgnoredWarning(t *testing.T) {
+	srv, _ := newTestControlAppNoticed(t, config.Default(), config.Notices{
+		Ignored: []string{"pinned (replaced by models[<id>].pinned)"},
+	})
+
+	resp := postJSON(t, srv, "/api/settings", `{"idle_timeout_sec":120}`)
+	defer resp.Body.Close()
+	io.Copy(io.Discard, resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+
+	for _, w := range stateOf(t, srv).Warnings {
+		if strings.Contains(w, "not in force") {
+			t.Errorf("the ignored warning survived the save that rewrote the file: %q", w)
+		}
+	}
+}
+
+// A body naming a setting this build no longer reads is refused, naming the
+// key and what carries it now. The keys decode into nothing, so the save would
+// otherwise succeed and answer "saved" to a caller — a script, or someone's
+// own shell; the panel never posts them — whose pins and overrides were not
+// stored at all.
+func TestSettingsRefusesASupersededKey(t *testing.T) {
+	for _, tc := range []struct {
+		name, body, want string
+	}{
+		{"pinned", `{"idle_timeout_sec":120,"pinned":["org/a"]}`, "pinned"},
+		{"per_model", `{"idle_timeout_sec":120,"per_model":{"org/a":{"merge_system_messages":true}}}`, "per_model"},
+		{"model_sampling", `{"idle_timeout_sec":120,"model_sampling":{"org/a":{"temperature":0.2}}}`, "model_sampling"},
+		// encoding/json matches field names case-insensitively, so the refusal
+		// has to fold too or one spelling walks straight past it.
+		{"another spelling", `{"idle_timeout_sec":120,"Per_Model":{}}`, "per_model"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, a := newTestControlApp(t, config.Default())
+			before := a.Config().IdleTimeoutSec
+
+			resp := postJSON(t, srv, "/api/settings", tc.body)
+			defer resp.Body.Close()
+			body, _ := io.ReadAll(resp.Body)
+			if resp.StatusCode != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400 for a body naming %s", resp.StatusCode, tc.want)
+			}
+			if !strings.Contains(string(body), tc.want) {
+				t.Errorf("the refusal %q does not name %s", body, tc.want)
+			}
+			if !strings.Contains(string(body), "models") {
+				t.Errorf("the refusal %q does not say where the setting lives now", body)
+			}
+			if got := a.Config().IdleTimeoutSec; got != before {
+				t.Errorf("the refused save applied the rest of the body: idle timeout %d -> %d", before, got)
+			}
+		})
+	}
+}
+
+// newTestControlAppNoticed is newTestControlApp with what the load had to
+// change about config.json, which is what the panel warns about.
+func newTestControlAppNoticed(t *testing.T, cfg config.Config, notices config.Notices) (*httptest.Server, *app.App) {
 	t.Helper()
 
 	paths := config.NewPaths(t.TempDir())
@@ -798,7 +889,7 @@ func newTestControlAppRepaired(t *testing.T, cfg config.Config, repaired []strin
 	}
 	t.Cleanup(func() { a.Close() })
 
-	ctrl := &Control{App: a, Repaired: repaired}
+	ctrl := &Control{App: a, Notices: notices}
 	mux := http.NewServeMux()
 	ctrl.Routes(mux)
 	srv := httptest.NewServer(mux)

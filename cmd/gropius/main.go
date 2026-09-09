@@ -133,9 +133,10 @@ func main() {
 				lockDown("could not save the generated API key — starting locked down to loopback only so the endpoint is not left open", "path", paths.Config, "err", err)
 				break
 			}
-			// That save wrote the file from the settings in force, repairs
-			// included, so there is nothing left in it to warn about.
-			start.Notices.Repaired = nil
+			// That save wrote the file from the settings in force — repairs
+			// included, and without the keys this build ignores — so there is
+			// nothing left in it to warn about.
+			start.Notices = config.Notices{}
 			log.Warn("SECURITY: this server binds a LAN address, so an API key was generated and saved; clients must send it as \"Authorization: Bearer <key>\". Change or clear it in Settings.",
 				"api_key", key)
 		}
@@ -160,7 +161,7 @@ func main() {
 		return
 	}
 
-	if err := runServer(ln, paths, cfg, start.Notices.Repaired, *headless, log); err != nil {
+	if err := runServer(ln, paths, cfg, start.Notices, *headless, log); err != nil {
 		log.Error("server stopped", "err", err)
 		os.Exit(1)
 	}
@@ -264,12 +265,13 @@ func warnStartupNotices(log *slog.Logger, n config.Notices) {
 
 // runServer is the primary instance: it owns the models and the GPU.
 //
-// repaired names the settings config.json could not carry as written, which the
-// control panel warns about until a save rewrites the file. It is carried in
-// rather than re-derived because loading happens once, before the bind is
+// notices names what config.json could not be used for as written — settings
+// in force in a changed form, and settings not in force at all — which the
+// control panel warns about until a save rewrites the file. They are carried
+// in rather than re-derived because loading happens once, before the bind is
 // decided, and nothing downstream can tell a value that was repaired from one
 // the operator wrote that way.
-func runServer(ln net.Listener, paths config.Paths, cfg config.Config, repaired []string, headless bool, log *slog.Logger) error {
+func runServer(ln net.Listener, paths config.Paths, cfg config.Config, notices config.Notices, headless bool, log *slog.Logger) error {
 	a, err := app.New(app.Options{Paths: paths, Config: cfg, Log: log})
 	if err != nil {
 		return err
@@ -301,7 +303,7 @@ func runServer(ln net.Listener, paths config.Paths, cfg config.Config, repaired 
 	// Control plane + web UI — administrative, so loopback-only (Control.Handler
 	// enforces it). Mounted at "/" as the catch-all for everything that is not a
 	// /v1 or /health request.
-	ctrl := &gateway.Control{App: a, UI: ui.Handler(), Root: paths.Root, Repaired: repaired}
+	ctrl := &gateway.Control{App: a, UI: ui.Handler(), Root: paths.Root, Notices: notices}
 	mux.Handle("/", ctrl.Handler())
 
 	srv := &http.Server{
