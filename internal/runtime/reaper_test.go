@@ -5,10 +5,32 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/intentdriven/Gropius/internal/config"
 )
+
+// The pid ledger belongs to the account that wrote it, not to the install. Its
+// entries are process groups only the uid that started them can signal, so it
+// is no use to any other account — and in the data root, where it used to live,
+// the second account's rename over the first account's ledger is refused by the
+// sticky bit and swallowed, which silently ends orphan reaping for that
+// account.
+func TestPIDLedgerLivesInThisAccountsOwnDirectory(t *testing.T) {
+	root := t.TempDir()
+	acct := t.TempDir()
+	l := &ExecLauncher{Paths: config.Paths{Root: root, Account: acct}}
+	got := l.pidLedger().path
+	if want := filepath.Join(acct, pidFileName); got != want {
+		t.Errorf("ledger path = %q, want this account's own %q", got, want)
+	}
+	if strings.HasPrefix(got, root) {
+		t.Errorf("ledger path %q is in the data root, which every account shares", got)
+	}
+}
 
 // reapOrphans must kill a process group recorded in the ledger, and leave the
 // ledger clean afterwards.

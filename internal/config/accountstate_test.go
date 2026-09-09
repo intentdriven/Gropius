@@ -39,6 +39,40 @@ func TestSharedModeStateIsPerAccount(t *testing.T) {
 	}
 }
 
+// A log is one account's record of what its own subprocess printed, and the pid
+// ledger records process groups only the uid that started them can signal.
+// Neither is any use to another account, and both are written under a fixed
+// name that only their creator can write — so in the shared root they stopped
+// the second account launching a model the first had already served. They
+// follow the settings into the account's own directory.
+func TestSharedModeLogsAndLedgerDirArePerAccount(t *testing.T) {
+	root := t.TempDir()
+	withSharedRoot(t, root)
+
+	homeA := t.TempDir()
+	t.Setenv("HOME", homeA)
+	a := NewPaths(root)
+
+	homeB := t.TempDir()
+	t.Setenv("HOME", homeB)
+	b := NewPaths(root)
+
+	acctA := filepath.Join(homeA, "Library", "Application Support", "Gropius")
+	if a.Logs != filepath.Join(acctA, "logs") {
+		t.Errorf("Logs = %q, want this account's own %q", a.Logs, filepath.Join(acctA, "logs"))
+	}
+	if a.Account != acctA {
+		t.Errorf("Account = %q, want %q", a.Account, acctA)
+	}
+	if a.Logs == b.Logs || a.Account == b.Account {
+		t.Errorf("two accounts share one log directory (%q) or state directory (%q)", a.Logs, a.Account)
+	}
+	// What is shared stays shared.
+	if a.Models != b.Models || a.HFCache != b.HFCache {
+		t.Error("the models and the download cache must stay in the shared root")
+	}
+}
+
 // Two accounts, one shared root. Account B must be able to read its own
 // settings and write its own after account A has run, and A's secrets must
 // never reach B.
@@ -264,8 +298,47 @@ func TestSharedRootSettingsAdoptionRefusesAPlantedFile(t *testing.T) {
 // adopted, whatever its mode: adopting one would copy another account's API key
 // and HuggingFace token across the account boundary.
 //
-// A test running under one uid cannot create a file owned by another, so what
-// is checked here is the rule the code applies, against the one uid available.
+// Ownership alone is not enough, because a co-tenant can hand this account a
+// file it owns. A hard link made in the group-writable shared root to any file
+// this account owns — a log, say — passes a uid check while its content is
+// whatever the linked file holds; and a settings file left group-writable (what
+// a recursive chmod of the shared root produces, which the installer's comment
+// warns against) is one another account can write before it is adopted.
+// Neither is adopted.
+func TestSharedRootSettingsAdoptionRefusesALinkedOrOpenFile(t *testing.T) {
+	t.Run("hard link", func(t *testing.T) {
+		p, root, _ := sharedLayout(t)
+		elsewhere := filepath.Join(t.TempDir(), "elsewhere.json")
+		if err := Save(elsewhere, Default()); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Link(elsewhere, filepath.Join(root, "config.json")); err != nil {
+			t.Skipf("this filesystem does not support hard links: %v", err)
+		}
+		adopted, err := p.AdoptSharedConfig()
+		if adopted || err == nil {
+			t.Errorf("AdoptSharedConfig = (%v, %v), want a refusal: a linked file is not this account's own", adopted, err)
+		}
+	})
+	t.Run("group-writable", func(t *testing.T) {
+		p, root, _ := sharedLayout(t)
+		legacy := filepath.Join(root, "config.json")
+		if err := Save(legacy, Default()); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(legacy, 0o664); err != nil {
+			t.Fatal(err)
+		}
+		adopted, err := p.AdoptSharedConfig()
+		if adopted || err == nil {
+			t.Errorf("AdoptSharedConfig = (%v, %v), want a refusal: another account could have written this file", adopted, err)
+		}
+	})
+}
+
+// A test running under one uid cannot create a file owned by another, so the
+// uid half of the rule is checked against the one uid available; the two halves
+// a co-tenant CAN reach — the link count and the mode — are exercised above.
 func TestSharedRootSettingsAdoptionRequiresOwnership(t *testing.T) {
 	root := t.TempDir()
 	legacy := filepath.Join(root, "config.json")
@@ -280,10 +353,10 @@ func TestSharedRootSettingsAdoptionRequiresOwnership(t *testing.T) {
 	if !ok {
 		t.Skip("no stat information on this platform")
 	}
-	if ownedByThisAccount(fi) != (int(st.Uid) == os.Getuid()) {
-		t.Errorf("ownedByThisAccount disagrees with the file's uid %d (this account is %d)", st.Uid, os.Getuid())
+	if int(st.Uid) != os.Getuid() {
+		t.Fatalf("a file this account just wrote is owned by uid %d", st.Uid)
 	}
-	if !ownedByThisAccount(fi) {
-		t.Error("a file this account just wrote is not recognized as its own")
+	if err := privateToThisAccount(fi); err != nil {
+		t.Errorf("a 0600 file this account just wrote was refused: %v", err)
 	}
 }

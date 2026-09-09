@@ -60,7 +60,7 @@ func TestEnsureDirsWidensDataDirsUnderSetgidSharedRoot(t *testing.T) {
 	if err := p.EnsureDirs(); err != nil {
 		t.Fatalf("EnsureDirs: %v", err)
 	}
-	for _, d := range []string{p.Models, filepath.Dir(p.HFCache), p.HFCache, p.Logs} {
+	for _, d := range []string{p.Models, filepath.Dir(p.HFCache), p.HFCache} {
 		fi, err := os.Stat(d)
 		if err != nil {
 			t.Fatalf("stat %s: %v", d, err)
@@ -75,13 +75,17 @@ func TestEnsureDirsWidensDataDirsUnderSetgidSharedRoot(t *testing.T) {
 		}
 	}
 	// bin must NOT be widened: a group-writable bin would let one account
-	// replace the uv binary another account executes.
-	fi, err := os.Stat(p.Bin)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if fi.Mode()&0o020 != 0 {
-		t.Errorf("bin mode = %v, must not be group-writable (it holds executables)", fi.Mode())
+	// replace the uv binary another account executes. Nor must logs: it holds
+	// one account's record of what its own model servers printed, under names
+	// another account would then be unable to write.
+	for name, d := range map[string]string{"bin": p.Bin, "logs": p.Logs} {
+		fi, err := os.Stat(d)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if fi.Mode()&0o020 != 0 {
+			t.Errorf("%s mode = %v, must not be group-writable", name, fi.Mode())
+		}
 	}
 }
 
@@ -370,7 +374,7 @@ func TestEnsureDirsUnderASharedRootCreatesThisAccountsOwnDirectories(t *testing.
 	if err := p.EnsureDirs(); err != nil {
 		t.Fatalf("EnsureDirs refused the layout a shared cache actually produces: %v", err)
 	}
-	for _, d := range []string{p.Bin, p.Venv, p.Python} {
+	for _, d := range []string{p.Bin, p.Venv, p.Python, p.Logs} {
 		if fi, err := os.Stat(d); err != nil || !fi.IsDir() {
 			t.Errorf("expected %s to exist (err=%v)", d, err)
 		}
@@ -380,7 +384,7 @@ func TestEnsureDirsUnderASharedRootCreatesThisAccountsOwnDirectories(t *testing.
 	}
 	// The shared half is unchanged: still widened to match the installer's mode,
 	// so the next account can write what this one created.
-	for _, d := range []string{p.Models, filepath.Dir(p.HFCache), p.HFCache, p.Logs} {
+	for _, d := range []string{p.Models, filepath.Dir(p.HFCache), p.HFCache} {
 		fi, err := os.Stat(d)
 		if err != nil {
 			t.Fatalf("stat %s: %v", d, err)
