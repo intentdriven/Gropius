@@ -5,7 +5,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
-	"strings"
 	"testing"
 
 	"github.com/intentdriven/Gropius/internal/config"
@@ -26,6 +25,11 @@ import (
 // an address on another Mac and may name a persona's host.
 var serverURLDefault = regexp.MustCompile(
 	`@AppStorage\("serverURL"\)\s+var\s+serverURL\s*:\s*String\s*=\s*"([^"]*)"`)
+
+// clientServiceType matches the client's own declaration of the service type it
+// browses for, so that a comment mentioning the type cannot stand in for it.
+var clientServiceType = regexp.MustCompile(
+	`(?m)^\s*let\s+gropiusServiceType\s*=\s*"([^"]*)"`)
 
 // TestChatClientOpensOnTheServersOwnDefaultAddress holds the client's first-run
 // address to the endpoint a freshly installed server listens on.
@@ -64,10 +68,16 @@ func TestChatClientBrowsesForTheAdvertisedServiceType(t *testing.T) {
 
 	t.Run("client source", func(t *testing.T) {
 		source := readRepoFile(t, root, filepath.Join("client", "GropiusChat", "GropiusChat.swift"))
-		if !strings.Contains(source, `"`+discovery.ServiceType+`"`) {
-			t.Errorf("client/GropiusChat/GropiusChat.swift names no %q service type; "+
-				"the server advertises on it and nothing in the client browses for it",
-				discovery.ServiceType)
+		// The declaration, not a mention: a comment naming the type would
+		// otherwise satisfy this while the browse asked for something else.
+		m := clientServiceType.FindStringSubmatch(source)
+		if m == nil {
+			t.Fatal("client/GropiusChat/GropiusChat.swift declares no gropiusServiceType; " +
+				"the type the client browses for is unchecked")
+		}
+		if m[1] != discovery.ServiceType {
+			t.Errorf("the chat client browses for %q; the server advertises on %q",
+				m[1], discovery.ServiceType)
 		}
 	})
 

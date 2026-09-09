@@ -313,22 +313,67 @@ final class ServiceResolver: NSObject, NetServiceDelegate {
         service.stop()
         let done = completion
         completion = nil
-        keepAlive = nil
-        DispatchQueue.main.async { done?(outcome) }
+        // keepAlive is this object's only strong reference by the time a
+        // delegate callback runs, so it is released in the dispatched block,
+        // after the last use of self -- not here, mid-method.
+        DispatchQueue.main.async {
+            done?(outcome)
+            self.keepAlive = nil
+        }
     }
 
     func netServiceDidResolveAddress(_ sender: NetService) {
         var host = sender.hostName ?? ""
         while host.hasSuffix(".") { host.removeLast() } // fully qualified on the wire
-        guard !host.isEmpty, sender.port > 0 else {
+
+        // An SRV target is not a trusted string. mDNSResponder escapes only
+        // "\", "." and non-printables, so a name published as
+        // "host.local@evil.example" or "evil.example#" survives to here intact
+        // -- and interpolating either into a URL moves the host: the first
+        // makes "host.local" userinfo and evil.example the host, the second
+        // truncates at the fragment. Either sends the stored bearer token to a
+        // machine the user did not pick. So: a host name is accepted only as
+        // the letters, digits, dots and hyphens a host name is made of, and the
+        // URL is built field by field rather than by interpolation, so nothing
+        // in the host can reach across into another component.
+        //
+        // An IPv6 literal is refused rather than bracketed: internal/discovery
+        // publishes a name, so a literal here is not a shape this server
+        // produces, and typing the address by hand still works.
+        let hostCharacters = CharacterSet(charactersIn:
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-.")
+        guard !host.isEmpty, host.count <= 253,
+              host.unicodeScalars.allSatisfy(hostCharacters.contains),
+              (1...65535).contains(sender.port)
+        else {
+            deliver(.failure("That server reported an address this client will not use."))
+            return
+        }
+
+        var url = URLComponents()
+        url.scheme = "http"
+        url.host = host
+        url.port = sender.port
+        guard let address = url.string else {
             deliver(.failure("That server did not report an address."))
             return
         }
-        deliver(.address("http://\(host):\(sender.port)"))
+        deliver(.address(address))
     }
 
     func netService(_ sender: NetService, didNotResolve errorDict: [String: NSNumber]) {
         deliver(.failure("Could not work out that server's address — it may have left the network."))
+    }
+
+    /// Abandons the resolve: the completion is never called. Used when the user
+    /// picks a different server, so a slow resolve for the one they moved off
+    /// cannot land afterwards and overwrite the newer pick.
+    func cancel() {
+        service.stop()
+        completion = nil
+        // Released asynchronously: keepAlive is the only strong reference, and
+        // the caller may be holding self no more firmly than this property does.
+        DispatchQueue.main.async { self.keepAlive = nil }
     }
 }
 
@@ -450,11 +495,12 @@ final class AppModel: ObservableObject {
         return s
     }
 
-    /// The base path, sanitised. serverPath can come from a TXT record, which
+    /// The base path, sanitized. serverPath can come from a TXT record, which
     /// is unauthenticated network input: a value like "@example.net" appended
     /// raw would turn "host:11535" into userinfo and hand the bearer token to
-    /// whatever host followed. So a path must be a plain, single-rooted path or
-    /// it is not used at all.
+    /// whatever host followed. So a path must be a plain, single-rooted path --
+    /// no "." or ".." segment, which would climb back out of it -- or it is not
+    /// used at all.
     private var apiPath: String {
         var p = serverPath.trimmingCharacters(in: .whitespaces)
         while p.hasSuffix("/") { p.removeLast() }
@@ -462,9 +508,11 @@ final class AppModel: ObservableObject {
         if !p.hasPrefix("/") { p = "/" + p }
         let allowed = CharacterSet(charactersIn:
             "/ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~")
+        let segments = p.dropFirst().split(separator: "/", omittingEmptySubsequences: false)
         guard p.count <= 128,
               !p.contains("//"),
-              p.unicodeScalars.allSatisfy(allowed.contains)
+              p.unicodeScalars.allSatisfy(allowed.contains),
+              !segments.contains(where: { $0 == "." || $0 == ".." })
         else { return AppModel.defaultAPIPath }
         return p
     }
@@ -1025,6 +1073,11 @@ struct SettingsView: View {
     /// The server currently being resolved, and why the last attempt failed.
     @State private var resolving: String?
     @State private var resolveError: String?
+    /// The resolve in flight, and which one it is. Resolves take as long as the
+    /// network makes them take, so a second pick can be answered before the
+    /// first: the generation says whose answer is still wanted.
+    @State private var resolver: ServiceResolver?
+    @State private var resolveGeneration = 0
     @Environment(\.dismiss) private var dismiss
 
     /// Typing in the address field is a hand-typed address, which resets the
@@ -1065,7 +1118,12 @@ struct SettingsView: View {
         .padding(20)
         .frame(width: 460)
         .onAppear { browser.start() }
-        .onDisappear { browser.stop() }
+        .onDisappear {
+            browser.stop()
+            resolver?.cancel()
+            resolver = nil
+            resolving = nil
+        }
     }
 
     // MARK: Servers on this network
@@ -1147,11 +1205,23 @@ struct SettingsView: View {
     /// Resolve the picked service to an address and put it in the field. The
     /// resolve is where a server that has left the network is found out: the
     /// browse can still be listing a service whose machine has gone.
+    ///
+    /// Only the newest pick may write the field. Picking a slow server and then
+    /// a fast one would otherwise end with the slow one's address in the field,
+    /// several seconds after the user watched the fast one land there.
     private func pick(_ server: DiscoveredServer) {
+        resolver?.cancel()
         resolveError = nil
         resolving = server.id
-        ServiceResolver(server: server).resolve { outcome in
+        resolveGeneration += 1
+        let generation = resolveGeneration
+
+        let resolver = ServiceResolver(server: server)
+        self.resolver = resolver
+        resolver.resolve { outcome in
+            guard generation == resolveGeneration else { return }
             resolving = nil
+            self.resolver = nil
             switch outcome {
             case .address(let address):
                 model.use(server, resolvedAddress: address)
