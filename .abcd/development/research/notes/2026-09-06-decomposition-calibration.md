@@ -298,3 +298,18 @@ Typed links: `builds_on` itd-2609061521082551 and its store ADRs; `builds_on`
 itd-2609061431481936; `refines` itd-2609091301112705.
 
 Verdict adopted: SPLIT. Grade: routing survived as proposed.
+
+## 2026-09-09 — transcript exceptions per model (stub)
+
+Proposal: an exception list so named models keep no transcripts under the
+recording mode; recorded as a stub only, by the maintainer's instruction.
+
+| Part | Type | Home |
+| --- | --- | --- |
+| Named models keep no transcript while recording is on | user-facing capability | this draft, a stub |
+| Where the exception lives | mechanism | the per-model settings map; settled at planning |
+| What a client is told for an excepted model | open question | inherits the parent's held notice question |
+
+Typed links: `builds_on` itd-2609091707499248 (held); inherits its hold.
+Verdict adopted: FILE-AS-IS as a stub, no interview, at the human's request.
+Grade: routing not tested (the human asked for a stub); recorded for the count.
