@@ -13,6 +13,14 @@ GitHub release notes.
 
 ### Fixed
 
+- **A second account can serve a model the first account has already served.**
+  Each model server writes a log named after the model, and while those logs
+  sat in the shared folder the second account could not open one the first
+  account had written — so that model would not start for it at all, and every
+  model in a shared cache is one the other account has served. The same fault
+  silently stopped it cleaning up model servers left behind by a crash. Logs
+  and that record now live with each account's own settings.
+
 - **Gropius starts again on a Mac with a shared model cache.** Two safeguards
   had come to refuse each other: the startup check that stops another account
   planting a link under one of Gropius' folders insisted every folder sit
