@@ -66,8 +66,23 @@ models that want a figure their own.
 
 ## Where the values are kept
 
-In `config.json`, under `sampling` for the machine-wide set and
-`model_sampling` for the per-model overrides. At most 256 overrides are held.
+In `config.json`, under `sampling` for the machine-wide set. Everything set for
+one model rather than for the machine lives under `models`, keyed by the
+model's repository id — its sampling override, whether it is pinned, and
+whether its system messages are merged:
+
+```json
+"models": {
+  "mlx-community/Qwen3-8B-4bit": {
+    "sampling": { "temperature": 0.2 },
+    "pinned": true,
+    "merge_system_messages": true
+  }
+}
+```
+
+A model with no entry is served with the machine-wide set, is evictable, and
+has its messages passed on as they arrive. At most 256 models are held.
 
 A value of the right kind but the wrong size, hand-edited into that file, is
 ignored rather than fatal: Gropius starts normally, logs which fields it
