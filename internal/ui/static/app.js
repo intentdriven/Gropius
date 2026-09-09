@@ -674,6 +674,7 @@ function renderSettings() {
   renderOverrides();
   renderMergeSwitches();
   renderPinSwitches();
+  renderContextFields();
 }
 
 // renderPinSwitches draws one box per downloaded model, and the figure that
@@ -743,18 +744,51 @@ function checkedPinModels() {
   return pinBoxes().filter((cb) => cb.checked).map((cb) => cb.dataset.model);
 }
 
-// pinnedCharge is what the pinned models cost against the memory budget: each
-// one's size plus a fifth, which is what the pool charges a loaded model
-// (capability.LoadCost). A model still downloading is charged the size it
-// declares, because ticking its box now is a promise about the memory it will
-// take when it lands. A pin naming a model this Mac does not have at all has
-// no size to charge.
-function pinnedCharge(models, pinned) {
+// servedContext is the window Gropius serves a model at, which is what it is
+// charged for and what the gateway holds a request to: the operator's figure
+// for that model, or the window the model itself declares when they have set
+// none or set one the model cannot address. It is config.Config.ServedContext
+// written out again here, and a test in internal/ui holds the two together.
+function servedContext(config, repoID, declared) {
+  const models = (config || {}).models || {};
+  let set = 0;
+  Object.keys(models).forEach((id) => {
+    if (foldRepoID(id) === foldRepoID(repoID)) set = models[id].served_context || 0;
+  });
+  if (set <= 0 || (declared > 0 && set > declared)) return declared || 0;
+  return set;
+}
+
+// modelCharge is what one model costs the memory budget, and it is the Go
+// charge (capability.LoadCostOf) written out again here: the weights plus a
+// fifth for the working set, plus the cache the window this model is served at
+// will build, once per sequence its server may decode at once. A model whose
+// configuration says nothing about its cache is charged the flat figure.
+//
+// No ceiling: a charge is what the model will cost. The safety factor is not
+// here either — what the models list carries is already the charged cost per
+// token, so the panel multiplies and nothing more. A test in internal/ui holds
+// this to the Go figure; if you change one, change both.
+function modelCharge(model, config, sequences) {
+  const m = model || {};
+  // A model still downloading is charged the size it declares, because ticking
+  // its box now is a promise about the memory it will take when it lands.
+  const bytes = m.bytes || m.size_bytes || 0;
+  const flat = bytes + Math.floor(bytes / 5);
+  const perToken = m.kv_charge_per_token || 0;
+  const window = servedContext(config, m.repo_id, m.context_length || 0);
+  const seq = sequences || 0;
+  if (perToken <= 0 || window <= 0 || seq <= 0) return flat;
+  return flat + perToken * window * seq;
+}
+
+// pinnedCharge is what the pinned models cost against the memory budget. A pin
+// naming a model this Mac does not have at all has no size to charge.
+function pinnedCharge(models, pinned, config, sequences) {
   const want = new Set((pinned || []).map(foldRepoID));
   return (models || []).reduce((sum, m) => {
     if (!want.has(foldRepoID(m.repo_id))) return sum;
-    const b = m.bytes || m.size_bytes || 0;
-    return sum + b + Math.floor(b / 5);
+    return sum + modelCharge(m, config, sequences);
   }, 0);
 }
 
@@ -811,7 +845,7 @@ function budgetHint(machine) {
     parts.push(`The models in memory use ${size(resident)} of it.`);
   }
   if (m.warn_above && budget > m.warn_above) {
-    parts.push('macOS and everything else running share this memory, and a model is charged the weights it loads rather than what a long conversation adds to it.');
+    parts.push('macOS and everything else running share this memory, and a model\'s charge is worked out from its configuration rather than measured on this Mac.');
   }
   return parts.join(' ');
 }
@@ -848,7 +882,11 @@ function updatePinBudget() {
   const line = $('pinBudget');
   if (!line) return;
   const budget = (state.machine && state.machine.budget) || 0;
-  const charge = pinnedCharge(state.models || [], checkedPinModels());
+  // The decode concurrency is part of the charge: each sequence a server may
+  // run at once holds its own cache, so the panel reads the figure the pool is
+  // running with rather than assuming one.
+  const sequences = (state.config && state.config.decode_concurrency) || 0;
+  const charge = pinnedCharge(state.models || [], checkedPinModels(), state.config, sequences);
   if (!budget) {
     line.textContent = charge ? `Pinned models use about ${size(charge)}.` : '';
     line.className = 'hint';
@@ -889,6 +927,58 @@ function renderMergeSwitches() {
   });
 }
 
+// renderContextFields draws one window field per downloaded model. A blank
+// field is the model's own declared window, which is what the placeholder
+// shows, so the operator types a figure only for a model they want served
+// shorter than it was built for.
+function renderContextFields() {
+  const box = $('contextList');
+  if (!box) return;
+  const models = state.models || [];
+  const per = state.config.models || {};
+  box.innerHTML = '';
+  if (!models.length) {
+    box.innerHTML = '<p class="hint">Download a model and it appears here.</p>';
+    return;
+  }
+  models.forEach((m) => {
+    const row = document.createElement('label');
+    row.className = 'field';
+    const name = document.createElement('span');
+    name.textContent = m.repo_id;
+    const input = document.createElement('input');
+    input.type = 'number';
+    input.min = '0';
+    input.dataset.model = m.repo_id;
+    input.placeholder = m.context_length ? String(m.context_length) : 'the model\'s own window';
+    const set = per[m.repo_id] && per[m.repo_id].served_context;
+    input.value = set ? String(set) : '';
+    input.addEventListener('input', () => { settingsTouched = true; updatePinBudget(); });
+    row.appendChild(name);
+    row.appendChild(input);
+    box.appendChild(row);
+  });
+}
+
+// contextInputs are the fields drawn above, one per model the form lists.
+function contextInputs() {
+  return Array.from(document.querySelectorAll('#contextList input[type=number]'));
+}
+
+// listedContextModels lists the models the form drew a field for.
+function listedContextModels() {
+  return contextInputs().map((el) => el.dataset.model);
+}
+
+// typedContextModels is what has been typed into those fields, by model. A
+// blank or unusable field is zero, which applyModelNumber reads as "the
+// model's own window" and leaves no setting behind.
+function typedContextModels() {
+  const out = {};
+  contextInputs().forEach((el) => { out[el.dataset.model] = parseInt(el.value, 10) || 0; });
+  return out;
+}
+
 // mergeBoxes are the boxes drawn above, one per model the form lists.
 function mergeBoxes() {
   return Array.from(document.querySelectorAll('#mergeList input[type=checkbox]'));
@@ -920,7 +1010,7 @@ function checkedMergeModels() {
 // The sampling overrides are not a box but a whole editor, which holds every
 // override there is while it is open, so they are assigned rather than
 // toggled: a model missing from them has had its override removed.
-function modelSettings(current, overrides, listedMerge, checkedMerge, listedPin, checkedPin) {
+function modelSettings(current, overrides, listedMerge, checkedMerge, listedPin, checkedPin, listedContext, typedContext) {
   const out = {};
   Object.keys(current || {}).forEach((id) => {
     out[id] = Object.assign({}, current[id]);
@@ -931,6 +1021,7 @@ function modelSettings(current, overrides, listedMerge, checkedMerge, listedPin,
   });
   applyModelSwitch(out, 'merge_system_messages', listedMerge, checkedMerge);
   applyModelSwitch(out, 'pinned', listedPin, checkedPin);
+  applyModelNumber(out, 'served_context', listedContext, typedContext);
   // A model left with no settings at all is left out entirely, so that
   // clearing every box for a model removes it rather than storing an empty
   // object under its name.
@@ -943,6 +1034,19 @@ function modelSettings(current, overrides, listedMerge, checkedMerge, listedPin,
 // applyModelSwitch writes one row of boxes into the map being posted: every
 // model the form drew a box for loses the setting, and every model whose box
 // is ticked gets it back. A model with no box is not touched.
+function applyModelNumber(models, field, listed, typed) {
+  (listed || []).forEach((id) => {
+    if (models[id]) delete models[id][field];
+  });
+  Object.keys(typed || {}).forEach((id) => {
+    const n = typed[id];
+    // A blank or unusable field is the model's own window, which is the
+    // absence of the setting rather than a figure of zero.
+    if (!(n > 0)) return;
+    models[id] = Object.assign({}, models[id] || {}, { [field]: n });
+  });
+}
+
 function applyModelSwitch(models, field, listed, checked) {
   (listed || []).forEach((id) => {
     if (models[id]) delete models[id][field];
@@ -1164,6 +1268,7 @@ $('settingsForm').addEventListener('submit', async (e) => {
       state.config.models, overrides,
       listedMergeModels(), checkedMergeModels(),
       listedPinModels(), checkedPinModels(),
+      listedContextModels(), typedContextModels(),
     ),
   };
   try {

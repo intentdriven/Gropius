@@ -411,16 +411,24 @@ func (a *App) SetConfig(c config.Config) error {
 	// already waiting rather than leaving them to sit out a grace nobody wants
 	// any more.
 	a.Pool.SetEvictionGrace(a.enforcedGrace(c))
-	// Applied live, and last: the line below is written at whatever level this
-	// save just chose, so an operator who switches to detailed sees the save
-	// that switched it in the detail they asked for.
+	// A served window is an input to what a model is charged, and this save may
+	// have changed one. The models in memory are charged again from what the
+	// settings now say, so the panel reports what the pool is enforcing rather
+	// than what it was enforcing before the save — the gateway already refuses
+	// against the new window from the next request.
+	a.Pool.RefreshCharges()
+	// Applied live, and after every other setting: the line below is written at
+	// whatever level this save just chose, so an operator who switches to
+	// detailed sees the save that switched it in the detail they asked for.
 	a.applyLogLevel(c)
-	// Said out loud, at the sparse level. On a Mac several people log into,
-	// the control plane asks nobody for a password, so a server whose settings
-	// changed under it is a fact the person reading the log afterwards has no
-	// other way to recover. Only the level is named: every other field here is
-	// either uninteresting or a secret, and a save line that printed the API
-	// key would undo the whole point of having a log file.
+	// Said out loud, at the sparse level, and last of all — so that a save is
+	// reported only once everything it changed is really in force. On a Mac
+	// several people log into, the control plane asks nobody for a password, so
+	// a server whose settings changed under it is a fact the person reading the
+	// log afterwards has no other way to recover. Only the level is named:
+	// every other field here is either uninteresting or a secret, and a save
+	// line that printed the API key would undo the whole point of having a log
+	// file.
 	a.Log.Info("settings changed", "log_level", c.EffectiveLogLevel())
 	return nil
 }
@@ -580,10 +588,11 @@ func (a *App) BudgetWarnAbove() int64 {
 // end of its range, and "" for one in the middle.
 //
 // Advice rather than a refusal at both ends. At the top, what a Mac can carry
-// is not a figure Gropius knows: a loaded model is charged its weights and a
-// fifth, and not the cache a long conversation adds (iss-3), so a machine fully
-// committed on paper can still run out under load — and equally, a Mac that
-// runs nothing else can carry more than the default share. At the bottom, a
+// is not a figure Gropius knows: a model's charge is worked out from its own
+// configuration rather than measured here, and everything else on the machine
+// draws on the same memory, so a Mac fully committed on paper can still run
+// out under load — and equally, a Mac that runs nothing else can carry more
+// than the default share. At the bottom, a
 // budget under the smallest model's charge refuses every request and hides
 // every model from the search tab, and the operator should hear that from the
 // panel rather than from the first client to be turned away.
@@ -600,7 +609,7 @@ func (a *App) MemoryBudgetWarning() string {
 		return ""
 	}
 	return fmt.Sprintf(
-		"The memory budget (%s) is most of this Mac's memory (%s). macOS and everything else running share it, and a model is charged what it loads rather than what a long conversation adds to it, so requests can still run the machine out of memory.",
+		"The memory budget (%s) is most of this Mac's memory (%s). macOS and everything else running share it, and a model's charge is worked out from its configuration rather than measured on this Mac, so requests can still run the machine out of memory.",
 		runtime.HumanBytes(budget), runtime.HumanBytes(a.machineRAM))
 }
 
@@ -639,7 +648,7 @@ func (a *App) smallestChargeableModel() (int64, string) {
 		if size <= 0 {
 			continue
 		}
-		if cost := capability.LoadCost(size); smallest == 0 || cost < smallest {
+		if cost := a.chargeOf(m, size); smallest == 0 || cost < smallest {
 			smallest, id = cost, m.RepoID
 		}
 	}
@@ -915,9 +924,25 @@ func (a *App) pinnedCharge(pinned []string) (sum int64, unsized []string) {
 			unsized = append(unsized, m.RepoID)
 			continue
 		}
-		sum += capability.LoadCost(size)
+		sum += a.chargeOf(m, size)
 	}
 	return sum, unsized
+}
+
+// chargeOf is what one model costs the memory budget, asked of the one place
+// that answers it. Every figure the pool charges is here too — the window this
+// model is served at, what a token of it costs, and the decode concurrency its
+// server is launched with — because a pinned set the app says fits and the
+// pool then refuses is the disagreement this single home exists to prevent.
+// The size is a parameter because a model still downloading is charged the
+// size it declares rather than the bytes so far.
+func (a *App) chargeOf(m registry.Model, size int64) int64 {
+	return capability.LoadCostOf(capability.Load{
+		DiskBytes:        size,
+		KVChargePerToken: m.KVChargePerToken,
+		Window:           a.Config().ServedContext(m.RepoID, m.ContextLength),
+		Sequences:        int64(a.Pool.DecodeConcurrency()),
+	})
 }
 
 // chargeable reports whether a model could occupy memory at all. Anything the
@@ -1058,7 +1083,7 @@ func perModelKeys(in map[string]config.ModelSettings) []string {
 // unlinking the files, and the pool decides to launch inside this call.
 type modelSource struct{ app *App }
 
-func (s modelSource) Resolve(repoID string) (string, int64, error) {
+func (s modelSource) Resolve(repoID string) (runtime.ResolvedModel, error) {
 	// Asked before the index, because the index is not what says whether this
 	// model may be launched. The window is precise: Delete calls Pool.Unload
 	// and then Registry.Remove, and between Unload returning and Remove's index
@@ -1071,16 +1096,24 @@ func (s modelSource) Resolve(repoID string) (string, int64, error) {
 	// through it is a model server answering requests from unlinked files after
 	// every surface that reports what this Mac holds has stopped listing it.
 	if s.app.isDeleting(repoID) {
-		return "", 0, fmt.Errorf("%s is being deleted", repoID)
+		return runtime.ResolvedModel{}, fmt.Errorf("%s is being deleted", repoID)
 	}
 	m, err := s.app.Registry.Get(repoID)
 	if err != nil {
-		return "", 0, fmt.Errorf("%s is not downloaded", repoID)
+		return runtime.ResolvedModel{}, fmt.Errorf("%s is not downloaded", repoID)
 	}
 	if !m.Ready() {
-		return "", 0, fmt.Errorf("%s is not ready (%s)", repoID, m.State)
+		return runtime.ResolvedModel{}, fmt.Errorf("%s is not ready (%s)", repoID, m.State)
 	}
-	return m.Path, m.Bytes, nil
+	// The window is the one the operator has this model served at, which is
+	// the model's own declared cap unless they have lowered it: the pool
+	// charges what the gateway will let a client fill.
+	return runtime.ResolvedModel{
+		Path:             m.Path,
+		Bytes:            m.Bytes,
+		ServedContext:    s.app.Config().ServedContext(m.RepoID, m.ContextLength),
+		KVChargePerToken: m.KVChargePerToken,
+	}, nil
 }
 
 // ErrAlreadyDownloading is returned when a download is requested twice.
@@ -1250,7 +1283,7 @@ func (a *App) Download(repoID string) error {
 			// after the next startup rescan. Both touch the disk, so both are
 			// done here, before the lock.
 			bytes := a.measureDir(dest)
-			contextLength := registry.ReadContextLength(dest)
+			facts := registry.ReadModelFacts(dest)
 			// And what the Hub says this model is. It is the one reading here
 			// that is not on the disk — nothing in a model directory says
 			// whether it transcribes speech or holds a conversation — so it is
@@ -1260,15 +1293,16 @@ func (a *App) Download(repoID string) error {
 			var perr error
 			a.finishDownload(dl, func() {
 				perr = a.Registry.Put(registry.Model{
-					RepoID:        repoID,
-					Path:          dest,
-					Bytes:         bytes,
-					ContextLength: contextLength,
-					PipelineTag:   pipelineTag,
-					Tags:          tags,
-					State:         registry.StateReady,
-					Progress:      100,
-					AddedAt:       addedAt,
+					RepoID:           repoID,
+					Path:             dest,
+					Bytes:            bytes,
+					ContextLength:    facts.ContextLength,
+					KVChargePerToken: facts.KVChargePerToken,
+					PipelineTag:      pipelineTag,
+					Tags:             tags,
+					State:            registry.StateReady,
+					Progress:         100,
+					AddedAt:          addedAt,
 				})
 			})
 			if perr != nil {
@@ -1286,6 +1320,12 @@ func (a *App) Download(repoID string) error {
 			if w := a.PinnedFitWarning(); w != "" {
 				a.Log.Warn("a model arrived and the pinned set no longer fits", "warning", w)
 			}
+			// A model that has just landed on top of one already in memory —
+			// a re-download of a revision with a different window — changes
+			// what the pool should be charging it. Asked for outside
+			// finishDownload, because the pool resolves models through this
+			// App and would take dlMu again from under it.
+			a.Pool.RefreshCharges()
 
 		case errors.Is(err, context.Canceled):
 			// A cancelled download leaves .part files behind on purpose: they let
@@ -1383,15 +1423,16 @@ func (a *App) canRestoreReady(dest string, wasReady bool) bool {
 // it from the directory that is actually being served.
 func (a *App) restoreReady(repoID, dest string, prior registry.Model) bool {
 	if perr := a.Registry.Put(registry.Model{
-		RepoID:        repoID,
-		Path:          dest,
-		Bytes:         prior.Bytes,
-		ContextLength: prior.ContextLength,
-		PipelineTag:   prior.PipelineTag,
-		Tags:          prior.Tags,
-		State:         registry.StateReady,
-		Progress:      100,
-		AddedAt:       prior.AddedAt,
+		RepoID:           repoID,
+		Path:             dest,
+		Bytes:            prior.Bytes,
+		ContextLength:    prior.ContextLength,
+		KVChargePerToken: prior.KVChargePerToken,
+		PipelineTag:      prior.PipelineTag,
+		Tags:             prior.Tags,
+		State:            registry.StateReady,
+		Progress:         100,
+		AddedAt:          prior.AddedAt,
 	}); perr != nil {
 		a.Log.Error("could not restore the ready model record", "model", repoID, "err", perr)
 		return false

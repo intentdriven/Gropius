@@ -36,8 +36,8 @@ Otherwise the save goes through, and the panel says so when the figure is worth
 a word:
 
 - **A budget that claims most of the Mac** is saved with a warning. macOS and
-  everything else running share this memory, and a model is charged what it
-  loads rather than what a long conversation adds to it, so the machine can
+  everything else running share this memory, and a model's charge is worked out
+  from its configuration rather than measured on your Mac, so the machine can
   still run out.
 - **A budget too small to hold the smallest model on this Mac** is saved with a
   warning too, naming what that model needs. Every request is refused until the

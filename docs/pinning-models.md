@@ -50,8 +50,10 @@ never told which models are protected, or what this Mac is running.
 
 ## Choose how much to pin
 
-Every model in memory is charged its size plus a fifth, and the budget is what
-**Settings → Memory for loaded models** holds — 60% of this Mac's physical RAM
+Every model in memory is charged its weights plus a fifth, plus the attention
+cache its context window costs at the concurrency it is served with, and the
+budget is what **Settings → Memory for loaded models** holds — 60% of this Mac's
+physical RAM
 until you set your own figure. The figure beside the boxes is that sum for the
 models you have ticked. A model that is still downloading is charged the size
 it declares, so pinning one before it lands is measured on the same terms as

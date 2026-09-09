@@ -969,7 +969,7 @@ func TestListModelsPublishesContextLengthUnderBothNames(t *testing.T) {
 	// whole value is telling a model that can hold a conversation from one
 	// that cannot, so an absent key would read as a server that cannot say.
 	want := map[string]bool{"id": true, "object": true, "created": true, "owned_by": true,
-		"context_length": true, "max_model_len": true, "chat": true}
+		"context_length": true, "max_model_len": true, "served_context": true, "chat": true}
 	for k := range entry {
 		if !want[k] {
 			t.Errorf("unexpected field %q on the models list", k)
@@ -1611,12 +1611,17 @@ func (t composedTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 // registrySource adapts the registry to runtime.ModelSource, as the app does.
 type registrySource struct{ reg *registry.Registry }
 
-func (s registrySource) Resolve(repoID string) (string, int64, error) {
+func (s registrySource) Resolve(repoID string) (runtime.ResolvedModel, error) {
 	m, err := s.reg.Get(repoID)
 	if err != nil {
-		return "", 0, err
+		return runtime.ResolvedModel{}, err
 	}
-	return m.Path, m.Bytes, nil
+	return runtime.ResolvedModel{
+		Path:             m.Path,
+		Bytes:            m.Bytes,
+		ServedContext:    m.ContextLength,
+		KVChargePerToken: m.KVChargePerToken,
+	}, nil
 }
 
 // Every other residency test stubs out one half of the path: the gateway tests

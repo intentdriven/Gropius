@@ -688,7 +688,29 @@ type ModelSettings struct {
 	// parameter it does not name keeps the machine-wide value, so an override
 	// that says only "temperature 0.2" still gets the machine's token budget.
 	Sampling Sampling `json:"sampling,omitzero"`
+
+	// ServedContext is the context window Gropius serves this model at, in
+	// tokens. Zero means the window the model's own configuration declares,
+	// which is the default and what most models will run at.
+	//
+	// It is one figure with two effects, and that is the point of it: the
+	// memory budget charges the attention cache this window costs, and the
+	// gateway refuses a request estimated to be larger than it. Lowering it is
+	// how a model whose declared window will not fit this Mac becomes one that
+	// does. Read through Config.ServedContext, never off this field, so that
+	// the default is applied in one place.
+	ServedContext int64 `json:"served_context,omitempty"`
 }
+
+// MaxContextLength bounds every context window Gropius will believe, declared
+// or served. A model directory's config.json is, in shared-cache mode, a file
+// another local account can write, and so is config.json itself; the figure is
+// served to the LAN and decides how much memory a model is charged, so a
+// hostile or corrupt one must not be able to hand a client an absurd number to
+// size buffers from or fill this Mac's memory with. 8,388,608 tokens is far
+// above any window in use and far below anything that could be mistaken for
+// one. The registry bounds a declared window by this same constant.
+const MaxContextLength = 1 << 23
 
 // IsZero reports whether a model's settings say nothing at all. An entry like
 // that is dropped rather than stored — by sanitizeModels on the way in from
@@ -699,7 +721,46 @@ type ModelSettings struct {
 // embedded or promoted one would report a pinned model with no sampling
 // override as having no settings.
 func (m ModelSettings) IsZero() bool {
-	return !m.MergeSystemMessages && !m.Pinned && m.Sampling.IsZero()
+	return !m.MergeSystemMessages && !m.Pinned && m.ServedContext == 0 && m.Sampling.IsZero()
+}
+
+// ServedContext is the window Gropius serves the named model at: the
+// operator's figure, or declared — the window the model's own configuration
+// states — when they have set none or set one the model cannot address.
+//
+// The one home of that question. The memory budget charges this window, the
+// gateway refuses a request larger than it, the models list publishes it and
+// the panel shows it; a second reading of the setting anywhere is how those
+// four come to mean different windows by one number.
+//
+// A setting above the declared window is not honoured: the operator can ask
+// for less than the model was built for and cannot ask for more, and a model
+// that declares nothing has no window to serve.
+func (c Config) ServedContext(repoID string, declared int64) int64 {
+	set := c.Models[repoID].ServedContext
+	if set == 0 {
+		// Folded, because a request resolves to the registry's spelling and
+		// the settings file is written by hand as often as by the panel.
+		//
+		// Every variant is read and the largest kept, rather than the first
+		// the map hands over. Two spellings of one id are refused on the
+		// settings path and dropped on the file path, so a map holding both
+		// reached here some other way — assembled in Go, or written by a build
+		// with different rules — and taking whichever came first would answer
+		// differently on different runs of the same binary. The largest is the
+		// one choice that is both deterministic and no smaller than what the
+		// operator asked for anywhere.
+		folded := FoldRepoID(repoID)
+		for id, ms := range c.Models {
+			if FoldRepoID(id) == folded && ms.ServedContext > set {
+				set = ms.ServedContext
+			}
+		}
+	}
+	if set <= 0 || (declared > 0 && set > declared) {
+		return declared
+	}
+	return set
 }
 
 // Clone returns a copy that shares no pointer with the original — the sampling
@@ -786,6 +847,11 @@ func (c Config) validateModels() error {
 		if err := c.Models[id].Sampling.Validate(); err != nil {
 			return fmt.Errorf("%s: %w", id, err)
 		}
+		if sc := c.Models[id].ServedContext; sc < 0 || sc > MaxContextLength {
+			return fmt.Errorf(
+				"%s: served_context must be between 0 (the model's own window) and %d, got %d",
+				id, int64(MaxContextLength), sc)
+		}
 	}
 	return nil
 }
@@ -830,6 +896,13 @@ func (c *Config) sanitizeModels() []string {
 		ms.Sampling = sampling
 		for _, n := range names {
 			dropped = append(dropped, "models["+id+"].sampling."+n)
+		}
+		// A window this build cannot use is dropped on its own, leaving the
+		// model's other settings in force: the alternative is a file whose one
+		// bad figure takes a pin and a sampling override down with it.
+		if ms.ServedContext < 0 || ms.ServedContext > MaxContextLength {
+			ms.ServedContext = 0
+			dropped = append(dropped, "models["+id+"].served_context")
 		}
 		// An entry that says nothing is not kept, and is not reported either:
 		// nothing was ignored, because nothing was asked for. Keeping it would
