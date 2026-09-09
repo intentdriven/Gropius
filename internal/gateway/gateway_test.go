@@ -1120,16 +1120,16 @@ func TestModelsListReferenceDocumentsEveryFieldServed(t *testing.T) {
 	// documented ceiling, so it has to be a number on a user-facing page and
 	// has to be the number the code enforces.
 	// The same for residency: what the three values mean, who the fields are
-	// served to — a client on this Mac, or one an API key admits — and that
-	// reading one reserves nothing; a client that took the snapshot for a
-	// promise would be the failure this feature invites.
+	// served to — a client connecting over loopback, or one an API key admits
+	// — and that reading one reserves nothing; a client that took the snapshot
+	// for a promise would be the failure this feature invites.
 	for _, phrase := range []string{
 		"architectural maximum",
 		"may be smaller",
 		withThousands(registry.MaxContextLength),
 		"not_loaded",
 		"API key",
-		"on this Mac",
+		"over loopback",
 		"snapshot",
 	} {
 		if !strings.Contains(string(page), phrase) {

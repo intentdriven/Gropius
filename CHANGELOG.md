@@ -13,18 +13,23 @@ GitHub release notes.
 
 ### Changed
 
-- **A client on this Mac is told which models are loaded, whether or not an API
-  key is set.** `GET /v1/models` carries `state`, `in_flight`, `last_used` and
-  `pinned`, and used to carry them only on an install that had a key — so the
-  common first-run setup, a chat application beside the server on one Mac with
-  no key, had nothing to show in its model picker and no way to tell a warm
-  model from a cold one. A client connecting over loopback is the same person
-  at the same machine the control panel already shows exactly these facts to,
-  so it is now served them too. **Nothing changes for the network:** on an
-  install with no key, a client off this Mac is still served exactly the
-  OpenAI fields and the context figure, and learns nothing from the listing
-  about what this Mac is running or when. An install with a key behaves as
-  before.
+- **A client connecting over loopback is told which models are loaded, whether
+  or not an API key is set.** `GET /v1/models` carries `state`, `in_flight`,
+  `last_used` and `pinned`, and used to carry them only on an install that had
+  a key — so the common first-run setup, a chat application beside the server
+  on one Mac with no key, had nothing to show in its model picker and no way to
+  tell a warm model from a cold one. A client reaching the server at
+  `localhost` is the same person at the same machine the control panel already
+  shows exactly these facts to, so it is now served them too. It is the
+  connection that decides, not the computer: a program on this Mac that dials
+  this Mac's network address instead is a network client here.
+  **Nothing changes for the network:** on an install with no key, a client that
+  did not connect over loopback is still served exactly the OpenAI fields and
+  the context figure, and learns nothing from the listing about what this Mac
+  is running or when. Nor can a page in a browser borrow the rule — it is the
+  same `Host` and `Origin` check the control panel is gated on, so a site that
+  points its own hostname at `127.0.0.1` is refused. An install with a key
+  behaves as before.
 
 ### Fixed
 

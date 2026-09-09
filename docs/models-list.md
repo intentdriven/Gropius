@@ -3,8 +3,8 @@
 `GET /v1/models` reports the models this Gropius can serve. It is the
 OpenAI-shaped listing every OpenAI client already calls, with a small number
 of Gropius extensions carried as extra top-level fields. Some of those fields
-appear only for a client on this Mac, or on an install with an API key
-configured.
+appear only for a client connecting over loopback, or on an install with an
+API key configured.
 
 Only models in the **ready** state appear. A model that is downloading, or
 whose last download failed, is not listed.
@@ -39,10 +39,10 @@ curl http://localhost:11535/v1/models
 | `owned_by` | Always `gropius`. |
 | `context_length` | The model's maximum context, in tokens. See below. |
 | `max_model_len` | The same figure again, under the name vLLM-derived clients read. |
-| `state` | Whether the model is loaded, still loading, or not loaded. Only for a client on this Mac, or on an install with an API key. See below. |
-| `in_flight` | How many requests that model is already handling. Only for a client on this Mac, or on an install with an API key. |
-| `last_used` | Unix time at which Gropius last handled a request for that model. Only for a client on this Mac, or on an install with an API key, and only while the model is in memory — `loaded` or `loading`. |
-| `pinned` | Whether the operator has protected the model from eviction. Only for a client on this Mac, or on an install with an API key. See below. |
+| `state` | Whether the model is loaded, still loading, or not loaded. Only for a client connecting over loopback, or on an install with an API key. See below. |
+| `in_flight` | How many requests that model is already handling. Only for a client connecting over loopback, or on an install with an API key. |
+| `last_used` | Unix time at which Gropius last handled a request for that model. Only for a client connecting over loopback, or on an install with an API key, and only while the model is in memory — `loaded` or `loading`. |
+| `pinned` | Whether the operator has protected the model from eviction. Only for a client connecting over loopback, or on an install with an API key. See below. |
 
 ## The context figure
 
@@ -95,18 +95,28 @@ now and which models are protected, so a client can send its work to a model tha
 is already warm instead of forcing a load it did not know about. Loading a model takes seconds to a minute, longer
 for the largest; picking the warm one costs nothing.
 
-**They appear for a client on this Mac, and for every client an API key
-admits.** A client connecting over loopback — a chat application, a script, or
-any other program running on the same Mac as the server — is served all four,
-whether or not a key is set: it is the same person at the same machine the
-control panel already shows this to. Set a key in **Settings** and the four
+**They appear for a client connecting over loopback, and for every client an
+API key admits.** A chat application, a script, or any other program on the
+same Mac that reaches the server at `localhost` or `127.0.0.1` is served all
+four, whether or not a key is set: it is the same person at the same machine
+the control panel already shows this to. Set a key in **Settings** and the four
 fields are on every entry for every client the key admits, wherever it is.
 
-What is withheld is the listing served to the **network** on an install with no
+It is the connection that decides, not the computer. A program on this Mac that
+reaches the server by this Mac's **network** address rather than by loopback is
+a network client here, and is served no residency on a keyless install — point
+it at `localhost` or set a key. In the other direction, a tunnel or proxy
+running on this Mac (`ssh -L`, for instance) makes the clients behind it
+loopback clients: forwarding the port forwards this too.
+
+What is withheld is the listing served to the network on an install with no
 key. That is the shipping default, where anyone who can reach the server may
 use it, and a client on the network is then served exactly the four OpenAI
 fields and the context figure: nobody off this Mac learns from the listing what
-it is running or when.
+it is running or when. A page in a browser cannot borrow the loopback rule
+either — the request has to name loopback in its `Host`, and carry either no
+`Origin` or a loopback one, so a site that points its own hostname at
+`127.0.0.1` is refused the fields exactly as the network is.
 
 What that withholds is the *listing*, and only the listing. On a server left
 open, a client that never presents a key can still work out which models are
@@ -121,7 +131,7 @@ it secret. The key is what protects the server.
 
 The key is also one key, shared by every client that has it. A client holding
 it sees the whole machine's activity — every model's in-flight count and
-last-used time, not only its own. The same is true of a client on this Mac.
+last-used time, not only its own. The same is true of a loopback client.
 
 `state` carries one of three values:
 

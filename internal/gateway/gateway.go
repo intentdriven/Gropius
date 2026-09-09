@@ -179,6 +179,44 @@ func bearerToken(header string) string {
 	return ""
 }
 
+// fromThisMachine reports whether r originated from a client on this machine,
+// and is not a page somewhere else driving that client's browser.
+//
+// This is the one rule, and a bare RemoteAddr check is not it. A page the
+// victim visits runs in their browser, which connects from 127.0.0.1, so the
+// source address alone waves it through; two guards close what it cannot see.
+// A DNS-rebound page points a hostname it controls at 127.0.0.1, so the socket
+// is loopback and only the Host header names the attacker. A classic
+// cross-site request carries its Origin, and a genuine local client is either
+// same-origin on loopback or sends none at all.
+//
+// loopbackOnly gates the whole control plane on this. withAuth checks the same
+// two headers on its bearer-check exemption but cannot fold onto this function,
+// and the difference is deliberate rather than drift: a foreign Origin is a 403
+// there, while a foreign Host falls through to the bearer check so a
+// same-machine proxy that presents the key keeps working. Everything else that
+// treats a loopback connection as this machine's own operator answers here, so
+// the rule is stated once.
+//
+// What this does NOT stop, and the condition on that staying harmless: a
+// no-cors subresource — <script src>, <img> — that a page anywhere points at
+// the loopback URL sends a loopback Host and no Origin at all, so it passes.
+// It is not a read primitive today, because the gateway emits no
+// Access-Control-Allow-Origin (so the body is opaque to the page) and the JSON
+// is a syntax error if parsed as script. The day any CORS header is added to
+// these routes, that stops being true and this predicate is no longer enough
+// on its own.
+func fromThisMachine(r *http.Request) bool {
+	if !isLoopback(r.RemoteAddr) {
+		return false
+	}
+	if !isLoopbackHost(r.Host) {
+		return false
+	}
+	origin := r.Header.Get("Origin")
+	return origin == "" || isLoopbackOrigin(origin)
+}
+
 // isLoopback reports whether a RemoteAddr is on this machine.
 func isLoopback(remoteAddr string) bool {
 	host := remoteAddr
@@ -224,12 +262,18 @@ func (g *Gateway) handleListModels(w http.ResponseWriter, r *http.Request) {
 	// path: withAuth still decides who may call the listing at all. Reading the
 	// key again here would be a second reading of a live value, and a request
 	// admitted while no key was configured could then be served as if one had
-	// been. isLoopback is that same middleware's loopback classification, read
-	// off the connection rather than off any header, and is the only notion of
-	// loopback this package has.
+	// been.
+	//
+	// The loopback arm is fromThisMachine, not a bare source-address check.
+	// withAuth returns before its own Host and Origin guards when no key is
+	// configured, so on a keyless install nothing upstream has looked at either
+	// header: a DNS-rebound page would arrive from 127.0.0.1 carrying the
+	// attacker's Host and read exactly the activity this handler withholds from
+	// the LAN. The guards therefore have to be applied here, and they are the
+	// same ones — the same function — the control plane is gated on.
 	var residency map[string]runtime.Resident
 	var pinned map[string]bool
-	if g.admittedKeyed(r) || isLoopback(r.RemoteAddr) {
+	if g.admittedKeyed(r) || fromThisMachine(r) {
 		// Folded on the same rule as the residency join below. The pinned set
 		// is read separately from the residency snapshot because a pin is not
 		// a property of a loaded model: a pinned model the pool is not holding
