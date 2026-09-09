@@ -121,6 +121,13 @@ func (o *observation) relayed(out relayOutcome) {
 	switch {
 	case out.clientGone:
 		o.record.Class = stats.ClassCancelled
+	case out.oversizeLine:
+		// Ahead of upstreamCut, which is set with it: the model server was
+		// reachable and was answering, and the answer ended because Gropius
+		// stopped reading at a limit Gropius chose. Filing that as
+		// "unreachable" would send an operator reading the statistics after
+		// the wrong piece of software.
+		o.record.Class = stats.ClassGatewayError
 	case out.upstreamCut:
 		o.record.Class = stats.ClassUnreachable
 	}
@@ -186,9 +193,16 @@ type relayOutcome struct {
 	// hangs up on "[DONE]" — which is what an SDK treating it as the end does
 	// — makes both of them fail, so the two flags above are read in its light
 	// rather than on their own.
-	complete   bool
-	firstToken time.Time
-	usage      *usageCounts
+	complete bool
+	// oversizeLine is an upstream line that reached maxStreamLine without a
+	// newline, which is the one way the relay itself ends an answer. It is a
+	// fact about this Gropius rather than about either side: it is logged once
+	// by the caller, and it is what the answer is recorded under, because
+	// upstreamCut — which is set with it, the answer having stopped part-way —
+	// would file Gropius's own limit as the model server failing.
+	oversizeLine bool
+	firstToken   time.Time
+	usage        *usageCounts
 }
 
 // relayOptions tell the relay what the observer needs and what the client

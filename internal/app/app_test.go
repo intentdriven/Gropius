@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/intentdriven/Gropius/internal/capability"
 	"github.com/intentdriven/Gropius/internal/config"
 	"github.com/intentdriven/Gropius/internal/registry"
 	"github.com/intentdriven/Gropius/internal/runtime"
@@ -387,8 +388,8 @@ func TestSetConfigPersists(t *testing.T) {
 		t.Error("config not updated in memory")
 	}
 	// The HF token must reach the hub client, or gated downloads keep failing.
-	if a.Hub.Token != "hf_token" {
-		t.Errorf("Hub.Token = %q, want the newly-saved token", a.Hub.Token)
+	if a.Hub.Token() != "hf_token" {
+		t.Errorf("Hub token = %q, want the newly-saved token", a.Hub.Token())
 	}
 
 	reloaded, _, err := config.Load(a.Paths.Config)
@@ -446,7 +447,7 @@ func TestDownloadRequiresRepoID(t *testing.T) {
 
 func TestResolveOnlyReturnsReadyModels(t *testing.T) {
 	a := newTestApp(t)
-	src := modelSource{a.Registry}
+	src := modelSource{a}
 
 	a.Registry.Put(registry.Model{
 		RepoID: "org/half", Path: "/tmp/x", State: registry.StateDownloading,
@@ -499,7 +500,7 @@ func TestProgressReachesTheRegistry(t *testing.T) {
 
 func TestHumanReadableErrorForMissingModel(t *testing.T) {
 	a := newTestApp(t)
-	src := modelSource{a.Registry}
+	src := modelSource{a}
 	_, _, err := src.Resolve("org/nope")
 	if err == nil {
 		t.Fatal("expected an error")
@@ -909,7 +910,7 @@ func TestSetConfigRefusesPinsThatDoNotFitTheMemoryBudget(t *testing.T) {
 	if err == nil {
 		t.Fatal("SetConfig accepted a pinned set larger than the whole memory budget")
 	}
-	sum := runtime.HumanBytes(2 * runtime.LoadCost(each))
+	sum := runtime.HumanBytes(2 * capability.LoadCost(each))
 	budget := runtime.HumanBytes(a.Pool.MemoryBudget())
 	if !strings.Contains(err.Error(), sum) || !strings.Contains(err.Error(), budget) {
 		t.Errorf("error = %q, want it to give the pinned sum %s and the budget %s", err, sum, budget)
@@ -1081,7 +1082,7 @@ func TestSetConfigChargesAModelThatIsStillDownloading(t *testing.T) {
 	if err == nil {
 		t.Fatal("SetConfig accepted a pin on a download far larger than the whole budget")
 	}
-	if want := runtime.HumanBytes(runtime.LoadCost(1 << 50)); !strings.Contains(err.Error(), want) {
+	if want := runtime.HumanBytes(capability.LoadCost(1 << 50)); !strings.Contains(err.Error(), want) {
 		t.Errorf("error = %q, want it to charge the declared download size %s", err, want)
 	}
 }
@@ -1248,7 +1249,7 @@ func TestThePinnedFitCheckIsInclusiveOfTheBudget(t *testing.T) {
 	c.Pinned = []string{"org/exact"}
 	if err := a.SetConfig(c); err != nil {
 		t.Errorf("a pinned model charged %s against a budget of %s was refused: %v",
-			runtime.HumanBytes(runtime.LoadCost(fits)), runtime.HumanBytes(budget), err)
+			runtime.HumanBytes(capability.LoadCost(fits)), runtime.HumanBytes(budget), err)
 	}
 
 	putReady(t, a, "org/exact", over)
@@ -1260,7 +1261,7 @@ func TestThePinnedFitCheckIsInclusiveOfTheBudget(t *testing.T) {
 	c.Pinned = []string{"org/exact"}
 	if err := a.SetConfig(c); err == nil {
 		t.Errorf("a pinned model charged %s against a budget of %s was accepted",
-			runtime.HumanBytes(runtime.LoadCost(over)), runtime.HumanBytes(budget))
+			runtime.HumanBytes(capability.LoadCost(over)), runtime.HumanBytes(budget))
 	}
 }
 

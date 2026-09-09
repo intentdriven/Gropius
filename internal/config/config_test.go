@@ -60,7 +60,7 @@ func TestEnsureDirsWidensDataDirsUnderSetgidSharedRoot(t *testing.T) {
 	if err := p.EnsureDirs(); err != nil {
 		t.Fatalf("EnsureDirs: %v", err)
 	}
-	for _, d := range []string{p.Models, filepath.Dir(p.HFCache), p.HFCache, p.Logs} {
+	for _, d := range []string{p.Models, filepath.Dir(p.HFCache), p.HFCache} {
 		fi, err := os.Stat(d)
 		if err != nil {
 			t.Fatalf("stat %s: %v", d, err)
@@ -75,13 +75,17 @@ func TestEnsureDirsWidensDataDirsUnderSetgidSharedRoot(t *testing.T) {
 		}
 	}
 	// bin must NOT be widened: a group-writable bin would let one account
-	// replace the uv binary another account executes.
-	fi, err := os.Stat(p.Bin)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if fi.Mode()&0o020 != 0 {
-		t.Errorf("bin mode = %v, must not be group-writable (it holds executables)", fi.Mode())
+	// replace the uv binary another account executes. Nor must logs: it holds
+	// one account's record of what its own model servers printed, under names
+	// another account would then be unable to write.
+	for name, d := range map[string]string{"bin": p.Bin, "logs": p.Logs} {
+		fi, err := os.Stat(d)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if fi.Mode()&0o020 != 0 {
+			t.Errorf("%s mode = %v, must not be group-writable", name, fi.Mode())
+		}
 	}
 }
 
@@ -326,6 +330,94 @@ func TestEnsureDirsRefusesSymlinkedLayoutDirUnderSetgidRoot(t *testing.T) {
 	}
 }
 
+// sharedLayout stands a temporary directory in for the shared root and returns
+// the layout NewPaths derives for it: a setgid data root holding what every
+// account shares, and this account's own directory holding what it does not.
+//
+// The derivation is the real one — the seam is the shared root's path, not the
+// rule — so a NewPaths that stopped splitting the layout, or split it
+// differently, is caught here rather than agreeing with a hand-written copy of
+// itself.
+func sharedLayout(t *testing.T) (Paths, string, string) {
+	t.Helper()
+	root := t.TempDir()
+	if err := os.Chmod(root, 0o775|os.ModeSetgid|os.ModeSticky); err != nil {
+		t.Fatal(err)
+	}
+	withSharedRoot(t, root)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	acct := filepath.Join(home, "Library", "Application Support", "Gropius")
+	p := NewPaths(root)
+	if p.Bin == filepath.Join(root, "bin") {
+		t.Fatal("NewPaths did not split the layout for the shared root")
+	}
+	return p, root, acct
+}
+
+// withSharedRoot points the shared-root rule at dir for the duration of a test.
+func withSharedRoot(t *testing.T, dir string) {
+	t.Helper()
+	prev := sharedRoot
+	sharedRoot = dir
+	t.Cleanup(func() { sharedRoot = prev })
+}
+
+// The layout under a shared cache straddles two directories: what every account
+// shares sits in the setgid root, and this account's executables, settings and
+// registry sit in its own directory, which is outside it. EnsureDirs has to
+// create both. It used to refuse the whole layout on the first entry that was
+// not under the root — so with the executables moved out, a Mac with a shared
+// cache installed could not start Gropius at all.
+func TestEnsureDirsUnderASharedRootCreatesThisAccountsOwnDirectories(t *testing.T) {
+	p, root, acct := sharedLayout(t)
+	if err := p.EnsureDirs(); err != nil {
+		t.Fatalf("EnsureDirs refused the layout a shared cache actually produces: %v", err)
+	}
+	for _, d := range []string{p.Bin, p.Venv, p.Python, p.Logs} {
+		if fi, err := os.Stat(d); err != nil || !fi.IsDir() {
+			t.Errorf("expected %s to exist (err=%v)", d, err)
+		}
+		if !strings.HasPrefix(d, acct) {
+			t.Errorf("%s should be in this account's own directory", d)
+		}
+	}
+	// The shared half is unchanged: still widened to match the installer's mode,
+	// so the next account can write what this one created.
+	for _, d := range []string{p.Models, filepath.Dir(p.HFCache), p.HFCache} {
+		fi, err := os.Stat(d)
+		if err != nil {
+			t.Fatalf("stat %s: %v", d, err)
+		}
+		if fi.Mode()&0o020 == 0 || fi.Mode()&os.ModeSetgid == 0 || fi.Mode()&os.ModeSticky == 0 {
+			t.Errorf("%s mode = %v, want group-writable setgid sticky", d, fi.Mode())
+		}
+		if !strings.HasPrefix(d, root) {
+			t.Errorf("%s should stay in the shared root", d)
+		}
+	}
+	// Executables are never widened, wherever they live.
+	if fi, err := os.Stat(p.Bin); err != nil || fi.Mode()&0o020 != 0 {
+		t.Errorf("bin mode = %v (err=%v), must not be group-writable", fi.Mode(), err)
+	}
+}
+
+// A shared data directory that is not under the shared root is a layout nobody
+// can have meant: models, the HuggingFace cache and the logs are what the root
+// exists to hold, and one resolved outside it would be widened to
+// group-writable somewhere no co-tenant was ever meant to reach. The refusal
+// that used to cover every entry is kept for exactly these.
+func TestEnsureDirsRefusesASharedDataDirOutsideTheRoot(t *testing.T) {
+	p, _, acct := sharedLayout(t)
+	p.Models = filepath.Join(acct, "models")
+	if err := p.EnsureDirs(); err == nil {
+		t.Fatal("EnsureDirs accepted a shared data directory outside the shared root")
+	}
+	if _, err := os.Stat(p.Models); !os.IsNotExist(err) {
+		t.Errorf("the refused directory was created anyway (err=%v)", err)
+	}
+}
+
 // /Users/Shared is world-writable on stock macOS, so any unprivileged account
 // can pre-create the shared root and own every other account's data. Only a
 // directory the installer's `sudo mkdir` produced — root-owned and not
@@ -448,7 +540,7 @@ func TestLoadDropsAPerModelKeyThatNamesNoModel(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cfg, dropped, err := Load(path)
+	cfg, notices, err := Load(path)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -458,8 +550,8 @@ func TestLoadDropsAPerModelKeyThatNamesNoModel(t *testing.T) {
 	if !cfg.PerModel["mlx-community/Qwen3-8B-4bit"].MergeSystemMessages {
 		t.Errorf("the usable setting beside it was dropped too: %+v", cfg.PerModel)
 	}
-	if len(dropped) != 1 || !strings.Contains(dropped[0], "../../etc") {
-		t.Errorf("dropped = %v, want the one unusable key named", dropped)
+	if len(notices.All()) != 1 || !strings.Contains(notices.All()[0], "../../etc") {
+		t.Errorf("dropped = %v, want the one unusable key named", notices.All())
 	}
 	// The whole point: what loaded is a config that can be saved again.
 	if err := cfg.Validate(); err != nil {
@@ -480,15 +572,15 @@ func TestLoadDropsADuplicatePerModelSpelling(t *testing.T) {
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	cfg, dropped, err := Load(path)
+	cfg, notices, err := Load(path)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
 	if len(cfg.PerModel) != 1 {
 		t.Errorf("per-model settings = %+v, want one of the two spellings", cfg.PerModel)
 	}
-	if len(dropped) != 1 || !strings.Contains(dropped[0], "duplicate") {
-		t.Errorf("dropped = %v, want the duplicate spelling named", dropped)
+	if len(notices.All()) != 1 || !strings.Contains(notices.All()[0], "duplicate") {
+		t.Errorf("dropped = %v, want the duplicate spelling named", notices.All())
 	}
 }
 
@@ -536,12 +628,12 @@ func TestSaveLoadRoundTripKeepsPinnedModels(t *testing.T) {
 	if err := Save(path, c); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
-	got, dropped, err := Load(path)
+	got, notices, err := Load(path)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if len(dropped) != 0 {
-		t.Errorf("dropped = %v, want nothing dropped", dropped)
+	if len(notices.All()) != 0 {
+		t.Errorf("dropped = %v, want nothing dropped", notices.All())
 	}
 	if !reflect.DeepEqual(got.Pinned, c.Pinned) {
 		t.Errorf("Pinned = %v, want %v", got.Pinned, c.Pinned)
@@ -605,21 +697,21 @@ func TestLoadDropsAPinThatNamesNoModel(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cfg, dropped, err := Load(path)
+	cfg, notices, err := Load(path)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
 	if !reflect.DeepEqual(cfg.Pinned, []string{"org/keeper"}) {
 		t.Errorf("Pinned = %v, want only the one usable entry", cfg.Pinned)
 	}
-	if len(dropped) != 2 {
-		t.Fatalf("dropped = %v, want the bad id and the duplicate spelling named", dropped)
+	if len(notices.All()) != 2 {
+		t.Fatalf("dropped = %v, want the bad id and the duplicate spelling named", notices.All())
 	}
-	if !strings.Contains(dropped[0], "../../etc") {
-		t.Errorf("dropped = %v, want the entry that names no model named", dropped)
+	if !strings.Contains(notices.All()[0], "../../etc") {
+		t.Errorf("dropped = %v, want the entry that names no model named", notices.All())
 	}
-	if !strings.Contains(dropped[1], "duplicate") {
-		t.Errorf("dropped = %v, want the duplicate spelling named", dropped)
+	if !strings.Contains(notices.All()[1], "duplicate") {
+		t.Errorf("dropped = %v, want the duplicate spelling named", notices.All())
 	}
 	// The whole point: what loaded is a config that can be saved again.
 	if err := cfg.Validate(); err != nil {
@@ -656,12 +748,12 @@ func TestAFullPinnedListStillFitsTheConfigFile(t *testing.T) {
 	if err := Save(path, c); err != nil {
 		t.Fatalf("Save: %v — a legal pinned list does not fit the file", err)
 	}
-	loaded, dropped, err := Load(path)
+	loaded, notices, err := Load(path)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if len(dropped) != 0 {
-		t.Errorf("dropped %v from a config within every limit", dropped)
+	if len(notices.All()) != 0 {
+		t.Errorf("dropped %v from a config within every limit", notices.All())
 	}
 	if len(loaded.Pinned) != MaxPinned {
 		t.Errorf("loaded %d pins, want %d", len(loaded.Pinned), MaxPinned)
@@ -732,7 +824,7 @@ func TestLoadDropsAnUnusableMemoryBudget(t *testing.T) {
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	cfg, dropped, err := Load(path)
+	cfg, notices, err := Load(path)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -743,8 +835,8 @@ func TestLoadDropsAnUnusableMemoryBudget(t *testing.T) {
 	if cfg.APIKey != "bh_keep" {
 		t.Errorf("APIKey = %q, want the file's key — one bad figure must not reset the install", cfg.APIKey)
 	}
-	if len(dropped) != 1 || !strings.Contains(dropped[0], "max_resident_bytes") {
-		t.Errorf("dropped = %v, want the memory budget named", dropped)
+	if len(notices.All()) != 1 || !strings.Contains(notices.All()[0], "max_resident_bytes") {
+		t.Errorf("dropped = %v, want the memory budget named", notices.All())
 	}
 	if err := cfg.Validate(); err != nil {
 		t.Errorf("the loaded config does not validate: %v", err)
@@ -784,5 +876,144 @@ func TestExecRootIsTheRootEverywhereElse(t *testing.T) {
 		if !strings.HasPrefix(got, root) {
 			t.Errorf("%s should be under %q, got %q", name, root, got)
 		}
+	}
+}
+
+// The settings path, where a human is waiting: a key far longer than anything
+// that could be one is refused, and the refusal names the field so the person
+// who posted it knows which of a dozen settings was the problem.
+func TestValidateRefusesAnOverlongAPIKey(t *testing.T) {
+	c := Default()
+	c.APIKey = strings.Repeat("k", MaxAPIKeyBytes+1)
+
+	err := c.Validate()
+	if err == nil {
+		t.Fatalf("Validate accepted an API key of %d bytes", len(c.APIKey))
+	}
+	if !strings.Contains(err.Error(), "api_key") {
+		t.Errorf("Validate error = %q, want it to name the api_key field", err)
+	}
+	c.APIKey = strings.Repeat("k", MaxAPIKeyBytes)
+	if err := c.Validate(); err != nil {
+		t.Errorf("Validate refused a key at the ceiling: %v", err)
+	}
+}
+
+// The same rule on the preload list, and the same reason: everything saved is
+// written to config.json, which Load refuses to read above MaxConfigBytes.
+func TestValidateRefusesTooLongAPreloadList(t *testing.T) {
+	c := Default()
+	for i := range MaxPreload + 1 {
+		c.Preload = append(c.Preload, fmt.Sprintf("org/model-%d", i))
+	}
+
+	err := c.Validate()
+	if err == nil {
+		t.Fatalf("Validate accepted a preload list of %d models", len(c.Preload))
+	}
+	if !strings.Contains(err.Error(), "preload") {
+		t.Errorf("Validate error = %q, want it to name the preload field", err)
+	}
+	if !strings.Contains(err.Error(), strconv.Itoa(MaxPreload)) {
+		t.Errorf("Validate error = %q, want it to give the ceiling", err)
+	}
+	c.Preload = c.Preload[:MaxPreload]
+	if err := c.Validate(); err != nil {
+		t.Errorf("Validate refused a list at the ceiling: %v", err)
+	}
+}
+
+// The file path, not the settings path. A key too long to be one is trimmed
+// and reported rather than refusing the whole file — which would send the next
+// start into its fail-closed loopback-only branch — and rather than being
+// cleared, which would leave a LAN-exposed server open to everyone on the
+// network over a hand-edit.
+func TestLoadTrimsAnOverlongAPIKeyRatherThanRefusingTheFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	key := strings.Repeat("k", MaxAPIKeyBytes+64)
+	body := `{"port":11535,"host":"0.0.0.0","decode_concurrency":4,"api_key":"` + key + `"}`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, notices, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(cfg.APIKey) != MaxAPIKeyBytes {
+		t.Errorf("APIKey is %d bytes, want it trimmed to %d", len(cfg.APIKey), MaxAPIKeyBytes)
+	}
+	if cfg.APIKey == "" {
+		t.Error("the key was cleared, which opens a LAN-exposed server to the network")
+	}
+	// Repaired, not ignored: the trimmed key is the key clients must send from
+	// now on, and an operator told it was ignored has been told the opposite of
+	// what happened.
+	if len(notices.Repaired) != 1 || !strings.Contains(notices.Repaired[0], "api_key") {
+		t.Errorf("repaired = %v, want the api_key named", notices.Repaired)
+	}
+	if len(notices.Ignored) != 0 {
+		t.Errorf("ignored = %v, want the trimmed key reported as in force, not as ignored", notices.Ignored)
+	}
+	// The whole point: what loaded is a config that can be saved again.
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("the loaded config does not validate: %v", err)
+	}
+}
+
+// The trim steps back to the last whole character, and a value that is not
+// UTF-8 at all has no whole character to step back to. Load cannot produce one
+// today — encoding/json coerces anything invalid to U+FFFD — but the safety of
+// clearing a key can rest on nothing but this function: an empty key is an
+// open server on a LAN-exposed install, so it is refused here rather than
+// somewhere else's invariant.
+func TestSanitizeAPIKeyNeverClearsTheKey(t *testing.T) {
+	c := Default()
+	c.APIKey = strings.Repeat("\xff", MaxAPIKeyBytes+88)
+
+	repaired := c.sanitizeAPIKey()
+
+	if c.APIKey == "" {
+		t.Fatal("sanitizing cleared the API key, which opens a LAN-exposed server to the network")
+	}
+	if len(c.APIKey) > MaxAPIKeyBytes {
+		t.Errorf("APIKey is %d bytes, want at most %d", len(c.APIKey), MaxAPIKeyBytes)
+	}
+	if len(repaired) != 1 {
+		t.Errorf("repaired = %v, want the api_key named once", repaired)
+	}
+}
+
+// The same on the preload list: the entries beyond the ceiling are dropped and
+// named, and the file still loads.
+func TestLoadTrimsAnOversizePreloadList(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	ids := make([]string, 0, MaxPreload+3)
+	for i := range MaxPreload + 3 {
+		ids = append(ids, fmt.Sprintf(`"org/model-%d"`, i))
+	}
+	body := `{"port":11535,"host":"0.0.0.0","decode_concurrency":4,"preload":[` +
+		strings.Join(ids, ",") + `]}`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, notices, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(cfg.Preload) != MaxPreload {
+		t.Errorf("Preload holds %d models, want it trimmed to %d", len(cfg.Preload), MaxPreload)
+	}
+	if len(cfg.Preload) > 0 && cfg.Preload[0] != "org/model-0" {
+		t.Errorf("Preload starts at %q, want the list trimmed from the end", cfg.Preload[0])
+	}
+	// Ignored, not repaired: the entries beyond the ceiling are not in force in
+	// any form, and setting them again is the only way to get them.
+	if len(notices.Ignored) != 1 || !strings.Contains(notices.Ignored[0], "preload") {
+		t.Errorf("ignored = %v, want the preload list named", notices.Ignored)
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("the loaded config does not validate: %v", err)
 	}
 }

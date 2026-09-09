@@ -4,10 +4,13 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/intentdriven/Gropius/internal/config"
 )
 
 func newTestRegistry(t *testing.T) (*Registry, string) {
@@ -1151,5 +1154,55 @@ func TestReadContextLengthReadsAModelDirectory(t *testing.T) {
 	}
 	if got := ReadContextLength(filepath.Join(dir, "org", "absent")); got != 0 {
 		t.Errorf("ReadContextLength of a missing directory = %d, want 0", got)
+	}
+}
+
+// The first run of a second macOS account under a shared cache starts with an
+// empty registry — every account keeps its own — and the startup rescan of the
+// shared models directory is what fills it in. This is the documented first-run
+// path, so it is pinned: the rescan must both adopt the model directories the
+// first account downloaded and PERSIST them, into a file this account owns.
+//
+// Before per-account state, both accounts resolved to one registry.json in the
+// group-writable shared root, where the sticky bit made the second account's
+// save fail EPERM: it could serve, but never record anything.
+func TestFirstRunRescanRebuildsASecondAccountsRegistry(t *testing.T) {
+	// The shared root's models directory, as the first account left it. The
+	// state paths below come from the real derivation, which resolves them into
+	// this account's home — so nothing here writes to the shared root.
+	models := filepath.Join(t.TempDir(), "models")
+	writeModelDir(t, models, "mlx-community", "Qwen3-8B-4bit", 1024)
+
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	p := config.NewPaths(config.SharedRoot)
+	if err := os.MkdirAll(filepath.Dir(p.State), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	r, err := Open(p.State)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if len(r.List()) != 0 {
+		t.Fatalf("a new account's registry starts with %d models, want none", len(r.List()))
+	}
+	if err := r.Rescan(models); err != nil {
+		t.Fatalf("the first-run rescan could not record what it found: %v", err)
+	}
+	if _, err := r.Get("mlx-community/Qwen3-8B-4bit"); err != nil {
+		t.Fatalf("the rescan did not adopt the shared model directory: %v", err)
+	}
+
+	// Persisted, and readable back on the next start.
+	again, err := Open(p.State)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	if _, err := again.Get("mlx-community/Qwen3-8B-4bit"); err != nil {
+		t.Errorf("the rescan's result did not survive a restart: %v", err)
+	}
+	if !strings.HasPrefix(p.State, home) {
+		t.Errorf("registry.json is at %q, want it in this account's own directory", p.State)
 	}
 }

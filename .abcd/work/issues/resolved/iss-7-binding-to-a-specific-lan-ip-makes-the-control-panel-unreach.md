@@ -9,6 +9,9 @@ found_during: "2026-07 bug-hunt round 2"
 found_at: "cmd/gropius/main.go"
 resolution: "Every bind acquires loopback as well as the address it names, so a specific-address bind no longer strands the loopback-only control panel; the listen address is built with net.JoinHostPort, so an IPv6 literal binds in either spelling (adr-2609091123526871)."
 impact: fix
+resolved_by:
+  intent: "itd-2609081303525417"
+  spec: "spc-2609091240035356"
 ---
 
 A config.json hand-edited to a specific interface address (e.g. Host "192.0.2.5") passes Validate, but after restart the control plane is unreachable from anywhere: the single listener binds only that address (cmd/gropius/main.go), so localhost is connection-refused, while browsing the bound LAN address from the same machine arrives with a non-loopback RemoteAddr and Host header and is 403'd by loopbackOnly (internal/gateway/control.go). The menu bar's "Open Control Panel" always opens localhost. The /v1 API keeps working, which makes the failure look like a UI bug. ExposedToLAN's own comment (internal/config/config.go) treats specific-interface binds as a supported configuration.

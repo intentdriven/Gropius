@@ -1987,3 +1987,28 @@ func TestPrefillBudget(t *testing.T) {
 		})
 	}
 }
+
+// A model server that never emits a newline must not make the streamed relay
+// buffer without limit. The request side is capped at maxRequestBody and the
+// buffered JSON response at maxResponseBody; the streamed side is capped at
+// maxStreamLine, and the relay ends the answer rather than growing one line
+// forever.
+func TestStreamedLineIsCapped(t *testing.T) {
+	// Bounded a little past the cap rather than endless, so a build without
+	// the cap fails this test instead of allocating until the machine gives
+	// up — the same shape as TestNonStreamingResponseBodyIsCapped above.
+	src := io.LimitReader(fillReader{}, maxStreamLine+1024)
+	rec := httptest.NewRecorder()
+
+	out := streamRewriteSSE(rec, src, "backend-path", "requested-name", relayOptions{})
+
+	if got := rec.Body.Len(); got != 0 {
+		t.Errorf("relayed %d bytes of an unterminated line, want none: half an event is not an event", got)
+	}
+	if !out.upstreamCut {
+		t.Error("an answer ended by the line cap was not reported as cut short")
+	}
+	if !out.oversizeLine {
+		t.Error("the relay did not report the oversized line, so nothing could be logged about it")
+	}
+}

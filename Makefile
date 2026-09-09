@@ -152,7 +152,12 @@ allow-firewall:
 ##     account downloads is writable by the next.
 ##   • sticky (the 1) means a file can only be deleted or renamed by its owner —
 ##     without it, any account in `staff` could replace or remove another user's
-##     models (or config/registry files) in this group-writable directory.
+##     models or partial downloads in this group-writable directory.
+##     Only those live here. Settings, the model registry, the server logs and
+##     the pid ledger are each account's own, kept in its own Application
+##     Support folder: they are written under fixed names that only their
+##     creator can write, so sharing them stopped the second account serving,
+##     and no account's API key or HuggingFace token belongs here at all.
 ##
 ## Crucially, 3775 is applied to DIRECTORIES ONLY. A recursive `chmod -R 3775`
 ## also rewrites every file to 0775 (group-writable, world-readable) — which,

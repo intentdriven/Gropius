@@ -139,15 +139,19 @@ func resolvedAddr(addr string) (*net.TCPAddr, bool) {
 // memory would vanish on the next start and reopen the endpoint. It runs after
 // acquisition and before anything is served, so no request is ever answered
 // under the empty key.
-func secureExposedBind(paths config.Paths, cfg *config.Config, lns []net.Listener, plan bind.Plan, log *slog.Logger) ([]net.Listener, bind.Plan) {
+// The third return value reports whether config.json was rewritten, which the
+// caller needs for a reason of its own: that save writes the settings in force,
+// repairs and all, so a repair notice loaded from the old file is no longer
+// true of the file.
+func secureExposedBind(paths config.Paths, cfg *config.Config, lns []net.Listener, plan bind.Plan, log *slog.Logger) ([]net.Listener, bind.Plan, bool) {
 	if !plan.ReachesOtherMachines() || cfg.APIKey != "" {
-		return lns, plan
+		return lns, plan, false
 	}
-	lockDown := func(msg string, args ...any) ([]net.Listener, bind.Plan) {
+	lockDown := func(msg string, args ...any) ([]net.Listener, bind.Plan, bool) {
 		log.Error(msg, args...)
 		cfg.APIKey = ""
 		return closeExtra(lns), plan.WithoutExtra(
-			"no API key could be saved for a bind other machines reach — serving this Mac and nothing else")
+			"no API key could be saved for a bind other machines reach — serving this Mac and nothing else"), false
 	}
 	key, err := config.GenerateAPIKey()
 	if err != nil {
@@ -159,7 +163,7 @@ func secureExposedBind(paths config.Paths, cfg *config.Config, lns []net.Listene
 	}
 	log.Warn("SECURITY: this server answers on an address other machines reach, so an API key was generated and saved; clients must send it as \"Authorization: Bearer <key>\". Change or clear it in Settings.",
 		"api_key", key)
-	return lns, plan
+	return lns, plan, true
 }
 
 // closeExtra drops every listener but the loopback one, which is always first.

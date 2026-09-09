@@ -7,6 +7,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -14,19 +15,40 @@ import (
 	"github.com/intentdriven/Gropius/internal/config"
 )
 
-// freePort is a port that was momentarily bound and released, so it is very
-// likely free for the next Listen.
+// portsHandedOut is every port freePort has given a test in this binary.
+//
+// Two tests given the same port is not a hypothetical: these tests bind
+// loopback, the wildcard and specific addresses on a port and then assert what
+// answers there, so one test's wildcard listener answering another's dial reads
+// as a narrowing that leaked. It was observed, on three different tests,
+// because "a port that was free a moment ago" is not the same as "a port
+// nothing in this process holds".
+var (
+	portsMu        sync.Mutex
+	portsHandedOut = map[int]bool{}
+)
+
+// freePort is a port free on the WILDCARD — so free on loopback and on every
+// specific address too — and handed to exactly one test in this binary.
 func freePort(t *testing.T) int {
 	t.Helper()
-	_, p, err := net.SplitHostPort(freeAddr(t))
-	if err != nil {
-		t.Fatalf("splitting a probe address: %v", err)
+	portsMu.Lock()
+	defer portsMu.Unlock()
+	for i := 0; i < 50; i++ {
+		ln, err := net.Listen("tcp", "0.0.0.0:0")
+		if err != nil {
+			continue
+		}
+		p := ln.Addr().(*net.TCPAddr).Port
+		ln.Close()
+		if portsHandedOut[p] {
+			continue
+		}
+		portsHandedOut[p] = true
+		return p
 	}
-	n, err := strconv.Atoi(p)
-	if err != nil {
-		t.Fatalf("port %q: %v", p, err)
-	}
-	return n
+	t.Fatal("could not find a port free on the wildcard that no other test here holds")
+	return 0
 }
 
 func closeAll(lns []net.Listener) {
@@ -394,7 +416,10 @@ func TestTheKeyIsRequiredForWhatWasAcquiredAndNothingElse(t *testing.T) {
 		}
 		defer closeAll(lns)
 
-		lns, plan = secureExposedBind(paths, &cfg, lns, plan, log)
+		lns, plan, saved := secureExposedBind(paths, &cfg, lns, plan, log)
+		if saved {
+			t.Error("config.json was rewritten for a bind that needed no key")
+		}
 		if cfg.APIKey != "" {
 			t.Errorf("an API key was generated for a server serving this Mac only: %q is friction with no exposure behind it", cfg.APIKey)
 		}
@@ -417,19 +442,22 @@ func TestTheKeyIsRequiredForWhatWasAcquiredAndNothingElse(t *testing.T) {
 		}
 		defer closeAll(lns)
 
-		lns, plan = secureExposedBind(paths, &cfg, lns, plan, log)
+		lns, plan, saved := secureExposedBind(paths, &cfg, lns, plan, log)
+		if !saved {
+			t.Error("the save was not reported — the caller clears the repair notice on it, because that write is the file being rewritten from the settings in force")
+		}
 		if cfg.APIKey == "" {
 			t.Fatal("no API key for a bind every machine on the network reaches — this is the window iss-1 closed")
 		}
 		if len(lns) != 2 || plan.LoopbackOnly() {
 			t.Errorf("the bind narrowed although the key was saved: %d listeners, plan %+v", len(lns), plan)
 		}
-		saved, _, err := config.Load(paths.Config)
+		onDisk, _, err := config.Load(paths.Config)
 		if err != nil {
 			t.Fatalf("the generated key was not persisted: %v", err)
 		}
-		if saved.APIKey != cfg.APIKey {
-			t.Errorf("config.json holds %q, want the generated key — one held only in memory reopens the endpoint at the next start", saved.APIKey)
+		if onDisk.APIKey != cfg.APIKey {
+			t.Errorf("config.json holds %q, want the generated key — one held only in memory reopens the endpoint at the next start", onDisk.APIKey)
 		}
 	})
 
@@ -452,7 +480,10 @@ func TestTheKeyIsRequiredForWhatWasAcquiredAndNothingElse(t *testing.T) {
 		}
 		defer closeAll(lns)
 
-		lns, plan = secureExposedBind(paths, &cfg, lns, plan, log)
+		lns, plan, saved := secureExposedBind(paths, &cfg, lns, plan, log)
+		if saved {
+			t.Error("a save was reported although it failed")
+		}
 		if cfg.APIKey != "" {
 			t.Errorf("APIKey = %q — a key that could not be saved is one the next start does not have", cfg.APIKey)
 		}

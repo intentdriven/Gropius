@@ -36,6 +36,55 @@ type Control struct {
 	// against it so a future launch can tell this user's server apart from a
 	// process squatting on the port (see cmd/gropius singleton coordination).
 	Root string
+
+	// Repaired names the settings config.Load could not use as written and put
+	// into force in a changed form — a trimmed API key, a clamped grace, a
+	// statistics figure replaced by its default. Set once before serving, and
+	// cleared by a save, which rewrites the file from the values in force.
+	//
+	// It is here because the panel is the surface the operator is looking at.
+	// The startup log says this once, into a stream nobody running the app from
+	// the menu bar ever sees, and the panel shows an API key as asterisks
+	// whether it was trimmed or not — so without this the one setting where the
+	// repair changes what every client must send is invisible.
+	Repaired []string
+
+	// loadMu guards loading, the set of models the Load button already has a
+	// background load running for, keyed by folded repo id.
+	//
+	// The button answers before the load finishes — a large model takes
+	// minutes — so an operator who sees nothing happen clicks it again. Each
+	// click used to start a goroutine of its own, and with eviction grace on
+	// each of those occupies one of the places in the queue for memory for the
+	// whole maximum wait: enough clicks fill the queue and every cold load,
+	// including the ones serving requests from the network, is refused until
+	// they drain.
+	loadMu  sync.Mutex
+	loading map[string]bool
+
+	// repairMu guards Repaired, which the snapshot reads on every state request
+	// and a save clears.
+	repairMu sync.Mutex
+
+	// settingsMu serialises the whole settings write path: read the settings
+	// in force, decode the posted body into a copy of them, hand the result to
+	// SetConfig, and work out what the change means for the models already
+	// loaded.
+	//
+	// App.SetConfig has a lock of its own, and it cannot be the one that does
+	// this: the snapshot every save starts from is taken before SetConfig is
+	// called, so two overlapping saves each write a configuration that never
+	// saw the other's change and the second reverts a field it was never asked
+	// about — the form posts a whole configuration, so the field need not even
+	// appear in the body. The reload_models list has the same staleness: it
+	// compares the incoming settings against that snapshot.
+	//
+	// This handler is the only caller of SetConfig there is, so serialising it
+	// here serialises every settings write. It is held across SetConfig, which
+	// takes App's own save lock inside it; nothing taken under that lock
+	// reaches back into the control plane, so this adds no order anything can
+	// invert.
+	settingsMu sync.Mutex
 }
 
 // Handler returns the control plane and web UI, restricted to loopback.
@@ -240,8 +289,21 @@ type Machine struct {
 	// cannot be measured. Advice, not a limit.
 	WarnAbove int64 `json:"warn_above"`
 	// ResidentBytes is what the models in memory are charged against the
-	// budget, the same 1.2x figure eviction uses.
+	// budget, the same 1.2x figure eviction uses — including the servers in
+	// ExitingBytes, because that is the figure the pool admits a load against.
+	// A panel that counted only the models it lists would report room the pool
+	// will not give out.
 	ResidentBytes int64 `json:"resident_bytes"`
+	// ExitingBytes is the part of that charged to model servers which have left
+	// the pool and whose processes have not exited yet. They appear in no
+	// models list — they are nobody's model any more — but their memory is not
+	// back, so a load can be refused while every model on screen fits.
+	ExitingBytes int64 `json:"exiting_bytes"`
+	// StuckServers is how many of those are past the point where stopping them
+	// should have worked: SIGTERM, then SIGKILL, then nothing. Their memory is
+	// held until the kernel lets go, so the budget is smaller than it looks for
+	// as long as this is not zero.
+	StuckServers int `json:"stuck_servers"`
 	// OverBudget says the models in memory cost more than the budget allows.
 	// Lowering the budget unloads nothing, so this stands until they unload by
 	// the usual rules.
@@ -256,9 +318,10 @@ type Machine struct {
 // is fed exclusively by the stream. One builder, one truth.
 func (c *Control) snapshot() State {
 	cfg := c.App.Config()
+	residency := c.App.Pool.Residency()
 	st := State{
 		Models:    c.App.Registry.List(),
-		Resident:  c.App.Pool.Resident(),
+		Resident:  residency.Models,
 		Setup:     c.App.Provisioner.Status(),
 		Config:    redactConfig(cfg),
 		Pinned:    c.App.Pool.Pinned(),
@@ -268,7 +331,10 @@ func (c *Control) snapshot() State {
 		Hostname:  hostname(),
 	}
 	budget := c.App.Pool.MemoryBudget()
-	resident := residentCharge(st.Resident)
+	// One reading, not two: a stop landing between a models list and a tally
+	// read would count the same server in both, or in neither.
+	exiting, stuck := residency.ExitingBytes, residency.StuckServers
+	resident := residentCharge(st.Resident) + exiting
 	st.Machine = Machine{
 		TotalRAM:        c.App.MachineRAM(),
 		Budget:          budget,
@@ -276,7 +342,14 @@ func (c *Control) snapshot() State {
 		BudgetIsDefault: cfg.MaxResidentBytes == 0,
 		WarnAbove:       c.App.BudgetWarnAbove(),
 		ResidentBytes:   resident,
+		ExitingBytes:    exiting,
+		StuckServers:    stuck,
 		OverBudget:      resident > budget,
+	}
+	if stuck > 0 {
+		st.Warnings = append(st.Warnings, fmt.Sprintf(
+			"%s of memory is held by %d model server(s) that were stopped and have not exited. Until they do, that much of the budget cannot be used.",
+			runtime.HumanBytes(exiting), stuck))
 	}
 	// Asked of the sockets, not of the stored configuration. The endpoint list
 	// beside this warning is derived from what was acquired, and the two have
@@ -295,6 +368,9 @@ func (c *Control) snapshot() State {
 	if w := c.App.MemoryBudgetWarning(); w != "" {
 		st.Warnings = append(st.Warnings, w)
 	}
+	if w := c.repairWarning(); w != "" {
+		st.Warnings = append(st.Warnings, w)
+	}
 	if !c.App.Provisioner.Installed() {
 		st.Warnings = append(st.Warnings,
 			"The MLX runtime is not installed yet — models cannot be served until setup finishes.")
@@ -308,12 +384,13 @@ func (c *Control) snapshot() State {
 }
 
 // residentCharge is what the models in memory cost the budget: each one's size
-// on disk plus a fifth, which is the figure the pool charges (runtime.LoadCost)
+// on disk plus a fifth, which is the figure the pool charges
+// (capability.LoadCost)
 // and therefore the only one that can be compared with the budget.
 func residentCharge(resident []runtime.Resident) int64 {
 	var sum int64
 	for _, r := range resident {
-		sum += runtime.LoadCost(r.Bytes)
+		sum += capability.LoadCost(r.Bytes)
 	}
 	return sum
 }
@@ -992,14 +1069,21 @@ func (c *Control) handleDelete(w http.ResponseWriter, r *http.Request) {
 }
 
 // modelErrorStatus maps a model-action error to the right HTTP status:
-// a malformed id is the caller's mistake (400), an absent model is 404, and a
-// genuine conflict (already downloading, or busy serving a request) is 409.
+// a malformed id is the caller's mistake (400), an absent model is 404, a
+// server that is going away is 503, and a genuine conflict (already
+// downloading, being deleted, or busy serving a request) is 409.
 func modelErrorStatus(err error) int {
 	switch {
 	case errors.Is(err, app.ErrInvalidRepoID):
 		return http.StatusBadRequest
 	case errors.Is(err, registry.ErrNotFound):
 		return http.StatusNotFound
+	case errors.Is(err, app.ErrShuttingDown):
+		// Named rather than left to the default arm: a conflict says the state
+		// of this model is the problem and asking again about a different one
+		// would work, and neither is true here. The server is stopping, and
+		// 503 is what says so.
+		return http.StatusServiceUnavailable
 	default:
 		return http.StatusConflict
 	}
@@ -1013,17 +1097,55 @@ func (c *Control) handleLoad(w http.ResponseWriter, r *http.Request) {
 	}
 	// Loading a large model can take minutes; do not hold the HTTP request open
 	// for it. The UI watches /api/events for the model to appear as resident.
-	go func() {
-		ctx, cancel := contextWithTimeout(15 * time.Minute)
-		defer cancel()
-		_, release, err := c.App.Pool.Acquire(ctx, model)
-		if err != nil {
-			c.App.Log.Error("preload failed", "model", model, "err", err)
-			return
-		}
-		release()
-	}()
+	//
+	// One background load per model, however many times the button is pressed:
+	// a second one would ask the pool for a model the first is already loading
+	// and hold a second place in the queue for memory to do it. A click that
+	// finds a load already running is answered with the same status, because
+	// it is the same true answer — this model is loading.
+	if c.beginLoad(model) {
+		go func() {
+			defer c.endLoad(model)
+			ctx, cancel := contextWithTimeout(15 * time.Minute)
+			defer cancel()
+			_, release, err := c.App.Pool.Acquire(ctx, model)
+			if err != nil {
+				c.App.Log.Error("preload failed", "model", model, "err", err)
+				return
+			}
+			release()
+		}()
+	}
 	writeJSON(w, http.StatusAccepted, map[string]any{"status": "loading", "model": model})
+}
+
+// beginLoad claims the background load of a model, reporting whether this
+// caller is the one that has to run it.
+//
+// Keyed on the folded repo id, which is how the pool itself looks a model up:
+// two spellings are two strings and one model, and keying on the spelling
+// would let a second click through under a different case.
+func (c *Control) beginLoad(model string) bool {
+	key := config.FoldRepoID(model)
+	c.loadMu.Lock()
+	defer c.loadMu.Unlock()
+	if c.loading[key] {
+		return false
+	}
+	if c.loading == nil {
+		c.loading = make(map[string]bool)
+	}
+	c.loading[key] = true
+	return true
+}
+
+// endLoad releases the claim, whether the load succeeded or failed. The next
+// click starts a fresh one — a load that failed is worth retrying, and a model
+// that is now resident costs the pool nothing to acquire again.
+func (c *Control) endLoad(model string) {
+	c.loadMu.Lock()
+	defer c.loadMu.Unlock()
+	delete(c.loading, config.FoldRepoID(model))
 }
 
 func (c *Control) handleUnload(w http.ResponseWriter, r *http.Request) {
@@ -1043,8 +1165,6 @@ func (c *Control) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 }
 
 func (c *Control) handleSetSettings(w http.ResponseWriter, r *http.Request) {
-	current := c.App.Config()
-
 	// Everything saved here is written to config.json, which Load refuses to
 	// read above this size — so a larger body could only produce a file the
 	// next start cannot read, and a start that cannot read it locks the server
@@ -1059,6 +1179,56 @@ func (c *Control) handleSetSettings(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+
+	// The body is read before the lock is taken and the answer written after
+	// it is released: a client that uploads or reads slowly is not something
+	// the next save should have to wait behind.
+	out, err := c.applySettings(raw)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+// repairWarning is what the panel says about the settings the file could not
+// carry as written.
+//
+// It says they are in force, because they are, and it names them: an operator
+// who reads "your API key was shortened" can check the key their clients send,
+// which is the only thing they can usefully do about it. Saying "ignored" would
+// send them to set a key that is already working, and blaming the model server
+// would send them to the wrong software entirely.
+func (c *Control) repairWarning() string {
+	c.repairMu.Lock()
+	defer c.repairMu.Unlock()
+	if len(c.Repaired) == 0 {
+		return ""
+	}
+	return "Some settings in config.json could not be used as written and are in force in a changed form: " +
+		strings.Join(c.Repaired, ", ") +
+		". Check them here and save to write the values now in force back to the file."
+}
+
+// clearRepairs drops the notice once a save has rewritten config.json from the
+// values in force: there is nothing left in the file that needed repairing, and
+// a warning that outlives what it warned about is the same untruth from the
+// other side.
+func (c *Control) clearRepairs() {
+	c.repairMu.Lock()
+	defer c.repairMu.Unlock()
+	c.Repaired = nil
+}
+
+// applySettings is the settings write path, from the settings in force to what
+// the save is answered with, run start to finish under settingsMu. It returns
+// what the panel is told, or the refusal to report to the caller — every one of
+// which is the caller's own mistake, and so a 400.
+func (c *Control) applySettings(raw []byte) (map[string]any, error) {
+	c.settingsMu.Lock()
+	defer c.settingsMu.Unlock()
+
+	current := c.App.Config()
 
 	// Decode INTO a copy of the current config, not a fresh zero value: the
 	// settings form posts only the fields it owns, so any field it omits — e.g.
@@ -1086,8 +1256,7 @@ func (c *Control) handleSetSettings(w http.ResponseWriter, r *http.Request) {
 		incoming.PerModel = nil
 	}
 	if err := json.Unmarshal(raw, &incoming); err != nil {
-		writeError(w, http.StatusBadRequest, "settings body is not valid JSON")
-		return
+		return nil, errors.New("settings body is not valid JSON")
 	}
 	// The UI is served the redacted placeholder; echoing it back must not
 	// overwrite the real secret with literal asterisks.
@@ -1099,9 +1268,11 @@ func (c *Control) handleSetSettings(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := c.App.SetConfig(incoming); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
-		return
+		return nil, err
 	}
+	// The file has just been written from the settings in force, repairs and
+	// all, so there is nothing left in it to repair.
+	c.clearRepairs()
 	// Host, the bind mode and the port bind the server; decode concurrency and
 	// idle timeout are pool options — all five are consumed only at startup,
 	// and SetConfig cannot apply them live.
@@ -1121,7 +1292,7 @@ func (c *Control) handleSetSettings(w http.ResponseWriter, r *http.Request) {
 	if warn := c.App.MemoryBudgetWarning(); warn != "" {
 		out["warning"] = warn
 	}
-	writeJSON(w, http.StatusOK, out)
+	return out, nil
 }
 
 // namesModelSampling reports whether the posted body carries a model_sampling

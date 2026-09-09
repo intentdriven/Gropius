@@ -25,12 +25,12 @@ func TestSaveLoadRoundTripKeepsTheEvictionGraceSettings(t *testing.T) {
 		t.Fatalf("Save: %v", err)
 	}
 
-	got, dropped, err := Load(path)
+	got, notices, err := Load(path)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if len(dropped) != 0 {
-		t.Errorf("Load dropped %v from a file it wrote itself", dropped)
+	if len(notices.All()) != 0 {
+		t.Errorf("Load dropped %v from a file it wrote itself", notices.All())
 	}
 	if !got.EvictionGrace || got.EvictionGraceSec != 45 || got.EvictionMaxWaitSec != 90 {
 		t.Errorf("round trip gave grace=%v %ds/%ds, want true 45s/90s",
@@ -129,7 +129,7 @@ func TestLoadRepairsAnUnusableEvictionGrace(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got, dropped, err := Load(path)
+	got, notices, err := Load(path)
 	if err != nil {
 		t.Fatalf("Load refused a file it could repair: %v", err)
 	}
@@ -144,10 +144,10 @@ func TestLoadRepairsAnUnusableEvictionGrace(t *testing.T) {
 	if got.EvictionMaxWaitSec != DefaultEvictionMaxWaitSec {
 		t.Errorf("EvictionMaxWaitSec = %d, want the default", got.EvictionMaxWaitSec)
 	}
-	joined := strings.Join(dropped, " ")
+	joined := strings.Join(notices.Repaired, " ")
 	for _, want := range []string{"eviction_grace_sec", "eviction_max_wait_sec"} {
 		if !strings.Contains(joined, want) {
-			t.Errorf("Load repaired %s without saying so: %v", want, dropped)
+			t.Errorf("Load repaired %s without saying so: %v", want, notices.Repaired)
 		}
 	}
 	// What Load hands back must be loadable: the repair, not the file, is what
@@ -239,7 +239,7 @@ func TestLoadRaisesAMaximumWaitBelowTheGrace(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got, dropped, err := Load(path)
+	got, notices, err := Load(path)
 	if err != nil {
 		t.Fatalf("Load refused a file it could repair: %v", err)
 	}
@@ -249,8 +249,8 @@ func TestLoadRaisesAMaximumWaitBelowTheGrace(t *testing.T) {
 	if got.EvictionMaxWaitSec != 300 {
 		t.Errorf("EvictionMaxWaitSec = %d, want it raised to the grace (300)", got.EvictionMaxWaitSec)
 	}
-	if !strings.Contains(strings.Join(dropped, " "), "eviction_max_wait_sec") {
-		t.Errorf("Load repaired the maximum wait without saying so: %v", dropped)
+	if !strings.Contains(strings.Join(notices.Repaired, " "), "eviction_max_wait_sec") {
+		t.Errorf("Load repaired the maximum wait without saying so: %v", notices.Repaired)
 	}
 	if err := got.Validate(); err != nil {
 		t.Errorf("the repaired config does not validate: %v", err)

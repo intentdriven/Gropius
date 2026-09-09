@@ -241,7 +241,8 @@ func TestFilesRefusesCrossOriginNextPage(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := &Client{BaseURL: srv.URL, HTTP: srv.Client(), Token: "secret-hf-token"}
+	c := &Client{BaseURL: srv.URL, HTTP: srv.Client()}
+	c.SetToken("secret-hf-token")
 	_, err := c.Files(context.Background(), "org/repo", "")
 	if err == nil {
 		t.Fatal("Files followed a cross-origin next page; it must refuse")
@@ -288,7 +289,8 @@ func TestTokenIsSentAsBearer(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := &Client{BaseURL: srv.URL, HTTP: srv.Client(), Token: "hf_abc123"}
+	c := &Client{BaseURL: srv.URL, HTTP: srv.Client()}
+	c.SetToken("hf_abc123")
 	if _, err := c.Search(context.Background(), SearchQuery{}); err != nil {
 		t.Fatal(err)
 	}
