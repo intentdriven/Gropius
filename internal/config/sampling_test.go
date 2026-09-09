@@ -331,6 +331,7 @@ func TestCloneCopiesEveryReferenceInTheType(t *testing.T) {
 	cfg.Models = map[string]ModelSettings{
 		"org/one": {MergeSystemMessages: true, Pinned: true, Sampling: full.Clone()},
 	}
+	cfg.ChatRule = ChatRule{PipelineTags: []string{"text-generation"}, RequiredTags: []string{"conversational"}}
 
 	before := map[string]uintptr{}
 	collectRefs(t, "Config", reflect.ValueOf(cfg), before)

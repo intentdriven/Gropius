@@ -7,6 +7,8 @@ category: "security"
 source: "agent-finding"
 found_during: "2026-08 bug-hunt round 9 (merge-gate security review)"
 found_at: "internal/gateway/control.go"
+resolution: "The control plane and the models list now also read Sec-Fetch-Site in fromThisMachine, so a blind cross-origin GET that carries no Origin is refused."
+impact: fix
 ---
 
 `loopbackOnly`'s Origin allow-list (internal/gateway/control.go, around the
@@ -36,3 +38,7 @@ cannot attach, or enforcing `Sec-Fetch-Site: same-origin` (not currently
 checked anywhere in this codebase) for GET routes. Either changes what the
 control-plane API contract requires of any client, including the app's own
 UI, and is a call for the maintainer.
+
+## Grounds
+
+- pursued: a GET whose Sec-Fetch-Site is present and is neither same-origin nor none is refused 403 on every control-plane route and is served no residency by GET /v1/models, while a request without the header (curl, an older browser) is admitted exactly as before; shown wrong by a browser that sends a value other than same-origin on the panel's own same-origin fetch, which would break the panel.

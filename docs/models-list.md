@@ -22,6 +22,9 @@ curl http://localhost:11535/v1/models
       "object": "model",
       "created": 1757145600,
       "owned_by": "gropius",
+      "pipeline_tag": "text-generation",
+      "tags": ["mlx", "conversational"],
+      "chat": true,
       "context_length": 40960,
       "max_model_len": 40960,
       "served_context": 40960
@@ -38,6 +41,9 @@ curl http://localhost:11535/v1/models
 | `object` | Always `model`, as the OpenAI schema requires. |
 | `created` | Unix time at which this Mac first recorded the model. A re-download or a retry does not move it. |
 | `owned_by` | Always `gropius`. |
+| `pipeline_tag` | What HuggingFace says the model does — `text-generation`, `automatic-speech-recognition`, and so on. Absent when the Hub has no tag for that repository. See below. |
+| `tags` | The repository's HuggingFace tags, as they are written there. Absent when the Hub has none. See below. |
+| `chat` | Whether the model counts as able to hold a conversation, under the rule this server runs. Always present. See below. |
 | `context_length` | The model's maximum context, in tokens. See below. |
 | `max_model_len` | The same figure again, under the name vLLM-derived clients read. |
 | `served_context` | The window this Mac will actually serve the model at, in tokens. A request estimated to be larger is refused. See below. |
@@ -45,6 +51,62 @@ curl http://localhost:11535/v1/models
 | `in_flight` | How many requests that model is already handling. Only for a client connecting over loopback, or on an install with an API key. |
 | `last_used` | Unix time at which Gropius last handled a request for that model. Only for a client connecting over loopback, or on an install with an API key, and only while the model is in memory — `loaded` or `loading`. |
 | `pinned` | Whether the operator has protected the model from eviction. Only for a client connecting over loopback, or on an install with an API key. See below. |
+
+## What kind of model it is
+
+`pipeline_tag` and `tags` are HuggingFace's own words for a model, republished
+as they are. Gropius has no taxonomy of its own: it records the tags the Hub
+carries for a repository at the moment the model is downloaded, and serves them
+back. The vocabulary is HuggingFace's, so it can change without a Gropius
+release.
+
+**When they are absent.** Either field is omitted, rather than sent empty, when:
+
+- The Hub carries no tag of that kind for the repository.
+- The model was downloaded by a Gropius that predates these fields. Nothing on
+  disk says what kind of model it is, so a rescan cannot fill them in —
+  download the model again to give it its words.
+- HuggingFace could not be reached for the repository's metadata when the
+  download finished. The model is complete and served as normal; only the words
+  are missing.
+
+Treat an absent field as "not known", never as an answer about the model.
+
+## The chat flag
+
+`chat` says whether this server counts the model as able to hold a conversation.
+It is on every entry, including entries with no tags at all — the whole value of
+the field is telling one kind of model from another, so an absent key would read
+as a server that cannot say either way.
+
+**It filters nothing.** A model with `"chat": false` is loaded and served like
+any other: name it in a request's `model` field and it answers. The flag exists
+so a chat application can leave a speech or OCR model out of its picker while
+every model stays callable over the API.
+
+**The rule behind it.** A model counts as able to chat when its pipeline tag is
+one of a list, and its tags include every word of a second list. As shipped, the
+lists are `text-generation` and `image-text-to-text`, and `conversational` —
+which makes `chat` false for a model with no tags. Both lists are settings:
+**Settings → Which models can chat** in the control panel, and `chat_rule` in
+`config.json`:
+
+```json
+"chat_rule": {
+  "pipeline_tags": ["text-generation", "image-text-to-text"],
+  "required_tags": ["conversational"]
+}
+```
+
+Comparison folds case and ignores surrounding space. An empty list stops testing
+that half, so a rule with both lists empty marks every model as able to chat; no
+`chat_rule` key at all means the shipped rule. See
+[Choose which models are offered for chat](chat-models.md).
+
+**The flag is this server's answer, not the last word.** A client is free to
+read `pipeline_tag` and `tags` and apply its own rule — which is what the
+GropiusChat client does, with the same rule as its own default, changeable in
+its Settings.
 
 ## The context figure
 
@@ -137,20 +199,34 @@ key. That is the shipping default, where anyone who can reach the server may
 use it, and a client on the network is then served exactly the four OpenAI
 fields and the context figure: nobody off this Mac learns from the listing what
 it is running or when. A page in a browser cannot borrow the loopback rule
-either — the request has to name loopback in its `Host`, and carry either no
-`Origin` or a loopback one, so a site that points its own hostname at
-`127.0.0.1` is refused the fields exactly as the network is.
+either — the request has to name loopback in its `Host`, carry either no
+`Origin` or a loopback one, and, where the browser sends a `Sec-Fetch-Site`
+header, say the request came from this server's own page (`same-origin`) or
+from no page at all (`none`). So a site that points its own hostname at
+`127.0.0.1` is refused the fields exactly as the network is, and so is the
+blind fetch a page makes with an `<img>` or a `fetch()` it never reads, which
+carries no `Origin` for the second rule to catch.
 
 What that withholds is the *listing*, and only the listing. On a server left
 open, a client that never presents a key can still work out which models are
 warm by timing a one-token completion — a loaded model answers straight away, a
 cold one takes seconds to a minute — and that probe loads the model it asks
-about, which reading the field never does. A model already at its request
-ceiling, or one that does not fit in the memory budget, is refused with a
-message that names how many requests are already in flight for it, or the
-budget figure. So an unkeyed
+about, which reading the field never does. So an unkeyed
 server keeps activity off the listing it serves the network; it does not keep
 it secret. The key is what protects the server.
+
+**A refusal follows the same rule.** A model already at its request ceiling, or
+one that does not fit in the memory budget, is refused with a message that
+names how many requests are already in flight for it, or the budget figure —
+and those are the same facts as the listing's, so they go to the same clients.
+A client the listing tells nothing is refused instead with
+`cannot serve this model right now`.
+The status code and every response header are identical
+either way, so a client that backs off on the status keeps working unchanged;
+only the sentence differs. The same holds for a request naming a model that is
+still downloading: this listing carries ready models only, so a client it tells
+nothing gets the answer it would get for a model this Mac has never heard of.
+The operator's own log keeps the reason in both cases.
 
 The key is also one key, shared by every client that has it. A client holding
 it sees the whole machine's activity — every model's in-flight count and
@@ -246,8 +322,9 @@ rules.
   seconds before its own model starts, rather than the two overlapping. A model
   with a request in flight is never the one chosen, a model still loading is
   not either, and a pinned model is not either. If nothing can be freed, the
-  request is refused with an error naming the memory pressure. That refusal
-  names no model: which models this Mac is protecting stays off the network.
+  request is refused with an error naming the memory pressure, on the rule
+  above. That refusal names no model: which models this Mac is protecting stays
+  off the network.
 - Requests waiting for a server to exit are waiting for memory like any other,
   and share the same queue: a small number of places overall, and a smaller
   number per caller. Callers that present no API key — which is every caller on

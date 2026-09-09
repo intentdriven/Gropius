@@ -270,13 +270,15 @@ func TestAModelBeingDeletedCannotBeResolvedForALoad(t *testing.T) {
 // model it is a walk of a multi-gigabyte tree; done under the lock, it would let
 // the size of one model set how long every other model's load waits.
 //
-// Two rounds of the same download, differing only in how much there is to size,
-// rather than one round against an absolute bound. Something does legitimately
-// stay under this lock — the registry write, which has to be one step with the
-// deregistration — and on a loaded machine an fsync is tens of milliseconds, so
-// an absolute bound measures that and the scheduler rather than the property.
-// What the property predicts is a difference: with the sizing under the lock the
-// worst delay grows by the cost of the walk, and without it, it does not.
+// The property is an ordering, not a duration: the walk finishes before the
+// publication takes the lock. So this holds the walk still — the measureDir
+// seam blocks until the test releases it — and asks whether another model's
+// load gets through meanwhile. It does, or it cannot: with the sizing moved
+// under dlMu the load waits for a walk that is not going to end, and the test
+// fails on a bound no amount of machine load can cross. An earlier version
+// compared wall-clock delays across a small and a large directory and failed
+// about one run in five under load, measuring the scheduler and the registry's
+// fsync rather than where the walk is.
 func TestAFinishingDownloadDoesNotHoldUpALoadOfAnotherModel(t *testing.T) {
 	a := newTestApp(t)
 	a.Hub.BaseURL = fakeHub(t).URL
@@ -292,61 +294,58 @@ func TestAFinishingDownloadDoesNotHoldUpALoadOfAnotherModel(t *testing.T) {
 		t.Fatalf("registering the second model: %v", err)
 	}
 
-	// worstLoadDelayDuringDownload runs a download to completion while asking
-	// for the other model as fast as it can, and reports the longest any one of
-	// those asks took.
-	worstLoadDelayDuringDownload := func() time.Duration {
-		stop := make(chan struct{})
-		worst := make(chan time.Duration, 1)
-		go func() {
-			var longest time.Duration
-			for {
-				select {
-				case <-stop:
-					worst <- longest
-					return
-				default:
-				}
-				began := time.Now()
-				if _, err := src.Resolve("org/other"); err != nil {
-					t.Errorf("resolving the second model: %v", err)
-				}
-				if took := time.Since(began); took > longest {
-					longest = took
-				}
-			}
-		}()
-		if err := a.Download("org/repo"); err != nil {
-			t.Fatalf("Download: %v", err)
-		}
-		waitFor(t, "the model to become ready", func() bool {
-			m, err := a.Registry.Get("org/repo")
-			return err == nil && m.Ready()
-		})
-		close(stop)
-		return <-worst
+	// Stand in for the walk of a multi-gigabyte tree: it starts, and then it
+	// takes as long as this test says it does.
+	walking := make(chan struct{})
+	release := make(chan struct{})
+	var began, freed sync.Once
+	unblock := func() { freed.Do(func() { close(release) }) }
+	defer unblock()
+	realMeasure := a.measureDir
+	a.measureDir = func(dir string) int64 {
+		began.Do(func() { close(walking) })
+		<-release
+		return realMeasure(dir)
 	}
 
-	// The control: the model's directory holds only the model.
-	small := worstLoadDelayDuringDownload()
+	if err := a.Download("org/repo"); err != nil {
+		t.Fatalf("Download: %v", err)
+	}
+	select {
+	case <-walking:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the download never sized its directory")
+	}
 
-	// The same download again, with a great deal more to size. A re-download
-	// keeps the directory, so the blobs are still there when it finishes.
-	dir := a.Paths.ModelDir("org/repo")
-	plantBlobs(t, dir, 6000)
+	// The walk is in progress and will stay that way. If it were happening
+	// under dlMu, this load would be behind it.
+	loaded := make(chan error, 1)
+	go func() {
+		_, err := src.Resolve("org/other")
+		loaded <- err
+	}()
+	select {
+	case err := <-loaded:
+		if err != nil {
+			t.Fatalf("resolving the second model: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("a load of another model was still waiting while the finishing download sized its directory: the sizing is happening under the lock the pool waits on")
+	}
 
-	// What sizing it now costs, measured warm on this machine, so the margin
-	// below is a figure from this run rather than a guess about the hardware.
-	_ = dirSize(dir)
-	start := time.Now()
-	_ = dirSize(dir)
-	sizing := time.Since(start)
-
-	big := worstLoadDelayDuringDownload()
-
-	if big > small+sizing/2 {
-		t.Errorf("the worst load delay went from %v to %v when the finishing download's directory grew by %v of sizing — the sizing is happening under the lock the pool waits on",
-			small, big, sizing)
+	// And the walk is still the download's own work: let it finish, and the
+	// model arrives with the size that walk returned.
+	unblock()
+	waitFor(t, "the model to become ready", func() bool {
+		m, err := a.Registry.Get("org/repo")
+		return err == nil && m.Ready()
+	})
+	m, err := a.Registry.Get("org/repo")
+	if err != nil {
+		t.Fatalf("reading the finished model: %v", err)
+	}
+	if m.Bytes != realMeasure(a.Paths.ModelDir("org/repo")) {
+		t.Errorf("the recorded size is %d, but the directory holds %d bytes", m.Bytes, realMeasure(a.Paths.ModelDir("org/repo")))
 	}
 }
 

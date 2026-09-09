@@ -323,6 +323,15 @@ $('searchForm').addEventListener('submit', async (e) => {
   }
 });
 
+// pipelineLabel is what a search result says it is: HuggingFace's own pipeline
+// tag, or "no tag" when the Hub has none for that repo. "no tag" is a fact
+// about the repository — plenty of good models carry none — so it is said
+// rather than left as a blank the reader has to interpret.
+function pipelineLabel(m) {
+  const tag = (m && m.pipeline_tag) || '';
+  return tag ? escapeHtml(tag) : 'no tag';
+}
+
 function renderSearch(data) {
   const box = $('searchResults');
   const results = (data && data.results) || [];
@@ -359,10 +368,11 @@ function renderSearch(data) {
     const quant = m.quantization
       ? `<span class="pill quant">${escapeHtml(m.quantization)}</span>` : '';
     const size = m.size_bytes ? ` · ${bytes(m.size_bytes)}` : '';
+    const kind = pipelineLabel(m);
     card.innerHTML = `
       <div class="meta">
         <div class="name">${escapeHtml(m.id)}${quant}</div>
-        <div class="info">${(m.downloads || 0).toLocaleString()} downloads · ${m.likes || 0} likes${size}</div>
+        <div class="info">${kind} · ${(m.downloads || 0).toLocaleString()} downloads · ${m.likes || 0} likes${size}</div>
       </div>
       <div class="actions"></div>`;
 
@@ -641,6 +651,12 @@ function renderSettings() {
   $('setGraceSec').value = c.eviction_grace_sec || '';
   $('setGraceWait').value = c.eviction_max_wait_sec || '';
   updateGraceHint();
+  // The rule in force, which is what the server answers with — never blank
+  // while a default stands behind it, because this form posts back what it
+  // shows and two blank fields mean "test nothing".
+  const rule = c.chat_rule || {};
+  $('setChatPipelines').value = (rule.pipeline_tags || []).join(', ');
+  $('setChatTags').value = (rule.required_tags || []).join(', ');
   $('setStats').checked = !!c.statistics;
   $('setStatsMonths').value = c.stats_months;
   // Typed in megabytes and stored in bytes, which is how every other size in
@@ -1185,6 +1201,25 @@ function renderStatsStore() {
   line.textContent = `${parts.join(' · ')}.`;
 }
 
+// chatRule turns the two settings fields into the rule the server holds: two
+// lists of HuggingFace's own words, as typed, trimmed, with the blanks a comma
+// or two leaves behind dropped.
+//
+// A cleared field posts an empty list rather than nothing at all. The two are
+// different settings on the server — an absent rule means the shipped default,
+// an empty list means "do not test this half" — and a cleared field is the
+// operator asking for the second.
+function chatRule(pipelines, tags) {
+  return { pipeline_tags: splitTagField(pipelines), required_tags: splitTagField(tags) };
+}
+
+function splitTagField(value) {
+  return String(value || '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter((s) => s !== '');
+}
+
 $('genKey').addEventListener('click', () => {
   const b = new Uint8Array(24);
   crypto.getRandomValues(b);
@@ -1218,6 +1253,7 @@ $('settingsForm').addEventListener('submit', async (e) => {
     // a figure nobody typed.
     eviction_grace_sec:    parseInt($('setGraceSec').value, 10) || 0,
     eviction_max_wait_sec: parseInt($('setGraceWait').value, 10) || 0,
+    chat_rule:          chatRule($('setChatPipelines').value, $('setChatTags').value),
     statistics:         $('setStats').checked,
     stats_months:       parseInt($('setStatsMonths').value, 10) || 6,
     stats_max_bytes:    (parseInt($('setStatsMB').value, 10) || 200) * 1024 * 1024,

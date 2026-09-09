@@ -965,8 +965,11 @@ func TestListModelsPublishesContextLengthUnderBothNames(t *testing.T) {
 			t.Errorf("%s = %v, want 262144", name, entry[name])
 		}
 	}
+	// chat is on every entry, for the reason the handler gives: the flag's
+	// whole value is telling a model that can hold a conversation from one
+	// that cannot, so an absent key would read as a server that cannot say.
 	want := map[string]bool{"id": true, "object": true, "created": true, "owned_by": true,
-		"context_length": true, "max_model_len": true, "served_context": true}
+		"context_length": true, "max_model_len": true, "served_context": true, "chat": true}
 	for k := range entry {
 		if !want[k] {
 			t.Errorf("unexpected field %q on the models list", k)
@@ -1052,7 +1055,10 @@ func TestModelsListReferenceDocumentsEveryFieldServed(t *testing.T) {
 	defer fake.Close()
 
 	models := &stubModels{models: []registry.Model{
-		{RepoID: "org/m", State: registry.StateReady, ContextLength: 131072},
+		// Carrying a category, so the two fields a model with one is served
+		// are in the set the page is held to.
+		{RepoID: "org/m", State: registry.StateReady, ContextLength: 131072,
+			PipelineTag: "text-generation", Tags: []string{"mlx", "conversational"}},
 	}}
 	g := New(Options{Config: config.Default(), Pool: &stubPool{srv: fake}, Models: models})
 	srv := httptest.NewServer(g.Handler())
@@ -1340,7 +1346,11 @@ func TestListModelsCarriesNoResidencyWithoutAnAPIKey(t *testing.T) {
 
 	entries, body := listModelsEntries(t, h, "")
 	for _, entry := range entries {
-		want := map[string]bool{"id": true, "object": true, "created": true, "owned_by": true}
+		// chat is not residency. It says what a model IS — the same class of
+		// fact as its context length, worked out from the Hub's own words about
+		// the repo — and an open server publishes that to everyone; what it
+		// withholds is what this Mac is doing right now.
+		want := map[string]bool{"id": true, "object": true, "created": true, "owned_by": true, "chat": true}
 		for k := range entry {
 			if !want[k] {
 				t.Errorf("an unkeyed listing carries %q; it must be exactly today's list", k)

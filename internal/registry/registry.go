@@ -18,6 +18,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/intentdriven/Gropius/internal/capability"
 	"github.com/intentdriven/Gropius/internal/config"
@@ -67,6 +68,108 @@ type Model struct {
 	// does not say enough to work it out, and such a model is charged the flat
 	// figure instead.
 	KVChargePerToken int64 `json:"kv_charge_per_token,omitempty"`
+	// PipelineTag and Tags are what HuggingFace says this model is: the repo's
+	// pipeline tag ("text-generation", "automatic-speech-recognition") and its
+	// tags, recorded from the Hub when the model was downloaded.
+	//
+	// They are the Hub's words, not a Gropius vocabulary, and they are the only
+	// thing a client is given to pick a model by kind. Neither is on the disk,
+	// so a rescan cannot re-derive them: an entry recorded by a build that
+	// predates them, or downloaded while the Hub was unreachable, simply has
+	// none, and omitempty keeps that out of the index rather than writing an
+	// empty word a client would read as an answer.
+	PipelineTag string   `json:"pipeline_tag,omitempty"`
+	Tags        []string `json:"tags,omitempty"`
+}
+
+// MaxTags and MaxTagBytes bound the category. A repo's tags are typed by its
+// owner and republished by this Mac to its network, and registry.json is, in
+// shared-cache mode, a file another local account can write — so the words are
+// bounded wherever they enter the registry, exactly as the context length is.
+//
+// A word beyond the bound is dropped rather than cut down: a truncated tag is a
+// word the Hub never said, and it would match no rule while looking as though
+// it should. 64 tags is well past what any repo carries; the Hub's own longest
+// tag is a couple of dozen bytes.
+const (
+	MaxTags     = 64
+	MaxTagBytes = 128
+)
+
+// sanitizeCategory bounds the Hub's words on a model record. It is the one
+// canonical primitive for that: Put is the only write path into the index and
+// Open is where a planted file arrives, so those two calls are the whole of it.
+//
+// It returns a fresh slice, so what the registry holds is never the caller's
+// array — a download's decoded metadata, or a planted file's.
+func sanitizeCategory(m Model) Model {
+	m.PipelineTag = usableTag(m.PipelineTag)
+	if m.Tags == nil {
+		return m
+	}
+	out := make([]string, 0, min(len(m.Tags), MaxTags))
+	seen := map[string]bool{}
+	for _, tag := range m.Tags {
+		if len(out) >= MaxTags {
+			break
+		}
+		tag = usableTag(tag)
+		if tag == "" || seen[tag] {
+			continue
+		}
+		seen[tag] = true
+		out = append(out, tag)
+	}
+	if len(out) == 0 {
+		// Absent rather than an empty list, which is the same statement said
+		// twice and would reach the models list as "tags": [].
+		m.Tags = nil
+		return m
+	}
+	m.Tags = out
+	return m
+}
+
+// usableTag returns the word if it has the shape a HuggingFace tag has, and ""
+// otherwise.
+//
+// An allow-list, not a deny-list of the dangerous characters. These words are
+// typed by whoever owns a repository and this Mac republishes them — to the LAN
+// on the models list, to the control panel's search card, to the chat client's
+// picker and Settings — so the question worth answering is not "which
+// characters do we know to fear" but "which characters does the vocabulary
+// actually use". A word outside the set could match no rule anyway, because a
+// rule is made of Hub words too, so keeping one buys nothing and hands every
+// surface downstream a string it has to be careful with.
+//
+// The set is what a Hub tag is made of: ASCII letters and digits, and the five
+// separators the vocabulary uses — "text-generation", "4-bit", "custom_code",
+// "license:apache-2.0", "arxiv:2501.12948", "base_model:Qwen/Qwen3-8B",
+// "endpoints_compatible", "Not-For-All-Audiences", "en". Case is kept because
+// the Hub keeps it; the chat rule folds case when it compares. There is no
+// recorded sample of the whole vocabulary in this repository, so a legitimate
+// tag outside this set would be dropped rather than mangled: the model is
+// listed and served exactly as it is, with one word fewer.
+func usableTag(tag string) string {
+	tag = strings.TrimSpace(tag)
+	if tag == "" || len(tag) > MaxTagBytes {
+		return ""
+	}
+	for _, r := range tag {
+		if r >= utf8.RuneSelf || !hubTagRune(byte(r)) {
+			return ""
+		}
+	}
+	return tag
+}
+
+// hubTagRune reports whether one ASCII byte is one a HuggingFace tag is made of.
+func hubTagRune(b byte) bool {
+	switch {
+	case b >= 'a' && b <= 'z', b >= 'A' && b <= 'Z', b >= '0' && b <= '9':
+		return true
+	}
+	return strings.IndexByte("-_.:/", b) >= 0
 }
 
 // MaxContextLength bounds the context length Gropius will believe. A model
@@ -178,6 +281,10 @@ func Open(path string) (*Registry, error) {
 		if !plausibleKVChargePerToken(m.KVChargePerToken) {
 			m.KVChargePerToken = 0
 		}
+		// The category is persisted too, so a hand-edited or planted index can
+		// carry an unbounded tag list straight to the LAN with no download in
+		// between. Bound words read back exactly as words from the Hub are.
+		m = sanitizeCategory(m)
 		r.models[key(m.RepoID)] = m
 	}
 	return r, nil
@@ -232,6 +339,9 @@ func (r *Registry) Put(m Model) error {
 	if m.AddedAt.IsZero() {
 		m.AddedAt = time.Now()
 	}
+	// The Hub's words arrive here from a download, bounded once for every path
+	// that publishes them afterwards.
+	m = sanitizeCategory(m)
 	r.mu.Lock()
 	// A re-cased Put updates the existing entry but never renames it: the
 	// first-seen spelling stays the model's public name. Path is taken from
@@ -563,6 +673,11 @@ func (r *Registry) Rescan(modelsDir string) error {
 			// next startup rescan rather than only on a re-download.
 			existing.ContextLength = m.ContextLength
 			existing.KVChargePerToken = m.KVChargePerToken
+			// The category is deliberately NOT re-derived. It is the Hub's
+			// word, fetched when the model was downloaded, and nothing in the
+			// directory can tell us it again — so a rescan that assigned it,
+			// the way it assigns everything else here, would clear it at every
+			// start-up.
 			existing.State = StateReady
 			existing.Err = ""
 			r.models[key(repoID)] = existing

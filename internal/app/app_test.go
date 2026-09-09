@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -1391,6 +1392,126 @@ func TestAPinnedSetThatStopsFittingIsReportedToTheOperator(t *testing.T) {
 	}
 	if !strings.Contains(w, runtime.HumanBytes(a.Pool.MemoryBudget())) {
 		t.Errorf("PinnedFitWarning = %q, want it to give the budget", w)
+	}
+}
+
+// categoryHub is fakeHub with the repo endpoint the category is read from.
+func categoryHub(t *testing.T, body string) *httptest.Server {
+	t.Helper()
+	srv := fakeHub(t)
+	// fakeHub's mux is not reachable from here, so the category endpoint is
+	// served by a second server that proxies the file paths to the first.
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/models/org/repo", func(w http.ResponseWriter, r *http.Request) {
+		if body == "" {
+			http.Error(w, "no such repo", http.StatusNotFound)
+			return
+		}
+		fmt.Fprint(w, body)
+	})
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		resp, err := srv.Client().Get(srv.URL + r.URL.RequestURI())
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadGateway)
+			return
+		}
+		defer resp.Body.Close()
+		w.WriteHeader(resp.StatusCode)
+		io.Copy(w, resp.Body)
+	})
+	proxy := httptest.NewServer(mux)
+	t.Cleanup(proxy.Close)
+	return proxy
+}
+
+// A completed download records what HuggingFace says the model is, so that a
+// client can pick a model by kind afterwards. The words are the Hub's; nothing
+// here interprets them.
+func TestDownloadRecordsTheHubsCategory(t *testing.T) {
+	a := newTestApp(t)
+	a.Hub.BaseURL = categoryHub(t, `{"id":"org/repo","pipeline_tag":"text-generation",
+		"tags":["mlx","conversational"]}`).URL
+
+	if err := a.Download("org/repo"); err != nil {
+		t.Fatalf("Download: %v", err)
+	}
+	waitFor(t, "the model to become ready", func() bool {
+		m, err := a.Registry.Get("org/repo")
+		return err == nil && m.Ready()
+	})
+
+	m, _ := a.Registry.Get("org/repo")
+	if m.PipelineTag != "text-generation" {
+		t.Errorf("PipelineTag = %q, want text-generation", m.PipelineTag)
+	}
+	if strings.Join(m.Tags, ",") != "mlx,conversational" {
+		t.Errorf("Tags = %v, want the Hub's two", m.Tags)
+	}
+}
+
+// A repo the Hub does not tag, and a Hub that cannot be reached for the
+// metadata, are the same state: the model is downloaded, ready and served, and
+// simply carries no category. The category must never be able to fail a
+// download of gigabytes that has already succeeded.
+func TestADownloadWithoutACategoryIsStillReady(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		body string
+	}{
+		{name: "the Hub tags the repo with nothing", body: `{"id":"org/repo"}`},
+		{name: "the Hub does not answer for the repo at all", body: ""},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			a := newTestApp(t)
+			a.Hub.BaseURL = categoryHub(t, c.body).URL
+
+			if err := a.Download("org/repo"); err != nil {
+				t.Fatalf("Download: %v", err)
+			}
+			waitFor(t, "the model to become ready", func() bool {
+				m, err := a.Registry.Get("org/repo")
+				return err == nil && m.Ready()
+			})
+			m, _ := a.Registry.Get("org/repo")
+			if m.PipelineTag != "" || len(m.Tags) != 0 {
+				t.Errorf("category = %q/%v, want none recorded", m.PipelineTag, m.Tags)
+			}
+			if m.ContextLength != 40960 {
+				t.Errorf("ContextLength = %d — the rest of the record must be unaffected", m.ContextLength)
+			}
+		})
+	}
+}
+
+// Restoring a ready model after a failed re-download must not strip the
+// category the record already carried, for the reason it must not strip the
+// context length: the restored record is the one the model had, not what a
+// failed attempt could measure.
+func TestRestoredReadyModelKeepsItsCategory(t *testing.T) {
+	a := newTestApp(t)
+	a.Hub.BaseURL = categoryHub(t, `{"id":"org/repo","pipeline_tag":"text-generation",
+		"tags":["conversational"]}`).URL
+
+	if err := a.Download("org/repo"); err != nil {
+		t.Fatalf("Download: %v", err)
+	}
+	waitFor(t, "the first download to finish", func() bool {
+		m, err := a.Registry.Get("org/repo")
+		return err == nil && m.Ready()
+	})
+
+	a.Hub.BaseURL = "http://127.0.0.1:1"
+	if err := a.Download("org/repo"); err != nil {
+		t.Fatalf("re-download: %v", err)
+	}
+	waitFor(t, "the failed attempt to settle", func() bool {
+		m, err := a.Registry.Get("org/repo")
+		return err == nil && m.Ready() && m.Progress == 100
+	})
+
+	m, _ := a.Registry.Get("org/repo")
+	if m.PipelineTag != "text-generation" || strings.Join(m.Tags, ",") != "conversational" {
+		t.Errorf("the restored record carries %q/%v, want the category it had", m.PipelineTag, m.Tags)
 	}
 }
 

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/intentdriven/Gropius/internal/runtime"
@@ -335,3 +336,86 @@ func classifyAcquireError(err error) stats.Class {
 		return stats.ClassRefused
 	}
 }
+
+// refusalClass names a pool refusal for the operator's log, so a line says
+// which of the pool's refusals happened without the operator having to read
+// the message to work it out.
+//
+// It is deliberately coarser than the message: "too large" and the handful of
+// other outright refusals share one name because the pool distinguishes them
+// only by their text, and a bucket named from a string match would be a second
+// classification to keep in step with the first. The message itself is on the
+// same line.
+func refusalClass(err error) string {
+	var noRoom *runtime.NoRoomError
+	var notReady *runtime.NotReadyError
+	switch {
+	case errors.As(err, &noRoom):
+		return "nothing evictable"
+	case errors.As(err, &notReady):
+		return "not ready"
+	case errors.Is(err, runtime.ErrBusy):
+		return "overloaded"
+	default:
+		return "refused"
+	}
+}
+
+// logEvery holds a log line to one per key per interval.
+//
+// It exists for lines a network client can cause at the rate it can send
+// requests. A refusal is exactly that: a client asking for a model that is
+// busy, or one too large to load, gets a refusal every time it asks, and an
+// unentitled client is no longer told why — so the operator needs the reason
+// in the log, and the log needs to not be a place a stranger can write to
+// without limit. One line per model per minute answers both: the first refusal
+// of a run is recorded, and the thousandth adds nothing the first did not say.
+//
+// The key space is bounded by the caller, not by this type: every caller keys
+// on a repo id the registry resolved, never on a string a client chose. The
+// sweep below is housekeeping for a long-running server, not a defense.
+type logEvery struct {
+	every time.Duration
+	// now is the clock, so a test can move it rather than sleep.
+	now func() time.Time
+
+	mu   sync.Mutex
+	last map[string]time.Time
+}
+
+func newLogEvery(every time.Duration) *logEvery {
+	return &logEvery{every: every, now: time.Now, last: map[string]time.Time{}}
+}
+
+// allow reports whether the line for key may be written now, and records that
+// it was. It is the only mutator, so a caller that ignores the answer has
+// still consumed the interval — which is what makes "log if allow" correct.
+//
+// A nil limiter does not limit: New is the only constructor there is, so a nil
+// one means a Gateway assembled some other way, and a missing rate limit must
+// cost a noisy log rather than a panic on the refusal path.
+func (l *logEvery) allow(key string) bool {
+	if l == nil {
+		return true
+	}
+	now := l.now()
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if seen, ok := l.last[key]; ok && now.Sub(seen) < l.every {
+		return false
+	}
+	if len(l.last) >= maxLogEveryKeys {
+		for k, seen := range l.last {
+			if now.Sub(seen) >= l.every {
+				delete(l.last, k)
+			}
+		}
+	}
+	l.last[key] = now
+	return true
+}
+
+// maxLogEveryKeys is when logEvery sweeps entries it no longer needs. A model
+// this server has not refused anything for in the last interval cannot be
+// holding a line back, so its entry says nothing.
+const maxLogEveryKeys = 256

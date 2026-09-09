@@ -202,3 +202,114 @@ the human adopted them as a batch, so this is weaker evidence than a table
 confirmed part by part. The acceptance criteria on the filed intent are
 agent-seeded and marked as such in its Open Questions; the planning interview
 has not run.
+
+## 2026-09-09 — model category from the Hub (itd-2609091129451578)
+
+Proposal: the server lists a model's type (chat, coding, other) when browsing,
+records it at download, advertises it via the API; clients pick by category.
+
+| Part | Type | Home |
+| --- | --- | --- |
+| Search results show each model's category | user-facing capability | this intent |
+| The category is recorded in the registry at download | mechanism | this intent (spec) |
+| The models list advertises the category | user-facing API contract | this intent, plus the models-list reference page |
+| GropiusChat's picker offers only chat models | client half | this intent (client criterion) |
+| How a category is derived | mechanism claim | spec's Mechanism section, no ADR (no trust boundary) |
+| A coding harness picks coding for implementation, chat plus coding for reviews | illustration of a third-party client | press release only |
+
+Typed links: `refines` iss-2609081743175520 (`promoted_from`); `builds_on`
+itd-2609061431463108 (the models-list field convention). Flagged reversal: it
+widened the same day's decision to publish a boolean chat capability from the
+chat template; the human confirmed the widening ("category supersedes the
+boolean").
+
+Verdict adopted: FILE-AS-IS, one intent. Grade: routing survived the human;
+the VOCABULARY did not survive the design review — a 500-repository sample
+showed "coding" is not derivable from Hub metadata, and the human then chose
+"rely on the HuggingFace tag, don't invent your own", with a server-side chat
+rule (default text-generation or image-text-to-text plus conversational) an
+operator can change and the same default in GropiusChat. Lesson for the
+protocol: run the feasibility review BEFORE the routing question when a
+proposal names a taxonomy, because the taxonomy was the decision.
+
+## 2026-09-09 — server-side logging (itd-2609091412177263)
+
+Proposal: API users get clear messages on what is not possible but never the
+why; the why is logged server-side (sparse default, detailed option), within
+each account, never shared.
+
+| Part | Type | Home |
+| --- | --- | --- |
+| API answers say what, never why | user-facing API contract | this intent |
+| The why goes to a server log; sparse by default, detailed on request | user-facing capability (setting on three surfaces) | this intent |
+| What each level contains, and what is never logged | mechanism | spec, plus the existing prompt-content invariant |
+| Logs live within each account, never shared | trust-boundary rule | already shipped the same day (iss-2609091131311102); linked, not restated |
+
+Typed links: `builds_on` the entitlement rule (iss-2609062210238684) and
+per-account state (iss-2609091131311102); NOT a duplicate of the per-model
+debug draft itd-2609062346072707 (a shared level control would fail the
+statistics-switch guard). Flagged reversal: "never the why" for entitled
+clients would reverse the same day's error-text decision; the human kept the
+why for entitled clients, so nothing reversed.
+
+Verdict adopted: FILE-AS-IS, one intent. Grade: routing survived. The design
+review found the log the intent writes to does not exist (stderr only), which
+became the first sentence of the mechanism rather than a routing change.
+
+## 2026-09-09 — recording mode (itd-2609091707499248)
+
+Proposal: a server-side mode recording every prompt and answer, explicitly
+activated, announced to every client session as a first message, with no way
+to circumvent it.
+
+| Part | Type | Home |
+| --- | --- | --- |
+| A server-wide recording mode | user-facing capability | this intent |
+| Explicit activation on three surfaces | capability | this intent |
+| Every session told first, no way round | user-facing API contract | this intent |
+| A second reader (and, it turned out, a writer) of prompt content | trust-boundary rule | a superseding ADR for adr-2609061610102325 |
+| The store lives per-account | mechanism | the spec, on the per-account rule |
+
+Typed links: `supersedes` itd-2609062346072707 (proposed); `refines` the
+logging intent's no-prompts scope condition; `reverses` the never-retain
+clause of the prompt-content ADR (flagged; the human confirmed the ADR route).
+
+Verdict adopted: FILE-AS-IS with the ADR as companion. Grade: routing
+survived; the PROMISE did not survive the design review — "told first, no way
+round" is not a thing a stateless server can do — and the human HELD the
+intent rather than adopt the every-answer rule. Lesson, same as the category
+run: when a proposal's headline is a guarantee, run the feasibility review
+before the press-release question, because the guarantee is the decision.
+
+## 2026-09-09 — usage measurement, and held adaptive settings (itd-2609091712141073, itd-2609091712142715)
+
+Proposal: fully dynamic, customised per-model and context-window settings on
+the server; until then, collect the data that says what to configure.
+
+| Part | Type | Home |
+| --- | --- | --- |
+| Per-model settings an operator can change | exists or in flight | no record; `builds_on` the unified models map and the served-window intent |
+| Settings that adapt without a restart | capability, unproven | a held draft (itd-2609091712142715) the data lifts |
+| Per-request and per-model usage facts on the dashboard, exportable | capability, buildable now | this intent (itd-2609091712141073) |
+| No prompt content in it | invariant | already holds; linked |
+| Which record carries it | mechanism | the spec: fields on the existing request line, no new kind |
+
+Typed links: `builds_on` itd-2609061521082551 and its store ADRs; `builds_on`
+itd-2609061431481936; `refines` itd-2609091301112705.
+
+Verdict adopted: SPLIT. Grade: routing survived as proposed.
+
+## 2026-09-09 — transcript exceptions per model (stub)
+
+Proposal: an exception list so named models keep no transcripts under the
+recording mode; recorded as a stub only, by the maintainer's instruction.
+
+| Part | Type | Home |
+| --- | --- | --- |
+| Named models keep no transcript while recording is on | user-facing capability | this draft, a stub |
+| Where the exception lives | mechanism | the per-model settings map; settled at planning |
+| What a client is told for an excepted model | open question | inherits the parent's held notice question |
+
+Typed links: `builds_on` itd-2609091707499248 (held); inherits its hold.
+Verdict adopted: FILE-AS-IS as a stub, no interview, at the human's request.
+Grade: routing not tested (the human asked for a stub); recorded for the count.
