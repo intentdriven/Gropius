@@ -21,6 +21,16 @@ GitHub release notes.
   answer ends, the reason is logged once, and the connection to the model
   server is closed.
 
+- **The API key and the preload list are bounded, and a refusal says which one
+  it is about.** Both could be saved at any size, so either could grow
+  `config.json` until the next start could no longer read it — which locks the
+  server down to loopback. A key may now be up to 512 bytes (a generated one is
+  43) and the preload list up to 256 models, and a save beyond either is
+  refused by name rather than as a body that is simply too large. A settings
+  file already carrying more is trimmed to fit and says so as it loads, rather
+  than being refused: the key is shortened, never cleared, so a server exposed
+  to the network is never opened by a value in a file.
+
 ## [0.4.0] - 2026-09-08
 
 ### Added

@@ -786,3 +786,111 @@ func TestExecRootIsTheRootEverywhereElse(t *testing.T) {
 		}
 	}
 }
+
+// The settings path, where a human is waiting: a key far longer than anything
+// that could be one is refused, and the refusal names the field so the person
+// who posted it knows which of a dozen settings was the problem.
+func TestValidateRefusesAnOverlongAPIKey(t *testing.T) {
+	c := Default()
+	c.APIKey = strings.Repeat("k", MaxAPIKeyBytes+1)
+
+	err := c.Validate()
+	if err == nil {
+		t.Fatalf("Validate accepted an API key of %d bytes", len(c.APIKey))
+	}
+	if !strings.Contains(err.Error(), "api_key") {
+		t.Errorf("Validate error = %q, want it to name the api_key field", err)
+	}
+	c.APIKey = strings.Repeat("k", MaxAPIKeyBytes)
+	if err := c.Validate(); err != nil {
+		t.Errorf("Validate refused a key at the ceiling: %v", err)
+	}
+}
+
+// The same rule on the preload list, and the same reason: everything saved is
+// written to config.json, which Load refuses to read above MaxConfigBytes.
+func TestValidateRefusesTooLongAPreloadList(t *testing.T) {
+	c := Default()
+	for i := range MaxPreload + 1 {
+		c.Preload = append(c.Preload, fmt.Sprintf("org/model-%d", i))
+	}
+
+	err := c.Validate()
+	if err == nil {
+		t.Fatalf("Validate accepted a preload list of %d models", len(c.Preload))
+	}
+	if !strings.Contains(err.Error(), "preload") {
+		t.Errorf("Validate error = %q, want it to name the preload field", err)
+	}
+	if !strings.Contains(err.Error(), strconv.Itoa(MaxPreload)) {
+		t.Errorf("Validate error = %q, want it to give the ceiling", err)
+	}
+	c.Preload = c.Preload[:MaxPreload]
+	if err := c.Validate(); err != nil {
+		t.Errorf("Validate refused a list at the ceiling: %v", err)
+	}
+}
+
+// The file path, not the settings path. A key too long to be one is trimmed
+// and reported rather than refusing the whole file — which would send the next
+// start into its fail-closed loopback-only branch — and rather than being
+// cleared, which would leave a LAN-exposed server open to everyone on the
+// network over a hand-edit.
+func TestLoadTrimsAnOverlongAPIKeyRatherThanRefusingTheFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	key := strings.Repeat("k", MaxAPIKeyBytes+64)
+	body := `{"port":11535,"host":"0.0.0.0","decode_concurrency":4,"api_key":"` + key + `"}`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, dropped, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(cfg.APIKey) != MaxAPIKeyBytes {
+		t.Errorf("APIKey is %d bytes, want it trimmed to %d", len(cfg.APIKey), MaxAPIKeyBytes)
+	}
+	if cfg.APIKey == "" {
+		t.Error("the key was cleared, which opens a LAN-exposed server to the network")
+	}
+	if len(dropped) != 1 || !strings.Contains(dropped[0], "api_key") {
+		t.Errorf("dropped = %v, want the api_key named", dropped)
+	}
+	// The whole point: what loaded is a config that can be saved again.
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("the loaded config does not validate: %v", err)
+	}
+}
+
+// The same on the preload list: the entries beyond the ceiling are dropped and
+// named, and the file still loads.
+func TestLoadTrimsAnOversizePreloadList(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	ids := make([]string, 0, MaxPreload+3)
+	for i := range MaxPreload + 3 {
+		ids = append(ids, fmt.Sprintf(`"org/model-%d"`, i))
+	}
+	body := `{"port":11535,"host":"0.0.0.0","decode_concurrency":4,"preload":[` +
+		strings.Join(ids, ",") + `]}`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, dropped, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(cfg.Preload) != MaxPreload {
+		t.Errorf("Preload holds %d models, want it trimmed to %d", len(cfg.Preload), MaxPreload)
+	}
+	if len(cfg.Preload) > 0 && cfg.Preload[0] != "org/model-0" {
+		t.Errorf("Preload starts at %q, want the list trimmed from the end", cfg.Preload[0])
+	}
+	if len(dropped) != 1 || !strings.Contains(dropped[0], "preload") {
+		t.Errorf("dropped = %v, want the preload list named", dropped)
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("the loaded config does not validate: %v", err)
+	}
+}
