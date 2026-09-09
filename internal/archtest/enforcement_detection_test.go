@@ -59,7 +59,16 @@ import (
 //     import the gateway tomorrow, while cmd/gropius already imports IT. A
 //     helper there reading Endpoint.Network and returning a bool is a route
 //     into the enforcement path that no rule saw. It is scanned for the same
-//     names as the gateway, with nothing allowlisted.
+//     names as the gateway, with nothing allowlisted;
+//   - the private-network resolver, which is the one carve-out. The
+//     2026-09-08 amendment to adr-2609081118587999 lets the classifier choose
+//     the address the private-network bind mode acquires, and
+//     adr-2609091123526871 rule 10 puts that in one package. So the resolver's
+//     package name is scanned for exactly as the classifier's is, everywhere
+//     the classifier's is: reaching the detection THROUGH the carve-out has to
+//     be as loud as reaching it directly, or the exception becomes a laundry.
+//     Two declarations in cmd/gropius may name it, listed below with what each
+//     is for; internal/gateway's list says the same for the panel's side.
 //
 // WHAT THEY DO NOT CLOSE, in full, because a list that says "and some other
 // things" is the overclaim this comment exists to retire. Every one of these
@@ -272,6 +281,25 @@ var gatewayMayReadTheDetection = map[string]bool{
 	"control.go::func appendEndpoint":      true,
 }
 
+// cmd/gropius names the resolver in exactly two declarations, and this is the
+// list of them. It is separate from the gateway's, keyed the same way — file
+// and declaration — and it exists rather than the command being scanned with
+// nothing allowlisted, because the carve-out has to be consumed somewhere: the
+// mode resolves an address, and the process that acquires listeners is what
+// acquires it.
+//
+// What the command may do with the resolver is bounded by what these two
+// declarations are. One asks for the plan and hands it on; the other prints
+// what the mode selected, which is the amendment's second condition — the
+// choice is always shown — on the surface an operator running headless reads.
+// Neither decides anything: no key requirement, no admission, no warning's
+// firing condition reads any of it, and adding a third name here is the
+// decision adr-2609081118587999 governs, not a refactor.
+var commandMayNameTheResolver = map[string]bool{
+	"main.go::func resolveBind":  true,
+	"main.go::func announceBind": true,
+}
+
 func TestOnlyTheEndpointListReadsTheDetection(t *testing.T) {
 	for _, r := range scanForDetection(t, filepath.Join("..", "gateway")) {
 		if gatewayMayReadTheDetection[r.site()] {
@@ -312,7 +340,11 @@ func TestThePanelPackageDoesNotReadTheDetectionEither(t *testing.T) {
 //
 // Nothing here may read the detection by any route the source can name — not
 // the classifier, not the field, and not the Endpoint type, whose value
-// carries the field.
+// carries the field. The one exception is the resolver, in the two
+// declarations commandMayNameTheResolver lists: the private-network mode
+// resolves an address, and this is the process that acquires listeners, so the
+// carve-out has to be consumed here or it cannot be consumed at all. What
+// arrives is a set of addresses; why they were chosen stays in the resolver.
 //
 // What cmd/gropius legitimately needs is the URL of the first entry, for the
 // menu-bar title and the clipboard, and reading `.URL` off a value it never
@@ -325,6 +357,9 @@ func TestThePanelPackageDoesNotReadTheDetectionEither(t *testing.T) {
 func TestTheCommandCannotSeeTheDetection(t *testing.T) {
 	dir := filepath.Join("..", "..", "cmd", "gropius")
 	for _, r := range scanForDetection(t, dir) {
+		if commandMayNameTheResolver[r.site()] && strings.HasPrefix(r.what, resolverName+".") {
+			continue
+		}
 		t.Errorf("%s: %s reads the detection (%s) — cmd/gropius decides whether an exposed bind may run at all, and that decision may not rest on another process's state (adr-2609081118587999 rule 2). The menu bar needs the first entry's .URL and nothing else",
 			r.file, r.where, r.what)
 	}
@@ -353,12 +388,12 @@ func TestTheCommandCannotSeeTheDetection(t *testing.T) {
 var detectionSpelling = []string{`"network"`, "private network"}
 
 func TestTheDetectionsSpellingIsNotWrittenDownOutsideTheEndpointList(t *testing.T) {
-	for _, dir := range []string{
-		filepath.Join("..", "gateway"),
-		filepath.Join("..", "..", "cmd", "gropius"),
+	for dir, allowed := range map[string]map[string]bool{
+		filepath.Join("..", "gateway"):              gatewayMayReadTheDetection,
+		filepath.Join("..", "..", "cmd", "gropius"): commandMayNameTheResolver,
 	} {
 		for _, u := range declUnits(t, dir) {
-			if gatewayMayReadTheDetection[u.file+"::"+u.name] {
+			if allowed[u.file+"::"+u.name] {
 				continue
 			}
 			ast.Inspect(u.node, func(n ast.Node) bool {

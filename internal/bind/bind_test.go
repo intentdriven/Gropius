@@ -195,3 +195,19 @@ func TestLoopbackIsAContentionPointAndADifferingBindIsNot(t *testing.T) {
 		second.Close()
 	}
 }
+
+// A plan that could not take the address it named narrows and says why, and
+// there is no way for it to end up wider than it started: WithoutExtra is the
+// only change a plan undergoes after it is built.
+func TestWithoutExtraNarrowsAndRecordsWhy(t *testing.T) {
+	p := ForHost("0.0.0.0").WithoutExtra("could not listen on 0.0.0.0")
+	if !p.LoopbackOnly() {
+		t.Errorf("plan = %+v, want this Mac only", p)
+	}
+	if p.Loopback != LoopbackAddr {
+		t.Errorf("Loopback = %q — narrowing must never take this Mac's own access with it", p.Loopback)
+	}
+	if p.Refusal == "" {
+		t.Error("no Refusal — a bind that quietly serves less than it was asked to is the fault this whole record is about")
+	}
+}

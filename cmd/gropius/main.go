@@ -25,6 +25,8 @@ import (
 	"time"
 
 	"github.com/intentdriven/Gropius/internal/app"
+	"github.com/intentdriven/Gropius/internal/bind"
+	"github.com/intentdriven/Gropius/internal/bind/private"
 	"github.com/intentdriven/Gropius/internal/config"
 	"github.com/intentdriven/Gropius/internal/discovery"
 	"github.com/intentdriven/Gropius/internal/gateway"
@@ -101,6 +103,11 @@ func main() {
 			log.Error(msg, args...)
 			cfg.APIKey = ""
 			cfg.Host = loopbackBind
+			// The mode is part of the bind, so locking the bind down drops it:
+			// leaving it set would go on resolving a private-network address
+			// and serving on it, which is the opposite of locked down
+			// (adr-2609091123526871 rule 6).
+			cfg.BindMode = config.BindModeHost
 			cfg.Advertise = false
 		}
 		key, err := config.GenerateAPIKey()
@@ -118,16 +125,22 @@ func main() {
 		}
 	}
 
+	// Work out the addresses to acquire. A bind is a set of listeners rather
+	// than an address (adr-2609091123526871): loopback is in every one of them,
+	// so narrowing the bind never costs the operator the control panel they
+	// narrowed it from, and it is the address the port-ownership challenge
+	// contacts.
+	plan := resolveBind(cfg)
+
 	// Claim the port. Losing this race to a live server is a normal outcome, not
 	// an error: another account (or another copy of the app) is already serving.
-	// A predecessor still shutting down is NOT a loss — acquireListener waits for
+	// A predecessor still shutting down is NOT a loss — acquireBind waits for
 	// the port to free rather than falling into client mode with nothing serving.
-	addr := fmt.Sprintf("%s:%d", cfg.Host, cfg.Port)
-	ln, claimed, err := acquireListener(addr, 5*time.Second, func() portHolder {
+	lns, plan, claimed, err := acquireBind(plan, cfg.Port, 5*time.Second, func() portHolder {
 		return probePortHolder(paths, cfg.Port)
 	})
 	if err != nil {
-		log.Error("cannot listen", "addr", addr, "err", err)
+		log.Error("cannot listen", "port", cfg.Port, "err", err)
 		os.Exit(1)
 	}
 	if !claimed {
@@ -136,10 +149,46 @@ func main() {
 		runClient(cfg, *headless, log)
 		return
 	}
+	announceBind(log, cfg, plan)
 
-	if err := runServer(ln, paths, cfg, *headless, log); err != nil {
+	if err := runServer(lns, plan, paths, cfg, *headless, log); err != nil {
 		log.Error("server stopped", "err", err)
 		os.Exit(1)
+	}
+}
+
+// resolveBind is the one place in this command that names the private-network
+// resolver.
+//
+// It hands back a set of addresses and nothing else: what the mode read to
+// choose them stays inside the resolver, and cmd/gropius acquires what it is
+// given without knowing why. That separation is what
+// adr-2609081118587999's amendment is narrow enough to permit —
+// internal/archtest/enforcement_detection_test.go allows this declaration and
+// no other, because this command also holds the strongest enforcement decision
+// in the app.
+func resolveBind(cfg config.Config) bind.Plan {
+	return private.Resolve(cfg)
+}
+
+// announceBind says what the server ended up listening on, in the log the
+// operator running headless reads.
+//
+// A narrowing is reported at error level. It is not an error in the sense that
+// something went wrong with this process — the server is running and this Mac
+// can reach it — but it is the operator's setting not being in force, and a
+// warning buried among startup lines is how a server ends up quietly serving
+// less, or being believed to serve less, than it does.
+func announceBind(log *slog.Logger, cfg config.Config, plan bind.Plan) {
+	if len(plan.Candidates) > 0 {
+		log.Info("addresses on a private network", "addresses", strings.Join(plan.Candidates, ", "))
+	}
+	if plan.Refusal != "" {
+		log.Error("the bind narrowed to this Mac: "+plan.Refusal, "port", cfg.Port)
+		return
+	}
+	if !plan.LoopbackOnly() {
+		log.Info("serving on this Mac and one other address", "address", plan.Extra, "port", cfg.Port)
 	}
 }
 
@@ -184,6 +233,7 @@ func loadStartupConfig(path string) startupConfig {
 
 	lockedDefaults := config.Default()
 	lockedDefaults.Host = loopbackBind
+	lockedDefaults.BindMode = config.BindModeHost
 	lockedDefaults.Advertise = false
 
 	var invalid *config.InvalidError
@@ -197,6 +247,10 @@ func loadStartupConfig(path string) startupConfig {
 
 	locked := invalid.Parsed
 	locked.Host = loopbackBind
+	// A bind is a Host and a mode, so narrowing it narrows both. A mode left
+	// in place would resolve an address and serve on it under a log line
+	// saying the bind was locked down to loopback.
+	locked.BindMode = config.BindModeHost
 	locked.Advertise = false
 	if err := locked.Validate(); err != nil {
 		return startupConfig{
@@ -229,7 +283,7 @@ func warnDroppedSettings(log *slog.Logger, dropped []string) {
 }
 
 // runServer is the primary instance: it owns the models and the GPU.
-func runServer(ln net.Listener, paths config.Paths, cfg config.Config, headless bool, log *slog.Logger) error {
+func runServer(lns []net.Listener, plan bind.Plan, paths config.Paths, cfg config.Config, headless bool, log *slog.Logger) error {
 	a, err := app.New(app.Options{Paths: paths, Config: cfg, Log: log})
 	if err != nil {
 		return err
@@ -271,16 +325,25 @@ func runServer(ln net.Listener, paths config.Paths, cfg config.Config, headless 
 		IdleTimeout:       120 * time.Second,
 	}
 
-	go func() {
+	for _, ln := range lns {
 		log.Info("serving", "addr", ln.Addr().String(), "ui", panelURL(cfg))
-		if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+	}
+	serveAll(srv, lns, func(err error) {
+		if !errors.Is(err, http.ErrServerClosed) {
 			log.Error("http server failed", "err", err)
 		}
-	}()
+	})
 
 	// Advertise on the network so other machines can find this Mac by name.
+	// Not in the private-network mode, and not on a bind that narrowed to this
+	// Mac. The advert is mDNS on the local link, which is the network this mode
+	// exists to exclude: every advert it produced would carry this Mac's
+	// hostname, the port, the model count and whether a key is required to
+	// machines that cannot connect to what it names
+	// (adr-2609091123526871 rule 8). It reads the configured mode, never the
+	// detection.
 	var adv *discovery.Advertiser
-	if cfg.Advertise && cfg.ExposedToLAN() {
+	if cfg.Advertise && cfg.ExposedToLAN() && cfg.BindMode != config.BindModePrivateNetwork && !plan.LoopbackOnly() {
 		adv = &discovery.Advertiser{
 			Port:         cfg.Port,
 			Models:       func() int { return len(a.Registry.Ready()) },

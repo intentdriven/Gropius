@@ -99,6 +99,20 @@ func Private(selected string, candidates []string, refusal string) Plan {
 	return p
 }
 
+// WithoutExtra is this plan with the second address dropped and the reason
+// recorded: what a bind turned out to be, when the address it named could not
+// be taken.
+//
+// The narrowing can only ever narrow, which is why this is the only way a plan
+// changes after it is built. A fallback that widened — to the wildcard, or to
+// the address the mode was chosen instead of — would be the fail-open every
+// other rule here exists to prevent.
+func (p Plan) WithoutExtra(reason string) Plan {
+	p.Extra = ""
+	p.Refusal = reason
+	return p
+}
+
 // LoopbackOnly reports whether this plan serves this Mac and nothing else.
 func (p Plan) LoopbackOnly() bool { return p.Extra == "" }
 
