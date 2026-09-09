@@ -45,6 +45,13 @@ const loopbackOnlyEdits = `{
 
 var postureFunctions = []string{"endpointOf", "bytes", "advertising", "postureLines"}
 
+// privateAddr is an address in the RFC 6598 shared range, which is the shape
+// the classifier marks as a private network; the snapshots below write PRIV
+// and priv fills it in, so the address is written down once.
+const privateAddr = "100.101.102.103" // abcd-lint:allow: RFC 6598 shared address space, the classifier's own range
+
+func priv(s string) string { return strings.ReplaceAll(s, "PRIV", privateAddr) }
+
 func posture(t *testing.T, snapshot string) map[string]map[string]any {
 	t.Helper()
 	items := evalPanelArray(t, "postureLines("+snapshot+")", postureFunctions...)
@@ -228,9 +235,9 @@ func TestReachIsReadFromTheBindAndNotFromTheEndpointList(t *testing.T) {
 // advert and the addresses are the running bind's until the next start, and
 // the page says the choice is saved rather than reporting it as running.
 func TestASavedModeIsNotReportedAsRunning(t *testing.T) {
-	lines := posture(t, edited(t, `{
+	lines := posture(t, edited(t, priv(`{
 		"config": {"bind_mode":"private-network"},
-		"bind": {"mode":"private-network","candidates":["100.101.102.103"],"mode_in_force":"","wildcard":true,"reaches_other_machines":true,"port":11535,"advertising":true}}`)) // abcd-lint:allow: RFC 6598 shared address space, the classifier's own range
+		"bind": {"mode":"private-network","candidates":["PRIV"],"mode_in_force":"","wildcard":true,"reaches_other_machines":true,"port":11535,"advertising":true}}`)))
 	wants(t, lines, "announce", "is announcing")
 	wants(t, lines, "reach", "every address this Mac holds")
 	wants(t, lines, "private", "The private-network choice is saved and is not in force until Gropius next starts.")
@@ -242,23 +249,23 @@ func TestASavedModeIsNotReportedAsRunning(t *testing.T) {
 // either, and — under the mode — which address the mode selected (the
 // amendment to adr-2609081118587999 requires the selection to be shown here).
 func TestThePrivateNetworkLineStatesTheLimits(t *testing.T) {
-	marked := posture(t, edited(t, `{
+	marked := posture(t, edited(t, priv(`{
 		"endpoints": [{"url":"http://192.0.2.10:11535/v1"},
-		              {"url":"http://100.101.102.103:11535/v1","network":"private network"},
-		              {"url":"http://127.0.0.1:11535/v1"}]}`)) // abcd-lint:allow: RFC 6598 shared address space, the classifier's own range
+		              {"url":"http://PRIV:11535/v1","network":"private network"},
+		              {"url":"http://127.0.0.1:11535/v1"}]}`)))
 	wants(t, marked, "private",
-		"http://100.101.102.103:11535/v1 is on a private network", // abcd-lint:allow: RFC 6598 shared address space, the classifier's own range
+		"http://"+privateAddr+":11535/v1 is on a private network",
 		"shared with machines", "publish", "Gropius cannot see")
 
-	mode := posture(t, edited(t, `{
+	mode := posture(t, edited(t, priv(`{
 		"config": {"bind_mode":"private-network"},
-		"endpoints": [{"url":"http://100.101.102.103:11535/v1","network":"private network"},
+		"endpoints": [{"url":"http://PRIV:11535/v1","network":"private network"},
 		              {"url":"http://127.0.0.1:11535/v1"}],
-		"bind": {"mode":"private-network","selected":"100.101.102.103","candidates":["100.101.102.103"],
-		         "mode_in_force":"private-network","bound":"100.101.102.103","wildcard":false,"reaches_other_machines":true,"port":11535,"advertising":false}}`)) // abcd-lint:allow: RFC 6598 shared address space, the classifier's own range
-	wants(t, mode, "private", "The private-network choice selected 100.101.102.103.") // abcd-lint:allow: RFC 6598 shared address space, the classifier's own range
+		"bind": {"mode":"private-network","selected":"PRIV","candidates":["PRIV"],
+		         "mode_in_force":"private-network","bound":"PRIV","wildcard":false,"reaches_other_machines":true,"port":11535,"advertising":false}}`)))
+	wants(t, mode, "private", "The private-network choice selected "+privateAddr+".")
 	wants(t, mode, "announce", "not announcing", "private-network choice excludes")
-	wants(t, mode, "reach", "This server answers on 100.101.102.103 and on this Mac;") // abcd-lint:allow: RFC 6598 shared address space, the classifier's own range
+	wants(t, mode, "reach", "This server answers on "+privateAddr+" and on this Mac;")
 
 	if _, present := posture(t, baseSnapshot)["private"]; present {
 		t.Error("with nothing on a private network, the page still carries a private-network line")
@@ -350,12 +357,12 @@ func TestTheAnnouncementLineNamesWhyItIsOff(t *testing.T) {
 func TestEveryPostureLineTracesToTheSnapshot(t *testing.T) {
 	constants := map[string]bool{"transport": true, "panel": true, "log": true}
 	// The most fully populated snapshot: every line present.
-	lines := posture(t, edited(t, `{
+	lines := posture(t, edited(t, priv(`{
 		"config": {"statistics":true,"bind_mode":"private-network"},
-		"endpoints": [{"url":"http://100.101.102.103:11535/v1","network":"private network"}],
-		"bind": {"mode":"private-network","selected":"100.101.102.103","candidates":["100.101.102.103"],"refusal":"",
-		         "mode_in_force":"private-network","bound":"100.101.102.103","wildcard":false,"reaches_other_machines":true,"port":11535,"advertising":false},
-		"stats_store": {"files":1,"bytes":10,"oldest":1}}`)) // abcd-lint:allow: RFC 6598 shared address space, the classifier's own range
+		"endpoints": [{"url":"http://PRIV:11535/v1","network":"private network"}],
+		"bind": {"mode":"private-network","selected":"PRIV","candidates":["PRIV"],"refusal":"",
+		         "mode_in_force":"private-network","bound":"PRIV","wildcard":false,"reaches_other_machines":true,"port":11535,"advertising":false},
+		"stats_store": {"files":1,"bytes":10,"oldest":1}}`)))
 	state := reflect.TypeOf(gateway.State{})
 	src := readPanelSource(t)
 	code := extractFunction(t, src, "postureLines") + extractFunction(t, src, "advertising")
@@ -572,10 +579,10 @@ func TestTheReferencePageDocumentsEveryLine(t *testing.T) {
 		t.Fatal(err)
 	}
 	page := string(doc)
-	lines := posture(t, edited(t, `{
+	lines := posture(t, edited(t, priv(`{
 		"config": {"statistics":true},
-		"endpoints": [{"url":"http://100.101.102.103:11535/v1","network":"private network"}],
-		"stats_store": {"files":0,"bytes":0,"oldest":0}}`)) // abcd-lint:allow: RFC 6598 shared address space, the classifier's own range
+		"endpoints": [{"url":"http://PRIV:11535/v1","network":"private network"}],
+		"stats_store": {"files":0,"bytes":0,"oldest":0}}`)))
 	documented := 0
 	for id, l := range lines {
 		heading, _ := l["heading"].(string)
