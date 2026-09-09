@@ -767,9 +767,20 @@ func (c *Config) sanitizeAPIKey() []string {
 	key := c.APIKey[:MaxAPIKeyBytes]
 	// A cut through the middle of a multi-byte character would leave a string
 	// that is not valid UTF-8, which Save would re-encode as something else
-	// again. Step back to the last whole character; at most three steps.
-	for len(key) > 0 && !utf8.ValidString(key) {
-		key = key[:len(key)-1]
+	// again. Step back to the last whole character; at most three steps for a
+	// value that is UTF-8 at all.
+	whole := key
+	for len(whole) > 0 && !utf8.ValidString(whole) {
+		whole = whole[:len(whole)-1]
+	}
+	// A value with no whole character anywhere in it leaves nothing to step
+	// back to, and the raw cut is kept rather than the empty string this would
+	// otherwise produce. Nothing reaches here with one today — Load's decoder
+	// coerces invalid UTF-8 to U+FFFD — and the guard does not depend on that
+	// staying true: an empty key is an open server on a LAN-exposed install,
+	// which is the one repair this function must never make.
+	if whole != "" {
+		key = whole
 	}
 	c.APIKey = key
 	return []string{"api_key (trimmed to the " + strconv.Itoa(MaxAPIKeyBytes) + "-byte ceiling)"}

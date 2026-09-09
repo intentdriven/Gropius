@@ -863,6 +863,29 @@ func TestLoadTrimsAnOverlongAPIKeyRatherThanRefusingTheFile(t *testing.T) {
 	}
 }
 
+// The trim steps back to the last whole character, and a value that is not
+// UTF-8 at all has no whole character to step back to. Load cannot produce one
+// today — encoding/json coerces anything invalid to U+FFFD — but the safety of
+// clearing a key can rest on nothing but this function: an empty key is an
+// open server on a LAN-exposed install, so it is refused here rather than
+// somewhere else's invariant.
+func TestSanitizeAPIKeyNeverClearsTheKey(t *testing.T) {
+	c := Default()
+	c.APIKey = strings.Repeat("\xff", MaxAPIKeyBytes+88)
+
+	dropped := c.sanitizeAPIKey()
+
+	if c.APIKey == "" {
+		t.Fatal("sanitizing cleared the API key, which opens a LAN-exposed server to the network")
+	}
+	if len(c.APIKey) > MaxAPIKeyBytes {
+		t.Errorf("APIKey is %d bytes, want at most %d", len(c.APIKey), MaxAPIKeyBytes)
+	}
+	if len(dropped) != 1 {
+		t.Errorf("dropped = %v, want the api_key named once", dropped)
+	}
+}
+
 // The same on the preload list: the entries beyond the ceiling are dropped and
 // named, and the file still loads.
 func TestLoadTrimsAnOversizePreloadList(t *testing.T) {
