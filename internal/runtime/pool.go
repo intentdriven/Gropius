@@ -665,8 +665,16 @@ func (p *Pool) acquire(ctx context.Context, repoID string, mayWait bool) (*Upstr
 		timer.Stop()
 		p.mu.Lock()
 	}
+	// served records what a queued load is about to be told, for the log line
+	// below: how old the waiter was at the moment it got room, against the two
+	// figures that bound it. A waiter served at its grace and one served at its
+	// maximum are the same success to the client and the opposite outcomes to
+	// this queue's fairness rule, and nothing else on this path tells them
+	// apart (iss-2609081516178867).
+	var servedGrace, servedMax time.Duration
 	if w != nil {
 		waited = p.waitedBy(w)
+		servedGrace, servedMax = p.grace, p.maxWait
 		p.leaveQueueLocked(w)
 	}
 	// Refuse once the backlog for this model is already at its ceiling. Every
@@ -692,6 +700,13 @@ func (p *Pool) acquire(ctx context.Context, repoID string, mayWait bool) (*Upstr
 	// free model as cold whenever another goroutine happened to hold the lock.
 	entered := p.opts.now()
 	p.mu.Unlock()
+
+	// Written off the lock, like the refusal above and for the same reason: a
+	// slow log sink must not stall every other caller of the pool's one lock.
+	if w != nil {
+		p.opts.Log.Debug("a queued model load got room",
+			"model", repoID, "waited", waited, "grace", servedGrace, "max_wait", servedMax)
+	}
 
 	release := func() {
 		p.mu.Lock()
@@ -1226,18 +1241,50 @@ func (p *Pool) waitedBy(w *loadWaiter) time.Duration {
 	return time.Since(w.arrived)
 }
 
-// wakeDelayLocked is how long a waiter may sleep before something could have
-// changed that nothing will signal. Callers must hold p.mu.
+// wakeRecheckFloor is the shortest interval wakeDelayLocked will impose as its
+// unconditional re-check. The re-check tracks the grace, and EvictionGrace is
+// an operator setting with no lower bound: a grace of a millisecond would
+// otherwise have every parked waiter taking the pool's one lock a thousand
+// times a second. A quarter-second is far below any wait a person notices and
+// far above any rate that matters. It bounds only the re-check — a real
+// deadline this function can compute, an idle model's grace running out or the
+// waiter's own age reaching it, is still slept to exactly.
+const wakeRecheckFloor = 250 * time.Millisecond
+
+// wakeDelayLocked is how long a waiter may sleep before it looks again.
+// Callers must hold p.mu.
 //
-// Releases, stops, budget and pin changes all signal, so this covers only the
-// passage of time: the waiter's own age reaching the grace, the oldest
-// protected candidate's grace running out, and the maximum wait expiring. The
-// floor keeps a stopped clock from spinning.
+// Three of its terms are moments this function can compute, and it sleeps to
+// the nearest: the waiter's own age reaching the grace, an idle candidate's
+// grace running out, and the maximum wait expiring.
+//
+// The fourth is a bound rather than a moment, and it is why this is not simply
+// a deadline calculator. Every change that could free room does signal — a
+// release, a stop, a failed load, a crashed process, a budget or pin change —
+// and the waiter is queued and its delay computed under p.mu with a buffered
+// signal channel, so a wake arriving between the unlock and the select is taken
+// rather than lost. That is the mechanism, and this is its backstop. A backstop
+// whose own terms rest on the mechanism it backs up is not one, so a parked
+// waiter also looks again at least once per grace whatever the entries look
+// like (iss-2609081516178867).
+//
+// The sharpest case for that, and the one that found it, is a candidate with a
+// request in flight or still loading: those states end on an event, not at a
+// moment, so the loop below rightly reads no deadline from them — and a waiter
+// past its own grace behind a single busy candidate was then left with no term
+// at all and fell back to the whole maximum wait. It was woken in practice,
+// by that request ending; it was one missing signal away from not being.
+//
+// wakeRecheckFloor keeps the re-check from becoming a spin on a very short
+// grace, and the millisecond floor keeps a stopped clock from spinning.
 func (p *Pool) wakeDelayLocked(w *loadWaiter) time.Duration {
 	waited := time.Since(w.arrived)
 	delay := p.maxWait - waited
 	if own := p.grace - waited; own > 0 && own < delay {
 		delay = own
+	}
+	if recheck := max(p.grace, wakeRecheckFloor); recheck < delay {
+		delay = recheck
 	}
 	now := p.opts.now()
 	for _, e := range p.entries {

@@ -11,6 +11,20 @@ GitHub release notes.
 
 ## [Unreleased]
 
+### Changed
+
+- **A request waiting for memory now looks again by itself, rather than only
+  when something wakes it.** The pool wakes every waiting request whenever room
+  might have appeared, and each request sleeps in between for as long as it can
+  work out that nothing can have changed on its own. Those two together were
+  correct — no wake-up was being missed — but the second had gaps in it: behind
+  a model that was busy serving someone else, a request could work out a sleep
+  of the whole maximum eviction wait, and was then relying entirely on being
+  woken. It now also looks again once per grace period regardless, so the
+  waiting is no longer answered by the wake-ups alone. **No request is served
+  differently.** This is one less thing that has to hold for the queue to
+  behave, not a stall anyone was hitting.
+
 ## [0.4.0] - 2026-09-08
 
 ### Added
