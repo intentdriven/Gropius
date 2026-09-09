@@ -23,18 +23,25 @@ from capability — would create an import cycle. Collapsing the duplicate means
 moving the charge into internal/capability and having internal/runtime call it,
 not the other way round.
 
-Amendment (2026-09-09, iss-3): the charge is no longer one figure that every
-surface can apply. A model Gropius holds is charged by capability.LoadCostOf,
-which needs the model's declared window and the per-token cache cost its
-config.json implies; a model in the search results is not on this Mac and has
-neither, so the fits filter still applies the flat capability.LoadCost. The two
-therefore answer different questions, and they agree on the filter's own
-question — can this model load at all — only because no single model is charged
-more than the whole budget: the ceiling makes the flat charge both the floor
-under LoadCostOf and the test the filter applies. If the maintainer decides
-against that ceiling, this record reopens: the filter would then show models
-the pool refuses outright, and the filter would need the model's configuration,
-which is on the hub and not on disk.
+Amendment (2026-09-09, iss-3 and itd-2609061431481936): there is still exactly
+one Go definition of the charge — capability.LoadCostOf — and every surface
+reads it: the pool, the app's pinned-set check, the control panel through the
+binding test in internal/ui, and the fits filter. What differs is what each can
+tell it. A model Gropius holds carries the window it is served at and the
+per-token cache cost its config.json implies; a model in the search results is
+on the hub and has neither, so the filter calls the same function with neither
+and gets its degenerate case, the flat weights-plus-a-fifth.
+
+The ceiling that once made those two answers agree by construction is gone (the
+maintainer's decision of 2026-09-09: a model charged the budget rather than
+what it costs is a figure the machine does not support). So a model can now
+pass the filter and be refused at load — and that refusal names the served
+window and the decode concurrency that would fit, which is the honest answer to
+a question the filter cannot answer from the hub. This record stays resolved:
+the duplication it was filed about is gone and cannot return while the charge
+has one home. What would reopen it is a second definition of the charge
+appearing anywhere, not the two callers knowing different amounts about a
+model.
 
 ## Grounds
 

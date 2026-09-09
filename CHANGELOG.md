@@ -13,24 +13,28 @@ GitHub release notes.
 
 ### Changed
 
-- **A loaded model is charged the memory its context window really costs, not a
-  flat fifth over its weights.** A model in memory now costs the budget its
-  weights, a fifth of them for the working set, and the attention cache the
-  window it serves will build — once for every sequence its server may decode
-  at once — with the per-token figure read from the model's own configuration
-  and multiplied by a safety factor of seven. Measuring four models on a 128 GB
-  Mac showed the old flat charge wrong in both directions and wrong by a lot:
-  it budgeted 35 GB for a model that took 49 GB at the largest prompt it could
-  serve, and 38 GB for one that took 59 GB, while over-charging a model whose
-  architecture makes its cache nearly free. What changes for you is **which
-  models load together**: a long-context model can now cost several times what
-  it used to, so a pair that used to co-reside may not any more, and a pinned
-  set that used to save may be refused. A model whose window costs more than
-  the whole budget is charged the budget rather than refused — it loads, and it
-  loads alone — and a model whose configuration cannot be read keeps the flat
-  charge. Lowering **Batched requests (decode concurrency)** lowers the charge
-  in proportion. The control panel, the pinned-set check and the pool all read
-  the one figure, as before.
+- **BREAKING: a model is served, charged and reported at one context window,
+  and you choose it.** Every model now has a served context — **Settings →
+  Served context**, `served_context` in `config.json` — which defaults to the
+  window the model's own configuration declares. Three things follow from that
+  one figure. The memory budget charges the attention cache the window costs,
+  worked out from the model's own configuration rather than a flat fifth over
+  its weights: measuring four models on a 128 GB Mac found the old charge
+  budgeting 35 GB for a model that took 49 GB at the largest prompt it could
+  serve, and 38 GB for one that took 59 GB. The gateway refuses a request whose
+  prompt plus `max_tokens` is estimated to be larger than the window, with a
+  400 in the OpenAI error shape naming the window and the estimate — an
+  over-long prompt used to be answered by the model server filling this Mac's
+  memory. And `GET /v1/models` publishes `served_context` beside
+  `context_length`, so a client can size its prompts to what this Mac accepts.
+  **What changes for you is which models load together, and which load at
+  all**: a long-context model can cost several times what it used to, so a pair
+  that used to co-reside may not any more, a pinned set that used to save may
+  be refused, and a model whose window will not fit the budget is refused with
+  a message naming the window and the batch size that would fit. Lowering its
+  served context is how such a model is made to fit — the charge falls in
+  proportion, and so does lowering **Batched requests (decode concurrency)**. A
+  model whose configuration cannot be read keeps the flat 1.2 times its size.
 
 - **BREAKING: every per-model setting now lives in one place in `config.json`,
   and the settings from before this change are dropped.** Sampling overrides,

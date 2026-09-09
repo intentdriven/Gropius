@@ -35,40 +35,48 @@ any figure you type at its word.
 
 A loaded model is charged three things: its weights, a fifth of them again for
 the working set a running model needs whatever the prompt is, and the attention
-cache its declared context window costs — once for every sequence its server
-may decode at once. The window is the one the model's own configuration
-declares, the same figure the models list shows as its context length; nothing
-between a client and the model server caps it, so it is the length a prompt may
-actually reach.
+cache the window it is served at costs — once for every sequence its server may
+decode at once.
 
 The cache is the term that decides which models can share this Mac. It grows
 with the prompt, and what it costs per token is a property of the architecture
 rather than of the model's size: measured on a 128 GB Mac, four models between
 18 GB and 45 GB of weights ranged from 12 KB to 353 KB per token, a thirtyfold
-spread, and the largest of them was not the most expensive.
-At a long window that is the difference between a model that leaves room for a
-second one and a model that fills the machine on its own. The model server also
-keeps a prompt's cache after the answer is sent, and caches stack across
+spread, and the largest of them was not the most expensive. The model server
+also keeps a prompt's cache after the answer is sent, and caches stack across
 requests, so the charge is what the model may come to hold rather than what it
 holds the moment it loads.
 
 The figure per token is read from the model's own configuration: how many of
 its layers attend over the whole prompt, and what one layer's entry costs. That
-arithmetic is a floor rather than an estimate — every model measured held two to
-seven times it, because a server keeps more than the raw cache — so Gropius
-multiplies it by seven, the top of the range it measured. A model whose
-configuration cannot be read is charged the flat figure instead: its weights
-plus a fifth.
+arithmetic is a floor rather than an estimate — every model measured held more
+than it, because a server keeps more than the raw cache — so Gropius multiplies
+it: five times for a model that caches keys and values per head, seven for one
+that caches a compressed latent, each the top of what its own kind was measured
+holding. A model whose configuration cannot be read is charged the flat figure
+instead: its weights plus a fifth.
 
-Two consequences worth knowing. A model whose window costs more than the whole
-budget is charged the budget, not more: it loads, and it loads alone. And
-because the charge counts every sequence the server may decode at once,
-lowering **Settings → Batched requests (decode concurrency)** is one way to make
-two long-context models share a Mac that will not hold both at the default of
-four.
+## The window is the operator's, and it is the same window twice
 
-This is why a budget claiming most of the machine draws a warning rather than an
-assurance, and why leaving room matters more the longer your prompts are.
+The window in that charge is the one **Settings → Served context** holds for
+the model, and the window the model's own configuration declares when that
+field is blank. It is one figure doing two jobs, and that is what makes it
+trustworthy: the memory budget charges the cache this window costs, and the
+gateway refuses a request estimated to be larger than it. Gropius never budgets
+for one window and then serves another.
+
+That is what to reach for when a model will not fit. A model declaring 262,144
+tokens can cost more than a whole Mac at that window; served at 32,768 it costs
+a fraction of it, and it is a model this Mac can hold beside another rather
+than one it cannot hold at all. Lowering **Batched requests (decode
+concurrency)** does the same thing, in proportion: each sequence that may run
+at once holds its own cache.
+
+A model whose charge does not fit the budget is refused rather than loaded on a
+smaller figure. The refusal names the window and the concurrency it was charged
+at and the largest of each that would fit, so what to change is in the message.
+Gropius will not quietly charge a model less than it costs: a budget that lies
+by a factor is worse than one that says no.
 
 ## Why a change applies to the next load
 
