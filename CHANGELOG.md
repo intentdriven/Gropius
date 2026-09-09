@@ -13,6 +13,16 @@ GitHub release notes.
 
 ### Fixed
 
+- **A disk that has stopped answering no longer holds the usage dashboard
+  open.** Every reading of the statistics store starts by flushing the writer,
+  so that it shows what has been recorded rather than what happened to have
+  reached the disk. That flush waited with nothing to interrupt it: closing the
+  panel did not stop it, and while it waited it held one of the two readings the
+  store allows at once, so a stalled disk could leave the dashboard unable to
+  answer anyone. The wait now ends with the reader — closing the panel stops the
+  work — and, for a panel left open, after ten seconds, which is reported as a
+  reading that failed rather than as figures that are missing part of the story.
+
 - **A streamed answer the client hung up on is no longer recorded as
   cancelled.** An SSE client that treats `data: [DONE]` as the end of the
   answer — most of them do — closes its socket on that line, without reading

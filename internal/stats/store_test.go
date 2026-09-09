@@ -2,7 +2,9 @@ package stats
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -875,6 +877,133 @@ func TestAFlushDoesNotHoldUpARecord(t *testing.T) {
 		t.Fatal("recording a request waited for a flush that was waiting for the disk")
 	}
 	close(held)
+}
+
+// A reading is not made to wait for a disk either. Every reading flushes the
+// writer first, so that it sees what has been recorded rather than what
+// happens to have reached the disk — and that flush runs on a control-plane
+// request, holding the handler's socket open and one of the two passes the
+// dashboard is allowed at once. A writer that has stopped answering must
+// therefore be able to be given up on, from both ends: the reader's own
+// context, and a bound of the store's own for a reader whose context never
+// ends.
+func TestAReadingIsNotHeldOpenByAWriterThatHasStopped(t *testing.T) {
+	// stuck returns a store whose writer is inside beforeWrite and stays
+	// there: nothing queued behind the record below is ever written, and a
+	// flush queued behind it is never answered.
+	stuck := func(t *testing.T, wait time.Duration) *FileStore {
+		t.Helper()
+		held := make(chan struct{})
+		s, _ := newTestStore(t, StoreOptions{FlushWait: wait, beforeWrite: func() { <-held }})
+		// After the store's own cleanup is registered, so that it runs before
+		// it: closing the store waits for the writer, and a writer still held
+		// here would never come back.
+		t.Cleanup(func() { close(held) })
+		on(t, s)
+		if err := s.AppendRequest(Record{Model: "org/a", At: 1, Class: ClassOK}); err != nil {
+			t.Fatal(err)
+		}
+		return s
+	}
+
+	// Long enough that a reading which returns cannot have returned because
+	// the store gave up: only the context can have stopped it.
+	const patient = time.Minute
+
+	// answered runs fn on its own goroutine and reports the error it returned,
+	// or fails the test if it is still waiting a few seconds later — which is
+	// what an unbounded flush looks like from here.
+	answered := func(t *testing.T, fn func() error) error {
+		t.Helper()
+		out := make(chan error, 1)
+		go func() { out <- fn() }()
+		select {
+		case err := <-out:
+			return err
+		case <-time.After(5 * time.Second):
+			t.Fatal("the reading is still waiting for a writer that has stopped")
+			return nil
+		}
+	}
+
+	t.Run("the reader's context stops it", func(t *testing.T) {
+		s := stuck(t, patient)
+		ctx, cancel := context.WithCancel(context.Background())
+		time.AfterFunc(50*time.Millisecond, cancel)
+
+		err := answered(t, func() error {
+			_, err := s.Read(ctx, ReadOptions{}, func(Line) bool { return true })
+			return err
+		})
+
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("a reading a cancelled caller abandoned returned %v, want %v", err, context.Canceled)
+		}
+	})
+
+	t.Run("a reading of the summaries too", func(t *testing.T) {
+		s := stuck(t, patient)
+		ctx, cancel := context.WithCancel(context.Background())
+		time.AfterFunc(50*time.Millisecond, cancel)
+
+		err := answered(t, func() error {
+			_, err := s.Summaries(ctx, SummaryOptions{}, func(SummaryDay) bool { return true })
+			return err
+		})
+
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("a summary reading a cancelled caller abandoned returned %v, want %v", err, context.Canceled)
+		}
+	})
+
+	// This is the aggregation the dashboard's own handler runs, with the
+	// request's context, while holding one of the two passes.
+	t.Run("the aggregation the handler runs", func(t *testing.T) {
+		s := stuck(t, patient)
+		ctx, cancel := context.WithCancel(context.Background())
+		time.AfterFunc(50*time.Millisecond, cancel)
+		to := time.Now()
+
+		err := answered(t, func() error {
+			_, err := Aggregate(ctx, s, to.AddDate(0, 0, -7), to, time.UTC)
+			return err
+		})
+
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("the aggregation returned %v, want %v — the handler's socket stays open until it does",
+				err, context.Canceled)
+		}
+	})
+
+	// A reader whose context never ends is the ordinary case: a panel left
+	// open. The store gives up on its own so that a stopped writer cannot pin
+	// a pass, and says so rather than answering with a store it did not flush.
+	t.Run("and the store gives up on its own", func(t *testing.T) {
+		s := stuck(t, 100*time.Millisecond)
+
+		err := answered(t, func() error {
+			_, err := s.Read(context.Background(), ReadOptions{}, func(Line) bool { return true })
+			return err
+		})
+
+		if !errors.Is(err, errFlushTimedOut) {
+			t.Errorf("a reading of a store whose writer has stopped returned %v, want %v", err, errFlushTimedOut)
+		}
+		// And nothing is wedged by having given up: the abandoned flush left
+		// its slot to the writer rather than to the reader, so the next one is
+		// answered the same way rather than not at all.
+		if err := answered(t, func() error {
+			_, err := s.Read(context.Background(), ReadOptions{}, func(Line) bool { return true })
+			return err
+		}); !errors.Is(err, errFlushTimedOut) {
+			t.Errorf("the reading after a flush that gave up returned %v, want %v", err, errFlushTimedOut)
+		}
+		// And a record offered after it is still taken, rather than the store
+		// being left with a queue slot nobody will ever free.
+		if err := s.AppendRequest(Record{Model: "org/a", At: 2, Class: ClassOK}); err != nil {
+			t.Errorf("the store refused a record after a flush gave up: %v", err)
+		}
+	})
 }
 
 // Rotation starts a new file at the limit rather than one record past it, so

@@ -163,6 +163,13 @@ type StoreOptions struct {
 	// QueueSize is how many records may be waiting to be written before
 	// further ones are dropped rather than made to wait.
 	QueueSize int
+	// FlushWait bounds how long a reading waits for the writer to answer the
+	// flush it begins with. It is the bound for a reader whose context never
+	// ends — a panel left open — and it exists because a reading holds an
+	// HTTP handler's socket and one of the two passes the dashboard is allowed
+	// at once: a disk that has stopped answering would otherwise hold both
+	// until the browser tab was closed.
+	FlushWait time.Duration
 	Now       func() time.Time
 	Log       *slog.Logger
 
@@ -194,7 +201,17 @@ const (
 	defaultQueueSize   = 1024
 	defaultMonths      = 6
 	defaultMaxBytes    = 200 << 20
+	// defaultFlushWait is several times the writer's own flush interval, so a
+	// store that is merely busy is waited for and only one that has stopped
+	// answering is given up on.
+	defaultFlushWait = 10 * time.Second
 )
+
+// errFlushTimedOut is what a reading returns when the writer did not answer
+// its flush inside the store's bound. It is deliberately not a context error:
+// the caller is still there, and a control plane that reads it as a reader
+// who went away would answer a waiting browser with nothing at all.
+var errFlushTimedOut = errors.New("the statistics writer did not answer a flush in time")
 
 // storeFilePattern is the only name the store will ever create, read or
 // remove: "stats-YYYYMMDD-NNN.jsonl", the date in UTC and a counter within the
@@ -310,6 +327,9 @@ func NewStore(dir string, opts StoreOptions) *FileStore {
 	}
 	if opts.QueueSize <= 0 {
 		opts.QueueSize = defaultQueueSize
+	}
+	if opts.FlushWait <= 0 {
+		opts.FlushWait = defaultFlushWait
 	}
 	if opts.Now == nil {
 		opts.Now = time.Now
@@ -568,7 +588,27 @@ func (s *FileStore) sendLocked(b []byte) {
 
 // Flush writes out everything buffered and waits for it, so a reader sees what
 // has been recorded rather than what happens to have reached the disk.
+//
+// It is the weaker of the two, as Latest is to Read: it passes no context, so
+// the store's own FlushWait is all that bounds it. It suits a test and a
+// one-off. Anything on a request path takes flush and hands it the caller's
+// context, so that a reader who has gone away stops being paid for.
 func (s *FileStore) Flush() error {
+	if s == nil {
+		return nil
+	}
+	return s.flush(context.Background())
+}
+
+// flush is Flush under the caller's context.
+//
+// It waits for the writer, and every way of waiting has an end: the caller's
+// context, the writer stopping underneath, and the store's own FlushWait for a
+// caller whose context has no end of its own. A reading begins with this while
+// holding an HTTP handler's socket and one of the dashboard's two passes, so a
+// wait with no bound is a disk fault the panel cannot recover from without the
+// operator closing the tab.
+func (s *FileStore) flush(ctx context.Context) error {
 	if s == nil {
 		return nil
 	}
@@ -579,6 +619,18 @@ func (s *FileStore) Flush() error {
 	if !on {
 		return nil
 	}
+	var abandoned <-chan struct{}
+	if ctx != nil {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		abandoned = ctx.Done()
+	}
+	// One timer across both waits: the bound is on getting an answer, not on
+	// each half of asking for one.
+	giveUp := time.NewTimer(s.opts.FlushWait)
+	defer giveUp.Stop()
+
 	// Through the writer's own queue rather than past it: everything already
 	// offered has to reach the file before the flush answers, or a reader that
 	// flushed first would still miss the record it had just made.
@@ -587,17 +639,32 @@ func (s *FileStore) Flush() error {
 	// lock every record takes would turn one slow disk into a stall of every
 	// request goroutine. The writer stopping underneath is not an error — the
 	// records were flushed as it closed.
+	//
+	// The acknowledgement channel is buffered, which is what lets this be
+	// given up on: the writer answers a flush nobody is waiting for any more
+	// without blocking on it, so an abandoned flush costs its queue slot until
+	// the writer reaches it and nothing after that. Giving up therefore leaks
+	// neither the slot nor a goroutine, and a later flush is answered the same
+	// way.
 	ack := make(chan error, 1)
 	select {
 	case ch <- storeEntry{ack: ack}:
 	case <-done:
 		return nil
+	case <-abandoned:
+		return ctx.Err()
+	case <-giveUp.C:
+		return errFlushTimedOut
 	}
 	select {
 	case err := <-ack:
 		return err
 	case <-done:
 		return nil
+	case <-abandoned:
+		return ctx.Err()
+	case <-giveUp.C:
+		return errFlushTimedOut
 	}
 }
 
@@ -1573,7 +1640,11 @@ func (s *FileStore) Read(ctx context.Context, opts ReadOptions, fn func(Line) bo
 	if s == nil {
 		return got, nil
 	}
-	if err := s.Flush(); err != nil {
+	// Under the caller's context, like everything else here: the flush is the
+	// first thing a reading does and the one thing in it that waits on the
+	// disk, so a reader who has gone away must be able to be let go of here
+	// too rather than only once lines are being read.
+	if err := s.flush(ctx); err != nil {
 		return got, err
 	}
 	root, err := openStoreRoot(s.dir)
