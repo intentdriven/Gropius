@@ -190,7 +190,6 @@ func (a *Advertiser) Start(ctx context.Context) error {
 // advertisement is one live registration: a service that has been handed to a
 // responder which is serving it until its context is cancelled.
 type advertisement struct {
-	reg    registration
 	text   map[string]string
 	cancel context.CancelFunc
 	done   chan struct{}
@@ -204,7 +203,7 @@ func (a *Advertiser) publish(ctx context.Context, cfg dnssd.Config, text map[str
 		return nil, err
 	}
 	rctx, cancel := context.WithCancel(ctx)
-	ad := &advertisement{reg: reg, text: text, cancel: cancel, done: make(chan struct{})}
+	ad := &advertisement{text: text, cancel: cancel, done: make(chan struct{})}
 	go func() {
 		defer close(ad.done)
 		// Respond blocks until the context is cancelled. On darwin it logs a
