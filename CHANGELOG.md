@@ -25,6 +25,19 @@ GitHub release notes.
   longer holds the machine indefinitely either: the waiting request is refused
   the way any other request that cannot be served is.
 
+- **Model servers left behind by a crash are cleaned up even after the Mac's
+  clock has been corrected.** If Gropius is force-quit or crashes, the model
+  servers it started keep holding their memory, and the next start kills them
+  using a small file recording what was running. That file was stamped with the
+  system's boot time — a figure macOS quietly adjusts whenever the clock is
+  stepped, which happens on the first time sync after a start-up and after
+  sleep. A stamp that no longer matched read as "a previous boot", and the
+  clean-up did nothing: the abandoned servers held their memory until the Mac
+  was restarted. The stamp is now the identifier macOS gives each boot, which
+  does not move, and the per-process check that stops the clean-up ever killing
+  something it did not start is unchanged. A file left by an earlier version is
+  ignored rather than acted on.
+
 ## [0.4.0] - 2026-09-08
 
 ### Added
