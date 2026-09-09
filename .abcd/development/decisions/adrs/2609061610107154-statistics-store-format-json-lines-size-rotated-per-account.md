@@ -1,10 +1,10 @@
 ---
 id: adr-2609061610107154
 slug: statistics-store-format-json-lines-size-rotated-per-account
-status: accepted
+status: superseded by adr-2609090716413337
 date: 2026-09-06
 supersedes: null
-superseded_by: null
+superseded_by: adr-2609090716413337
 related_intents: [itd-2609061521102742, itd-2609061602043757, itd-2609061521159233]
 related_rfcs: []
 related_adrs: [adr-2609061503319212]
