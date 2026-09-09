@@ -452,10 +452,11 @@ func TestEventStreamIsSSE(t *testing.T) {
 	}
 }
 
-// /api/search's "limit" must be bounded: it is reachable even from a blind,
-// Origin-less cross-origin GET (loopbackOnly's Origin check never sees a
-// header on a request like <img src>), and an unbounded value turns one
-// request into an unbounded fan-out of outbound Hub lookups.
+// /api/search's "limit" must be bounded: an unbounded value turns one request
+// into an unbounded fan-out of outbound Hub lookups, and the cap does not
+// depend on who can reach the route — a browser too old to send Sec-Fetch-Site
+// still makes the blind, Origin-less cross-origin GET that loopbackOnly's
+// Origin check never sees.
 func TestSearchLimitIsBounded(t *testing.T) {
 	cases := []struct {
 		raw  string

@@ -114,9 +114,13 @@ key. That is the shipping default, where anyone who can reach the server may
 use it, and a client on the network is then served exactly the four OpenAI
 fields and the context figure: nobody off this Mac learns from the listing what
 it is running or when. A page in a browser cannot borrow the loopback rule
-either — the request has to name loopback in its `Host`, and carry either no
-`Origin` or a loopback one, so a site that points its own hostname at
-`127.0.0.1` is refused the fields exactly as the network is.
+either — the request has to name loopback in its `Host`, carry either no
+`Origin` or a loopback one, and, where the browser sends a `Sec-Fetch-Site`
+header, say the request came from this server's own page (`same-origin`) or
+from no page at all (`none`). So a site that points its own hostname at
+`127.0.0.1` is refused the fields exactly as the network is, and so is the
+blind fetch a page makes with an `<img>` or a `fetch()` it never reads, which
+carries no `Origin` for the second rule to catch.
 
 What that withholds is the *listing*, and only the listing. On a server left
 open, a client that never presents a key can still work out which models are

@@ -88,6 +88,21 @@ GitHub release notes.
 
 ### Security
 
+- **A page in a browser can no longer reach the control panel blind.** The
+  panel refuses any request that did not come from this machine, and one of the
+  things it looked at was the `Origin` header a cross-site request carries. A
+  browser does not send that header on a fetch a page makes without reading the
+  answer — an `<img>` pointed at the panel's address, say — so a site the
+  operator visited could make the panel *do* things it could not then read
+  back: every listing, and every search of HuggingFace the panel offers. The
+  panel now also reads `Sec-Fetch-Site`, which the browser sends on that
+  request too and a page cannot forge: a request that says it came from
+  anywhere but the panel's own page is refused. **Nothing about a client that
+  is not a browser changes** — `curl`, an OpenAI client and an older browser
+  send no such header, and are admitted exactly as before. The same rule now
+  guards what `GET /v1/models` reports about which models are loaded, because
+  that listing is gated on the same "came from this machine" test.
+
 - **Every command Gropius runs is now named by its full path.** Reading this
   Mac's Bonjour name, opening the control panel in a browser and copying the
   endpoint each started a small system command by bare name, so the one that

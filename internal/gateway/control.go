@@ -154,7 +154,7 @@ func (c *Control) handleInstance(w http.ResponseWriter, r *http.Request) {
 // attacks that a source-address check alone cannot see.
 //
 // A page the victim visits runs in their browser, which connects from 127.0.0.1
-// — so RemoteAddr is loopback and a bare check waves the request through. Two
+// — so RemoteAddr is loopback and a bare check waves the request through. Three
 // extra guards close that:
 //
 //   - Host allow-list: a DNS-rebinding attack points a hostname it controls at
@@ -163,8 +163,13 @@ func (c *Control) handleInstance(w http.ResponseWriter, r *http.Request) {
 //   - Origin allow-list: a cross-site POST from evil.com carries its origin. The
 //     real UI is same-origin (a loopback origin), so any other origin is refused.
 //     This blocks classic CSRF, which needs no rebinding.
+//   - Sec-Fetch-Site: a no-cors subresource fetch — <img src>, and every other
+//     request a page makes without reading the answer — carries no Origin at
+//     all, so the allow-list above never runs and the route is executed blind.
+//     The browser states where the request came from in this header instead,
+//     and a page cannot forge it.
 //
-// The three checks are fromThisMachine, which is where the rule lives: the
+// The four checks are fromThisMachine, which is where the rule lives: the
 // models list admits a keyless install's loopback client on exactly the same
 // terms, and two spellings of "came from this machine" would be two things to
 // keep right. Only the refusal message is the control plane's own.
@@ -182,13 +187,18 @@ func loopbackOnly(next http.Handler) http.Handler {
 // operator reading a 403 learns what to change. Evaluated only on the refusal
 // path, and it enumerates the same checks in the same order.
 func loopbackRefusal(r *http.Request) string {
+	origin := r.Header.Get("Origin")
 	switch {
 	case !isLoopback(r.RemoteAddr):
 		return "the Gropius control panel is only reachable from the computer it runs on"
 	case !isLoopbackHost(r.Host):
 		return "unrecognized Host header — the control panel only answers to localhost"
-	default:
+	case origin != "" && !isLoopbackOrigin(origin):
 		return "cross-origin request to the control panel refused"
+	default:
+		// The only check left, so this is the one that refused: the request
+		// named a Sec-Fetch-Site other than the panel's own page.
+		return "cross-site request to the control panel refused"
 	}
 }
 
@@ -809,9 +819,11 @@ func hostname() string {
 
 // maxSearchLimit bounds the "limit" query parameter on /api/search. Without a
 // ceiling, a single request turns into an unbounded fan-out of outbound
-// RepoSize lookups (internal/hub) against HuggingFace — reachable even from a
-// blind, Origin-less cross-origin GET (e.g. <img src>), since loopbackOnly's
-// Origin check only ever sees an Origin header on same-site or POST requests.
+// RepoSize lookups (internal/hub) against HuggingFace. loopbackOnly now refuses
+// the blind, Origin-less cross-origin GET (e.g. <img src>) that reached this
+// route, on the Sec-Fetch-Site header its Origin check never sees — but the cap
+// stands on its own: a browser too old to send that header still gets here, and
+// the operator's own panel can ask for any number it likes.
 const maxSearchLimit = 100
 
 // searchLimit parses and bounds the "limit" query parameter.

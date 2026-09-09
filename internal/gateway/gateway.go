@@ -213,14 +213,26 @@ func bearerToken(header string) string {
 // treats a loopback connection as this machine's own operator answers here, so
 // the rule is stated once.
 //
-// What this does NOT stop, and the condition on that staying harmless: a
+// The third guard is what closes the request the first two cannot see: a
 // no-cors subresource — <script src>, <img> — that a page anywhere points at
-// the loopback URL sends a loopback Host and no Origin at all, so it passes.
-// It is not a read primitive today, because the gateway emits no
+// the loopback URL sends a loopback Host and no Origin at all, so the Origin
+// allow-list never runs and the request is executed blind. Sec-Fetch-Site is
+// the browser's own statement of where the request came from, sent on every
+// request including that one, and unforgeable from script. A value that is
+// neither this document's own origin nor a direct navigation is refused. The
+// header is treated as advisory when absent, because everything that is not a
+// browser — curl, an OpenAI client, an older browser — sends none, and this is
+// the only guard whose absence a non-browser client is expected to exhibit.
+//
+// Comparison is exact and lowercase, as the Fetch specification defines the
+// four values, so an unrecognized spelling fails closed.
+//
+// What that leaves, and the condition on it staying harmless: a browser old
+// enough to send no Sec-Fetch-Site at all still reaches these routes blind. It
+// is not a read primitive, because the gateway emits no
 // Access-Control-Allow-Origin (so the body is opaque to the page) and the JSON
 // is a syntax error if parsed as script. The day any CORS header is added to
-// these routes, that stops being true and this predicate is no longer enough
-// on its own.
+// these routes, that stops being true.
 func fromThisMachine(r *http.Request) bool {
 	if !isLoopback(r.RemoteAddr) {
 		return false
@@ -228,8 +240,25 @@ func fromThisMachine(r *http.Request) bool {
 	if !isLoopbackHost(r.Host) {
 		return false
 	}
-	origin := r.Header.Get("Origin")
-	return origin == "" || isLoopbackOrigin(origin)
+	if origin := r.Header.Get("Origin"); origin != "" && !isLoopbackOrigin(origin) {
+		return false
+	}
+	return sameOriginFetch(r)
+}
+
+// sameOriginFetch reports whether r's Sec-Fetch-Site header, if it sent one,
+// says the request came from this server's own page or from no page at all.
+//
+// "same-site" is refused along with "cross-site": on loopback a site is the
+// bare host, so a page served from another port on localhost is same-site to
+// the browser and is not this server's panel.
+func sameOriginFetch(r *http.Request) bool {
+	switch r.Header.Get("Sec-Fetch-Site") {
+	case "", "same-origin", "none":
+		return true
+	default:
+		return false
+	}
 }
 
 // isLoopback reports whether a RemoteAddr is on this machine.

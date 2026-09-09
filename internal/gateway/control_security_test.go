@@ -92,3 +92,80 @@ func TestControlAPIRejectsCrossOrigin(t *testing.T) {
 		t.Errorf("cross-origin POST returned %d, want 403", w.Code)
 	}
 }
+
+// A blind cross-origin GET carries no Origin at all — a browser omits it on a
+// no-cors subresource fetch such as <img src="http://127.0.0.1:PORT/api/...">
+// — so the Origin allow-list above never sees the request the page made. What
+// the browser does send is Sec-Fetch-Site, its own statement of where the
+// request came from, and the control plane is gated on that too: a request
+// that says it came from anywhere but this document's own origin is refused,
+// whatever its method.
+func TestControlAPIRefusesACrossSiteFetch(t *testing.T) {
+	h := controlHandler(t)
+
+	cases := []struct {
+		site      string // the Sec-Fetch-Site header, "" for a request without one
+		wantAdmit bool
+	}{
+		{"cross-site", false},
+		{"same-site", false}, // another port on this host is not the panel
+		{"same-origin", true},
+		{"none", true}, // the operator typed the URL, or opened a bookmark
+		{"", true},     // curl, an older browser: the header is not required
+	}
+	for _, c := range cases {
+		t.Run("Sec-Fetch-Site: "+c.site, func(t *testing.T) {
+			req := httptest.NewRequest("GET", "/api/state", nil)
+			req.RemoteAddr = "127.0.0.1:5555"
+			req.Host = "localhost:11535"
+			if c.site != "" {
+				req.Header.Set("Sec-Fetch-Site", c.site)
+			}
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, req)
+
+			admitted := w.Code != http.StatusForbidden
+			if admitted != c.wantAdmit {
+				t.Fatalf("GET /api/state with Sec-Fetch-Site %q returned %d, want admitted = %v",
+					c.site, w.Code, c.wantAdmit)
+			}
+			if !admitted && !strings.Contains(w.Body.String(), "refused") {
+				t.Errorf("the refusal does not say what happened: %s", w.Body.String())
+			}
+		})
+	}
+}
+
+// The state-changing routes are unchanged: a POST the panel itself makes is
+// still served, and a cross-site one is still refused on its Origin — which is
+// the header a browser always sends on a cross-site submit, and which is still
+// what the refusal names.
+func TestControlAPIPOSTsAreUnchangedByTheFetchCheck(t *testing.T) {
+	h := controlHandler(t)
+
+	panelPOST := httptest.NewRequest("POST", "/api/stats/clear", nil)
+	panelPOST.RemoteAddr = "127.0.0.1:5555"
+	panelPOST.Host = "localhost:11535"
+	panelPOST.Header.Set("Origin", "http://localhost:11535")
+	panelPOST.Header.Set("Sec-Fetch-Site", "same-origin")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, panelPOST)
+	if w.Code != http.StatusOK {
+		t.Errorf("the panel's own POST returned %d, want 200: %s", w.Code, w.Body.String())
+	}
+
+	crossSite := httptest.NewRequest("POST", "/api/models/delete",
+		strings.NewReader(`{"model":"org/m"}`))
+	crossSite.RemoteAddr = "127.0.0.1:5555"
+	crossSite.Host = "localhost:11535"
+	crossSite.Header.Set("Origin", "https://evil.example")
+	crossSite.Header.Set("Sec-Fetch-Site", "cross-site")
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, crossSite)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("cross-site POST returned %d, want 403", w.Code)
+	}
+	if got := w.Body.String(); !strings.Contains(got, "cross-origin") {
+		t.Errorf("the refusal = %s, want the Origin check to be the one that names it", got)
+	}
+}
