@@ -2,3 +2,4 @@
 # core.autocrlf=true would rewrite it to CRLF and its shebang would stop
 # resolving, so the guard would silently stop running.
 .githooks/* text eol=lf
+.abcd/work/DECISIONS.md merge=union
