@@ -5,6 +5,7 @@ import (
 	"errors"
 	golog "log"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -72,6 +73,59 @@ func apiRequest(method, path, addr string) *http.Request {
 	return req
 }
 
+// clientAddressLeaks reports which forms of addr — a "host:port" RemoteAddr —
+// appear in a log line.
+//
+// The panic log carries a goroutine stack, and Go prints a goroutine's
+// arguments as hex words: a pointer such as 0x1054321c0 spells the digits of
+// the port 54321, so a plain substring check on the bare port reds at random.
+// A hex word can only spell [0-9a-f], so the address is looked for here in the
+// forms a pointer cannot produce: host and port together, the port with its
+// ":" delimiter, and the dotted host on its own. Every way the address could
+// actually reach a log line — RemoteAddr verbatim, a split host, a port
+// rendered as a slog attribute value — carries one of those.
+func clientAddressLeaks(t *testing.T, line, addr string) []string {
+	t.Helper()
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		t.Fatalf("test address %q is not host:port: %v", addr, err)
+	}
+	var found []string
+	for _, form := range []string{addr, ":" + port, "=" + port, host} {
+		if strings.Contains(line, form) {
+			found = append(found, form)
+		}
+	}
+	return found
+}
+
+// The leak check is itself load-bearing, so it gets its own test: it has to
+// stay blind to a hex pointer that happens to spell the port, and it has to
+// still catch every form in which the address could genuinely be logged.
+func TestClientAddressLeakCheckSeesPastHexPointers(t *testing.T) {
+	const addr = "192.0.2.50:54321"
+	// A goroutine stack as runtime.Stack renders one: the frame arguments are
+	// hex words, and the second of them spells the port's digit run.
+	const stack = `stack="goroutine 41 [running]:\nmain.withLogging.func1.1(0x14000f2c000, 0x1054321c0)\n\tcmd/gropius/main.go:396 +0x1c\n"`
+
+	for _, tc := range []struct {
+		name     string
+		line     string
+		wantLeak bool
+	}{
+		{"a hex pointer spelling the port is not a leak", `msg="panic serving request" method=POST ` + stack, false},
+		{"the whole address", `msg=request remote=192.0.2.50:54321 ` + stack, true},
+		{"the port as a slog attribute", `msg=request port=54321 ` + stack, true},
+		{"the host alone", `msg=request client=192.0.2.50 ` + stack, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := clientAddressLeaks(t, tc.line, addr); (len(got) > 0) != tc.wantLeak {
+				t.Errorf("clientAddressLeaks = %v, want a leak: %v", got, tc.wantLeak)
+			}
+		})
+	}
+}
+
 // The operational log is a privacy surface: it must describe the call without
 // naming the caller. Method, path, status and duration are what a failure is
 // diagnosed from; the client's network address is not.
@@ -82,10 +136,8 @@ func TestRequestLogOmitsTheClientAddress(t *testing.T) {
 		w.WriteHeader(http.StatusCreated)
 	}))
 
-	for _, leak := range []string{"192.0.2.50", "54321"} {
-		if strings.Contains(line, leak) {
-			t.Errorf("request log leaks the client address %q:\n%s", leak, line)
-		}
+	if leaks := clientAddressLeaks(t, line, req.RemoteAddr); len(leaks) > 0 {
+		t.Errorf("request log leaks the client address %v:\n%s", leaks, line)
 	}
 	for _, want := range []string{"method=POST", "path=/v1/chat/completions", "status=201", "took="} {
 		if !strings.Contains(line, want) {
@@ -106,8 +158,8 @@ func TestRequestLogReportsTheImplicitStatus(t *testing.T) {
 	if !strings.Contains(line, "status=200") {
 		t.Errorf("request log did not report the implicit 200:\n%s", line)
 	}
-	if strings.Contains(line, "198.51.100.7") {
-		t.Errorf("request log leaks the client address:\n%s", line)
+	if leaks := clientAddressLeaks(t, line, req.RemoteAddr); len(leaks) > 0 {
+		t.Errorf("request log leaks the client address %v:\n%s", leaks, line)
 	}
 }
 
@@ -294,10 +346,8 @@ func TestPanicIsLoggedWithoutTheClientAddress(t *testing.T) {
 			t.Errorf("panic log is missing %q:\n%s", want, line)
 		}
 	}
-	for _, leak := range []string{"192.0.2.50", "54321"} {
-		if strings.Contains(line, leak) {
-			t.Errorf("panic log leaks the client address %q:\n%s", leak, line)
-		}
+	if leaks := clientAddressLeaks(t, line, req.RemoteAddr); len(leaks) > 0 {
+		t.Errorf("panic log leaks the client address %v:\n%s", leaks, line)
 	}
 }
 

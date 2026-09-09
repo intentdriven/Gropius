@@ -188,16 +188,12 @@ func TestEveryTestDrivingTheInjectionSeamIsBuiltOutWithIt(t *testing.T) {
 	}
 	const seam = "SetEnumerator"
 	var found int
-	err = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if d.IsDir() {
-			if name := d.Name(); name == ".git" || name == "bin" || name == "dist" || name == "site" {
-				return filepath.SkipDir
-			}
-			return nil
-		}
+	// The walk goes through walkRepoFiles, which skips every dot-directory: this
+	// scan excluded only .git, so a git worktree checked out under .claude/ was
+	// counted as if its test files were this checkout's — a branch someone else
+	// is working on could both hold this scan green and fail it
+	// (iss-2609081427104462).
+	walkRepoFiles(t, root, walkOptions{}, func(path string, d fs.DirEntry) error {
 		if !strings.HasSuffix(d.Name(), "_test.go") {
 			return nil
 		}
@@ -218,9 +214,6 @@ func TestEveryTestDrivingTheInjectionSeamIsBuiltOutWithIt(t *testing.T) {
 		}
 		return nil
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if found == 0 {
 		t.Fatalf("nothing in the module drives netshape.%s any more — either the seam is unused, in which case delete it and the rules around it, or this walk is looking in the wrong place", seam)
 	}

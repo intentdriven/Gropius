@@ -1228,6 +1228,12 @@ func TestMemoryBudgetReportsTheCeilingEvictionUses(t *testing.T) {
 
 // testClock is an injectable clock, so eviction order is set by the test
 // rather than by how long the test took to run.
+//
+// It moves the pool's view of a model's idleness and nothing else: advance()
+// neither wakes a parked waiter nor ages one, because a waiter is clocked on
+// real time by design (see loadWaiter). A test that advances past the grace
+// expecting a waiting request to be served will see nothing happen until a real
+// grace has elapsed.
 type testClock struct {
 	mu  sync.Mutex
 	now time.Time

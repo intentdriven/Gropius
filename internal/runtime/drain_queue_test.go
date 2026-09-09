@@ -56,9 +56,9 @@ func TestALoadThatNeverBecameReadyIsChargedUntilItsProcessExits(t *testing.T) {
 		t.Fatalf("Resident() = %+v after a failed load, want none", got)
 	}
 	// ...but its process has not exited, so its memory is not back.
-	if bytes, _ := p.Draining(); bytes != capability.LoadCost(100) {
-		t.Errorf("Draining() = %d bytes, want the failed load still charged %d",
-			bytes, capability.LoadCost(100))
+	if got := p.Residency().ExitingBytes; got != capability.LoadCost(100) {
+		t.Errorf("ExitingBytes = %d, want the failed load still charged %d",
+			got, capability.LoadCost(100))
 	}
 
 	loaded := make(chan error, 1)
@@ -131,8 +131,8 @@ func TestNoModelIsStoppedForACallerThatCannotWaitForIt(t *testing.T) {
 		t.Error("a model was stopped for a caller that was then refused")
 	default:
 	}
-	if bytes, _ := p.Draining(); bytes != 0 {
-		t.Errorf("Draining() = %d bytes, want nothing stopped", bytes)
+	if got := p.Residency().ExitingBytes; got != 0 {
+		t.Errorf("ExitingBytes = %d, want nothing stopped", got)
 	}
 }
 
@@ -334,19 +334,69 @@ func TestAServerThatWillNotDieIsReportedAsStuck(t *testing.T) {
 	}
 
 	waitFor(t, "the stuck server to be counted", func() bool {
-		bytes, stuck := p.Draining()
-		return stuck == 1 && bytes == capability.LoadCost(100)
+		r := p.Residency()
+		return r.StuckServers == 1 && r.ExitingBytes == capability.LoadCost(100)
 	})
 	if got := logged.String(); !strings.Contains(got, "has not exited") {
 		t.Errorf("nothing was logged about a server that would not die: %q", got)
 	}
 
-	// When the kernel does let go, the charge and the count both come back.
-	l.procFor("org/a").exit()
-	waitFor(t, "the charge to come back", func() bool {
-		bytes, stuck := p.Draining()
-		return bytes == 0 && stuck == 0
+	// Nothing waits on it any more: the goroutine that was watching for the
+	// exit is gone, so the charge stands until this process restarts. That is
+	// the honest answer — the pool cannot see a process it has already killed
+	// let go of its memory — and it is what the shutdown log and the docs say.
+	if err := p.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if got := logged.String(); !strings.Contains(got, "shutting down while a stopped model server is still running") {
+		t.Errorf("shutdown did not name the server still holding memory: %q", got)
+	}
+}
+
+// A server that will not die must not stop the pool working around it. Its
+// memory is gone until a restart, so the eviction plan counts it and takes an
+// idle model instead — otherwise every later load needing room is refused for
+// the life of the process, with a message saying nothing could be freed while
+// an idle model sat there.
+func TestAStuckServerDoesNotBlockEvictionForEver(t *testing.T) {
+	l := newFakeLauncher()
+	l.holdExitFor = "org/a"
+	src := &fakeSource{models: map[string]int64{"org/a": 100, "org/b": 100, "org/c": 100}}
+	// Charged 120 each: the budget holds two.
+	p := newTestPool(t, l, src, PoolOptions{
+		MaxResidentBytes: 300,
+		drainWait:        100 * time.Millisecond,
 	})
+
+	_, release, err := p.Acquire(context.Background(), "org/a")
+	if err != nil {
+		t.Fatalf("Acquire org/a: %v", err)
+	}
+	release()
+	if err := p.Unload("org/a"); err != nil {
+		t.Fatalf("Unload org/a: %v", err)
+	}
+	waitFor(t, "org/a to be given up on", func() bool {
+		return p.Residency().StuckServers == 1
+	})
+
+	// org/b loads into the room that is left...
+	_, release, err = p.Acquire(context.Background(), "org/b")
+	if err != nil {
+		t.Fatalf("Acquire org/b beside a stuck server: %v", err)
+	}
+	release()
+
+	// ...and org/c, which needs org/b's place, gets it: 120 stuck + 120 for
+	// org/c is 240, inside a budget of 300, once idle org/b goes.
+	_, release, err = p.Acquire(context.Background(), "org/c")
+	if err != nil {
+		t.Fatalf("Acquire org/c was refused although evicting idle org/b makes room: %v", err)
+	}
+	release()
+	if got := p.Resident(); len(got) != 1 || got[0].RepoID != "org/c" {
+		t.Errorf("Resident() = %+v, want org/c alone", got)
+	}
 }
 
 // waitFor polls until cond holds, or fails the test saying what it was waiting

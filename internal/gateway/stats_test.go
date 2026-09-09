@@ -922,6 +922,89 @@ func TestAnAnswerDeliveredInFullIsNotCancelledByAClientHangingUp(t *testing.T) {
 	})
 }
 
+// The same hang-up reaches the relay itself, and this is the half the context
+// check above cannot cover. A client that stops on the "data: [DONE]" line has
+// not read the blank line that terminates that event, and closing its socket
+// cancels the handler's context — which is the context the model server's
+// response is being read under. So the relay's own last two steps are exactly
+// the two that fail: writing the terminator, and reading the body to EOF.
+//
+// Neither says anything about what the client got. The answer was delivered
+// down to its terminal event before either could fail, and a request recorded
+// as cancelled here is a request whose token counts are thrown away — the
+// dashboard undercounting precisely the answers that went best, because
+// hanging up on [DONE] is what a well-behaved streaming client does.
+func TestAFailureAfterTheTerminalEventDoesNotTakeTheAnswerAway(t *testing.T) {
+	// The answer as the model server sends it, cut off after the "[DONE]"
+	// line: the blank line that ends that event never gets read or written.
+	const answer = "data: {\"model\":\"backend\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"}}]}\n\n" +
+		"data: {\"model\":\"backend\",\"choices\":[],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":4}}\n\n" +
+		"data: [DONE]\n"
+
+	// The handler's context is cancelled by the same close, so finish has only
+	// the relay's verdict to go on.
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	gone := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil).WithContext(cancelled)
+
+	answered := func(t *testing.T, w http.ResponseWriter, src io.Reader) stats.Record {
+		t.Helper()
+		rec := stats.New(stats.Options{})
+		rec.SetEnabled(true)
+		out := streamRewriteSSE(w, src, "backend", "friendly",
+			relayOptions{observing: true, dropUsage: true})
+		obs := &observation{rec: rec, started: time.Now(),
+			record: stats.Record{Model: "org/a", Class: stats.ClassOK, FirstTokenMS: stats.NoFirstToken}}
+		obs.relayed(out)
+		obs.finish(gone)
+		return onlyRecord(t, rec)
+	}
+
+	t.Run("the model server's body fails after [DONE]", func(t *testing.T) {
+		src := io.MultiReader(strings.NewReader(answer),
+			&oneShotReader{err: context.Canceled})
+
+		got := answered(t, httptest.NewRecorder(), src)
+
+		if got.Class != stats.ClassOK {
+			t.Errorf("an answer read past its terminal event is recorded as %q, want %q", got.Class, stats.ClassOK)
+		}
+		if got.PromptTokens != 3 || got.CompletionTokens != 4 {
+			t.Errorf("its counts are %d/%d, want 3/4 — they were thrown away", got.PromptTokens, got.CompletionTokens)
+		}
+	})
+
+	t.Run("the write of the terminator fails after [DONE]", func(t *testing.T) {
+		got := answered(t, &goneAtDoneWriter{ResponseWriter: httptest.NewRecorder()},
+			strings.NewReader(answer+"\n"))
+
+		if got.Class != stats.ClassOK {
+			t.Errorf("an answer written down to its terminal event is recorded as %q, want %q", got.Class, stats.ClassOK)
+		}
+		if got.PromptTokens != 3 || got.CompletionTokens != 4 {
+			t.Errorf("its counts are %d/%d, want 3/4 — they were thrown away", got.PromptTokens, got.CompletionTokens)
+		}
+	})
+}
+
+// goneAtDoneWriter is the client this is about: it takes every write up to and
+// including the terminal event and is gone for the next one, which is what
+// closing the socket on the "[DONE]" line looks like from the relay's side.
+type goneAtDoneWriter struct {
+	http.ResponseWriter
+	gone bool
+}
+
+func (w *goneAtDoneWriter) Write(b []byte) (int, error) {
+	if w.gone {
+		return 0, errors.New("broken pipe")
+	}
+	if bytes.Contains(b, []byte("[DONE]")) {
+		w.gone = true
+	}
+	return w.ResponseWriter.Write(b)
+}
+
 // The same thing again, through a real socket: a client that reads to
 // "data: [DONE]" and closes without draining, while the handler still has
 // work to do. This is the shape an aborted fetch reader, a curl with a

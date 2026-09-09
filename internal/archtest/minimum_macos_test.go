@@ -183,3 +183,69 @@ func plistString(t *testing.T, path, key string) string {
 	t.Fatalf("%s declares no top-level %s", path, key)
 	return ""
 }
+
+// plistStringArray returns the <array> of <string> values an XML property list
+// declares for key at the top level of its bundle dictionary. It is the array
+// sibling of plistString and walks the token stream the same way, for the same
+// reason: a plist <dict> is a flat run of sibling <key>/<value> pairs, not a
+// shape the xml package can unmarshal into a struct.
+func plistStringArray(t *testing.T, path, key string) []string {
+	t.Helper()
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+
+	dec := xml.NewDecoder(f)
+	var (
+		// depth 0 is outside <plist>, 1 inside it, 2 inside the bundle <dict>.
+		depth  int
+		wanted bool
+	)
+	for {
+		tok, err := dec.Token()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatalf("parsing %s: %v", path, err)
+		}
+		switch elem := tok.(type) {
+		case xml.StartElement:
+			// As in plistString, only the bundle dictionary's own keys count,
+			// so a key of the same name nested inside some other value cannot
+			// satisfy the lookup while the top-level key is missing.
+			if depth == 2 && elem.Name.Local == "key" {
+				var v string
+				if err := dec.DecodeElement(&v, &elem); err != nil {
+					t.Fatalf("parsing %s: %v", path, err)
+				}
+				wanted = strings.TrimSpace(v) == key
+				continue
+			}
+			if depth == 2 && elem.Name.Local == "array" && wanted {
+				var arr struct {
+					Values []string `xml:"string"`
+				}
+				if err := dec.DecodeElement(&arr, &elem); err != nil {
+					t.Fatalf("parsing %s: %v", path, err)
+				}
+				for i, v := range arr.Values {
+					arr.Values[i] = strings.TrimSpace(v)
+				}
+				return arr.Values
+			}
+			if depth == 2 {
+				// Any other element is the current key's value, so a key whose
+				// value is not an array can never pick up a later, unrelated one.
+				wanted = false
+			}
+			depth++
+		case xml.EndElement:
+			depth--
+		}
+	}
+	t.Fatalf("%s declares no top-level %s array", path, key)
+	return nil
+}

@@ -388,8 +388,8 @@ func TestSetConfigPersists(t *testing.T) {
 		t.Error("config not updated in memory")
 	}
 	// The HF token must reach the hub client, or gated downloads keep failing.
-	if a.Hub.Token != "hf_token" {
-		t.Errorf("Hub.Token = %q, want the newly-saved token", a.Hub.Token)
+	if a.Hub.Token() != "hf_token" {
+		t.Errorf("Hub token = %q, want the newly-saved token", a.Hub.Token())
 	}
 
 	reloaded, _, err := config.Load(a.Paths.Config)
@@ -447,7 +447,7 @@ func TestDownloadRequiresRepoID(t *testing.T) {
 
 func TestResolveOnlyReturnsReadyModels(t *testing.T) {
 	a := newTestApp(t)
-	src := modelSource{a.Registry}
+	src := modelSource{a}
 
 	a.Registry.Put(registry.Model{
 		RepoID: "org/half", Path: "/tmp/x", State: registry.StateDownloading,
@@ -500,7 +500,7 @@ func TestProgressReachesTheRegistry(t *testing.T) {
 
 func TestHumanReadableErrorForMissingModel(t *testing.T) {
 	a := newTestApp(t)
-	src := modelSource{a.Registry}
+	src := modelSource{a}
 	_, _, err := src.Resolve("org/nope")
 	if err == nil {
 		t.Fatal("expected an error")

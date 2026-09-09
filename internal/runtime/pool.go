@@ -214,19 +214,23 @@ type Pool struct {
 	grace   time.Duration
 	maxWait time.Duration
 	// drainBytes is the charged size of the model servers that have left the
-	// pool but whose processes have not exited yet. A stopped server holds its
-	// memory until the kernel reclaims it — up to the SIGTERM grace and the
-	// SIGKILL that follows — so crediting the budget at the moment the entry is
-	// deleted would let a replacement load on top of a victim that has released
-	// nothing. Guarded by mu, and given back in drainLocked's goroutine when
-	// the process's Done fires.
+	// pool and are still exiting, within the time stopping one is allowed to
+	// take. A stopped server holds its memory until the kernel reclaims it — up
+	// to the SIGTERM grace and the SIGKILL that follows — so crediting the
+	// budget at the moment the entry is deleted would let a replacement load on
+	// top of a victim that has released nothing. This is the charge a load
+	// WAITS for: it is coming back. Guarded by mu.
 	drainBytes int64
-	// drainStuck is how many of those processes are past stopBound — SIGTERM,
-	// then SIGKILL, then nothing — and are therefore holding memory the pool
-	// cannot get back. Their charge stays in drainBytes, because the memory is
-	// still spent; this counts them so the control panel can say so rather
-	// than showing a budget that has silently shrunk. Guarded by mu.
-	drainStuck int
+	// stuck are the servers that did not exit even after SIGKILL. Their memory
+	// is gone for the life of this process — a restart is the only remedy — so
+	// it is not something to wait for. It is charged (the memory really is
+	// spent) and it is EVICTABLE-AGAINST: the eviction plan counts it, so a
+	// load can still take an idle model to make room around it. Guarded by mu.
+	stuck []stuckServer
+	// drainGen changes whenever either of the two above does. A waiter records
+	// it, so a wake-up that cannot have changed the answer costs a comparison
+	// rather than a walk of the pool. Guarded by mu.
+	drainGen uint64
 	// waiters are the loads parked for want of room, oldest first. Guarded by
 	// mu; a waiter is never parked while holding it. Serving the head first is
 	// the whole fairness rule: serving whichever load is quickest would starve
@@ -262,6 +266,16 @@ type entry struct {
 	readyErr error
 }
 
+// stuckServer is a model server that survived being stopped and then killed.
+// It is remembered rather than merely counted so that shutdown can name the
+// process groups still holding memory: the orphan reaper's ledger is what the
+// next start uses to finish them off.
+type stuckServer struct {
+	repoID string
+	pid    int
+	charge int64
+}
+
 // loadWaiter is one request parked for want of room for its model.
 //
 // Its own clock is real time rather than the pool's injectable one: what it
@@ -294,6 +308,11 @@ type loadWaiter struct {
 	// holding p.mu, and so that a wake-up arriving between two checks is not
 	// lost.
 	signal chan struct{}
+	// drainGen is the pool's drain generation as of this waiter's last attempt.
+	// A periodic re-check that finds it unchanged, on a waiter the drain is
+	// blocking, is answered from what the waiter already carries — no resolving
+	// the model, no stat-ing the launcher's files under p.mu.
+	drainGen uint64
 }
 
 // defaultMaxLoadWaiters is the ceiling on parked loads. See
@@ -706,16 +725,6 @@ func (p *Pool) acquire(ctx context.Context, repoID string, mayWait bool) (*Upstr
 			p.waiters = append(p.waiters, w)
 		}
 		delay := p.wakeDelayLocked(w)
-		// Nothing about the passage of time ends a drain: the process exiting
-		// does, and that signals. Waking early to re-plan against a pool that
-		// cannot have changed would resolve the model and stat the launcher's
-		// files under p.mu at the rate of the wake-up floor, so sleep to this
-		// caller's own bound instead and let the exit do the waking.
-		if errors.Is(err, errDraining) {
-			if left := p.waitBoundLocked(mayWait) - time.Since(w.arrived); left > delay {
-				delay = left
-			}
-		}
 		p.mu.Unlock()
 
 		// Parked off p.mu: Acquire holds it across startLocked, so waiting
@@ -735,8 +744,16 @@ func (p *Pool) acquire(ctx context.Context, repoID string, mayWait bool) (*Upstr
 		timer.Stop()
 		p.mu.Lock()
 	}
+	// served records what a queued load is about to be told, for the log line
+	// below: how old the waiter was at the moment it got room, against the two
+	// figures that bound it. A waiter served at its grace and one served at its
+	// maximum are the same success to the client and the opposite outcomes to
+	// this queue's fairness rule, and nothing else on this path tells them
+	// apart (iss-2609081516178867).
+	var servedGrace, servedMax time.Duration
 	if w != nil {
 		waited = p.waitedBy(w)
+		servedGrace, servedMax = p.grace, p.maxWait
 		p.leaveQueueLocked(w)
 	}
 	// Refuse once the backlog for this model is already at its ceiling. Every
@@ -762,6 +779,13 @@ func (p *Pool) acquire(ctx context.Context, repoID string, mayWait bool) (*Upstr
 	// free model as cold whenever another goroutine happened to hold the lock.
 	entered := p.opts.now()
 	p.mu.Unlock()
+
+	// Written off the lock, like the refusal above and for the same reason: a
+	// slow log sink must not stall every other caller of the pool's one lock.
+	if w != nil {
+		p.opts.Log.Debug("a queued model load got room",
+			"model", repoID, "waited", waited, "grace", servedGrace, "max_wait", servedMax)
+	}
 
 	release := func() {
 		p.mu.Lock()
@@ -1093,21 +1117,37 @@ func (p *Pool) liveChargeLocked() int64 {
 
 // residentChargeLocked is what this machine's memory is actually spoken for:
 // every model the pool is holding, plus every one it has stopped that has not
-// exited yet. It is what a launch is measured against, because a victim told to
-// go a moment ago is still holding its weights. Callers must hold p.mu.
+// exited yet — whether that exit is still coming or never will. It is what a
+// launch is measured against, because a victim told to go a moment ago is still
+// holding its weights. Callers must hold p.mu.
 func (p *Pool) residentChargeLocked() int64 {
-	return p.liveChargeLocked() + p.drainBytes
+	return p.evictableChargeLocked() + p.drainBytes
+}
+
+// evictableChargeLocked is the charge an eviction plan is measured against: the
+// models in memory, plus the servers that will not die. Callers must hold p.mu.
+//
+// The second is the difference between this and residentChargeLocked, and it is
+// the whole point of the split. Memory held by a stuck server is not coming
+// back, so a plan that ignored it would refuse every load that needed room for
+// the rest of the process's life; counting it lets a load take an idle model
+// and be served around the loss. Memory held by a server that is still exiting
+// IS coming back, and evicting a healthy model to cover a wait of seconds would
+// be destroying something for nothing.
+func (p *Pool) evictableChargeLocked() int64 {
+	return p.liveChargeLocked() + p.stuckChargeLocked()
 }
 
 // evictionPlanLocked names the models that would have to go for need bytes to
 // fit, least recently used first, and says whether taking them all is enough.
 // Callers must hold p.mu.
 func (p *Pool) evictionPlanLocked(need int64, waited time.Duration) ([]*entry, bool) {
-	// Live entries only. The models on their way out are counted where the
-	// launch is decided (residentChargeLocked), not here: a plan that counted
-	// them would name victims to free room that an exiting process is about to
-	// hand back, killing a healthy model to cover a wait of a few seconds.
-	used := p.liveChargeLocked()
+	// The models in memory and the servers that will never exit; not the ones
+	// that are still exiting. A plan that counted those would name victims to
+	// free room a process is about to hand back, killing a healthy model to
+	// cover a wait of a few seconds — and a plan that did not count the stuck
+	// ones would refuse every load needing room until the app restarted.
+	used := p.evictableChargeLocked()
 	if used+need <= p.maxResident {
 		return nil, true
 	}
@@ -1336,19 +1376,28 @@ func (p *Pool) drainBlocksLocked(need int64) bool {
 // waiter and startLocked resolves the model and stats two files before it
 // reaches the eviction plan — filesystem work under the pool's one lock, at
 // whatever rate the machine completes requests.
+//
+// It records on the waiter the drain generation it judged against, which is
+// what makes the next answer cheap. That is a write, so this is not the pure
+// predicate its name suggests; it is called once per pass round the acquire
+// loop, which is where the judgement belongs.
 func (p *Pool) worthTryingLocked(w *loadWaiter, age time.Duration, adm admission) bool {
 	// A caller that has not queued always asks: it has nothing to judge itself
 	// by yet.
 	if w == nil {
 		return true
 	}
-	// A waiter whose room is still being handed back by an exiting process
-	// gains nothing by asking again — only the exit changes the answer, and it
-	// signals — and it must not take a victim meanwhile: the machine is already
-	// over its budget with memory it has not got back.
-	if p.drainBlocksLocked(w.need) {
+	// A waiter whose room is still being handed back by an exiting process must
+	// not take a victim meanwhile: the machine is already over its budget with
+	// memory it has not got back. Nor is there anything for it to learn by
+	// resolving the model and stat-ing the launcher's files again while the
+	// tally is where it was — the periodic re-check every waiter does still
+	// happens, it just costs a comparison here instead of filesystem work under
+	// p.mu.
+	if w.drainGen == p.drainGen && p.drainBlocksLocked(w.need) {
 		return false
 	}
+	w.drainGen = p.drainGen
 	// Every caller asks once grace is off: the off path evicts what it can
 	// before it refuses, and skipping the attempt would refuse a request that a
 	// swap would have served.
@@ -1365,7 +1414,10 @@ func (p *Pool) worthTryingLocked(w *loadWaiter, age time.Duration, adm admission
 // canEverFitLocked reports whether evicting every model that is not pinned
 // would leave room for need bytes. Callers must hold p.mu.
 func (p *Pool) canEverFitLocked(need int64) bool {
-	var protected int64
+	// A server that would not die is counted with the pinned models: its memory
+	// is not coming back while this process lives, so a load that does not fit
+	// around it is one no amount of waiting will serve.
+	protected := p.stuckChargeLocked()
 	for _, e := range p.entries {
 		if p.isPinnedLocked(e.repoID) {
 			protected += capability.LoadCost(e.bytes)
@@ -1422,18 +1474,50 @@ func (p *Pool) waitedBy(w *loadWaiter) time.Duration {
 	return time.Since(w.arrived)
 }
 
-// wakeDelayLocked is how long a waiter may sleep before something could have
-// changed that nothing will signal. Callers must hold p.mu.
+// wakeRecheckFloor is the shortest interval wakeDelayLocked will impose as its
+// unconditional re-check. The re-check tracks the grace, and EvictionGrace is
+// an operator setting with no lower bound: a grace of a millisecond would
+// otherwise have every parked waiter taking the pool's one lock a thousand
+// times a second. A quarter-second is far below any wait a person notices and
+// far above any rate that matters. It bounds only the re-check — a real
+// deadline this function can compute, an idle model's grace running out or the
+// waiter's own age reaching it, is still slept to exactly.
+const wakeRecheckFloor = 250 * time.Millisecond
+
+// wakeDelayLocked is how long a waiter may sleep before it looks again.
+// Callers must hold p.mu.
 //
-// Releases, stops, budget and pin changes all signal, so this covers only the
-// passage of time: the waiter's own age reaching the grace, the oldest
-// protected candidate's grace running out, and the maximum wait expiring. The
-// floor keeps a stopped clock from spinning.
+// Three of its terms are moments this function can compute, and it sleeps to
+// the nearest: the waiter's own age reaching the grace, an idle candidate's
+// grace running out, and the maximum wait expiring.
+//
+// The fourth is a bound rather than a moment, and it is why this is not simply
+// a deadline calculator. Every change that could free room does signal — a
+// release, a stop, a failed load, a crashed process, a budget or pin change —
+// and the waiter is queued and its delay computed under p.mu with a buffered
+// signal channel, so a wake arriving between the unlock and the select is taken
+// rather than lost. That is the mechanism, and this is its backstop. A backstop
+// whose own terms rest on the mechanism it backs up is not one, so a parked
+// waiter also looks again at least once per grace whatever the entries look
+// like (iss-2609081516178867).
+//
+// The sharpest case for that, and the one that found it, is a candidate with a
+// request in flight or still loading: those states end on an event, not at a
+// moment, so the loop below rightly reads no deadline from them — and a waiter
+// past its own grace behind a single busy candidate was then left with no term
+// at all and fell back to the whole maximum wait. It was woken in practice,
+// by that request ending; it was one missing signal away from not being.
+//
+// wakeRecheckFloor keeps the re-check from becoming a spin on a very short
+// grace, and the millisecond floor keeps a stopped clock from spinning.
 func (p *Pool) wakeDelayLocked(w *loadWaiter) time.Duration {
 	waited := time.Since(w.arrived)
 	delay := p.maxWait - waited
 	if own := p.grace - waited; own > 0 && own < delay {
 		delay = own
+	}
+	if recheck := max(p.grace, wakeRecheckFloor); recheck < delay {
+		delay = recheck
 	}
 	now := p.opts.now()
 	for _, e := range p.entries {
@@ -1468,6 +1552,7 @@ func (p *Pool) stopEntryLocked(e *entry, reason StopReason) {
 	}
 	charge := capability.LoadCost(e.bytes)
 	p.drainBytes += charge
+	p.drainGen++
 	// A prod, not a promise of room: a waiter re-reads the pool when it comes
 	// back and will find this charge still counted until the process exits.
 	p.wakeWaitersLocked()
@@ -1484,46 +1569,81 @@ func (p *Pool) drainEntry(repoID string, proc Process, charge int64) {
 	// Stop returning is not the process being gone: it gives up on a server
 	// that will not die even after SIGKILL, and such a server is still holding
 	// its memory. Done is the only honest signal, so the charge waits for it —
-	// but not silently. Past stopBound and the margin, the kernel has not let
-	// go, and an operator watching a budget that has quietly shrunk deserves to
-	// be told which process took it.
+	// but not for ever. Past the drain bound the kernel has not let go, and
+	// this goroutine stops waiting rather than living as long as the app: the
+	// charge moves to the stuck list, which no load waits for and every
+	// eviction plan counts, and the operator is told which process took it.
 	timer := time.NewTimer(p.opts.drainWait)
 	select {
 	case <-proc.Done():
 		timer.Stop()
+		p.mu.Lock()
+		p.drainBytes -= charge
+		p.drainGen++
+		// Every load parked for this memory is woken to look again.
+		p.wakeWaitersLocked()
+		p.mu.Unlock()
+		return
 	case <-timer.C:
-		p.mu.Lock()
-		p.drainStuck++
-		p.mu.Unlock()
-		// Logged off the lock: p.mu is the pool's one lock, and a slow sink
-		// would stall every other caller for the length of a write.
-		p.opts.Log.Warn("a stopped model server has not exited; its memory stays charged against the budget until it does",
-			"model", repoID, "pid", proc.Pid(), "charged", HumanBytes(charge),
-			"waited", p.opts.drainWait, "stop_error", stopErr)
-		<-proc.Done()
-		p.mu.Lock()
-		p.drainStuck--
-		p.mu.Unlock()
 	}
 
 	p.mu.Lock()
 	p.drainBytes -= charge
-	// Every load parked for this memory is woken to look again.
+	p.stuck = append(p.stuck, stuckServer{repoID: repoID, pid: proc.Pid(), charge: charge})
+	p.drainGen++
+	// The memory is not coming back, but the pool can still work around it:
+	// waking every waiter lets one that could be served by evicting an idle
+	// model go and do that instead of sitting out a wait for an exit that is
+	// not going to happen.
 	p.wakeWaitersLocked()
 	p.mu.Unlock()
+
+	// Logged off the lock: p.mu is the pool's one lock, and a slow sink would
+	// stall every other caller for the length of a write.
+	p.opts.Log.Warn("a stopped model server has not exited; its memory stays charged against the budget until Gropius restarts",
+		"model", repoID, "pid", proc.Pid(), "charged", HumanBytes(charge),
+		"waited", p.opts.drainWait, "stop_error", stopErr)
 }
 
-// Draining reports the memory charged to model servers that have left the pool
-// but whose processes have not exited, and how many of those are past the point
-// where stopping them should have worked.
+// Residency is one consistent answer to what this pool is holding: the models
+// it has, and the memory it has not got back. Taken under a single lock, so a
+// stop landing between two reads cannot make a caller count the same server
+// twice or miss it altogether.
+type Residency struct {
+	// Models is what the pool is holding, most recently used first.
+	Models []Resident
+	// ExitingBytes is charged to model servers that have left the pool and
+	// whose processes have not gone: they appear in no models list, but their
+	// memory is not back and a load is measured against it.
+	ExitingBytes int64
+	// StuckServers is how many of those did not exit even after SIGKILL. Their
+	// memory is held until this process restarts.
+	StuckServers int
+}
+
+// Residency reports the models in memory and the memory not yet handed back.
 //
-// It is read by the control panel's snapshot: a stuck server shrinks the budget
-// for as long as it lives, and a panel that showed only the models it is
-// holding would report room the pool will not give out.
-func (p *Pool) Draining() (bytes int64, stuck int) {
+// The control panel reads this rather than Resident alone: a stuck server
+// shrinks the budget for as long as it lives, and a panel that showed only the
+// models it is holding would report room the pool will not give out.
+func (p *Pool) Residency() Residency {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return p.drainBytes, p.drainStuck
+	return Residency{
+		Models:       p.residentLocked(),
+		ExitingBytes: p.drainBytes + p.stuckChargeLocked(),
+		StuckServers: len(p.stuck),
+	}
+}
+
+// stuckChargeLocked is the memory held by servers that would not die. Callers
+// must hold p.mu.
+func (p *Pool) stuckChargeLocked() int64 {
+	var sum int64
+	for _, s := range p.stuck {
+		sum += s.charge
+	}
+	return sum
 }
 
 // ErrNotLoaded is returned by Unload when the model is not resident.
@@ -1569,7 +1689,13 @@ func (p *Pool) Unload(repoID string) error {
 func (p *Pool) Resident() []Resident {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	return p.residentLocked()
+}
 
+// residentLocked is Resident's body, so that a caller needing the models and
+// the memory not yet handed back gets both from one lock acquisition. Callers
+// must hold p.mu.
+func (p *Pool) residentLocked() []Resident {
 	out := make([]Resident, 0, len(p.entries))
 	for _, e := range p.entries {
 		// isReady reads the ready channel without blocking, so a model in the
@@ -1643,10 +1769,20 @@ func (p *Pool) Close() error {
 		p.notify(func(o PoolObserver) { o.EntryStopped(e.repoID, StopShutdown) })
 	}
 	p.entries = map[string]*entry{}
+	stuck := append([]stuckServer(nil), p.stuck...)
 	// Every parked request is answered rather than left holding a connection
 	// while the process goes away; each sees p.closed and returns ErrClosed.
 	p.wakeWaitersLocked()
 	p.mu.Unlock()
+
+	// A server that outlived SIGKILL outlives us too, and it is still holding
+	// its memory. Name the process groups on the way out: the crash-recovery
+	// ledger is what the next start reads, and an operator reading this log is
+	// being told why a restart got the memory back.
+	for _, s := range stuck {
+		p.opts.Log.Warn("shutting down while a stopped model server is still running; it holds its memory until it goes",
+			"model", s.repoID, "pid", s.pid, "charged", HumanBytes(s.charge))
+	}
 
 	close(p.stopIdle)
 	<-p.idleDone

@@ -124,6 +124,9 @@ print(resp.choices[0].message.content)
 If `your-mac.local` does not resolve, use the IP address shown in the Connect tab
 instead.
 
+To reach the server from a machine that is not on this network, see
+[Serve models over a mesh VPN](mesh-vpn.md).
+
 ## 6. Lock it down (optional but recommended)
 
 By default anyone on your network can use the server. To require a key:

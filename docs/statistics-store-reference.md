@@ -43,7 +43,7 @@ Every line carries two fields before anything else:
 | Field | Meaning |
 | --- | --- |
 | `v` | The version of this format the line was written under. A later Gropius can still read an older file. |
-| `kind` | Which of the six kinds below the line is: `request`, `load`, `removed`, `settings`, `summary` or `summary_index`. A load and a removal are two spellings of the one event kind the [decision record](../.abcd/development/decisions/adrs/2609061610107154-statistics-store-format-json-lines-size-rotated-per-account.md) names, and the last two belong to the summary that is kept when detail is dropped, which is why that record counts three kinds and this page counts six. |
+| `kind` | Which of the six kinds below the line is: `request`, `load`, `removed`, `settings`, `summary` or `summary_index`. The first four are the record kinds the [decision record](../.abcd/development/decisions/adrs/2609090716413337-the-statistics-store-s-record-kinds-are-request-load-removed.md) ratifies, and the last two belong to the summary that is kept when detail is dropped, which is why that record counts four kinds and this page counts six. |
 
 A reader should ignore a field it does not know, and skip a line it cannot
 parse. A line whose `v` is newer than the reader understands is one to skip:

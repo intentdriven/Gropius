@@ -11,6 +11,77 @@ GitHub release notes.
 
 ## [Unreleased]
 
+### Changed
+
+- **A request waiting for memory now looks again by itself, rather than only
+  when something wakes it.** The pool wakes every waiting request whenever room
+  might have appeared, and each request sleeps in between for as long as it can
+  work out that nothing can have changed on its own. Those two together were
+  correct — no wake-up was being missed — but the second had gaps in it: behind
+  a model that was busy serving someone else, a request could work out a sleep
+  of the whole maximum eviction wait, and was then relying entirely on being
+  woken. It now also looks again once per grace period regardless, so the
+  waiting is no longer answered by the wake-ups alone. **No request is served
+  differently.** This is one less thing that has to hold for the queue to
+  behave, not a stall anyone was hitting.
+
+
+- **A client connecting over loopback is told which models are loaded, whether
+  or not an API key is set.** `GET /v1/models` carries `state`, `in_flight`,
+  `last_used` and `pinned`, and used to carry them only on an install that had
+  a key — so the common first-run setup, a chat application beside the server
+  on one Mac with no key, had nothing to show in its model picker and no way to
+  tell a warm model from a cold one. A client reaching the server at
+  `localhost` is the same person at the same machine the control panel already
+  shows exactly these facts to, so it is now served them too. It is the
+  connection that decides, not the computer: a program on this Mac that dials
+  this Mac's network address instead is a network client here.
+  **Nothing changes for the network:** on an install with no key, a client that
+  did not connect over loopback is still served exactly the OpenAI fields and
+  the context figure, and learns nothing from the listing about what this Mac
+  is running or when. Nor can a page in a browser borrow the rule — it is the
+  same `Host` and `Origin` check the control panel is gated on, so a site that
+  points its own hostname at `127.0.0.1` is refused. An install with a key
+  behaves as before.
+
+### Security
+
+- **Every command Gropius runs is now named by its full path.** Reading this
+  Mac's Bonjour name, opening the control panel in a browser and copying the
+  endpoint each started a small system command by bare name, so the one that
+  ran was whichever the account's `PATH` pointed at first. Gropius is built for
+  a Mac shared by several accounts, and a directory another account can write
+  is a normal thing to find on a developer's `PATH` ahead of the system ones —
+  which made those three commands a way into the account running the server.
+  The Bonjour lookup was the one that mattered: it runs once, early, in every
+  account that launches Gropius, with no click to invite it. A test now holds
+  the rule for any command added later.
+
+### Added
+
+- **A how-to for serving over a mesh VPN.**
+  [docs/mesh-vpn.md](docs/mesh-vpn.md) takes the walk-through's "talk to it from
+  another machine" steps and runs them over a mesh network instead of the local
+  one, and it is where the mark beside an endpoint is explained: it names the
+  network the address belongs to, and says nothing about how safe it is or who
+  else can reach it. The page also lists the four things Gropius cannot see and
+  the reader can — publishing the address to the public internet through the
+  VPN's own tunnelling feature, a sharing rule that widens who reaches it, that
+  the mark is not a statement about encryption, and that Gropius speaks plain
+  HTTP either way, so whatever protection the traffic has is the VPN's and stops
+  where the VPN stops. Linked from the README and from the getting-started
+  guide.
+
+
+- **The chat client finds servers instead of asking you to name one.**
+  Settings now lists every Gropius server advertising itself on your network,
+  with the name it publishes, whether it wants an API key, and how many models
+  it can serve. Clicking one fills the address in. It never connects on its
+  own: which machine receives your API key stays your decision, and a server
+  that has left the network is reported when you pick it rather than quietly
+  failing later. The server has advertised itself over Bonjour all along —
+  until now nothing on the client side listened.
+
 ### Fixed
 
 - **A swapped-out model keeps its share of the memory budget until it is
@@ -28,10 +99,22 @@ GitHub release notes.
   towards the same queue limit as every other request waiting for memory.
 
 - **The panel says when a stopped model server is still holding memory.** A
-  server that survives being stopped and then killed keeps its memory until the
-  system reclaims it, which makes the budget smaller than the models on screen
-  account for. Settings now reports how much is held that way and by how many
-  servers, and the log says so once when it happens.
+  server that survives being stopped and then killed keeps its memory until
+  Gropius is restarted, which makes the budget smaller than the models on
+  screen account for. Settings now reports how much is held that way and by how
+  many servers, the log says so once when it happens and again at shutdown, and
+  models go on loading and swapping inside what is left rather than every
+  request for room being refused from then on.
+
+- **A burst of requests for several models that are not loaded can be refused
+  rather than queued.** Requests waiting for memory share a queue with a small
+  number of places overall and a smaller number per caller, and callers that
+  present no API key count as one caller between them. Because a request now
+  waits for the model it is replacing to actually exit, it occupies one of
+  those places for a moment where it previously did not, so the third and later
+  requests of such a burst can get the ordinary "not enough memory" refusal
+  straight away. A retry a moment later succeeds, and requests for models
+  already in memory are unaffected.
 
 - **Model servers left behind by a crash are cleaned up even after the Mac's
   clock has been corrected.** If Gropius is force-quit or crashes, the model
@@ -45,6 +128,125 @@ GitHub release notes.
   does not move, and the per-process check that stops the clean-up ever killing
   something it did not start is unchanged. A file left by an earlier version is
   ignored rather than acted on.
+
+- **The committed identity pin now has a gate behind it.** `.abcd/config/identity.json`
+  records the author identity every commit here is expected to carry, and until
+  now nothing enforced it: the pre-commit hook never mentioned identity, so the
+  pin was a record rather than a rule. The hook now checks it first — before the
+  private name guard, which is allowed to be inactive and must not be able to
+  skip the identity check — and refuses a commit whose `user.name` or
+  `user.email` diverges, naming the pin and the command that fixes it. The check
+  is self-contained shell, so it holds without any tool on `PATH`; it fails
+  closed on a pin it cannot read; and a repository with no pin is unaffected.
+  Contributors whose git identity already matches see no change.
+
+
+- **A first launch of the chat client no longer dead-ends.** It opened on a
+  documentation example's host name, which resolves for nobody, and the message
+  box stays disabled until a server answers — so the first thing a new user met
+  was a text field that would not take a keystroke and a sentence telling them
+  to connect, in a window offering nothing to click. It now opens on
+  `http://localhost:11535`, the server on the same Mac that the documented
+  install order puts there; the empty chat names Settings and has a button that
+  opens it; and the disabled message box says why it is disabled.
+
+
+- **Saving settings no longer empties the bind address.** The bind control
+  offers two addresses, and a browser's `<select>` has no notion of a value it
+  does not offer: a Gropius bound to anything else — `localhost`, IPv6
+  loopback, or one specific address, each of which `config.json` accepts and
+  the server starts on — posted an empty host on *every* save, including saves
+  that changed nothing about the bind. The save was refused with "host must not
+  be empty", naming a field the pane never showed as wrong, and nothing on the
+  pane could be saved again until the operator edited `config.json` by hand.
+  The bind in force is now offered as an option of its own, labelled with the
+  address itself, so the pane shows the address Gropius is serving on and saves
+  it back unchanged.
+
+
+- **A disk that has stopped answering no longer holds the usage dashboard
+  open.** Every reading of the statistics store starts by flushing the writer,
+  so that it shows what has been recorded rather than what happened to have
+  reached the disk. That flush waited with nothing to interrupt it: closing the
+  panel did not stop it, and while it waited it held one of the two readings the
+  store allows at once, so a stalled disk could leave the dashboard unable to
+  answer anyone. The wait now ends with the reader — closing the panel stops the
+  work — and, for a panel left open, after ten seconds. The two views say so in
+  the two ways that suit them: the historical tables report a reading that
+  failed, and the live figures, which are in memory, are still shown, with
+  Settings saying beside them that the disk did not answer in time and that they
+  may not include the newest records. Either way it is said out loud rather than
+  left as a figure quietly missing part of the story, and it clears itself as
+  soon as the disk answers again.
+
+- **A streamed answer the client hung up on is no longer recorded as
+  cancelled.** An SSE client that treats `data: [DONE]` as the end of the
+  answer — most of them do — closes its socket on that line, without reading
+  the blank line after it. That close made the last two steps of relaying fail:
+  writing the terminator, and reading the model server's body to its end. The
+  request was then filed as cancelled and its token counts thrown away, so the
+  usage figures were short by exactly the requests that went best. An answer
+  that reached its terminal event is now recorded as delivered, with its
+  counts, whatever happens to the tidying-up after it.
+
+
+- **The Bonjour advertisement is republished, not edited, when what it says
+  changes.** Setting or clearing the API key, or a change in how many models
+  are servable, used to rewrite the advertised record in place while the
+  responder was still reading it — an unsynchronised write against a
+  concurrent read, whose worst case is a garbled or missing answer to a
+  machine that happens to be browsing at that moment. Gropius now takes the
+  advertisement off the network, waits for it to be gone, and publishes it
+  afresh. The visible cost is that the service disappears and reappears in a
+  browser such as Bonjour Browser for the moment the change takes, which is
+  why it is done only when the record's contents have actually changed. A
+  republication that fails is retried on the next refresh rather than leaving
+  the Mac undiscoverable until it is restarted.
+
+- **An advertisement that stops on its own is put back.** Claiming a name on
+  the network is a separate step from being handed the service, and it happens
+  a moment later — so an advertisement could be accepted and then fail, on a
+  Mac whose Wi-Fi had just dropped or whose network changed under it. The Mac
+  then stayed off every browser's list until the next time the advertised
+  hints changed, or until Gropius was restarted. It now watches its own
+  advertisement and puts it back on the network as soon as it can, reusing
+  what it already claimed rather than starting over each time. An outage is
+  reported once when it begins and once when it ends, instead of every fifteen
+  seconds for as long as the network is away.
+
+
+- **Deleting a model now holds the model until the deletion is finished.**
+  Removing a model is not one step — its record goes first and its files
+  afterwards — and in between it looked to the rest of Gropius like a model that
+  had never been there. A download or a request arriving in that gap started
+  writing into, or loading from, a directory that was being carried away: the
+  model could come back as "ready" with most of its files gone, or a model
+  server could answer requests from files nothing on this Mac lists any more. A
+  download or a second delete asked for during a removal is now refused with a
+  conflict until the removal has finished, and a load is refused for the same
+  reason.
+
+- **Saving settings while a model is downloading no longer changes that
+  download's access token underneath it.** The token was read and written
+  without any synchronisation, and a download that started under one token could
+  find itself using another halfway through a repo — turning the second half of
+  a gated download into a run of refusals. A download now runs, from its file
+  listing to its last file, under the token that was in force when it started;
+  a saved token applies to whatever starts next.
+
+- **A download asked for while Gropius is shutting down is refused rather than
+  abandoned.** Shutdown cancels the downloads it can see and then waits for
+  them, and one accepted after that point was left writing files nothing was
+  waiting for. The control panel is told the server is unavailable, not that
+  the model is in conflict: it is the server that is going away, and asking
+  about a different model would not help.
+
+- **A model whose first registry record cannot be written no longer leaves a
+  pending delete waiting for ever.** The delete waits for the download to stop
+  touching the files; when the download never started, nothing ever told it so,
+  and the request that asked for the deletion hung for the life of the process.
+  In shared-cache mode, where another account owns the index file, a failed
+  registry write is routine rather than a disk-full hypothetical.
 
 ## [0.4.0] - 2026-09-08
 

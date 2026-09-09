@@ -1,12 +1,15 @@
 // GropiusChat — a small native macOS client for a Gropius MLX server.
 //
-// It talks to the OpenAI-compatible endpoint another Mac exposes with Gropius:
-// GET /v1/models to list what is available, POST /v1/chat/completions (streaming)
-// to chat. Conversations are kept in a toggleable sidebar and persisted to disk.
+// It talks to the OpenAI-compatible endpoint a Mac exposes with Gropius — this
+// one or another on the network: GET /v1/models to list what is available, POST
+// /v1/chat/completions (streaming) to chat. Servers on the local network are
+// found over Bonjour rather than typed in. Conversations are kept in a
+// toggleable sidebar and persisted to disk.
 //
 // Built as a single-file SwiftUI app so it compiles with swiftc and packages
 // into a .app without an Xcode project. See build.sh.
 
+import Network
 import SwiftUI
 import Security
 
@@ -99,12 +102,298 @@ private struct StreamChunk: Decodable {
     let choices: [Choice]
 }
 
+// MARK: - Local network discovery
+
+/// The mDNS service type a Gropius server advertises itself on.
+///
+/// It has to match the server's own (internal/discovery), and it is declared a
+/// second time in Info.plist's NSBonjourServices — macOS Local Network Privacy
+/// answers a browse for an undeclared type with an empty result set rather than
+/// an error, so an omission there looks exactly like "no servers on this
+/// network". A test in the server's suite holds all three to one value.
+let gropiusServiceType = "_gropius._tcp"
+
+/// One Gropius server seen on the local network.
+///
+/// Everything here comes out of the browse itself: the service instance name
+/// and the TXT record the server publishes. Nothing has been resolved — a
+/// service name is not an address — because resolving costs an mDNS round trip
+/// per server and only the one the user picks is worth spending it on.
+struct DiscoveredServer: Identifiable, Equatable {
+    /// The service instance name, e.g. "Gropius (alices-mac)".
+    let name: String
+    /// The service type and domain exactly as browsed, kept so the resolver can
+    /// ask for this service back rather than rebuild the triple from constants.
+    let type: String
+    let domain: String
+    /// TXT "api": the dialect the endpoint speaks. This client speaks "openai".
+    let api: String
+    /// TXT "path": the base path the API is mounted under, e.g. "/v1".
+    let path: String
+    /// TXT "auth": "bearer" when the server requires an API key, "none" when it
+    /// does not, "" when the record did not say.
+    let auth: String
+    /// TXT "models": how many models the server can serve, nil when unstated.
+    let models: Int?
+
+    var id: String { "\(name)|\(type)|\(domain)" }
+    var authRequired: Bool { auth == "bearer" }
+    var authStated: Bool { auth == "bearer" || auth == "none" }
+    /// An empty api is treated as this client's dialect: an older server that
+    /// publishes no hint is still an OpenAI-compatible endpoint.
+    var speaksThisClientsAPI: Bool { api.isEmpty || api == "openai" }
+
+    /// The one-line description under the server's name in Settings. Every part
+    /// of it is a hint from the network, so it says what was advertised and
+    /// never asserts more than that.
+    var summary: String {
+        var parts: [String] = []
+        if authStated {
+            parts.append(authRequired ? "API key required" : "No API key needed")
+        } else {
+            parts.append("Does not say whether it needs an API key")
+        }
+        if let models {
+            parts.append("\(models) model\(models == 1 ? "" : "s")")
+        }
+        if !speaksThisClientsAPI {
+            parts.append("speaks the \(api) API, not openai")
+        }
+        return parts.joined(separator: " · ")
+    }
+
+    init?(_ result: NWBrowser.Result) {
+        guard case let .service(name, type, domain, _) = result.endpoint else { return nil }
+        self.name = name
+        self.type = type
+        self.domain = domain
+        var txt: [String: String] = [:]
+        if case let .bonjour(record) = result.metadata {
+            for key in ["api", "path", "auth", "models"] {
+                txt[key] = record[key]
+            }
+        }
+        api = txt["api"] ?? ""
+        path = txt["path"] ?? ""
+        auth = txt["auth"] ?? ""
+        models = txt["models"].flatMap(Int.init)
+    }
+}
+
+/// Browses the local network for Gropius servers.
+///
+/// It only ever lists what it finds. Connecting is the user's decision: a
+/// client that auto-connected to the first server it saw would send the stored
+/// bearer token to whichever machine on the network answered first.
+@MainActor
+final class ServerBrowser: ObservableObject {
+    enum Status: Equatable {
+        case stopped
+        case searching
+        /// The browse cannot run yet — most often local network access has not
+        /// been granted. The reason is shown, because the user is the only one
+        /// who can clear it.
+        case waiting(String)
+        case failed(String)
+    }
+
+    @Published private(set) var servers: [DiscoveredServer] = []
+    @Published private(set) var status: Status = .stopped
+
+    private var browser: NWBrowser?
+
+    func start() {
+        guard browser == nil else { return }
+        status = .searching
+        servers = []
+
+        let browser = NWBrowser(
+            for: .bonjourWithTXTRecord(type: gropiusServiceType, domain: nil),
+            using: NWParameters())
+        browser.stateUpdateHandler = { [weak self] state in
+            Task { @MainActor in self?.apply(state) }
+        }
+        // The handler is called with the complete current result set, not a
+        // delta, so replacing the list is also how a server that has left the
+        // network stops being offered.
+        browser.browseResultsChangedHandler = { [weak self] results, _ in
+            let found = results.compactMap(DiscoveredServer.init)
+            Task { @MainActor in self?.apply(found) }
+        }
+        self.browser = browser
+        browser.start(queue: .main)
+    }
+
+    func stop() {
+        browser?.cancel()
+        browser = nil
+        servers = []
+        status = .stopped
+    }
+
+    func restart() {
+        stop()
+        start()
+    }
+
+    private func apply(_ state: NWBrowser.State) {
+        switch state {
+        case .ready, .setup:
+            status = .searching
+        case .waiting(let error):
+            status = .waiting(error.localizedDescription)
+        case .failed(let error):
+            // A failed browser never recovers on its own; drop it so "Search
+            // again" can build a new one.
+            browser?.cancel()
+            browser = nil
+            status = .failed(error.localizedDescription)
+        case .cancelled:
+            status = .stopped
+        @unknown default:
+            status = .searching
+        }
+    }
+
+    private func apply(_ found: [DiscoveredServer]) {
+        // One server seen on two interfaces arrives as two results; they carry
+        // the same instance name, so collapse them.
+        var seen = Set<String>()
+        servers = found
+            .filter { seen.insert($0.id).inserted }
+            .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+    }
+}
+
+/// Turns a browsed service into an address that can be stored.
+///
+/// NWBrowser reports a service *name*; a URL needs a host and a port. Network
+/// framework exposes no resolver of its own — the documented route is to open
+/// an NWConnection and read the peer's IP back off the established path, which
+/// yields an address that stops working the next time the server's DHCP lease
+/// moves. NetService resolves to the host name the server publishes its address
+/// records under instead ("gropius-<host>.local", which internal/discovery
+/// picks precisely so it can own that name), and that keeps resolving after the
+/// address changes. So: browse with NWBrowser, resolve with NetService.
+final class ServiceResolver: NSObject, NetServiceDelegate {
+    enum Outcome {
+        case address(String)
+        case failure(String)
+    }
+
+    private let service: NetService
+    private var completion: ((Outcome) -> Void)?
+    /// Held until an outcome is delivered: nothing else refers to a resolver
+    /// once the button action that made it returns.
+    private var keepAlive: ServiceResolver?
+
+    init(server: DiscoveredServer) {
+        service = NetService(domain: Self.qualified(server.domain),
+                             type: Self.qualified(server.type),
+                             name: server.name)
+        super.init()
+        service.delegate = self
+    }
+
+    /// NetService wants the wire form, with the trailing root dot.
+    private static func qualified(_ s: String) -> String {
+        s.hasSuffix(".") ? s : s + "."
+    }
+
+    /// Resolves, then calls completion exactly once on the main queue. The
+    /// timeout is part of the contract: NetService reports a service that has
+    /// left the network by failing to resolve it, not by any other signal.
+    func resolve(timeout: TimeInterval = 5, completion: @escaping (Outcome) -> Void) {
+        self.completion = completion
+        keepAlive = self
+        service.resolve(withTimeout: timeout)
+    }
+
+    private func deliver(_ outcome: Outcome) {
+        service.stop()
+        let done = completion
+        completion = nil
+        // keepAlive is this object's only strong reference by the time a
+        // delegate callback runs, so it is released in the dispatched block,
+        // after the last use of self -- not here, mid-method.
+        DispatchQueue.main.async {
+            done?(outcome)
+            self.keepAlive = nil
+        }
+    }
+
+    func netServiceDidResolveAddress(_ sender: NetService) {
+        var host = sender.hostName ?? ""
+        while host.hasSuffix(".") { host.removeLast() } // fully qualified on the wire
+
+        // An SRV target is not a trusted string. mDNSResponder escapes only
+        // "\", "." and non-printables, so a name published as
+        // "host.local@evil.example" or "evil.example#" survives to here intact
+        // -- and interpolating either into a URL moves the host: the first
+        // makes "host.local" userinfo and evil.example the host, the second
+        // truncates at the fragment. Either sends the stored bearer token to a
+        // machine the user did not pick. So: a host name is accepted only as
+        // the letters, digits, dots and hyphens a host name is made of, and the
+        // URL is built field by field rather than by interpolation, so nothing
+        // in the host can reach across into another component.
+        //
+        // An IPv6 literal is refused rather than bracketed: internal/discovery
+        // publishes a name, so a literal here is not a shape this server
+        // produces, and typing the address by hand still works.
+        let hostCharacters = CharacterSet(charactersIn:
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-.")
+        guard !host.isEmpty, host.count <= 253,
+              host.unicodeScalars.allSatisfy(hostCharacters.contains),
+              (1...65535).contains(sender.port)
+        else {
+            deliver(.failure("That server reported an address this client will not use."))
+            return
+        }
+
+        var url = URLComponents()
+        url.scheme = "http"
+        url.host = host
+        url.port = sender.port
+        guard let address = url.string else {
+            deliver(.failure("That server did not report an address."))
+            return
+        }
+        deliver(.address(address))
+    }
+
+    func netService(_ sender: NetService, didNotResolve errorDict: [String: NSNumber]) {
+        deliver(.failure("Could not work out that server's address — it may have left the network."))
+    }
+
+    /// Abandons the resolve: the completion is never called. Used when the user
+    /// picks a different server, so a slow resolve for the one they moved off
+    /// cannot land afterwards and overwrite the newer pick.
+    func cancel() {
+        service.stop()
+        completion = nil
+        // Released asynchronously: keepAlive is the only strong reference, and
+        // the caller may be holding self no more firmly than this property does.
+        DispatchQueue.main.async { self.keepAlive = nil }
+    }
+}
+
 // MARK: - App model
 
 @MainActor
 final class AppModel: ObservableObject {
+    /// The base path the OpenAI-compatible API is mounted under. Hand-typed
+    /// addresses get this; a discovered server can name its own in TXT "path".
+    static let defaultAPIPath = "/v1"
+
     // Persisted connection settings.
-    @AppStorage("serverURL") var serverURL: String = "http://AlicesMac.local:11535"
+    //
+    // The default address is this Mac's own server. The documented order
+    // installs the server first and the client second on the same machine, so
+    // loopback is the one address that is right before the user has told the
+    // client anything — and it has to be an address that resolves, because the
+    // composer stays disabled until a server answers.
+    @AppStorage("serverURL") var serverURL: String = "http://localhost:11535"
+    @AppStorage("serverPath") var serverPath: String = AppModel.defaultAPIPath
     @AppStorage("selectedModel") var selectedModel: String = ""
 
     /// The bearer token. Held in memory as @Published (so SettingsView's
@@ -206,12 +495,49 @@ final class AppModel: ObservableObject {
         return s
     }
 
+    /// The base path, sanitized. serverPath can come from a TXT record, which
+    /// is unauthenticated network input: a value like "@example.net" appended
+    /// raw would turn "host:11535" into userinfo and hand the bearer token to
+    /// whatever host followed. So a path must be a plain, single-rooted path --
+    /// no "." or ".." segment, which would climb back out of it -- or it is not
+    /// used at all.
+    private var apiPath: String {
+        var p = serverPath.trimmingCharacters(in: .whitespaces)
+        while p.hasSuffix("/") { p.removeLast() }
+        if p.isEmpty { return AppModel.defaultAPIPath }
+        if !p.hasPrefix("/") { p = "/" + p }
+        let allowed = CharacterSet(charactersIn:
+            "/ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~")
+        let segments = p.dropFirst().split(separator: "/", omittingEmptySubsequences: false)
+        guard p.count <= 128,
+              !p.contains("//"),
+              p.unicodeScalars.allSatisfy(allowed.contains),
+              !segments.contains(where: { $0 == "." || $0 == ".." })
+        else { return AppModel.defaultAPIPath }
+        return p
+    }
+
+    /// Point the client at a hand-typed address. The path resets with it: a
+    /// typed address carries no TXT record, so a path left over from a
+    /// previously picked server would silently misroute every request.
+    func useTypedAddress(_ address: String) {
+        serverURL = address
+        serverPath = AppModel.defaultAPIPath
+    }
+
+    /// Point the client at a server found on the network, at the address its
+    /// service resolved to and under the base path it advertises.
+    func use(_ server: DiscoveredServer, resolvedAddress: String) {
+        serverURL = resolvedAddress
+        serverPath = server.path.isEmpty ? AppModel.defaultAPIPath : server.path
+    }
+
     private func request(_ path: String) -> URLRequest? {
         // Require an http(s) URL with a host before attaching the bearer token.
         // The server URL is free-text; without this guard a stray scheme
         // (file://, ftp://) or a hostless string would still get the token
         // attached to whatever URL resulted.
-        guard let url = URL(string: base + path),
+        guard let url = URL(string: base + apiPath + path),
               let scheme = url.scheme?.lowercased(),
               scheme == "http" || scheme == "https",
               let host = url.host, !host.isEmpty
@@ -226,7 +552,7 @@ final class AppModel: ObservableObject {
 
     /// Fetch the model list; doubles as the connection test.
     func connect() async {
-        guard var req = request("/v1/models") else {
+        guard var req = request("/models") else {
             status = "That server URL is not valid."
             return
         }
@@ -286,7 +612,7 @@ final class AppModel: ObservableObject {
         let assistantIndex = conversations[ci0].messages.count - 1
         guard assistantIndex >= 0 else { return }
 
-        guard var req = request("/v1/chat/completions") else { return }
+        guard var req = request("/chat/completions") else { return }
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
 
@@ -490,7 +816,7 @@ struct ChatDetail: View {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 10) {
                     if model.currentMessages.isEmpty {
-                        EmptyState(model: model)
+                        EmptyState(model: model, openSettings: { showSettings = true })
                     }
                     ForEach(model.currentMessages) { m in
                         MessageRow(message: m).id(m.id)
@@ -510,8 +836,29 @@ struct ChatDetail: View {
     }
 
     private var composer: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            composerRow
+            // A disabled text field explains nothing by itself. Say why it is
+            // disabled and where the fix is, rather than leaving the user to
+            // guess at a box that will not take a keystroke.
+            if !model.connected {
+                HStack(spacing: 5) {
+                    Image(systemName: "exclamationmark.circle")
+                    Text("Not connected, so messages can't be sent yet.")
+                    Button("Open Settings…") { showSettings = true }
+                        .buttonStyle(.link)
+                }
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            }
+        }
+        .padding(12)
+    }
+
+    private var composerRow: some View {
         HStack(alignment: .bottom, spacing: 8) {
-            TextField("Message…", text: $model.input, axis: .vertical)
+            TextField(model.connected ? "Message…" : "Connect to a server to start typing",
+                      text: $model.input, axis: .vertical)
                 .textFieldStyle(.plain)
                 .lineLimit(1...6)
                 .padding(8)
@@ -537,7 +884,6 @@ struct ChatDetail: View {
                 .help("Send")
             }
         }
-        .padding(12)
     }
 
     private var statusColor: Color {
@@ -591,6 +937,11 @@ struct StatusDot: View {
 
 struct EmptyState: View {
     @ObservedObject var model: AppModel
+    /// Opens the settings sheet. Without it this view could only *tell* a
+    /// first-run user to go and connect somewhere, in a window that offered
+    /// them nothing to click and a message box they could not type in.
+    var openSettings: () -> Void
+
     var body: some View {
         VStack(spacing: 14) {
             HStack(spacing: 4) {
@@ -598,13 +949,36 @@ struct EmptyState: View {
                 Rectangle().fill(.yellow).frame(width: 16, height: 26)
                 Rectangle().fill(.blue).frame(width: 16, height: 26)
             }
-            Text(model.selectedModel.isEmpty
-                 ? "Connect to a Gropius server to start."
-                 : "Ask \(model.selectedModel.split(separator: "/").last.map(String.init) ?? "the model") anything.")
-                .foregroundStyle(.secondary)
+            if model.connected {
+                Text(model.selectedModel.isEmpty
+                     ? "Connected, but this server has no models to serve yet."
+                     : "Ask \(model.selectedModel.split(separator: "/").last.map(String.init) ?? "the model") anything.")
+                    .foregroundStyle(.secondary)
+            } else {
+                disconnected
+            }
         }
         .frame(maxWidth: .infinity)
         .padding(.top, 60)
+    }
+
+    private var disconnected: some View {
+        VStack(spacing: 10) {
+            Text("Not connected to a Gropius server.")
+                .foregroundStyle(.secondary)
+            Text(model.status)
+                .font(.caption)
+                .foregroundStyle(.tertiary)
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: 420)
+            Button("Open Settings…") { openSettings() }
+                .glassButton(prominent: true)
+            Text("Settings holds the server's address, and lists the Gropius servers it can find on your network.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: 420)
+        }
     }
 }
 
@@ -695,18 +1069,35 @@ struct MessageRow: View {
 
 struct SettingsView: View {
     @ObservedObject var model: AppModel
+    @StateObject private var browser = ServerBrowser()
+    /// The server currently being resolved, and why the last attempt failed.
+    @State private var resolving: String?
+    @State private var resolveError: String?
+    /// The resolve in flight, and which one it is. Resolves take as long as the
+    /// network makes them take, so a second pick can be answered before the
+    /// first: the generation says whose answer is still wanted.
+    @State private var resolver: ServiceResolver?
+    @State private var resolveGeneration = 0
     @Environment(\.dismiss) private var dismiss
+
+    /// Typing in the address field is a hand-typed address, which resets the
+    /// base path — see AppModel.useTypedAddress.
+    private var typedAddress: Binding<String> {
+        Binding(get: { model.serverURL }, set: { model.useTypedAddress($0) })
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             Text("Server settings").font(.title3).bold()
             VStack(alignment: .leading, spacing: 4) {
                 Text("Server URL").font(.caption).foregroundStyle(.secondary)
-                TextField("http://AlicesMac.local:11535", text: $model.serverURL)
+                TextField("http://alices-mac.local:11535", text: typedAddress)
                     .textFieldStyle(.roundedBorder)
-                Text("The Gropius server's address — the Mac's .local name or LAN IP, port 11535.")
+                Text("The Gropius server's address — the Mac's .local name or LAN IP, port 11535. "
+                     + "On the Mac running the server, that is http://localhost:11535.")
                     .font(.caption2).foregroundStyle(.secondary)
             }
+            discovered
             VStack(alignment: .leading, spacing: 4) {
                 Text("API key (optional)").font(.caption).foregroundStyle(.secondary)
                 SecureField("Only if the server requires one", text: $model.apiKey)
@@ -725,6 +1116,118 @@ struct SettingsView: View {
             }
         }
         .padding(20)
-        .frame(width: 420)
+        .frame(width: 460)
+        .onAppear { browser.start() }
+        .onDisappear {
+            browser.stop()
+            resolver?.cancel()
+            resolver = nil
+            resolving = nil
+        }
+    }
+
+    // MARK: Servers on this network
+
+    /// The browse results. Picking one fills the address field in; it never
+    /// connects on its own, so the choice of which machine gets the API key
+    /// stays with the user.
+    private var discovered: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text("On your network").font(.caption).foregroundStyle(.secondary)
+                Spacer()
+                Button("Search again") {
+                    resolveError = nil
+                    browser.restart()
+                }
+                .buttonStyle(.link).font(.caption)
+            }
+            switch browser.status {
+            case .failed(let why):
+                note("Could not search the local network: \(why)", systemImage: "exclamationmark.triangle")
+            case .waiting(let why):
+                note("Waiting to search the local network — \(why)", systemImage: "clock")
+            case .stopped, .searching:
+                if browser.servers.isEmpty {
+                    HStack(spacing: 6) {
+                        ProgressView().controlSize(.small)
+                        Text("Looking for Gropius servers… if none appear, type the address above.")
+                            .font(.caption2).foregroundStyle(.secondary)
+                    }
+                } else {
+                    serverList
+                }
+            }
+            if let resolveError {
+                note(resolveError, systemImage: "exclamationmark.triangle")
+            }
+        }
+    }
+
+    private var serverList: some View {
+        ScrollView {
+            VStack(spacing: 0) {
+                ForEach(browser.servers) { server in
+                    Button { pick(server) } label: { row(server) }
+                        .buttonStyle(.plain)
+                    Divider()
+                }
+            }
+        }
+        // Bounded, so a network full of servers cannot push the buttons below
+        // off the sheet.
+        .frame(maxHeight: 130)
+        .background(RoundedRectangle(cornerRadius: 6).fill(.quaternary))
+    }
+
+    private func row(_ server: DiscoveredServer) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: server.authRequired ? "lock.fill" : "network")
+                .foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(server.name).lineLimit(1)
+                Text(server.summary).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+            }
+            Spacer()
+            if resolving == server.id { ProgressView().controlSize(.small) }
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
+        .contentShape(Rectangle())
+    }
+
+    private func note(_ text: String, systemImage: String) -> some View {
+        Label(text, systemImage: systemImage)
+            .font(.caption2)
+            .foregroundStyle(.secondary)
+    }
+
+    /// Resolve the picked service to an address and put it in the field. The
+    /// resolve is where a server that has left the network is found out: the
+    /// browse can still be listing a service whose machine has gone.
+    ///
+    /// Only the newest pick may write the field. Picking a slow server and then
+    /// a fast one would otherwise end with the slow one's address in the field,
+    /// several seconds after the user watched the fast one land there.
+    private func pick(_ server: DiscoveredServer) {
+        resolver?.cancel()
+        resolveError = nil
+        resolving = server.id
+        resolveGeneration += 1
+        let generation = resolveGeneration
+
+        let resolver = ServiceResolver(server: server)
+        self.resolver = resolver
+        resolver.resolve { outcome in
+            guard generation == resolveGeneration else { return }
+            resolving = nil
+            self.resolver = nil
+            switch outcome {
+            case .address(let address):
+                model.use(server, resolvedAddress: address)
+            case .failure(let why):
+                resolveError = "\(server.name): \(why)"
+            }
+        }
     }
 }

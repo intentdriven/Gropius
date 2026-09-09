@@ -58,8 +58,14 @@ needed the room waits out those seconds rather than starting a second server on
 top of the first. That wait is bounded: a server that will not go — one the
 system has stopped and then killed, and which is still there — leaves the
 request refused rather than held, and the panel says how much memory is being
-held that way and by how many servers. Until they go, the budget is that much
-smaller than it looks.
+held that way and by how many servers.
+
+That memory does not come back on its own. Gropius has already asked the server
+to stop and then killed it; there is nothing further it can do, and it stops
+waiting rather than watching for ever. It works around the loss — models still
+load and are swapped inside what is left — and the budget is simply that much
+smaller until Gropius is restarted, which is the remedy. The log names the
+server on the way out, so the next start can finish the job.
 
 ## Choosing a figure
 

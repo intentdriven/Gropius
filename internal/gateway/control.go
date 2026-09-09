@@ -114,25 +114,33 @@ func (c *Control) handleInstance(w http.ResponseWriter, r *http.Request) {
 //   - Origin allow-list: a cross-site POST from evil.com carries its origin. The
 //     real UI is same-origin (a loopback origin), so any other origin is refused.
 //     This blocks classic CSRF, which needs no rebinding.
+//
+// The three checks are fromThisMachine, which is where the rule lives: the
+// models list admits a keyless install's loopback client on exactly the same
+// terms, and two spellings of "came from this machine" would be two things to
+// keep right. Only the refusal message is the control plane's own.
 func loopbackOnly(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !isLoopback(r.RemoteAddr) {
-			writeError(w, http.StatusForbidden,
-				"the Gropius control panel is only reachable from the computer it runs on")
-			return
-		}
-		if !isLoopbackHost(r.Host) {
-			writeError(w, http.StatusForbidden,
-				"unrecognized Host header — the control panel only answers to localhost")
-			return
-		}
-		if origin := r.Header.Get("Origin"); origin != "" && !isLoopbackOrigin(origin) {
-			writeError(w, http.StatusForbidden,
-				"cross-origin request to the control panel refused")
+		if !fromThisMachine(r) {
+			writeError(w, http.StatusForbidden, loopbackRefusal(r))
 			return
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// loopbackRefusal says which of fromThisMachine's checks refused r, so the
+// operator reading a 403 learns what to change. Evaluated only on the refusal
+// path, and it enumerates the same checks in the same order.
+func loopbackRefusal(r *http.Request) string {
+	switch {
+	case !isLoopback(r.RemoteAddr):
+		return "the Gropius control panel is only reachable from the computer it runs on"
+	case !isLoopbackHost(r.Host):
+		return "unrecognized Host header — the control panel only answers to localhost"
+	default:
+		return "cross-origin request to the control panel refused"
+	}
 }
 
 // isLoopbackHost reports whether an HTTP Host header (with or without a port)
@@ -255,9 +263,10 @@ type Machine struct {
 // is fed exclusively by the stream. One builder, one truth.
 func (c *Control) snapshot() State {
 	cfg := c.App.Config()
+	residency := c.App.Pool.Residency()
 	st := State{
 		Models:    c.App.Registry.List(),
-		Resident:  c.App.Pool.Resident(),
+		Resident:  residency.Models,
 		Setup:     c.App.Provisioner.Status(),
 		Config:    redactConfig(cfg),
 		Pinned:    c.App.Pool.Pinned(),
@@ -266,7 +275,9 @@ func (c *Control) snapshot() State {
 		Hostname:  hostname(),
 	}
 	budget := c.App.Pool.MemoryBudget()
-	exiting, stuck := c.App.Pool.Draining()
+	// One reading, not two: a stop landing between a models list and a tally
+	// read would count the same server in both, or in neither.
+	exiting, stuck := residency.ExitingBytes, residency.StuckServers
 	resident := residentCharge(st.Resident) + exiting
 	st.Machine = Machine{
 		TotalRAM:        c.App.MachineRAM(),
@@ -332,8 +343,6 @@ func residentCharge(resident []runtime.Resident) int64 {
 func (c *Control) handleStats(w http.ResponseWriter, r *http.Request) {
 	view := c.App.Stats.View()
 	if view.Enabled {
-		status := c.App.StatsStore.Status()
-		view.Store = &status
 		// And what is left of the days the store no longer holds in detail. A
 		// month whose records retention has dropped still has its per-model
 		// totals, and the view says so rather than showing a gap where the
@@ -345,19 +354,35 @@ func (c *Control) handleStats(w http.ResponseWriter, r *http.Request) {
 				view.Summaries = append(view.Summaries, d)
 				return true
 			}); err != nil {
-			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			switch {
+			case errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded):
 				// The reader went away. There is no socket left to answer, and
 				// logging it at Warn would let anyone who can open this
 				// endpoint write an unbounded run of failure lines into the
 				// operator's log.
 				c.App.Log.Debug("a reading of the request statistics summary was abandoned", "err", err)
 				return
+			case errors.Is(err, stats.ErrFlushTimedOut):
+				// A store that has stopped answering rather than one that is
+				// broken. This endpoint is what the panel polls, so it is
+				// answered rather than refused — the live figures are in
+				// memory and are worth showing — and the store status below
+				// carries Stalled, which is what the panel says it out loud
+				// from. Debug, not Warn: the store logs the spell once, and a
+				// line per poll would be an unbounded run of them.
+				c.App.Log.Debug("the request statistics summary was read without a flush the writer answered", "err", err)
+			default:
+				// Logged, not returned: the live figures are worth showing even
+				// when the summary cannot be read, and the reason names the store's
+				// directory, which the control plane must not publish.
+				c.App.Log.Warn("the request statistics summary could not be read", "err", err)
 			}
-			// Logged, not returned: the live figures are worth showing even
-			// when the summary cannot be read, and the reason names the store's
-			// directory, which the control plane must not publish.
-			c.App.Log.Warn("the request statistics summary could not be read", "err", err)
 		}
+		// After the reading, not before it: the figures the panel is handed
+		// have to describe the reading it was handed them with — the lines it
+		// could not use, and a writer it waited on and gave up.
+		status := c.App.StatsStore.Status()
+		view.Store = &status
 	}
 	writeJSON(w, http.StatusOK, view)
 }
@@ -927,14 +952,21 @@ func (c *Control) handleDelete(w http.ResponseWriter, r *http.Request) {
 }
 
 // modelErrorStatus maps a model-action error to the right HTTP status:
-// a malformed id is the caller's mistake (400), an absent model is 404, and a
-// genuine conflict (already downloading, or busy serving a request) is 409.
+// a malformed id is the caller's mistake (400), an absent model is 404, a
+// server that is going away is 503, and a genuine conflict (already
+// downloading, being deleted, or busy serving a request) is 409.
 func modelErrorStatus(err error) int {
 	switch {
 	case errors.Is(err, app.ErrInvalidRepoID):
 		return http.StatusBadRequest
 	case errors.Is(err, registry.ErrNotFound):
 		return http.StatusNotFound
+	case errors.Is(err, app.ErrShuttingDown):
+		// Named rather than left to the default arm: a conflict says the state
+		// of this model is the problem and asking again about a different one
+		// would work, and neither is true here. The server is stopping, and
+		// 503 is what says so.
+		return http.StatusServiceUnavailable
 	default:
 		return http.StatusConflict
 	}

@@ -49,23 +49,13 @@ func TestTheStatisticsSwitchDoesNotReachTheRuntime(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	err = filepath.WalkDir(repoRoot, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if d.IsDir() {
-			// A git worktree checked out under a dot-directory holds a whole
-			// second copy of the tree; scanning it would fail this test for
-			// somebody else's branch.
-			if path != repoRoot && strings.HasPrefix(d.Name(), ".") {
-				return fs.SkipDir
-			}
-			switch d.Name() {
-			case "bin", "dist", "client", "build", "docs", "site-src":
-				return fs.SkipDir
-			}
-			return nil
-		}
+	// walkRepoFiles owns the skip rule — including the dot-directory rule this
+	// scan used to carry itself, which keeps a git worktree checked out under
+	// .claude/ from being scanned as if it were this checkout. The rest is this
+	// scan's own subject: prose about the Statistics view is not a read of the
+	// switch, so the surfaces that only describe it are left out.
+	subject := walkOptions{AlsoSkip: []string{"client", "build", "docs", "site-src"}}
+	walkRepoFiles(t, repoRoot, subject, func(path string, d fs.DirEntry) error {
 		name := d.Name()
 		if !strings.HasSuffix(name, ".go") && !strings.HasSuffix(name, ".js") && !strings.HasSuffix(name, ".html") {
 			return nil
@@ -97,9 +87,6 @@ func TestTheStatisticsSwitchDoesNotReachTheRuntime(t *testing.T) {
 		}
 		return nil
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 }
 
 // The other half of the same rule, from the launcher's side: a model server is
