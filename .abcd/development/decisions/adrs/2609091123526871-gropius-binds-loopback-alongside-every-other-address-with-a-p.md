@@ -219,23 +219,43 @@ the form owns `bind_mode` and posts it explicitly; a body that omits the field
 preserves what is stored. A save is never refused over a field the operator did
 not touch.
 
-### 7. `ExposedToLAN` answers from the operator's choice, never from the interfaces
+### 7. What is exposed is what was acquired, and the key follows it
 
-Under `bind_mode: "private-network"`, `ExposedToLAN` is true unconditionally.
+Everything that decides how open this server is asks the **bind plan**: does
+this bind answer anywhere a machine other than this one can reach? The key
+requirement, the panel's keyless warning, Bonjour and the endpoint list all read
+that one answer, so they cannot disagree.
 
-It may not be otherwise. `ExposedToLAN` is read by the generate-a-key-or-lock-
-down branch, the eviction-grace key requirement, the panel's warning and
-Bonjour; making any of them ask whether a private-network interface exists would
-put an enforcement decision on another process's state, which is rule 2 of
-adr-2609081118587999 and is not what its amendment opened. The amendment opened
-one thing: which address the mode binds.
+The order is part of the decision. The sockets are acquired **first**, the key
+is settled against what was acquired **second**, and only then is anything
+mounted and served: `app.New` and the gateway are constructed after that line in
+`cmd/gropius`, so no request is ever answered under an empty key. A bind that
+reaches other machines and cannot be given a persisted key is narrowed by
+**closing** the second socket — not by leaving it open and reporting it as shut.
+A key held only in memory would vanish at the next start and reopen the
+endpoint, which is why the exposure goes rather than the key (iss-1, unchanged
+in substance and only in what it reads).
 
-The cost is stated rather than hidden. On a Mac with no private network the mode
-serves loopback only and Gropius still requires an API key for it, and still
-says the server binds a LAN address. That errs closed — a key on a server
-nothing off this Mac can reach — and the panel says which of the two happened,
-so the operator is not left to reconcile them. The alternative is in the section
-below.
+What follows from asking the sockets: a private-network mode that found no
+address to bind serves this Mac and nothing else, and needs no key. A specific
+address that has gone away is the same case. A mode that *did* acquire its
+address takes the iss-1 path exactly as a wildcard bind does — generate,
+persist, announce — because that is a server other machines reach with no key.
+
+This does not reopen rule 2 of adr-2609081118587999. The plan's addresses were
+resolved under that ADR's amendment, and what is asked of the plan here is
+whether the sockets this process holds reach anywhere else — a fact about our
+own listeners, not an inference about another process's state. Nothing consults
+the classifier to decide.
+
+`config.ExposedToLAN` stays, and stays honest about what it is: the answer about
+a *stored configuration*. Its one remaining reader is `Validate`'s
+eviction-grace rule, which runs at a save and at a load, where no socket exists
+and nothing can say what a mode would bind. There the private-network mode
+counts as exposed, deliberately: "might serve network callers" is the strongest
+thing a stored configuration can be asked, erring closed costs a key on a
+feature that is off by default, and erring open costs the queue that rule
+protects.
 
 **A second cost, and it is the one that widens rather than tightens.** Every
 bind now holds loopback, and the gateway exempts loopback from the bearer check
@@ -346,15 +366,19 @@ failure this repository spent 2026-09-08 correcting.
 - **Acquire the second listener first, and loopback after.** Rejected: the
   contention point would then differ per mode, which is the singleton fault
   measured above, and the probe would have no guaranteed target.
-- **`ExposedToLAN` reading the acquired listener set** rather than the
-  configuration. Tempting, and arguably legal — the sockets this process holds
-  are state Gropius owns end to end, not an inference about another process —
-  and it would remove the needless key on a mode that fell back to loopback.
-  Rejected for now on sequencing and blast radius: the key decision runs before
-  acquisition today, so this reorders a trust-boundary path that iss-1 settled,
-  to remove a warning rather than a fault. It stays available, and it is the
-  first thing to reconsider if the false exposure warning proves to be what
-  operators complain about.
+- **Reading exposure from the configuration rather than from the acquired
+  sockets** — `ExposedToLAN` true whatever `Host` says whenever the
+  private-network mode is chosen, so that a mode which might bind a network
+  address can never be read as closed. This record proposed it, on the ground
+  that it errs closed and costs only a key nobody needed. **The maintainer
+  declined it on 2026-09-09**: a key demanded of a server that is serving this
+  Mac and nothing else is friction with no exposure behind it — there is no
+  network caller to defend against, and a loopback connection is exempt from the
+  bearer check in any case — and an operator who meets that friction learns that
+  Gropius's warnings are about settings rather than about their exposure. The
+  adopted rule 7 above reads the sockets instead, which required moving the key
+  decision after acquisition; the sequencing worry that had it rejected is
+  answered by the order that rule states, since nothing serves between the two.
 - **Leave Bonjour advertising and document the limit.** The spec calls this the
   honest and weakest answer. Rejected because the strong answer costs one
   condition, and because the advert is a disclosure to the excluded network
@@ -376,10 +400,12 @@ failure this repository spent 2026-09-08 correcting.
 - Two new packages exist, and the archtest rule set gains a named carve-out. The
   boundary is one resolver package producing one value; anything wider is a new
   decision under the amendment, not an extension of this one.
-- The private-network mode requires an API key even when it has fallen back to
-  loopback-only, and says the server binds a LAN address. Erring closed, and
-  visible in the panel; recorded above as the accepted cost of keeping
-  enforcement clear of the detection.
+- A key is required for what was acquired: a private-network mode that found no
+  address, and a specific address that has gone away, serve this Mac and are
+  asked for no key. The stored configuration is no longer what decides that, so
+  a save that narrows the bind does not take effect until the next start — which
+  is true of the bind itself and is said in the panel and in
+  `docs/bind-address.md`.
 - A mesh-VPN peer cannot discover this Mac over Bonjour in the private-network
   mode. It could not connect to what the advert named in any case; clients use
   an address or a name.

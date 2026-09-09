@@ -269,24 +269,58 @@ func TestBindModeIsItsOwnFieldWithOnlyTwoValues(t *testing.T) {
 	}
 }
 
-// ExposedToLAN answers from the operator's choice and never from the interface
-// list (adr-2609091123526871 rule 7). It is read by the
-// generate-a-key-or-lock-down branch, the eviction-grace key requirement, the
-// panel's warning and Bonjour; asking whether a private-network interface
-// exists would put every one of those on another process's state, which is
-// rule 2 of adr-2609081118587999 and is not what its amendment opened.
+// ExposedToLAN answers from the bind address and from nothing else.
 //
-// So the private-network mode is exposed whatever Host says, including when it
-// has fallen back to loopback because it found no address. That errs closed —
-// a key required for a server nothing off this Mac can reach — and the panel
-// says which of the two happened.
-func TestThePrivateNetworkModeIsExposedWhateverHostSays(t *testing.T) {
-	for _, host := range []string{"0.0.0.0", "127.0.0.1", "localhost", "[::1]"} {
+// It used to answer true for the private-network mode whatever Host said, so
+// that a mode which might bind a network address could never be read as
+// closed. The maintainer declined that on 2026-09-09: a server that fell back
+// to this Mac because it found no address to bind is not exposed, and
+// demanding an API key for it is friction with no exposure behind it. What is
+// exposed is decided from the addresses actually acquired, which is a question
+// about sockets and is asked of the bind plan (adr-2609091123526871 rule 7).
+//
+// This function is left as the answer about a stored configuration, which is
+// all a configuration can answer.
+func TestExposedToLANAnswersFromTheBindAddressAndNotFromTheMode(t *testing.T) {
+	for _, host := range []string{"127.0.0.1", "localhost", "[::1]"} {
+		c := Default()
+		c.Host = host
+		c.BindMode = BindModePrivateNetwork
+		if c.ExposedToLAN() {
+			t.Errorf("Host %q in the private-network mode: ExposedToLAN() = true — the mode may bind nothing at all, and what it bound is a question about sockets", host)
+		}
+	}
+	for _, host := range []string{"0.0.0.0", "192.0.2.5"} {
 		c := Default()
 		c.Host = host
 		c.BindMode = BindModePrivateNetwork
 		if !c.ExposedToLAN() {
-			t.Errorf("Host %q in the private-network mode: ExposedToLAN() = false — the mode binds an address other machines reach, so every control that turns on exposure must arm", host)
+			t.Errorf("Host %q: ExposedToLAN() = false", host)
 		}
+	}
+}
+
+// Validate is the one place that keeps the conservative reading, and it has to:
+// it runs on a stored configuration, at a save and at a load, where no socket
+// exists and nothing can say what the mode would bind.
+//
+// The rule it guards is the eviction-grace one. A parked waiter is a
+// denial-of-service lever that can only be shared out per API key, so a
+// configuration that might serve network callers needs one — and "might" is
+// the strongest thing a stored configuration can be asked. Erring closed here
+// costs a key on a feature that is off by default; erring open costs the
+// queue.
+func TestValidateTreatsThePrivateModeAsExposedForTheGraceRule(t *testing.T) {
+	c := Default()
+	c.Host = "127.0.0.1" // reads as closed on its own
+	c.BindMode = BindModePrivateNetwork
+	c.EvictionGrace = true
+	c.APIKey = ""
+	if err := c.Validate(); err == nil {
+		t.Error("Validate accepted eviction grace with no API key under the private-network mode — the mode can bind an address network callers reach, and a stored configuration cannot know whether it did")
+	}
+	c.APIKey = "a-key"
+	if err := c.Validate(); err != nil {
+		t.Errorf("Validate refused the same configuration with a key: %v", err)
 	}
 }

@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"log/slog"
 	"net"
 	"time"
 
@@ -115,6 +116,62 @@ func resolvedAddr(addr string) (*net.TCPAddr, bool) {
 	return a, true
 }
 
+// secureExposedBind is the fail-closed rule for a bind that reaches other
+// machines with no API key set (iss-1), asked of the addresses this process
+// ACQUIRED rather than of the ones its configuration asked for.
+//
+// A LAN-bound listener with no key is reachable, unauthenticated, by everyone
+// on the network, and a warning is not a control: the operator running
+// headless never reads it, and the window between first launch and setting a
+// key is exactly when the machine is undefended. So a key is generated,
+// persisted so it survives the restart, and announced loudly enough to be
+// used.
+//
+// What is new is what it does NOT do. A private-network mode that found no
+// address to bind serves this Mac and nothing else, and a key for that is
+// friction with no exposure behind it — nobody off this Mac can reach the
+// server, and a loopback connection is exempt from the bearer check in any
+// case. The maintainer declined the conservative reading on 2026-09-09 for
+// that reason, and adr-2609091123526871 rule 7 records the adopted one.
+//
+// A save that fails is fatal to the exposure, not to the process: the second
+// listener is CLOSED rather than left serving, because a key held only in
+// memory would vanish on the next start and reopen the endpoint. It runs after
+// acquisition and before anything is served, so no request is ever answered
+// under the empty key.
+func secureExposedBind(paths config.Paths, cfg *config.Config, lns []net.Listener, plan bind.Plan, log *slog.Logger) ([]net.Listener, bind.Plan) {
+	if !plan.ReachesOtherMachines() || cfg.APIKey != "" {
+		return lns, plan
+	}
+	lockDown := func(msg string, args ...any) ([]net.Listener, bind.Plan) {
+		log.Error(msg, args...)
+		cfg.APIKey = ""
+		return closeExtra(lns), plan.WithoutExtra(
+			"no API key could be saved for a bind other machines reach — serving this Mac and nothing else")
+	}
+	key, err := config.GenerateAPIKey()
+	if err != nil {
+		return lockDown("could not generate an API key for a bind other machines reach — narrowing to this Mac so the endpoint is not left open", "err", err)
+	}
+	cfg.APIKey = key
+	if err := config.Save(paths.Config, *cfg); err != nil {
+		return lockDown("could not save the generated API key — narrowing to this Mac so the endpoint is not left open", "path", paths.Config, "err", err)
+	}
+	log.Warn("SECURITY: this server answers on an address other machines reach, so an API key was generated and saved; clients must send it as \"Authorization: Bearer <key>\". Change or clear it in Settings.",
+		"api_key", key)
+	return lns, plan
+}
+
+// closeExtra drops every listener but the loopback one, which is always first.
+// Closed rather than merely unreported: an open socket serves whatever the
+// server is mounted on, whatever the plan says about it.
+func closeExtra(lns []net.Listener) []net.Listener {
+	for _, ln := range lns[1:] {
+		ln.Close()
+	}
+	return lns[:1]
+}
+
 // advertises reports whether this server announces itself over Bonjour.
 //
 // Three conditions, and the last two are about what the bind turned out to be
@@ -129,13 +186,13 @@ func resolvedAddr(addr string) (*net.TCPAddr, bool) {
 // state Gropius owns end to end, which is what keeps this out of
 // adr-2609081118587999 rule 2.
 func advertises(cfg config.Config, plan bind.Plan) bool {
-	if !cfg.Advertise || !cfg.ExposedToLAN() {
+	if !cfg.Advertise {
 		return false
 	}
 	if cfg.BindMode == config.BindModePrivateNetwork {
 		return false
 	}
-	return !plan.LoopbackOnly()
+	return plan.ReachesOtherMachines()
 }
 
 // serveAll starts the server on every listener and returns a function that

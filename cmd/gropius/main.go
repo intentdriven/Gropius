@@ -87,44 +87,6 @@ func main() {
 	}
 	warnDroppedSettings(log, start.Dropped)
 
-	// Fail closed on an exposed bind with no key. A LAN-bound listener with no
-	// API key is reachable, unauthenticated, by everyone on the network, and a
-	// warning is not a control: the operator running headless never reads it,
-	// and the window between first launch and setting a key is exactly when the
-	// machine is undefended. Generate a key, persist it so it survives the
-	// restart, and announce it loudly enough to be used.
-	//
-	// Done before app.New so the gateway never serves a request under the empty
-	// key. A save that fails is fatal to the exposure, not to the process: the
-	// bind drops to loopback rather than continuing open, because a key held
-	// only in memory would vanish on restart and reopen the endpoint.
-	if cfg.ExposedToLAN() && cfg.APIKey == "" {
-		lockDown := func(msg string, args ...any) {
-			log.Error(msg, args...)
-			cfg.APIKey = ""
-			cfg.Host = loopbackBind
-			// The mode is part of the bind, so locking the bind down drops it:
-			// leaving it set would go on resolving a private-network address
-			// and serving on it, which is the opposite of locked down
-			// (adr-2609091123526871 rule 6).
-			cfg.BindMode = config.BindModeHost
-			cfg.Advertise = false
-		}
-		key, err := config.GenerateAPIKey()
-		switch {
-		case err != nil:
-			lockDown("could not generate an API key for a LAN-exposed bind — starting locked down to loopback only", "err", err)
-		default:
-			cfg.APIKey = key
-			if err := config.Save(paths.Config, cfg); err != nil {
-				lockDown("could not save the generated API key — starting locked down to loopback only so the endpoint is not left open", "path", paths.Config, "err", err)
-				break
-			}
-			log.Warn("SECURITY: this server binds a LAN address, so an API key was generated and saved; clients must send it as \"Authorization: Bearer <key>\". Change or clear it in Settings.",
-				"api_key", key)
-		}
-	}
-
 	// Work out the addresses to acquire. A bind is a set of listeners rather
 	// than an address (adr-2609091123526871): loopback is in every one of them,
 	// so narrowing the bind never costs the operator the control panel they
@@ -149,6 +111,14 @@ func main() {
 		runClient(cfg, *headless, log)
 		return
 	}
+
+	// The order here is the decision (adr-2609091123526871 rule 7): the sockets
+	// are acquired, then the key is settled against what was actually acquired,
+	// and only then does anything serve. app.New and the gateway come after
+	// this line, so no request is ever answered under the empty key — and a
+	// bind that cannot be given a key is narrowed by closing the socket rather
+	// than by hoping nothing arrives on it.
+	lns, plan = secureExposedBind(paths, &cfg, lns, plan, log)
 	announceBind(log, cfg, plan)
 
 	if err := runServer(lns, plan, paths, cfg, *headless, log); err != nil {

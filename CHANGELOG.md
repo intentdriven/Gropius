@@ -87,8 +87,9 @@ GitHub release notes.
 - **A reference page for the bind address.**
   [docs/bind-address.md](docs/bind-address.md) is the table of what each choice
   binds and who can reach it, what `config.json` carries, what happens when a
-  choice cannot be honoured, and why an API key is required for every choice
-  but this Mac alone.
+  choice cannot be honoured, and when an API key is required — which follows
+  what the server answers on rather than what is stored, so a choice that
+  narrowed to this Mac is asked for none.
 
 - **A how-to for serving over a mesh VPN.**
   [docs/mesh-vpn.md](docs/mesh-vpn.md) takes the walk-through's "talk to it from

@@ -101,11 +101,18 @@ serving this Mac with your other settings kept.
 
 ## What an API key is required for
 
-Every choice but `127.0.0.1` is treated as exposed, and Gropius generates and
-saves a key rather than serving a network open. That includes the
-private-network choice on a Mac where it found no address to bind: the
-requirement follows the choice you made, not what the interfaces happen to
-hold, so that it can never be relaxed by a network going away.
+A key is required for what the server actually answers on. If the bind reaches
+any machine other than this one, Gropius generates and saves a key rather than
+serving a network open — and if it cannot save one, it drops that address and
+serves this Mac instead.
+
+So a choice that narrowed to this Mac needs no key: the private-network choice
+on a Mac where it found no address to bind, or a specific address this Mac no
+longer holds. Nobody off this Mac can reach either, and the panel says which
+happened.
+
+The key is settled after the addresses are taken and before anything is served,
+so there is no moment at which a network address answers without it.
 
 ## Where to go next
 

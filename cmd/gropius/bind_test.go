@@ -1,7 +1,10 @@
 package main
 
 import (
+	"io"
+	"log/slog"
 	"net"
+	"os"
 	"strconv"
 	"strings"
 	"testing"
@@ -213,11 +216,27 @@ func TestAnAddressOutsideTheBindRefusesTheConnection(t *testing.T) {
 	if other == "" {
 		t.Skip("this Mac holds no non-loopback IPv4 address, so there is nothing outside the bind to dial")
 	}
-	port := freePort(t)
-
-	narrow, _, _, err := acquireBind(bind.ForHost("127.0.0.1"), port, time.Second, func() portHolder { return holderNone })
-	if err != nil {
-		t.Fatal(err)
+	// A port nothing else in this test binary holds the wildcard on. freePort
+	// alone is not enough: another test acquiring a wildcard bind on the same
+	// port would answer this dial, and the refusal this test is about would
+	// read as a failure of the narrowing rather than as a collision.
+	port, narrow := 0, []net.Listener(nil)
+	for i := 0; i < 20 && narrow == nil; i++ {
+		p := freePort(t)
+		lns, _, _, err := acquireBind(bind.ForHost("127.0.0.1"), p, time.Second, func() portHolder { return holderNone })
+		if err != nil {
+			continue
+		}
+		probe, err := net.Listen("tcp", net.JoinHostPort("0.0.0.0", strconv.Itoa(p)))
+		if err != nil {
+			closeAll(lns) // somebody holds the wildcard here; try another port
+			continue
+		}
+		probe.Close()
+		port, narrow = p, lns
+	}
+	if narrow == nil {
+		t.Skip("could not find a port free on both loopback and the wildcard")
 	}
 	if conn, err := net.DialTimeout("tcp", net.JoinHostPort(other, strconv.Itoa(port)), time.Second); err == nil {
 		conn.Close()
@@ -351,4 +370,104 @@ func TestANameThatResolvesToLoopbackNarrowsAndSaysSo(t *testing.T) {
 	if el := time.Since(start); el > 2*time.Second {
 		t.Errorf("acquireBind took %s — it went round the contended-port path rather than recognising its own address", el)
 	}
+}
+
+// The key follows the sockets, not the settings (adr-2609091123526871 rule 7).
+//
+// A private-network mode that found no address serves this Mac and nothing
+// else, and a key for that is friction with no exposure behind it: nobody off
+// this Mac can reach the server, and a loopback connection is exempt from the
+// bearer check anyway. A bind that DID acquire an address takes the iss-1 path
+// unchanged — generate, persist, announce — because that is a server other
+// machines reach with no key.
+func TestTheKeyIsRequiredForWhatWasAcquiredAndNothingElse(t *testing.T) {
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	t.Run("a mode that fell back to this Mac needs no key", func(t *testing.T) {
+		paths := config.NewPaths(t.TempDir())
+		cfg := config.Default()
+		cfg.BindMode = config.BindModePrivateNetwork
+		cfg.APIKey = ""
+		lns, plan, _, err := acquireBind(bind.Private("", nil, "no address matched"), freePort(t), time.Second, func() portHolder { return holderNone })
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer closeAll(lns)
+
+		lns, plan = secureExposedBind(paths, &cfg, lns, plan, log)
+		if cfg.APIKey != "" {
+			t.Errorf("an API key was generated for a server serving this Mac only: %q is friction with no exposure behind it", cfg.APIKey)
+		}
+		if _, err := os.Stat(paths.Config); err == nil {
+			t.Error("config.json was written for a bind that needed no key")
+		}
+		if len(lns) != 1 || !plan.LoopbackOnly() {
+			t.Errorf("the bind changed: %d listeners, plan %+v", len(lns), plan)
+		}
+	})
+
+	t.Run("a bind other machines reach generates and persists one", func(t *testing.T) {
+		paths := config.NewPaths(t.TempDir())
+		cfg := config.Default()
+		cfg.Host = "0.0.0.0"
+		cfg.APIKey = ""
+		lns, plan, _, err := acquireBind(bind.ForHost("0.0.0.0"), freePort(t), time.Second, func() portHolder { return holderNone })
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer closeAll(lns)
+
+		lns, plan = secureExposedBind(paths, &cfg, lns, plan, log)
+		if cfg.APIKey == "" {
+			t.Fatal("no API key for a bind every machine on the network reaches — this is the window iss-1 closed")
+		}
+		if len(lns) != 2 || plan.LoopbackOnly() {
+			t.Errorf("the bind narrowed although the key was saved: %d listeners, plan %+v", len(lns), plan)
+		}
+		saved, _, err := config.Load(paths.Config)
+		if err != nil {
+			t.Fatalf("the generated key was not persisted: %v", err)
+		}
+		if saved.APIKey != cfg.APIKey {
+			t.Errorf("config.json holds %q, want the generated key — one held only in memory reopens the endpoint at the next start", saved.APIKey)
+		}
+	})
+
+	t.Run("a key that cannot be saved narrows the bind rather than serving open", func(t *testing.T) {
+		// A root that cannot be written to: the save fails, and a key held
+		// only in memory would vanish at the next start and leave the endpoint
+		// open, so the exposure goes instead of the key.
+		root := t.TempDir()
+		if err := os.Chmod(root, 0o500); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { os.Chmod(root, 0o700) })
+		paths := config.NewPaths(root)
+		cfg := config.Default()
+		cfg.Host = "0.0.0.0"
+		cfg.APIKey = ""
+		lns, plan, _, err := acquireBind(bind.ForHost("0.0.0.0"), freePort(t), time.Second, func() portHolder { return holderNone })
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer closeAll(lns)
+
+		lns, plan = secureExposedBind(paths, &cfg, lns, plan, log)
+		if cfg.APIKey != "" {
+			t.Errorf("APIKey = %q — a key that could not be saved is one the next start does not have", cfg.APIKey)
+		}
+		if len(lns) != 1 || !plan.LoopbackOnly() {
+			t.Fatalf("the bind stayed open with no key: %d listeners, plan %+v", len(lns), plan)
+		}
+		if plan.Refusal == "" {
+			t.Error("the bind narrowed with nothing said — the log line and the panel notice are both keyed on the refusal")
+		}
+		// The socket it dropped must be gone, not merely unreported.
+		port := lns[0].Addr().(*net.TCPAddr).Port
+		probe, err := net.Listen("tcp", net.JoinHostPort("0.0.0.0", strconv.Itoa(port)))
+		if err != nil {
+			t.Fatalf("the wide listener is still open after the lockdown: %v", err)
+		}
+		probe.Close()
+	})
 }

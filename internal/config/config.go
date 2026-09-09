@@ -959,7 +959,13 @@ func (c Config) Validate() error {
 	// to tell callers apart. Loopback-only installs are unaffected: there is no
 	// network caller to defend against, and the check turns on exposure rather
 	// than on the key alone.
-	if c.EvictionGrace && c.ExposedToLAN() && c.APIKey == "" {
+	// The private-network mode counts as exposed HERE and only here. This runs
+	// on a stored configuration — at a save, and at a load before any socket
+	// exists — so nothing can say what the mode would bind, and "might serve
+	// network callers" is the strongest thing that can be asked of it. Erring
+	// closed costs a key on a feature that is off by default; erring open
+	// costs the queue this rule protects.
+	if c.EvictionGrace && (c.ExposedToLAN() || c.BindMode == BindModePrivateNetwork) && c.APIKey == "" {
 		return errors.New("eviction grace needs an API key on a LAN-exposed server: without one the wait queue cannot be shared out between callers, and one client can hold up model loading for everyone")
 	}
 	if c.StatsMonths < 1 || c.StatsMonths > MaxStatsMonths {
@@ -1214,21 +1220,15 @@ func validHostLabel(label string) bool {
 // direction the errors have to run: a name resolves to whatever the resolver
 // says today, and a malformed value binds nothing at all, and neither is a
 // reason to stand down.
+//
+// What it does NOT answer is what the running server is exposed on. A bind is
+// a set of addresses now, the set can be narrower than the configuration asked
+// for, and the bind mode may name no address at all — so everything that
+// decides at startup or reports at runtime asks bind.Plan.ReachesOtherMachines
+// instead, which is a question about sockets (adr-2609091123526871 rule 7).
+// This is the answer about a stored configuration, which is what a stored
+// configuration can be asked, and Validate below is its remaining reader.
 func (c Config) ExposedToLAN() bool {
-	// The private-network mode binds an address other machines reach, so every
-	// control that turns on exposure arms — from the mode the operator chose,
-	// never from whether a private-network interface is present. Reading the
-	// interfaces here would put the bearer-token branch, the eviction-grace
-	// requirement, the panel's warning and Bonjour on another process's state,
-	// which adr-2609081118587999 rule 2 closes and its amendment did not open:
-	// the amendment opened which address the mode binds, and nothing else.
-	//
-	// The cost, stated rather than hidden: on a Mac with no private network
-	// the mode serves loopback only and an API key is still required for it.
-	// That errs closed, and the panel says which of the two happened.
-	if c.BindMode == BindModePrivateNetwork {
-		return true
-	}
 	bare, ok := unbracket(c.Host)
 	if !ok {
 		return true
