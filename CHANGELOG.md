@@ -105,6 +105,46 @@ GitHub release notes.
 
 ### Security
 
+- **A page in a browser can no longer reach the control panel blind.** The
+  panel refuses any request that did not come from this machine, and one of the
+  things it looked at was the `Origin` header a cross-site request carries. A
+  browser does not send that header on a fetch a page makes without reading the
+  answer — an `<img>` pointed at the panel's address, say — so a site the
+  operator visited could make the panel *do* things it could not then read
+  back: every listing, and every search of HuggingFace the panel offers. The
+  panel now also reads `Sec-Fetch-Site`, which the browser sends on that
+  request too and a page cannot forge: a request that says it came from
+  anywhere but the panel's own page is refused. **Nothing about a client that
+  is not a browser changes** — `curl`, an OpenAI client and an older browser
+  send no such header, and are admitted exactly as before, and **neither does
+  following a link**: opening the panel from a link on another page, a
+  bookmark, the menu bar or a typed address all still work, because a
+  navigation shows the answer to the person who asked for it rather than to the
+  page that asked. The panel cannot be put in a frame by a site, and a
+  navigation straight to an API address is refused like any other blind read.
+  The same rule now guards what `GET /v1/models` reports about which models are
+  loaded, because that listing is gated on the same "came from this machine"
+  test.
+
+- **An open server no longer tells the network how busy it is when it refuses
+  a request.** Asking for a model that is already at its request ceiling, or
+  one too large for the memory budget, came back with a message naming how many
+  requests that model was already handling, or the budget in bytes — which is a
+  fraction of this Mac's memory, and so says roughly how much it has. Any
+  client could induce either by saturating a model or asking for a large one.
+  Those are the same facts the models list withholds from an open server's
+  network clients, so the refusal now withholds them on the same rule: a client
+  on this Mac, and any client an API key admits, still gets the message that
+  says what is actually wrong; everyone else gets `cannot serve this model
+  right now`. A request naming a model that is still downloading is answered
+  the same way, since the models list an open server serves the network carries
+  ready models only — otherwise a client could have found out what this Mac was
+  fetching by guessing names at it. **Backing off is unaffected** — the status
+  code and every response header are the same for both, so a client that
+  retries on the status behaves exactly as it did. **And the operator keeps
+  what the client no longer gets:** the reason is written to this Mac's log,
+  once a minute per model, so a busy client cannot fill the log with it.
+
 - **Every command Gropius runs is now named by its full path.** Reading this
   Mac's Bonjour name, opening the control panel in a browser and copying the
   endpoint each started a small system command by bare name, so the one that

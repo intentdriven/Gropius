@@ -192,3 +192,35 @@ func TestListModelsStillReportsResidencyToAKeyedClient(t *testing.T) {
 		})
 	}
 }
+
+// The blind cross-origin GET the control plane now refuses is the same request
+// against this listing: a page anywhere can point <img src> or fetch() at the
+// loopback URL, and the browser sends no Origin at all on a no-cors
+// subresource. Only Sec-Fetch-Site says where it came from, and this listing
+// reads the same rule the control plane is gated on — so a page cannot be the
+// route by which the LAN learns what the listing withholds from it.
+func TestListModelsWithholdsResidencyFromACrossSiteFetchOnAKeylessInstall(t *testing.T) {
+	h := warmGateway(t, "")
+
+	for _, site := range []string{"cross-site", "same-site"} {
+		t.Run(site, func(t *testing.T) {
+			req := modelsRequest("127.0.0.1:52001", "127.0.0.1:11535", "")
+			req.Header.Set("Sec-Fetch-Site", site)
+			_, body := listModelsFor(t, h, req)
+			assertNoResidency(t, "a "+site+" fetch", body)
+		})
+	}
+
+	// And the two a genuine local client sends are untouched: the panel and a
+	// page the operator opened themselves are same-origin and none.
+	for _, site := range []string{"same-origin", "none"} {
+		t.Run(site, func(t *testing.T) {
+			req := modelsRequest("127.0.0.1:52001", "127.0.0.1:11535", "")
+			req.Header.Set("Sec-Fetch-Site", site)
+			entries, _ := listModelsFor(t, h, req)
+			if got := entryByID(t, entries, "org/warm")["state"]; got != "loaded" {
+				t.Errorf("state = %v for a %s fetch, want %q", got, site, "loaded")
+			}
+		})
+	}
+}
