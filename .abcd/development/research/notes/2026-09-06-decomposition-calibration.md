@@ -313,3 +313,18 @@ recording mode; recorded as a stub only, by the maintainer's instruction.
 Typed links: `builds_on` itd-2609091707499248 (held); inherits its hold.
 Verdict adopted: FILE-AS-IS as a stub, no interview, at the human's request.
 Grade: routing not tested (the human asked for a stub); recorded for the count.
+
+## 2026-09-09 — resources view (itd-2609091903463596)
+
+Proposal: a dashboard for server activity and resource utilisation (number of
+models, disk space, context window).
+
+| Part | Type | Home |
+| --- | --- | --- |
+| Server activity | shipped and planned elsewhere | `duplicates` itd-2609061521082551 and itd-2609091712141073 |
+| Resource utilisation: models, disk, budget vs resident, windows | capability | this intent |
+| What is on and off | planned elsewhere | `builds_on` itd-2609081718534201 |
+| Where it lives | mechanism | the spec; decided at interview: a block on the Models tab |
+
+Verdict adopted: SPLIT. Grade: routing survived; the design review moved the
+placement from "a tab" to "a block on the Models tab" and the human took it.
