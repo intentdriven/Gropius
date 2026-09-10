@@ -328,3 +328,23 @@ models, disk space, context window).
 
 Verdict adopted: SPLIT. Grade: routing survived; the design review moved the
 placement from "a tab" to "a block on the Models tab" and the human took it.
+
+## 2026-09-10 — an intuitive control panel for the server
+
+Proposal: an intuitive, state-of-the-art website to configure the Gropius
+server — read as the control panel, not the landing page, which the human
+confirmed.
+
+| Part | Type | Home |
+| --- | --- | --- |
+| A redesigned control panel: settings found by task, state shown first, live validation in the server's words | user-facing capability | this draft (itd-2609100519003748) |
+| Whether the panel may take a build step, a framework or an asset fetched from outside the Mac | trust-boundary rule and dependency sign-off | a decision before planning (DECISIONS.md, 2026-09-10); an ADR if adopted |
+| "Intuitive" as a standing stance | standing stance | the draft's press release; no principle |
+| Plumbing | none | — |
+
+Typed links: `refines` itd-2609081259493890, itd-2609081718534201,
+itd-2609091903463596. Reversal flagged against adr-2609061503319212 for an
+asset fetched from a CDN; the human did not confirm a reversal, so none is
+recorded and the question is held at the decision.
+
+Verdict adopted: SPLIT. Grade: routing survived as proposed.
