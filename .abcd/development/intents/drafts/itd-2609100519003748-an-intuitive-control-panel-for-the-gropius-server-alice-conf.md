@@ -36,7 +36,26 @@ An intuitive control panel for the Gropius server: Alice configures the server f
 
 ## Open Questions
 
-_None recorded yet._
+- **Whether the panel may take a build step, a UI framework, or any asset
+  fetched from outside the Mac.** Opened as a decision to take before this
+  draft is planned (DECISIONS.md, 2026-09-10), and it is two decisions in one.
+  It is a dependency decision: AGENTS.md requires explicit sign-off before any
+  new dependency, and the panel today is static vanilla files served from the
+  binary, with no build step and a test in `internal/ui` that binds `app.js`
+  to Go by lifting its functions into node. And it is a boundary decision: an
+  asset fetched from a CDN is a new outbound host, which the no-telemetry
+  decision refuses, and the page is served from a Mac that may have no
+  internet at all, so a page that needs one to render is a page that does not
+  render. The maintainer decides with both costs visible.
+- **What the redesign re-homes rather than rebuilds.** The resources block on
+  the Models tab (itd-2609091903463596) and the usage-measurement additions to
+  the Usage tab (itd-2609091712141073) land before this is planned; the
+  interview treats them as inputs the redesign reorganises, never as things
+  to build twice, and the three-surfaces sync test (itd-2609081259493890)
+  should exist first so a redesign cannot drop a control unnoticed.
+- Whether "intuitive" needs a written principle, or stays as this press
+  release's stance: state before settings, facts not warnings, nothing
+  interrupts the task.
 
 ## Audit Notes
 
