@@ -201,7 +201,7 @@ func runUpdate(env Env, args []string, ue UpdateEnv) int {
 		if r.KeptStaging != "" {
 			r.DestVersion = ""
 		}
-		finishUpdate(env, ue, &r)
+		finishUpdate(ue, &r)
 		renderUpdate(env.Term, r)
 		writeLine(env.Err, "Retry with: "+retryUpdate)
 		return ExitFailed
@@ -241,7 +241,7 @@ func runUpdate(env Env, args []string, ue UpdateEnv) int {
 
 	// ELEVEN: ask again, and report. The verdict is what was true when the
 	// command returned, not what was true before the swap.
-	finishUpdate(env, ue, &r)
+	finishUpdate(ue, &r)
 	renderUpdate(env.Term, r)
 	return ExitOK
 }
@@ -253,7 +253,7 @@ func runUpdate(env Env, args []string, ue UpdateEnv) int {
 // installed: a build with no version field, a control plane that did not
 // answer, and a holder that answered no challenge are three different things to
 // have found and three different sentences to read.
-func finishUpdate(env Env, ue UpdateEnv, r *updateReport) {
+func finishUpdate(ue UpdateEnv, r *updateReport) {
 	r.Holder = classifyPort(ue)
 	switch r.Holder {
 	case portOurs:
