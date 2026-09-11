@@ -3,6 +3,8 @@ package main
 import (
 	"sort"
 	"strings"
+
+	"github.com/intentdriven/Gropius/internal/lifecycle"
 )
 
 // This file is the whole of the mapping from a command line to "run the server,
@@ -119,7 +121,7 @@ func refuseUnknownArgs(args []string) string {
 	if _, known := verbs[args[0]]; known {
 		return ""
 	}
-	return "gropius: unknown argument " + quote(args[0]) + "\n" +
+	return "gropius: unknown argument " + lifecycle.Quote(args[0]) + "\n" +
 		"The verbs this build knows are: " + strings.Join(knownVerbs(), ", ") + ".\n" +
 		"Run gropius with no arguments to start the server."
 }
@@ -137,14 +139,8 @@ func refuseTrailingArgs(args []string) string {
 		return ""
 	}
 	if _, known := verbs[args[0]]; known {
-		return "gropius: " + quote(args[0]) + " is a verb, and a verb comes first: gropius " + args[0] + "\n" +
+		return "gropius: " + lifecycle.Quote(args[0]) + " is a verb, and a verb comes first: gropius " + args[0] + "\n" +
 			"Flags before it belong to the server, which is not what this command line asked for."
 	}
 	return refuseUnknownArgs(args)
-}
-
-// quote wraps a value for display without pulling in a formatter, and keeps the
-// output readable when the argument is empty or carries spaces.
-func quote(s string) string {
-	return "\"" + s + "\""
 }

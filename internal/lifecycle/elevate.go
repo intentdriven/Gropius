@@ -1,9 +1,11 @@
 package lifecycle
 
 import (
+	"context"
 	"fmt"
 	"os/exec"
 	"strings"
+	"time"
 )
 
 // The one elevation, and the two other system tools a lifecycle verb starts.
@@ -66,6 +68,18 @@ func grantFirewall(binary string) error { return elevateFirewall(firewallGrantSc
 // revokeFirewall removes a binary's entry from the macOS Application Firewall.
 func revokeFirewall(binary string) error { return elevateFirewall(firewallRemoveScript, binary) }
 
+// quitTimeout and launchTimeout bound the two system tools that are not the
+// panel. Neither waits on a person: `quit app` is answered by an application
+// that is running or by an error saying it is not, and `open` returns as soon
+// as Launch Services has taken the request. A tool that does not answer in this
+// long is one this verb should report rather than wait on — the install has a
+// person watching it, and a hang with no line printed is the failure mode the
+// whole foreground design exists to remove.
+const (
+	quitTimeout   = 30 * time.Second
+	launchTimeout = 30 * time.Second
+)
+
 // elevateFirewall is the ONLY place in this package that asks for
 // administrator rights. Both verbs reach it; a scan in internal/archtest holds
 // it to being one site.
@@ -73,6 +87,11 @@ func elevateFirewall(script, binary string) error {
 	if binary == "" {
 		return fmt.Errorf("this installation's own binary path is not known")
 	}
+	// NO TIMEOUT HERE, and that is deliberate. This call blocks while the panel
+	// is on screen, and what it is waiting for is a person finding an
+	// administrator, reading the reason and typing a password. A deadline would
+	// turn "Alice went to fetch Bob" into a failed install. The two calls below
+	// are bounded because neither waits on anybody.
 	cmd := exec.Command("/usr/bin/osascript",
 		"-e", "on run argv",
 		"-e", `set fw to "`+socketfilterfw+`"`,
@@ -116,30 +135,50 @@ func firewallRemoveCommand(binary, home string) string {
 // nothing is executing and the launch that follows starts the new binary rather
 // than activating the old process.
 //
+// It quits by APPLICATION NAME within this login session, which cannot be aimed
+// at the bundle being replaced: another account's copy is in another session and
+// is not reachable, and a copy of the same name running from somewhere else in
+// this session is what would answer instead.
+//
 // A quit request rather than a signal: the app is a menu-bar application, and
 // this is the message Launch Services already sends it. The name is a literal,
 // so nothing is interpolated into the script.
 func quitRunningCopy() error {
-	cmd := exec.Command("/usr/bin/osascript", "-e", `quit app "Gropius"`)
+	ctx, cancel := context.WithTimeout(context.Background(), quitTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "/usr/bin/osascript", "-e", `quit app "Gropius"`)
 	cmd.Stdin = nil
-	if out, err := cmd.CombinedOutput(); err != nil {
-		if detail := strings.TrimSpace(string(out)); detail != "" {
-			return fmt.Errorf("%s", detail)
-		}
-		return err
-	}
-	return nil
+	out, err := cmd.CombinedOutput()
+	return toolError(ctx, "/usr/bin/osascript", quitTimeout, out, err)
 }
 
 // launchBundle opens the installed application.
 func launchBundle(bundle string) error {
-	cmd := exec.Command("/usr/bin/open", bundle)
+	ctx, cancel := context.WithTimeout(context.Background(), launchTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "/usr/bin/open", bundle)
 	cmd.Stdin = nil
-	if out, err := cmd.CombinedOutput(); err != nil {
-		if detail := strings.TrimSpace(string(out)); detail != "" {
-			return fmt.Errorf("%s", detail)
-		}
-		return err
+	out, err := cmd.CombinedOutput()
+	return toolError(ctx, "/usr/bin/open", launchTimeout, out, err)
+}
+
+// toolError turns what a bounded system tool left behind into the sentence a
+// warning will carry: the deadline where it ran out, what the tool printed
+// where it said something, and the raw failure otherwise.
+//
+// The tools themselves are started at their own call sites rather than through
+// a shared runner, so the absolute path of each is a literal the pinning scans
+// can see (internal/archtest/pinned_subprocess_test.go and the lifecycle
+// allow-list beside it read exec call sites, not the values a helper is handed).
+func toolError(ctx context.Context, name string, timeout time.Duration, out []byte, err error) error {
+	if ctx.Err() != nil {
+		return fmt.Errorf("%s did not answer within %s", name, timeout)
 	}
-	return nil
+	if err == nil {
+		return nil
+	}
+	if detail := strings.TrimSpace(string(out)); detail != "" {
+		return fmt.Errorf("%s", detail)
+	}
+	return err
 }

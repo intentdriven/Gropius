@@ -49,7 +49,7 @@ func runCommandVerb(cmd commandLine, out, errOut io.Writer) int {
 		// Quietly printing the version anyway would tell somebody who typed
 		// `gropius version --json` that they had got what they asked for.
 		if len(cmd.Args) > 0 {
-			fmt.Fprintln(errOut, "gropius version: unexpected argument "+quote(cmd.Args[0]))
+			fmt.Fprintln(errOut, "gropius version: unexpected argument "+lifecycle.Quote(cmd.Args[0]))
 			return lifecycle.ExitUsage
 		}
 		fmt.Fprintln(out, "gropius "+version)

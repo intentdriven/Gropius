@@ -1,9 +1,12 @@
 package lifecycle
 
 import (
+	"context"
+	"errors"
 	"os/exec"
 	"strings"
 	"testing"
+	"time"
 )
 
 // The commands a person is told to paste into a root shell are quoted by this
@@ -32,6 +35,32 @@ func TestThePrintedRootCommandsQuoteThePathTheyCarry(t *testing.T) {
 		if parsed[2] != hostile {
 			t.Errorf("%q parses its path as %q, want %q", cmd, parsed[2], hostile)
 		}
+	}
+}
+
+// The two system tools that are not the panel are bounded, and a deadline that
+// runs out says so rather than surfacing as "signal: killed". The panel itself
+// is deliberately unbounded — what it waits for is a person finding an
+// administrator — and that asymmetry is the thing worth holding.
+func TestABoundedToolSaysWhenItRanOutOfTime(t *testing.T) {
+	expired, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+
+	got := toolError(expired, "/usr/bin/open", 30*time.Second, nil, errors.New("signal: killed"))
+	if got == nil || !strings.Contains(got.Error(), "did not answer within 30s") {
+		t.Errorf("a tool killed by its deadline reported %v, which does not say it ran out of time", got)
+	}
+
+	// What the tool printed is what a person can act on, so it wins over the
+	// exit status.
+	got = toolError(context.Background(), "/usr/bin/osascript", time.Second,
+		[]byte("  Application isn't running. (-600)\n"), errors.New("exit status 1"))
+	if got == nil || got.Error() != "Application isn't running. (-600)" {
+		t.Errorf("the failure = %v, want what the tool printed", got)
+	}
+
+	if got := toolError(context.Background(), "/usr/bin/open", time.Second, nil, nil); got != nil {
+		t.Errorf("a tool that worked reported %v", got)
 	}
 }
 

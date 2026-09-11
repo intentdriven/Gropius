@@ -133,7 +133,7 @@ func runUninstall(env Env, args []string, ue UninstallEnv) int {
 		return ExitUsage
 	}
 	if fs.NArg() > 0 {
-		writeLine(env.Err, "gropius uninstall: unexpected argument "+quote(fs.Arg(0)))
+		writeLine(env.Err, "gropius uninstall: unexpected argument "+Quote(fs.Arg(0)))
 		return ExitUsage
 	}
 

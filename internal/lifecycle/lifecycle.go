@@ -91,7 +91,7 @@ func runStatus(env Env, args []string, st StatusEnv) int {
 		return ExitUsage
 	}
 	if fs.NArg() > 0 {
-		writeLine(env.Err, "gropius status: unexpected argument "+quote(fs.Arg(0)))
+		writeLine(env.Err, "gropius status: unexpected argument "+Quote(fs.Arg(0)))
 		return ExitUsage
 	}
 
@@ -125,9 +125,14 @@ func writeJSON(w io.Writer, v any) error {
 
 func writeLine(w io.Writer, s string) { fmt.Fprintln(w, s) }
 
-// quote wraps a value for display and keeps it readable when it is empty or
+// Quote wraps a value for display and keeps it readable when it is empty or
 // carries spaces.
-func quote(s string) string { return "\"" + s + "\"" }
+//
+// Exported because cmd/gropius refuses command lines this package never sees —
+// an unknown verb, a verb after the server's flags — and it was spelling the
+// same two lines itself. One helper, so a refusal from the command and a
+// refusal from a verb quote a word the same way.
+func Quote(s string) string { return "\"" + s + "\"" }
 
 // RunDoctor is the doctor verb: the expensive checks, and an honest account of
 // the two states nobody can settle from here.
@@ -142,7 +147,7 @@ func runDoctor(env Env, args []string, d DoctorEnv, checks []Check) int {
 		return ExitUsage
 	}
 	if fs.NArg() > 0 {
-		writeLine(env.Err, "gropius doctor: unexpected argument "+quote(fs.Arg(0)))
+		writeLine(env.Err, "gropius doctor: unexpected argument "+Quote(fs.Arg(0)))
 		return ExitUsage
 	}
 

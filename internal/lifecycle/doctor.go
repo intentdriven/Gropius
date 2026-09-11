@@ -335,7 +335,7 @@ func checkFirewall(env DoctorEnv) Answer {
 		answer.Summary = "the firewall query could not be run, so nothing was observed about the entry for " + binary
 		return answer
 	}
-	answer.Summary = "the firewall query answered " + quote(strings.TrimSpace(out)) +
+	answer.Summary = "the firewall query answered " + Quote(strings.TrimSpace(out)) +
 		" for " + binary + "; that does not establish that a grant covers this build, because the query answers " +
 		"the same way for a path it has no entry for, and this build's code identity changes with every build"
 	return answer

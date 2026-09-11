@@ -150,7 +150,7 @@ func runInstall(env Env, args []string, ie InstallEnv) int {
 		return ExitUsage
 	}
 	if fs.NArg() > 0 {
-		writeLine(env.Err, "gropius install: unexpected argument "+quote(fs.Arg(0)))
+		writeLine(env.Err, "gropius install: unexpected argument "+Quote(fs.Arg(0)))
 		return ExitUsage
 	}
 	if *bundle != "" {
