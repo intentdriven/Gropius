@@ -35,5 +35,13 @@
     <!-- Reaching a peer over the LAN triggers macOS Local Network Privacy. -->
     <key>NSLocalNetworkUsageDescription</key>
     <string>Gropius Chat connects to a Gropius model server on your local network.</string>
+    <!-- The Bonjour service types the app may browse for. macOS answers a browse
+         for an undeclared type with an empty result set rather than an error, so
+         an omission here is indistinguishable from "no servers on this network".
+         This is the type the server advertises (internal/discovery). -->
+    <key>NSBonjourServices</key>
+    <array>
+        <string>_gropius._tcp</string>
+    </array>
 </dict>
 </plist>

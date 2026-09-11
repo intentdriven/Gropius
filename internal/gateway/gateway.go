@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net/http"
 	"os"
 	"strconv"
@@ -19,11 +20,27 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/intentdriven/Gropius/internal/capability"
 	"github.com/intentdriven/Gropius/internal/config"
 	"github.com/intentdriven/Gropius/internal/registry"
 	"github.com/intentdriven/Gropius/internal/runtime"
 	"github.com/intentdriven/Gropius/internal/stats"
 )
+
+// LoadingComment is the SSE comment line a streaming response carries, about
+// once a second, while the model it asked for is still being loaded.
+//
+// A colon starts a comment in the SSE format, so the signal rides the response
+// the client is already reading without changing its content type or its status
+// code, and a client that knows nothing about it skips the line as the format
+// requires. That is what lets it be added to a stream nobody has to opt into.
+//
+// NOTE: the emitter is a separate change and nothing writes this yet. It is
+// declared here, in the package that will send it, because the chat client
+// already watches for it and one of the two halves has to name the wire form
+// for the other to be held to — see the client pins in internal/archtest. When
+// the emitter lands it writes this constant rather than a literal of its own.
+const LoadingComment = ": loading"
 
 // Pool is the subset of runtime.Pool the gateway needs.
 type Pool interface {
@@ -69,6 +86,11 @@ type Gateway struct {
 	log    *slog.Logger
 	tr     http.RoundTripper
 	stats  *stats.Recorder
+	// refusalLog holds the line written when a client is refused without being
+	// told why, to one per model per minute. A refusal is client-induced, so
+	// the line it produces has to be rate-limited or the log is somewhere a
+	// stranger can write at the rate it can send requests.
+	refusalLog *logEvery
 }
 
 // New builds a Gateway.
@@ -94,12 +116,13 @@ func New(opts Options) *Gateway {
 		}
 	}
 	return &Gateway{
-		cfg:    cfgFn,
-		pool:   opts.Pool,
-		models: opts.Models,
-		log:    opts.Log,
-		tr:     opts.Transport,
-		stats:  opts.Stats,
+		cfg:        cfgFn,
+		pool:       opts.Pool,
+		models:     opts.Models,
+		log:        opts.Log,
+		tr:         opts.Transport,
+		stats:      opts.Stats,
+		refusalLog: newLogEvery(refusalLogEvery),
 	}
 }
 
@@ -179,6 +202,103 @@ func bearerToken(header string) string {
 	return ""
 }
 
+// fromThisMachine reports whether r originated from a client on this machine,
+// and is not a page somewhere else driving that client's browser.
+//
+// This is the one rule, and a bare RemoteAddr check is not it. A page the
+// victim visits runs in their browser, which connects from 127.0.0.1, so the
+// source address alone waves it through; two guards close what it cannot see.
+// A DNS-rebound page points a hostname it controls at 127.0.0.1, so the socket
+// is loopback and only the Host header names the attacker. A classic
+// cross-site request carries its Origin, and a genuine local client is either
+// same-origin on loopback or sends none at all.
+//
+// loopbackOnly gates the whole control plane on this. withAuth checks the same
+// two headers on its bearer-check exemption but cannot fold onto this function,
+// and the difference is deliberate rather than drift: a foreign Origin is a 403
+// there, while a foreign Host falls through to the bearer check so a
+// same-machine proxy that presents the key keeps working. Everything else that
+// treats a loopback connection as this machine's own operator answers here, so
+// the rule is stated once.
+//
+// The third guard is what closes the request the first two cannot see: a
+// no-cors subresource — <script src>, <img> — that a page anywhere points at
+// the loopback URL sends a loopback Host and no Origin at all, so the Origin
+// allow-list never runs and the request is executed blind. Sec-Fetch-Site is
+// the browser's own statement of where the request came from, sent on every
+// request including that one, and unforgeable from script. A value that is
+// neither this document's own origin nor a direct navigation is refused. The
+// header is treated as advisory when absent, because everything that is not a
+// browser — curl, an OpenAI client, an older browser — sends none, and this is
+// the only guard whose absence a non-browser client is expected to exhibit.
+//
+// Comparison is exact and lowercase, as the Fetch specification defines the
+// four values, so an unrecognized spelling fails closed.
+//
+// What that leaves, and the condition on it staying harmless: a browser old
+// enough to send no Sec-Fetch-Site at all still reaches these routes blind. It
+// is not a read primitive, because the gateway emits no
+// Access-Control-Allow-Origin (so the body is opaque to the page) and the JSON
+// is a syntax error if parsed as script. The day any CORS header is added to
+// these routes, that stops being true.
+func fromThisMachine(r *http.Request) bool {
+	return sameMachineConnection(r) && sameOriginFetch(r)
+}
+
+// sameMachineConnection is the first three guards without the fourth: the
+// socket, the Host and the Origin all name this machine.
+//
+// It is separate only because the control plane admits one request the fourth
+// guard would refuse — a person following a link to the panel — and that
+// exception is the control plane's own, not a hole in the rule. Nothing else
+// calls this; everything else wants fromThisMachine.
+func sameMachineConnection(r *http.Request) bool {
+	if !isLoopback(r.RemoteAddr) {
+		return false
+	}
+	if !isLoopbackHost(r.Host) {
+		return false
+	}
+	if origin := r.Header.Get("Origin"); origin != "" && !isLoopbackOrigin(origin) {
+		return false
+	}
+	return true
+}
+
+// sameOriginFetch reports whether r's Sec-Fetch-Site header, if it sent one,
+// says the request came from this server's own page or from no page at all.
+//
+// "same-site" is refused along with "cross-site": on loopback a site is the
+// bare host, so a page served from another port on localhost is same-site to
+// the browser and is not this server's panel.
+func sameOriginFetch(r *http.Request) bool {
+	switch r.Header.Get("Sec-Fetch-Site") {
+	case "", "same-origin", "none":
+		return true
+	default:
+		return false
+	}
+}
+
+// entitled reports whether r may be told what this machine is doing — which
+// models are resident, how busy they are, and the memory budget they are
+// measured against.
+//
+// It is one rule with two arms, and both are trust classes this server already
+// had. On a keyed install the condition is the install's, not the request's:
+// withAuth has already decided who may call at all, and a loopback client
+// exempt from the bearer check sees the same picture a keyed LAN client does.
+// On a keyless install the LAN is unauthenticated and is told nothing, while a
+// client on this Mac is the class the control panel already shows exactly
+// these facts to over the same loopback.
+//
+// The models list and the pool's refusals answer here rather than each
+// spelling the rule out, so a fact withheld from one is withheld from the
+// other. A third notion of entitlement would be a third thing to keep right.
+func (g *Gateway) entitled(r *http.Request) bool {
+	return g.admittedKeyed(r) || fromThisMachine(r)
+}
+
 // isLoopback reports whether a RemoteAddr is on this machine.
 func isLoopback(remoteAddr string) bool {
 	host := remoteAddr
@@ -202,25 +322,41 @@ func (g *Gateway) handleHealth(w http.ResponseWriter, r *http.Request) {
 // enumerates the HuggingFace cache directory rather than the loaded model (and
 // throws CacheNotFound when that directory is absent).
 func (g *Gateway) handleListModels(w http.ResponseWriter, r *http.Request) {
+	cfg := g.cfg()
 	ready := g.models.Ready()
-	// Residency is reported only on an install that has a key configured. The
-	// three-state value is not itself a secret — an unauthenticated client can
-	// already learn it by timing a one-token completion, and in doing so it
-	// changes residency, which reporting never does — but the in-flight count
-	// and the last-used time say who is busy and when, and an open server
-	// discloses neither. The condition is the install's, not the request's: a
-	// loopback client exempt from the bearer check on a keyed install sees the
-	// same picture the control panel already shows it. A nil map means no key
-	// and no projection, which an empty one would not.
+	// Residency is reported to a client the install has admitted on its key,
+	// and to any client on this machine. The three-state value is not itself a
+	// secret — an unauthenticated client can already learn it by timing a
+	// one-token completion, and in doing so it changes residency, which
+	// reporting never does — but the in-flight count and the last-used time say
+	// who is busy and when, and an open server discloses neither to the network.
+	// A nil map means no projection, which an empty one would not.
 	//
-	// This is withAuth's own admission bit, not a second authorization path:
-	// withAuth still decides who may call the listing at all. Reading the key
-	// again here would be a second reading of a live value, and a request
+	// The two admissions are the two trust classes this server already has, and
+	// neither is new here. On a keyed install the condition is the install's,
+	// not the request's: a loopback client exempt from the bearer check sees
+	// the same picture a keyed LAN client does. On a keyless install the LAN is
+	// unauthenticated, so it is told nothing — but a client on this Mac is the
+	// class the control panel already shows exactly these facts to, over the
+	// same loopback, so withholding them from a program the same person is
+	// running on the same machine protects nothing.
+	//
+	// admittedKeyed is withAuth's own admission bit, not a second authorization
+	// path: withAuth still decides who may call the listing at all. Reading the
+	// key again here would be a second reading of a live value, and a request
 	// admitted while no key was configured could then be served as if one had
 	// been.
+	//
+	// The loopback arm of entitled is fromThisMachine, not a bare source-address
+	// check. withAuth returns before its own Host and Origin guards when no key
+	// is configured, so on a keyless install nothing upstream has looked at
+	// either header: a DNS-rebound page would arrive from 127.0.0.1 carrying the
+	// attacker's Host and read exactly the activity this handler withholds from
+	// the LAN. The guards therefore have to be applied here, and they are the
+	// same ones — the same function — the control plane is gated on.
 	var residency map[string]runtime.Resident
 	var pinned map[string]bool
-	if g.admittedKeyed(r) {
+	if g.entitled(r) {
 		// Folded on the same rule as the residency join below. The pinned set
 		// is read separately from the residency snapshot because a pin is not
 		// a property of a loaded model: a pinned model the pool is not holding
@@ -243,6 +379,11 @@ func (g *Gateway) handleListModels(w http.ResponseWriter, r *http.Request) {
 			residency[config.FoldRepoID(res.RepoID)] = res
 		}
 	}
+
+	// One reading of the rule for the whole listing, so two entries in one
+	// answer can never be judged by two different rules because the operator
+	// saved between them.
+	chatRule := g.cfg().EffectiveChatRule()
 
 	data := make([]any, 0, len(ready))
 	for _, m := range ready {
@@ -267,6 +408,37 @@ func (g *Gateway) handleListModels(w http.ResponseWriter, r *http.Request) {
 			entry["context_length"] = m.ContextLength
 			entry["max_model_len"] = m.ContextLength
 		}
+		// And the window this Mac will actually serve, which is the figure a
+		// client should size its prompts to: the operator's setting, or the
+		// declared window when they have set none. A request estimated above
+		// it is refused, so publishing it is what lets a client stay inside
+		// the limit rather than discover it.
+		if served := cfg.ServedContext(m.RepoID, m.ContextLength); served > 0 {
+			entry["served_context"] = served
+		}
+		// What HuggingFace says this model is, in HuggingFace's own words, and
+		// what this server makes of them. The two tag fields are absent when
+		// the Hub said nothing — an empty string or an empty list would read as
+		// an answer — and `chat` is always present, because the whole value of
+		// the flag is telling a model that can hold a conversation from one
+		// that cannot, and an absent key would be read as an older Gropius that
+		// cannot say either way.
+		//
+		// All three go to every client, keyed or not, loopback or not. They say
+		// what a model IS, which is the same class of fact as its context
+		// length; the residency fields below say what this Mac is doing, which
+		// is the class an open server withholds.
+		//
+		// The flag decides nothing about what is served. Every model stays
+		// callable by name whatever the rule says of it: this is a hint for a
+		// picker, not a filter, and nothing on the completions path reads it.
+		if m.PipelineTag != "" {
+			entry["pipeline_tag"] = m.PipelineTag
+		}
+		if len(m.Tags) > 0 {
+			entry["tags"] = m.Tags
+		}
+		entry["chat"] = chatRule.Matches(m.PipelineTag, m.Tags)
 		if residency != nil {
 			addResidency(entry, residency[config.FoldRepoID(m.RepoID)], pinned[config.FoldRepoID(m.RepoID)])
 		}
@@ -331,6 +503,20 @@ const maxRequestBody = 32 << 20
 // at relayRewritingModel's json branch grows memory without bound, the same
 // hazard maxRequestBody exists to prevent on the request side.
 const maxResponseBody = 64 << 20
+
+// maxStreamLine caps one line of a streamed answer, which is the unit
+// streamRewriteSSE buffers before it can rewrite and relay it. A model server
+// that never emits a newline — hung mid-event, or writing something that is
+// not SSE at all — would otherwise grow that buffer without limit, the same
+// hazard the two caps above exist to prevent, on the third and last body the
+// gateway reads.
+//
+// Set to the whole-answer cap rather than to a figure of its own: one event of
+// a streamed answer is a fragment of the answer a non-streamed request returns
+// in one object, so a streamed line cannot legitimately be larger than
+// maxResponseBody, and anything the two caps share stays a single number to
+// change. A real chunk is a few hundred bytes.
+const maxStreamLine = maxResponseBody
 
 // bodyReadTimeout bounds how long a client may take to send its request body.
 // The server has no WriteTimeout (a generation legitimately streams for minutes),
@@ -400,11 +586,22 @@ func (g *Gateway) handleCompletions(w http.ResponseWriter, r *http.Request) {
 		// asked for: that name is the client's own text, of the client's own
 		// length, and the recorder is never handed either.
 		obs.failed(stats.ClassClientError)
-		writeError(w, http.StatusNotFound, err.Error())
+		writeError(w, http.StatusNotFound, notServedText(err, g.entitled(r)))
 		return
 	}
 	obs.resolved(model)
 	obs.streaming(streamRequested(payload))
+
+	// Refused before the pool is asked for anything. A request larger than the
+	// window this model is served at cannot be served whatever happens next,
+	// and acquiring first would load a model — evicting another to do it — for
+	// a request that is about to be turned away. Streaming and non-streaming
+	// take this line together, because the stream is not opened until below.
+	if msg := g.overServedContext(cfg, model, len(raw), payload); msg != "" {
+		obs.failed(stats.ClassClientError)
+		writeError(w, http.StatusBadRequest, msg)
+		return
+	}
 
 	up, release, err := g.pool.Acquire(r.Context(), model)
 	if err != nil {
@@ -431,11 +628,57 @@ func (g *Gateway) handleCompletions(w http.ResponseWriter, r *http.Request) {
 			// file locations, the venv interpreter path, os.PathError from the
 			// child process) rooted under the serving account's home directory.
 			// Log it server-side; the network response stays generic.
-			g.log.Error("model launch failed", "model", model, "err", err)
+			//
+			// Two lines, because the log is a file now and not only a terminal
+			// nobody is watching. That a model would not start is the event,
+			// and it is sparse; what the child process said is the figure, and
+			// it goes to the detailed level with the rest of them — an
+			// operator who has turned detailed on has asked for the paths.
+			g.log.Error("model launch failed", "model", model)
+			g.log.Debug("model launch failed", "model", model, "err", err)
 			writeError(w, http.StatusServiceUnavailable, "the model could not be started")
 			return
 		}
-		writeError(w, http.StatusServiceUnavailable, err.Error())
+		// What is left is the pool saying it will not serve this request now.
+		// Those texts are informative on purpose and describe this Mac, so
+		// they go only to a client this server owes an account of itself; see
+		// genericRefusal. The status code and the wait headers already set
+		// above are the same either way, so a client backing off is unaffected.
+		if g.entitled(r) {
+			writeError(w, http.StatusServiceUnavailable, err.Error())
+			return
+		}
+		// The operator keeps what the client no longer gets. Without this the
+		// only record of a refusal a LAN client cannot read is a class in the
+		// statistics, which does not say which model or why — and diagnosing
+		// "my clients are being refused" from the machine doing the refusing
+		// is the whole reason the message was informative in the first place.
+		// Rate-limited because the client sets the rate; see logEvery. One
+		// allow for both lines, not one each: allow consumes the interval, so
+		// asking twice would let the sparse line through and hold the detailed
+		// one back on the very refusal the operator turned detailed on for.
+		//
+		// Two lines, because what the operator needs at a glance and what they
+		// need while they are diagnosing are not the same thing. Sparse names
+		// the model, which of the pool's refusals it was, and that the client
+		// was not one this server owes an account of itself. The pool's own
+		// message is a figure — it names the resident memory budget in bytes,
+		// or how many requests are already in flight — and those are the very
+		// facts genericRefusal strips out of the answer, because the budget is
+		// a fraction of physical RAM and so says roughly how much memory this
+		// Mac has. They are the same facts whichever way they travel: a
+		// stranger who can drive a refusal must not be able to drive a detailed
+		// description of this Mac into a file at the rate it can send
+		// requests. An operator asks for them by name, by moving the level
+		// (itd-2609091412177263).
+		if g.refusalLog.allow(model) {
+			class := refusalClass(err)
+			g.log.Info("refused a request, and told the client only that it could not be served",
+				"model", model, "class", class, "client", "unentitled")
+			g.log.Debug("refused a request, and told the client only that it could not be served",
+				"model", model, "class", class, "client", "unentitled", "err", err)
+		}
+		writeError(w, http.StatusServiceUnavailable, genericRefusal)
 		return
 	}
 	defer release()
@@ -464,7 +707,7 @@ func (g *Gateway) handleCompletions(w http.ResponseWriter, r *http.Request) {
 	// (adr-2609061610102325). It happens here, on the body already in hand, so
 	// a streamed request takes exactly this path too and the body limit above
 	// is the only one there is. Nothing read is logged, kept or counted.
-	if r.URL.Path == chatCompletionsPath && cfg.PerModel[model].MergeSystemMessages {
+	if r.URL.Path == chatCompletionsPath && cfg.Models[model].MergeSystemMessages {
 		if mergeSystemMessagesInto(payload) == mergeRefused {
 			// The operator switched merging on for this model and is not
 			// getting it, which is worth saying once, here, rather than
@@ -555,7 +798,16 @@ func (g *Gateway) handleCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	copyResponseHeaders(w.Header(), resp.Header)
 	w.WriteHeader(resp.StatusCode)
-	obs.relayed(relayRewritingModel(w, resp, up.ModelArg, requested, relay))
+	out := relayRewritingModel(w, resp, up.ModelArg, requested, relay)
+	if out.oversizeLine {
+		// Once per answer, and only for the relay's own refusal: the status
+		// line has already gone out, so this is the only place the operator
+		// can be told why a stream stopped. Nothing of the line is logged —
+		// what it carries is the answer being generated.
+		g.log.Error("ended a streamed answer: the model server sent a line beyond the relay's limit",
+			"model", model, "limit", maxStreamLine)
+	}
+	obs.relayed(out)
 }
 
 // gropiusHeaders are the response headers Gropius writes itself, which an
@@ -804,8 +1056,17 @@ func streamRewriteSSE(w http.ResponseWriter, src io.Reader, modelArg, requested 
 	// not the stream it would have got.
 	dropBlank := false
 	for {
-		line, err := br.ReadBytes('\n')
-		// ReadBytes returns the bytes it did read alongside the error that
+		line, err := readBoundedLine(br, maxStreamLine)
+		if errors.Is(err, errLineTooLong) {
+			// Nothing of this line is relayed and nothing more is read. The
+			// answer stops here, which is what upstreamCut says; the caller
+			// logs the reason once and its deferred Close on the upstream body
+			// ends that connection rather than leaving it to drain.
+			out.upstreamCut = true
+			out.oversizeLine = true
+			return out
+		}
+		// readBoundedLine returns the bytes it did read alongside the error that
 		// stopped it, so a line and the failure that truncated it can arrive
 		// together. Every path through the body below therefore falls out to
 		// the one error check at the bottom rather than continuing the loop:
@@ -840,6 +1101,12 @@ func streamRewriteSSE(w http.ResponseWriter, src io.Reader, modelArg, requested 
 						return out
 					}
 					_ = rc.Flush()
+					// Written and flushed: if that was the terminal event, the
+					// client has the whole answer, whatever becomes of the two
+					// lines that follow it.
+					if isTerminalEvent(payload) {
+						out.complete = true
+					}
 				}
 			} else if isBlankLine(line) && dropBlank {
 				dropBlank = false
@@ -865,6 +1132,36 @@ func streamRewriteSSE(w http.ResponseWriter, src io.Reader, modelArg, requested 
 	}
 }
 
+// errLineTooLong reports a streamed line that reached maxStreamLine without a
+// newline in it.
+var errLineTooLong = errors.New("the model server sent a line beyond the relay's limit")
+
+// readBoundedLine reads one newline-terminated line, buffering no more than
+// limit bytes of it.
+//
+// bufio.Reader.ReadBytes would grow its buffer for as long as the model server
+// keeps writing, so a server hung mid-event — or writing something that is not
+// SSE at all — is the whole of what this bounds. What was read before the
+// limit is discarded rather than returned: it is half an event, and half an
+// event is not one; relaying it would hand a client a fragment of JSON as if
+// it were a chunk of the answer.
+func readBoundedLine(br *bufio.Reader, limit int) ([]byte, error) {
+	var line []byte
+	for {
+		// ReadSlice returns a view of the reader's own buffer, valid only
+		// until the next read, so each fragment is copied out as it is taken.
+		frag, err := br.ReadSlice('\n')
+		if len(line)+len(frag) > limit {
+			return nil, errLineTooLong
+		}
+		line = append(line, frag...)
+		if errors.Is(err, bufio.ErrBufferFull) {
+			continue
+		}
+		return line, err
+	}
+}
+
 // cutDataPrefix splits an SSE line into its "data:" prefix and the payload
 // after it, reporting whether it is a data line at all.
 //
@@ -885,6 +1182,14 @@ func cutDataPrefix(line []byte) (prefix, payload []byte, ok bool) {
 		rest = after
 	}
 	return prefix, rest, true
+}
+
+// isTerminalEvent reports whether an event's payload is the "[DONE]" sentinel
+// that ends an OpenAI-compatible stream. It is not JSON and never parses, so
+// it is recognized as the text it is, allowing for whitespace a server may
+// pad it with.
+func isTerminalEvent(payload []byte) bool {
+	return bytes.Equal(bytes.TrimSpace(payload), []byte("[DONE]"))
 }
 
 // isBlankLine reports whether a line read off an SSE body is the empty line
@@ -937,7 +1242,10 @@ func copyResponseHeaders(dst, src http.Header) {
 func (g *Gateway) resolveModel(requested string) (string, error) {
 	if m, err := g.models.Get(requested); err == nil {
 		if !m.Ready() {
-			return "", fmt.Errorf("model %q is not ready (%s)", requested, m.State)
+			return "", &notServedError{
+				requested: requested,
+				detail:    fmt.Sprintf("model %q is not ready (%s)", requested, m.State),
+			}
 		}
 		return m.RepoID, nil
 	}
@@ -950,7 +1258,10 @@ func (g *Gateway) resolveModel(requested string) (string, error) {
 	}
 	switch len(matches) {
 	case 0:
-		return "", fmt.Errorf("model %q is not available — download it first", requested)
+		return "", &notServedError{
+			requested: requested,
+			detail:    fmt.Sprintf("model %q is not available — download it first", requested),
+		}
 	case 1:
 		return matches[0], nil
 	default:
@@ -993,6 +1304,58 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	json.NewEncoder(w).Encode(v)
 }
 
+// genericRefusal is what a client the server owes no account of itself is told
+// when the pool will not serve its request.
+//
+// The pool's own refusals are informative on purpose — they name the number of
+// requests already in flight for a model, or the resident memory budget in
+// bytes — and both are facts about this Mac rather than about the request. The
+// budget is a fraction of physical RAM, so it says roughly how much memory this
+// machine has, and a client can induce either refusal itself by saturating a
+// model or by asking for one it knows is large. That is the same class of fact
+// the models list withholds from an open server's network clients, so it is
+// withheld here on the same predicate. The status code and every header are
+// unchanged, because a client backing off honestly reads those, not this text.
+const genericRefusal = "cannot serve this model right now"
+
+// notServedError is the 404 for a model this server will not serve, and it
+// carries two texts because the fuller one describes this Mac.
+//
+// "not ready" says the model is here and downloading, which the listing an
+// open server serves the network deliberately does not: only ready models
+// appear there. Answering a network client with it turns the completions
+// endpoint into a way to enumerate what this Mac is fetching, one guessed name
+// at a time. The generic text is therefore the same sentence for a model that
+// is downloading and for one this Mac has never heard of — indistinguishable,
+// which a different-but-vaguer sentence for each would not have been.
+//
+// The ambiguity refusal is not one of these: the repo ids it names are already
+// in the listing every client is served, so there is nothing there to withhold
+// and a client cannot fix an ambiguous name without them.
+type notServedError struct {
+	// requested is the name the client asked for, echoed back to it.
+	requested string
+	// detail is what an entitled client is told, and is today's text.
+	detail string
+}
+
+func (e *notServedError) Error() string { return e.detail }
+
+// notServedText picks the text err's 404 is answered with.
+func notServedText(err error, entitled bool) string {
+	var notServed *notServedError
+	if entitled || !errors.As(err, &notServed) {
+		return err.Error()
+	}
+	return fmt.Sprintf("model %q is not available", notServed.requested)
+}
+
+// refusalLogEvery is how often the line above may be written for one model.
+// Long enough that a client sending continuously writes one line a minute,
+// short enough that an operator watching the log sees the next refusal within
+// a minute of asking themselves what is going on.
+const refusalLogEvery = time.Minute
+
 // writeError renders an OpenAI-shaped error, which is what clients parse.
 func writeError(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, map[string]any{
@@ -1002,6 +1365,130 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 			"code":    status,
 		},
 	})
+}
+
+// overServedContext reports why a request cannot be served at this model's
+// window, or "" when it can be.
+//
+// The size is estimated from the encoded request body rather than counted:
+// tokenising every request on the gateway's hot path would cost more than the
+// check is worth, and the estimator is the one prefillBudget already sizes its
+// deadline with. On English text it over-counts, because the whole body is
+// measured and every byte of JSON syntax and role name counts towards the
+// estimate, so a request close to the window can be refused when an exact
+// count would have let it through.
+//
+// It under-counts on text whose tokens are shorter in bytes than four —
+// densely packed CJK is about three — so such a prompt can be about a third
+// larger than the window and still pass. What that costs is bounded and
+// accounted for rather than caught later: the body is capped at
+// maxRequestBody, so the overshoot is bounded by the same fraction, and the
+// memory budget charges five to seven times the cache the configuration
+// implies, which is far more than a third of headroom. There is no backstop
+// underneath this: mlx-lm was measured accepting an abandoned 256K prompt
+// until the machine swapped, so nothing rejects an over-long prompt if this
+// does not.
+//
+// max_tokens counts against the same window because generated tokens are
+// written into the same cache. A model that declares no window and has been
+// given no setting has nothing to enforce, and nothing is refused for it.
+func (g *Gateway) overServedContext(cfg config.Config, model string, bodyBytes int, payload map[string]json.RawMessage) string {
+	var declared int64
+	if m, err := g.models.Get(model); err == nil {
+		declared = m.ContextLength
+	}
+	window := cfg.ServedContext(model, declared)
+	if window <= 0 {
+		return ""
+	}
+	// Saturating, because both terms are the client's to choose: a max_tokens
+	// of the largest integer there is made this sum negative, and a negative
+	// estimate is under every window.
+	estimate := capability.AddSaturating(int64(estimatedTokens(bodyBytes)), requestedMaxTokens(payload))
+	if estimate <= window {
+		return ""
+	}
+	return fmt.Sprintf(
+		"this request is about %s tokens, more than the %s this model is served at. "+
+			"Send a shorter prompt or a smaller max_tokens, or raise this model's served context in Settings.",
+		humanCount(estimate), humanCount(window))
+}
+
+// requestedMaxTokens is the answer length the request asked for, or 0 when it
+// asked for none. Both spellings are read: max_tokens is what most clients
+// send and what mlx-lm reads, max_completion_tokens what newer OpenAI clients
+// send, and a request carrying both is measured by the larger.
+//
+// Read as a JSON number rather than as an integer. JSON has one number type,
+// so 1e9 and 1000.0 ask for exactly what 1000000000 and 1000 ask for; decoded
+// into an int64 they fail to parse, and a value that failed to parse was
+// silently taken as no answer at all — which is how a request asking for a
+// billion tokens of answer got past a thousand-token window.
+func requestedMaxTokens(payload map[string]json.RawMessage) int64 {
+	var most int64
+	for _, key := range []string{"max_tokens", "max_completion_tokens"} {
+		raw, ok := payload[key]
+		if !ok {
+			continue
+		}
+		if n := asTokenCount(raw); n > most {
+			most = n
+		}
+	}
+	return most
+}
+
+// asTokenCount reads one JSON number as a token count: an integer, a float, or
+// a figure larger than any int64, which saturates rather than becoming
+// whatever the conversion happens to produce. Anything that is not a number —
+// a string, null, an object — is 0, which is the request asking for nothing in
+// particular and is what the model server will read too.
+func asTokenCount(raw json.RawMessage) int64 {
+	var n json.Number
+	if err := json.Unmarshal(raw, &n); err != nil {
+		return 0
+	}
+	if i, err := n.Int64(); err == nil {
+		return i
+	}
+	f, err := n.Float64()
+	if err != nil || f <= 0 {
+		return 0
+	}
+	if f >= math.MaxInt64 {
+		return math.MaxInt64
+	}
+	return int64(f)
+}
+
+// humanCount renders a token count with thousands separators, because these
+// two figures are read side by side by a person deciding what to send.
+func humanCount(n int64) string {
+	s := strconv.FormatInt(n, 10)
+	if len(s) <= 3 {
+		return s
+	}
+	var b strings.Builder
+	lead := len(s) % 3
+	if lead > 0 {
+		b.WriteString(s[:lead])
+	}
+	for i := lead; i < len(s); i += 3 {
+		if b.Len() > 0 {
+			b.WriteByte(',')
+		}
+		b.WriteString(s[i : i+3])
+	}
+	return b.String()
+}
+
+// estimatedTokens is how many tokens a request body of this size is taken to
+// be, at four bytes per token — the usual ballpark for English text, and
+// deliberately crude. One estimator, because the deadline a request is given
+// and the window it is measured against must not disagree about how big it is.
+func estimatedTokens(bodyBytes int) int {
+	const bytesPerToken = 4
+	return bodyBytes / bytesPerToken
 }
 
 // prefillBudget returns how long to wait for a model server to return response
@@ -1032,11 +1519,10 @@ func prefillBudget(bodyBytes, overrideSec int) time.Duration {
 	}
 	const (
 		base            = 10 * time.Minute
-		bytesPerToken   = 4
 		tokensPerSecond = 150
 		fixedOverhead   = time.Minute
 	)
-	tokens := bodyBytes / bytesPerToken
+	tokens := estimatedTokens(bodyBytes)
 	derived := time.Duration(tokens/tokensPerSecond)*time.Second + fixedOverhead
 	if derived < base {
 		return base

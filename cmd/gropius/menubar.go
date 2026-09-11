@@ -55,7 +55,7 @@ func runMenuBar(a *app.App, log *slog.Logger) {
 				// marked in the panel, not promoted here. Which address the
 				// menu bar hands out is behaviour, and the mark is
 				// presentation.
-				eps := gateway.Endpoints(a.Config())
+				eps := gateway.Endpoints(a.Config(), a.Bind())
 				if len(eps) > 0 {
 					endpoint.SetTitle(eps[0].URL)
 				}
@@ -70,7 +70,7 @@ func runMenuBar(a *app.App, log *slog.Logger) {
 				case <-copyURL.ClickedCh:
 					// The URL and nothing else: a mark pasted into a client's
 					// base-URL field is not a URL.
-					if eps := gateway.Endpoints(a.Config()); len(eps) > 0 {
+					if eps := gateway.Endpoints(a.Config(), a.Bind()); len(eps) > 0 {
 						copyToClipboard(eps[0].URL)
 					}
 				case <-quitItem.ClickedCh:

@@ -22,6 +22,67 @@ func TestLogFileNamesDoNotCollideAcrossDistinctRepoIDs(t *testing.T) {
 	}
 }
 
+// A second account must be able to launch a model the first account has
+// already served. The per-model log is opened O_CREATE|O_TRUNC at 0600 under a
+// name derived from the repo id, so while the two accounts shared one logs
+// directory the second account's open of the first account's log returned
+// EACCES and the model would not start at all — for every model the first
+// account had ever launched.
+//
+// A single-uid test cannot own a file as another account, so the first
+// account's log is made unwritable instead, which fails an open the same way.
+// Where the two logs directories come from under a shared cache is pinned in
+// internal/config; what is pinned here is that the launcher writes into the one
+// it is given and is unaffected by what is in the other.
+func TestASecondAccountLaunchesAModelTheFirstAlreadyLogged(t *testing.T) {
+	shared := t.TempDir() // the models, which both accounts read
+	model := filepath.Join(shared, "models", "org", "name")
+	if err := os.MkdirAll(model, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	account := func(t *testing.T) config.Paths {
+		t.Helper()
+		p := config.NewPaths(t.TempDir())
+		if err := os.MkdirAll(filepath.Dir(p.VenvPython()), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p.VenvPython(), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(p.Logs, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	first, second := account(t), account(t)
+
+	// The first account has served this model: its log exists and no other
+	// account could write it.
+	firstLog := filepath.Join(first.Logs, logFileName("org/name"))
+	if err := os.WriteFile(firstLog, []byte("the first account's log\n"), 0o400); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.OpenFile(firstLog, os.O_WRONLY|os.O_TRUNC, 0); err == nil {
+		t.Skip("this filesystem does not enforce write permission on the owner")
+	}
+
+	l := &ExecLauncher{Paths: second, LogDir: second.Logs}
+	p, err := l.Launch(context.Background(), Spec{RepoID: "org/name", ModelPath: model, Port: 1})
+	if p != nil {
+		<-p.Done()
+	}
+	if err != nil {
+		t.Fatalf("the second account could not launch a model the first had served: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(second.Logs, logFileName("org/name"))); err != nil {
+		t.Errorf("the second account's own log was not written: %v", err)
+	}
+	if b, _ := os.ReadFile(firstLog); string(b) != "the first account's log\n" {
+		t.Errorf("the first account's log was touched: %q", b)
+	}
+}
+
 // The per-model log has a predictable name in the logs directory, which in
 // shared-cache mode is group-writable: another local account can plant a
 // symlink there and the truncating open would land on any file this account

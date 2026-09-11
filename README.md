@@ -40,6 +40,11 @@ Cross-machine LAN use works; TLS and notarized distribution are not yet included
 - **Context window published** — the models list gives each model's maximum
   context, so a client can size its prompts instead of discovering the limit
   by failure ([reference](docs/models-list.md)).
+- **Model kind published** — each model carries HuggingFace's own pipeline tag
+  and tags, recorded when it was downloaded, plus a `chat` flag from a rule you
+  set: a chat client can offer only the models that can hold a conversation
+  while every model stays callable by name
+  ([how to](docs/chat-models.md), [reference](docs/models-list.md)).
 - **Residency published** — with an API key set, the models list also says which
   models are loaded, how busy each one is and when it was last used, so a client
   picks the warm model instead of triggering a load
@@ -68,14 +73,35 @@ Cross-machine LAN use works; TLS and notarized distribution are not yet included
   model's share, how long requests took, the spread of those times, and when
   models were evicted and reloaded
   ([what the views mean](docs/statistics-explained.md)).
-- **Network-shared** — bind the LAN, discoverable over Bonjour, optional API key.
+- **A log that says why** — Gropius keeps its own log in your account's data
+  folder, so the reason behind a refusal a client saw is somewhere you can read
+  it even when the app was launched from the Finder and has no terminal to
+  print to. Sparse by default, one line per event that mattered; switch it to
+  detailed while you are diagnosing something and it adds the figures behind
+  each line. Neither level writes a prompt, an answer, a key or the address of
+  the client that sent a request ([reference](docs/logging.md)).
+- **Network-shared** — bind the LAN, discoverable over Bonjour (the chat client
+  lists the servers it finds, so nobody has to guess an address), optional API
+  key. A mesh VPN reaches it from further away, with the same steps and a
+  different address ([how to](docs/mesh-vpn.md)) — or bind that network alone,
+  so the local one cannot reach the server at all. Every bind includes this
+  Mac, so narrowing one never costs you the control panel
+  ([what each choice binds](docs/bind-address.md)).
+- **One page that says what is on** — the control panel's Posture tab states,
+  as fact rather than warning, who can reach the server and by which addresses,
+  what a request has to carry from the network and from this Mac, what is
+  announced over Bonjour, what the request log writes down, and what is
+  recorded and for how long — and says where Gropius's own view stops
+  ([what each line is read from](docs/posture-reference.md)).
 - **Multi-account** — other user accounts on the same Mac share one copy of each
-  model on disk and on the GPU.
+  model on disk and on the GPU. The models are shared; each account keeps its
+  own settings and its own model list, so no key or token crosses accounts.
 
 ## Install
 
-One line — installs `Gropius.app` (the menu-bar server) to `/Applications`, allows
-it through the firewall, and launches it:
+One line — installs `Gropius.app` (the menu-bar server) to `/Applications`, or to
+your own `~/Applications` when your account is not an administrator, allows it
+through the firewall, and launches it:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/intentdriven/Gropius/main/install.sh | bash
@@ -153,11 +179,13 @@ the control panel warns you while this is so. Set a key in **Settings** to requi
 user accounts) never need a key. The control panel and its `/api/*` endpoints are
 bound to loopback only and are never reachable from the LAN.
 
-Setting a key also turns on the models list's residency fields, which say which
-models are loaded and how busy they are. With no key set, the list still names
-every downloaded model and says nothing about what this Mac is doing with them —
-though a client on an open server can still time a request to find out. Keeping
-activity private means setting the key, not leaving the fields off.
+The models list's residency fields, which say which models are loaded and how
+busy they are, are served to a client on this Mac — loopback, other user
+accounts included — whether or not a key is set, and to a client on the network
+when a key is set. With no key set, a client on the network still gets every
+downloaded model's name and nothing about what this Mac is doing with them —
+though it can still time a request to find out. Keeping activity private from
+the network means setting the key, not leaving the fields off.
 
 The server's request log records the method, path, status and duration of a
 request, and never the client's network address.
@@ -185,7 +213,9 @@ is written down as
 - [`cmd/gropius/`](cmd/gropius/) — menu-bar app + singleton election.
 - [`internal/`](internal/) — the engine: `hub` (HuggingFace client + downloader),
   `runtime` (Python/MLX provisioning + process pool), `gateway` (OpenAI + control
-  API), `registry`, `discovery`, `config`, `capability`, `ui`, `app`.
+  API), `registry`, `discovery`, `bind` and `netshape` (which addresses are
+  bound, and which network each sits on), `stats` (request statistics),
+  `applog` (the server's own log), `config`, `capability`, `ui`, `app`.
 - [`docs/`](docs/) — getting-started guide, how-to pages and reference.
 
 Design decisions and the empirical facts behind them: [`DECISIONS.md`](.abcd/development/decisions/DECISIONS.md).

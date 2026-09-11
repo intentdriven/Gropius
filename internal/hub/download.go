@@ -91,7 +91,15 @@ func (c *Client) Download(ctx context.Context, req DownloadRequest) error {
 		req.Concurrency = 4
 	}
 
-	all, err := c.Files(ctx, req.RepoID, req.Revision)
+	// Read once, and used for the listing and every file it names. A repo
+	// download is minutes of requests, and the operator may save a new token —
+	// or clear the old one — at any point during it; a download that picked up
+	// each request's token as it went would start succeeding and then fail
+	// halfway through a gated repo, leaving a half-fetched directory nobody
+	// asked for.
+	token := c.Token()
+
+	all, err := c.files(ctx, req.RepoID, req.Revision, token)
 	if err != nil {
 		return err
 	}
@@ -164,7 +172,7 @@ func (c *Client) Download(ctx context.Context, req DownloadRequest) error {
 			}
 			defer func() { <-sem }()
 
-			if err := c.downloadFile(ctx, req, root, f, tracker); err != nil {
+			if err := c.downloadFile(ctx, req, token, root, f, tracker); err != nil {
 				errOnce.Do(func() {
 					firstErr = err
 					cancel()
@@ -308,7 +316,7 @@ func existingBytes(root *os.Root, rel string) int64 {
 
 // downloadFile fetches one file, resuming if a partial exists. All filesystem
 // access goes through root, which confines it to the model directory.
-func (c *Client) downloadFile(ctx context.Context, req DownloadRequest, root *os.Root, f File, tr *progressTracker) error {
+func (c *Client) downloadFile(ctx context.Context, req DownloadRequest, token string, root *os.Root, f File, tr *progressTracker) error {
 	final, err := relPath(f.Path)
 	if err != nil {
 		// A repo whose file tree contains "../" escapes is either malicious or
@@ -370,7 +378,7 @@ func (c *Client) downloadFile(ctx context.Context, req DownloadRequest, root *os
 	}
 
 	u := c.ResolveURL(req.RepoID, req.Revision, f.Path)
-	httpReq, err := c.newRequest(ctx, http.MethodGet, u)
+	httpReq, err := c.newTokenRequest(ctx, http.MethodGet, u, token)
 	if err != nil {
 		return err
 	}
@@ -402,7 +410,7 @@ func (c *Client) downloadFile(ctx context.Context, req DownloadRequest, root *os
 				return err
 			}
 			tr.addCompleted(-resumeAt)
-			return c.downloadFile(ctx, req, root, f, tr)
+			return c.downloadFile(ctx, req, token, root, f, tr)
 		}
 	case http.StatusRequestedRangeNotSatisfiable:
 		// The .part is already at (or beyond) the server's full length, so its
@@ -417,7 +425,7 @@ func (c *Client) downloadFile(ctx context.Context, req DownloadRequest, root *os
 			return err
 		}
 		tr.addCompleted(-resumeAt)
-		return c.downloadFile(ctx, req, root, f, tr)
+		return c.downloadFile(ctx, req, token, root, f, tr)
 	default:
 		return apiError(resp, u)
 	}

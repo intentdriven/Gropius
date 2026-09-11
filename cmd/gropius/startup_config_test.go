@@ -28,7 +28,7 @@ func TestAnInvalidConfigKeepsEverythingButTheBind(t *testing.T) {
 	  "port": 12345,
 	  "api_key": "a-key-the-operator-chose",
 	  "advertise": true,
-	  "pinned": ["mlx-community/Qwen3-8B-4bit"],
+	  "models": {"mlx-community/Qwen3-8B-4bit": {"pinned": true}},
 	  "max_resident_bytes": 8589934592,
 	  "stats_months": 7
 	}`)
@@ -47,8 +47,8 @@ func TestAnInvalidConfigKeepsEverythingButTheBind(t *testing.T) {
 	if got.Config.Port != 12345 {
 		t.Errorf("Port = %d, want 12345 — the port was discarded too", got.Config.Port)
 	}
-	if len(got.Config.Pinned) != 1 || got.Config.Pinned[0] != "mlx-community/Qwen3-8B-4bit" {
-		t.Errorf("Pinned = %#v — the pins were discarded", got.Config.Pinned)
+	if len(got.Config.PinnedIDs()) != 1 || got.Config.PinnedIDs()[0] != "mlx-community/Qwen3-8B-4bit" {
+		t.Errorf("Pinned = %#v — the pins were discarded", got.Config.PinnedIDs())
 	}
 	if got.Config.MaxResidentBytes != 8589934592 {
 		t.Errorf("MaxResidentBytes = %d — the memory budget was discarded", got.Config.MaxResidentBytes)
@@ -147,5 +147,35 @@ func write(t *testing.T, path, body string) {
 	t.Helper()
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// The lockdown narrows the bind, and the bind is not only the Host field any
+// more. A configuration that fails Validate for any reason must not go on
+// resolving a private-network address: the mode is part of what "locked down
+// to loopback" locks down, or the narrowing is a bind the operator cannot see
+// in the field it was written in (adr-2609091123526871 rule 6).
+func TestALockedDownConfigurationDropsThePrivateNetworkMode(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	write(t, path, `{
+	  "host": "not an ip",
+	  "bind_mode": "private-network",
+	  "port": 12345,
+	  "api_key": "a-key-the-operator-chose"
+	}`)
+
+	got := loadStartupConfig(path)
+
+	if got.Config.BindMode != config.BindModeHost {
+		t.Errorf("BindMode = %q, want the default — a locked-down bind is loopback, and a mode that still resolves an address is not that", got.Config.BindMode)
+	}
+	if got.Config.Host != loopbackBind {
+		t.Errorf("Host = %q, want %q", got.Config.Host, loopbackBind)
+	}
+	if got.Config.APIKey != "a-key-the-operator-chose" {
+		t.Errorf("APIKey = %q — locking the bind down still keeps everything else", got.Config.APIKey)
+	}
+	if got.Config.ExposedToLAN() {
+		t.Error("ExposedToLAN() is true on a locked-down configuration — the mode is what makes it true, and it was supposed to be gone")
 	}
 }

@@ -3,7 +3,8 @@
 `GET /v1/models` reports the models this Gropius can serve. It is the
 OpenAI-shaped listing every OpenAI client already calls, with a small number
 of Gropius extensions carried as extra top-level fields. Some of those fields
-appear only on an install with an API key configured.
+appear only for a client connecting over loopback, or on an install with an
+API key configured.
 
 Only models in the **ready** state appear. A model that is downloading, or
 whose last download failed, is not listed.
@@ -21,8 +22,12 @@ curl http://localhost:11535/v1/models
       "object": "model",
       "created": 1757145600,
       "owned_by": "gropius",
+      "pipeline_tag": "text-generation",
+      "tags": ["mlx", "conversational"],
+      "chat": true,
       "context_length": 40960,
-      "max_model_len": 40960
+      "max_model_len": 40960,
+      "served_context": 40960
     }
   ]
 }
@@ -36,12 +41,72 @@ curl http://localhost:11535/v1/models
 | `object` | Always `model`, as the OpenAI schema requires. |
 | `created` | Unix time at which this Mac first recorded the model. A re-download or a retry does not move it. |
 | `owned_by` | Always `gropius`. |
+| `pipeline_tag` | What HuggingFace says the model does — `text-generation`, `automatic-speech-recognition`, and so on. Absent when the Hub has no tag for that repository. See below. |
+| `tags` | The repository's HuggingFace tags, as they are written there. Absent when the Hub has none. See below. |
+| `chat` | Whether the model counts as able to hold a conversation, under the rule this server runs. Always present. See below. |
 | `context_length` | The model's maximum context, in tokens. See below. |
 | `max_model_len` | The same figure again, under the name vLLM-derived clients read. |
-| `state` | Whether the model is loaded, still loading, or not loaded. Only on an install with an API key. See below. |
-| `in_flight` | How many requests that model is already handling. Only on an install with an API key. |
-| `last_used` | Unix time at which Gropius last handled a request for that model. Only on an install with an API key, and only while the model is in memory — `loaded` or `loading`. |
-| `pinned` | Whether the operator has protected the model from eviction. Only on an install with an API key. See below. |
+| `served_context` | The window this Mac will actually serve the model at, in tokens. A request estimated to be larger is refused. See below. |
+| `state` | Whether the model is loaded, still loading, or not loaded. Only for a client connecting over loopback, or on an install with an API key. See below. |
+| `in_flight` | How many requests that model is already handling. Only for a client connecting over loopback, or on an install with an API key. |
+| `last_used` | Unix time at which Gropius last handled a request for that model. Only for a client connecting over loopback, or on an install with an API key, and only while the model is in memory — `loaded` or `loading`. |
+| `pinned` | Whether the operator has protected the model from eviction. Only for a client connecting over loopback, or on an install with an API key. See below. |
+
+## What kind of model it is
+
+`pipeline_tag` and `tags` are HuggingFace's own words for a model, republished
+as they are. Gropius has no taxonomy of its own: it records the tags the Hub
+carries for a repository at the moment the model is downloaded, and serves them
+back. The vocabulary is HuggingFace's, so it can change without a Gropius
+release.
+
+**When they are absent.** Either field is omitted, rather than sent empty, when:
+
+- The Hub carries no tag of that kind for the repository.
+- The model was downloaded by a Gropius that predates these fields. Nothing on
+  disk says what kind of model it is, so a rescan cannot fill them in —
+  download the model again to give it its words.
+- HuggingFace could not be reached for the repository's metadata when the
+  download finished. The model is complete and served as normal; only the words
+  are missing.
+
+Treat an absent field as "not known", never as an answer about the model.
+
+## The chat flag
+
+`chat` says whether this server counts the model as able to hold a conversation.
+It is on every entry, including entries with no tags at all — the whole value of
+the field is telling one kind of model from another, so an absent key would read
+as a server that cannot say either way.
+
+**It filters nothing.** A model with `"chat": false` is loaded and served like
+any other: name it in a request's `model` field and it answers. The flag exists
+so a chat application can leave a speech or OCR model out of its picker while
+every model stays callable over the API.
+
+**The rule behind it.** A model counts as able to chat when its pipeline tag is
+one of a list, and its tags include every word of a second list. As shipped, the
+lists are `text-generation` and `image-text-to-text`, and `conversational` —
+which makes `chat` false for a model with no tags. Both lists are settings:
+**Settings → Which models can chat** in the control panel, and `chat_rule` in
+`config.json`:
+
+```json
+"chat_rule": {
+  "pipeline_tags": ["text-generation", "image-text-to-text"],
+  "required_tags": ["conversational"]
+}
+```
+
+Comparison folds case and ignores surrounding space. An empty list stops testing
+that half, so a rule with both lists empty marks every model as able to chat; no
+`chat_rule` key at all means the shipped rule. See
+[Choose which models are offered for chat](chat-models.md).
+
+**The flag is this server's answer, not the last word.** A client is free to
+read `pipeline_tag` and `tags` and apply its own rule — which is what the
+GropiusChat client does, with the same rule as its own default, changeable in
+its Settings.
 
 ## The context figure
 
@@ -58,12 +123,9 @@ at the top level, or `text_config.max_position_embeddings` for the multimodal
 and composite architectures that nest the text model's settings — and applies
 no scaling arithmetic of its own.
 
-**What the number is not.** It is not what a given Mac can serve. The usable
-window may be smaller: a long prompt has to fit in memory alongside the
-weights, and a very long one can take minutes to process. Nor is it enforced —
-Gropius refuses no request and trims no prompt because of it. A prompt beyond
-the figure is accepted, and the model's answers degrade outside the range it
-was scaled for.
+**What the number is not.** It is not what this Mac serves: the served window
+may be smaller, and it is `served_context` below that a client is held to. The
+declared figure is enforced nowhere.
 
 **When the fields are absent.** Both are omitted, rather than sent as zero, in
 these cases:
@@ -81,6 +143,30 @@ The model is listed and served exactly as it would be with a figure; only the
 context fields are missing. Treat an absent figure as "unknown", never as "no
 context".
 
+## The served window
+
+`served_context` is the window Gropius serves the model at on this Mac, and it
+is the figure to size prompts to. It is the operator's per-model setting, or
+the declared figure above when they have set none, and it is enforced: a
+request whose prompt plus `max_tokens` is estimated to be larger is refused
+with a 400 in the OpenAI error shape, naming both the window and the estimate,
+before any model is loaded.
+
+The estimate is made from the size of the request body at four bytes to the
+token rather than by tokenising it, so it is approximate and it over-counts:
+the whole body is measured, JSON syntax included. A request close to the
+window may therefore be refused when an exact count would have let it through.
+Send a shorter prompt, a smaller `max_tokens`, or raise the window in
+**Settings**.
+
+Lowering the window is also how a model that will not otherwise fit this Mac's
+memory budget is made to fit: the budget charges the attention cache the served
+window costs, so a smaller window is a smaller charge. See
+[Why there is a memory budget](memory-budget-explained.md).
+
+The field is absent for a model that declares no window and has been given no
+setting — there is nothing to serve it at, and nothing is enforced.
+
 **On the model card.** The control panel shows the figure on each model's
 card, labelled `max context`. From 1,024 tokens upwards the card abbreviates
 it to whole units of 1,024, rounded down, so a model declaring 262,143 reads
@@ -94,26 +180,57 @@ now and which models are protected, so a client can send its work to a model tha
 is already warm instead of forcing a load it did not know about. Loading a model takes seconds to a minute, longer
 for the largest; picking the warm one costs nothing.
 
-**They appear only when an API key is configured.** Set a key in **Settings**
-and the four fields are on every entry, for every client the key admits and
-for same-machine clients that need no key. Leave the key unset — the shipping
-default, where anyone on the network may use the server — and the listing is
-exactly the four OpenAI fields and the context figure.
+**They appear for a client connecting over loopback, and for every client an
+API key admits.** A chat application, a script, or any other program on the
+same Mac that reaches the server at `localhost` or `127.0.0.1` is served all
+four, whether or not a key is set: it is the same person at the same machine
+the control panel already shows this to. Set a key in **Settings** and the four
+fields are on every entry for every client the key admits, wherever it is.
+
+It is the connection that decides, not the computer. A program on this Mac that
+reaches the server by this Mac's **network** address rather than by loopback is
+a network client here, and is served no residency on a keyless install — point
+it at `localhost` or set a key. In the other direction, a tunnel or proxy
+running on this Mac (`ssh -L`, for instance) makes the clients behind it
+loopback clients: forwarding the port forwards this too.
+
+What is withheld is the listing served to the network on an install with no
+key. That is the shipping default, where anyone who can reach the server may
+use it, and a client on the network is then served exactly the four OpenAI
+fields and the context figure: nobody off this Mac learns from the listing what
+it is running or when. A page in a browser cannot borrow the loopback rule
+either — the request has to name loopback in its `Host`, carry either no
+`Origin` or a loopback one, and, where the browser sends a `Sec-Fetch-Site`
+header, say the request came from this server's own page (`same-origin`) or
+from no page at all (`none`). So a site that points its own hostname at
+`127.0.0.1` is refused the fields exactly as the network is, and so is the
+blind fetch a page makes with an `<img>` or a `fetch()` it never reads, which
+carries no `Origin` for the second rule to catch.
 
 What that withholds is the *listing*, and only the listing. On a server left
 open, a client that never presents a key can still work out which models are
 warm by timing a one-token completion — a loaded model answers straight away, a
 cold one takes seconds to a minute — and that probe loads the model it asks
-about, which reading the field never does. A model already at its request
-ceiling, or one that does not fit in the memory budget, is refused with a
-message that names how many requests are already in flight for it, or the
-budget figure. So an unkeyed
-server keeps activity off the listing; it does not keep it secret. The key is
-what protects the server.
+about, which reading the field never does. So an unkeyed
+server keeps activity off the listing it serves the network; it does not keep
+it secret. The key is what protects the server.
+
+**A refusal follows the same rule.** A model already at its request ceiling, or
+one that does not fit in the memory budget, is refused with a message that
+names how many requests are already in flight for it, or the budget figure —
+and those are the same facts as the listing's, so they go to the same clients.
+A client the listing tells nothing is refused instead with
+`cannot serve this model right now`.
+The status code and every response header are identical
+either way, so a client that backs off on the status keeps working unchanged;
+only the sentence differs. The same holds for a request naming a model that is
+still downloading: this listing carries ready models only, so a client it tells
+nothing gets the answer it would get for a model this Mac has never heard of.
+The operator's own log keeps the reason in both cases.
 
 The key is also one key, shared by every client that has it. A client holding
 it sees the whole machine's activity — every model's in-flight count and
-last-used time, not only its own.
+last-used time, not only its own. The same is true of a loopback client.
 
 `state` carries one of three values:
 
@@ -123,7 +240,7 @@ last-used time, not only its own.
 | `loading` | The model's server is running but has not answered its readiness probe yet. A request is served, after the wait. |
 | `not_loaded` | Gropius is holding no server for this model. A request loads it first, evicting another model if the memory budget is full. |
 
-On an install with a key, an entry reads:
+Where the fields are served, an entry reads:
 
 ```json
 {
@@ -190,20 +307,32 @@ rules.
   this Mac's memory is held down to it. See
   [Set how much memory models may use](memory-budget.md) and
   [Why there is a memory budget](memory-budget-explained.md).
-- Each loaded model is charged 1.2 times its size on disk, the weights plus
-  headroom for the cache and activations a running model needs. The cache a
-  request builds as it works through a long prompt is not counted, so a machine
-  loaded to its budget can still run out of memory under long prompts served
-  concurrently.
+- Each loaded model is charged its weights plus a fifth for the working set a
+  running model needs, plus the attention cache its declared context window
+  costs — the window above, worked out from the model's own configuration, once
+  for every sequence its server may decode at once. That cache is what makes a
+  long-context model expensive: the cost per token is a property of the
+  architecture and varies more than thirtyfold between models. One model is
+  never charged more than the whole budget, so a model whose window fills the
+  budget by itself loads alone rather than not at all. A model whose
+  configuration cannot be read is charged a flat 1.2 times its size.
 - A request for a model that does not fit in what is left unloads the
-  least-recently-used idle model, at once, to make room. The memory of the model
-  being unloaded is credited back as the replacement starts, so the two overlap
-  for the seconds it takes the first to exit and the budget is not a hard
-  ceiling in that moment. A model with a request
-  in flight is never the one chosen, a model still loading is not either, and a
-  pinned model is not either. If nothing can be freed, the request is refused
-  with an error naming the memory pressure. That refusal names no model: which
-  models this Mac is protecting stays off the network.
+  least-recently-used idle model, at once, to make room. The memory is not free
+  until that model's server process has gone, so the request waits those
+  seconds before its own model starts, rather than the two overlapping. A model
+  with a request in flight is never the one chosen, a model still loading is
+  not either, and a pinned model is not either. If nothing can be freed, the
+  request is refused with an error naming the memory pressure, on the rule
+  above. That refusal names no model: which models this Mac is protecting stays
+  off the network.
+- Requests waiting for a server to exit are waiting for memory like any other,
+  and share the same queue: a small number of places overall, and a smaller
+  number per caller. Callers that present no API key — which is every caller on
+  an install without one — count as one caller between them, so a burst of
+  requests for several different models that are not loaded can see the third
+  and later ones refused straight away rather than queued. The refusal is the
+  ordinary "not enough memory" one, and a retry a moment later usually
+  succeeds. Requests for models already in memory are unaffected.
 - **Eviction grace** (**Settings**, off by default) changes when that unload
   happens. With it on, a model is protected for a set interval after it
   finishes a request, and a request that needs its memory waits for another

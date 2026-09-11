@@ -59,7 +59,16 @@ import (
 //     import the gateway tomorrow, while cmd/gropius already imports IT. A
 //     helper there reading Endpoint.Network and returning a bool is a route
 //     into the enforcement path that no rule saw. It is scanned for the same
-//     names as the gateway, with nothing allowlisted.
+//     names as the gateway, with nothing allowlisted;
+//   - the private-network resolver, which is the one carve-out. The
+//     2026-09-08 amendment to adr-2609081118587999 lets the classifier choose
+//     the address the private-network bind mode acquires, and
+//     adr-2609091123526871 rule 10 puts that in one package. So the resolver's
+//     package name is scanned for exactly as the classifier's is, everywhere
+//     the classifier's is: reaching the detection THROUGH the carve-out has to
+//     be as loud as reaching it directly, or the exception becomes a laundry.
+//     Two declarations in cmd/gropius may name it, listed below with what each
+//     is for; internal/gateway's list says the same for the panel's side.
 //
 // WHAT THEY DO NOT CLOSE, in full, because a list that says "and some other
 // things" is the overclaim this comment exists to retire. Every one of these
@@ -93,6 +102,20 @@ const (
 	// well: outside the handful of declarations that build the endpoint list,
 	// nothing in internal/gateway or cmd/gropius may name it at all.
 	detectionType = "Endpoint"
+	// resolverPkg is the carve-out: the one package outside the endpoint list
+	// that may read the classifier, because the private-network bind mode has
+	// to resolve an address from it (adr-2609081118587999's 2026-09-08
+	// amendment, adr-2609091123526871 rule 10).
+	//
+	// It is scanned for by name everywhere the classifier is, and for the same
+	// reason. A helper in the resolver taking an interface list and returning a
+	// bool would be the classification with a different spelling, and reaching
+	// it from the gateway, the panel or the command has to be exactly as loud
+	// as reaching netshape directly — otherwise the carve-out is a laundry and
+	// the amendment widened by accident, which is the failure this file exists
+	// to make impossible to do quietly.
+	resolverPkg  = "github.com/intentdriven/Gropius/internal/bind/private"
+	resolverName = "private"
 )
 
 // enforcementPath is every package that decides who may reach this server or
@@ -107,6 +130,7 @@ const (
 // below instead.
 var enforcementPath = []string{
 	"github.com/intentdriven/Gropius/internal/config",
+	"github.com/intentdriven/Gropius/internal/bind",
 	"github.com/intentdriven/Gropius/internal/runtime",
 	"github.com/intentdriven/Gropius/internal/app",
 	"github.com/intentdriven/Gropius/internal/capability",
@@ -127,10 +151,21 @@ var notEnforcement = map[string]string{
 	"github.com/intentdriven/Gropius/cmd/gropius":       "reaches the endpoint list through the gateway, so no import rule can cover it; covered by its own source-scoped rule below",
 	"github.com/intentdriven/Gropius/internal/netshape": "is the classifier",
 	"github.com/intentdriven/Gropius/internal/ui":       "serves the control panel's assets and decides nothing about who may reach the server; presentation is what rule 1 allows. It imports nothing of ours and so could import the gateway, while cmd/gropius already imports it — a helper here reading Endpoint.Network is a route into the enforcement path, which is why TestThePanelPackageDoesNotReadTheDetectionEither scans it with nothing allowlisted",
+	"github.com/intentdriven/Gropius/internal/applog":   "builds the process's own log — a file, a level and a rotation. It decides nothing about who may reach the server or what it will do for them, and it imports nothing of ours, so there is no address in it to enforce on. What it must never gain is a reason to look at one: a log that reported which network a client came from would put the detection on the path of every served request",
 	"github.com/intentdriven/Gropius/internal/archtest": "is these rules",
 	"github.com/intentdriven/Gropius/internal/mlxtest":  "test helpers; nothing ships in the binary",
 	"github.com/intentdriven/Gropius/internal/sitetest": "test helpers for the landing-page renderer",
 	"github.com/intentdriven/Gropius/cmd/gropius-site":  "renders the landing page offline and serves nothing",
+}
+
+// carveOut is the amendment, written down. It is deliberately not part of
+// notEnforcement: the resolver DOES decide who may reach this server — it picks
+// the address the private-network mode binds — and filing it as "not
+// enforcement" would be the quiet widening the amendment forbade in the same
+// paragraph that granted it. It is enforcement, it reads the detection, and it
+// is the only thing in the module of which both are true.
+var carveOut = map[string]string{
+	resolverPkg: "resolves the address the private-network bind mode acquires, which is enforcement reading a detection — permitted by adr-2609081118587999's 2026-09-08 amendment, on its two conditions: ambiguity is refused rather than resolved, and the selection is always shown. Nothing else here is opened, and the package is scanned for by name wherever the classifier is",
 }
 
 func TestTheEnforcementPathCannotSeeThePrivateNetworkDetection(t *testing.T) {
@@ -169,7 +204,7 @@ func TestEveryPackageIsOnOneSideOfTheRule(t *testing.T) {
 	seen := map[string]bool{}
 	for _, pkg := range strings.Fields(string(out)) {
 		seen[pkg] = true
-		if onPath[pkg] || notEnforcement[pkg] != "" {
+		if onPath[pkg] || notEnforcement[pkg] != "" || carveOut[pkg] != "" {
 			continue
 		}
 		t.Errorf("%s is on neither enforcementPath nor notEnforcement, so no rule here covers it and it would pass in silence — decide which it is: if anything in it decides who may reach this server or what it will do for them, add it to enforcementPath; otherwise add it to notEnforcement with the reason (adr-2609081118587999 rule 2)", pkg)
@@ -184,6 +219,67 @@ func TestEveryPackageIsOnOneSideOfTheRule(t *testing.T) {
 	for pkg := range notEnforcement {
 		if !seen[pkg] {
 			t.Errorf("notEnforcement names %s, which is not a package in this module any more — remove it", pkg)
+		}
+	}
+	for pkg := range carveOut {
+		if !seen[pkg] {
+			t.Errorf("carveOut names %s, which is not a package in this module any more — remove it, and with it the exception the amendment granted", pkg)
+		}
+	}
+}
+
+// The carve-out is one package wide, and this is what holds it there: the
+// classifier is imported by the endpoint list's package and by the resolver,
+// the resolver is imported by the endpoint list's package and by the command
+// that acquires listeners, and by nothing else in the module. A second
+// importer of either is a second place the detection reaches enforcement, and
+// it fails here rather than being noticed in review.
+//
+// This is the rule an alias cannot walk past: it reads import PATHS out of `go
+// list`, so the name a file binds the package to is irrelevant to it. The
+// source-scoped rules below need their own defence against that, and have one.
+func TestTheClassifierAndTheResolverAreImportedOnlyWhereTheyMayBe(t *testing.T) {
+	const (
+		gatewayPkg = "github.com/intentdriven/Gropius/internal/gateway"
+		commandPkg = "github.com/intentdriven/Gropius/cmd/gropius"
+	)
+	allowed := map[string]map[string]bool{
+		// The endpoint list lives in the gateway, and the resolver is what
+		// produces the plan it reports.
+		detectionPkg: {gatewayPkg: true, resolverPkg: true},
+		// The gateway asks it what the mode could bind now, for the panel; the
+		// command asks it what to acquire. Both are named declarations below.
+		resolverPkg: {gatewayPkg: true, commandPkg: true},
+	}
+	out, err := exec.Command("go", "list", "-f", "{{.ImportPath}} {{join .Imports \" \"}}", "github.com/intentdriven/Gropius/...").CombinedOutput()
+	if err != nil {
+		t.Fatalf("go list: %v\n%s", err, out)
+	}
+	seen := map[string]int{}
+	for _, line := range strings.Split(string(out), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 0 {
+			continue
+		}
+		pkg := fields[0]
+		for _, imp := range fields[1:] {
+			may, watched := allowed[imp]
+			if !watched {
+				continue
+			}
+			seen[imp]++
+			if !may[pkg] {
+				t.Errorf("%s imports %s, which is not one of the packages that may (adr-2609081118587999 rule 2 and its amendment, adr-2609091123526871 rule 10)", pkg, imp)
+			}
+		}
+	}
+	// The other direction: a rule that matches nothing reads as coverage and
+	// is not. Both packages have importers by construction — the gateway's
+	// endpoint list and the command's acquisition — so zero means the scan is
+	// pointed at the wrong module.
+	for pkg := range allowed {
+		if seen[pkg] == 0 {
+			t.Errorf("nothing in this module imports %s any more — this rule is asserting nothing", pkg)
 		}
 	}
 }
@@ -203,15 +299,42 @@ var gatewayMayReadTheDetection = map[string]bool{
 	// The type itself, and the state field that carries it to the panel.
 	"control.go::type Endpoint": true,
 	"control.go::type State":    true,
+	// The bind's own report. It carries what the private-network mode
+	// selected and what it could select now, which is the amendment's second
+	// condition — the choice is always shown — and it is the one place in this
+	// package that names the resolver. It decides nothing: no key requirement,
+	// no admission and no warning's firing condition reads it.
+	"control.go::type BindState": true,
+	"control.go::func bindState": true,
 	// The endpoint list and the three helpers it is built from. Adding a name
 	// to this map is the decision the ADR governs, and it should be as hard to
 	// do quietly as changing the ADR. Anything that decides who may reach this
 	// server belongs nowhere near it.
 	"control.go::func Endpoints":           true,
 	"control.go::func networkOf":           true,
+	"control.go::func stillHeld":           true,
 	"control.go::func hasLocalNetworkAddr": true,
 	"control.go::func appendLocalName":     true,
 	"control.go::func appendEndpoint":      true,
+}
+
+// cmd/gropius names the resolver in exactly two declarations, and this is the
+// list of them. It is separate from the gateway's, keyed the same way — file
+// and declaration — and it exists rather than the command being scanned with
+// nothing allowlisted, because the carve-out has to be consumed somewhere: the
+// mode resolves an address, and the process that acquires listeners is what
+// acquires it.
+//
+// What the command may do with the resolver is bounded by what these two
+// declarations are. One asks for the plan and hands it on; the other prints
+// what the mode selected, which is the amendment's second condition — the
+// choice is always shown — on the surface an operator running headless reads.
+// Neither decides anything: no key requirement, no admission, no warning's
+// firing condition reads any of it, and adding a third name here is the
+// decision adr-2609081118587999 governs, not a refactor.
+var commandMayNameTheResolver = map[string]bool{
+	"main.go::func resolveBind":  true,
+	"main.go::func announceBind": true,
 }
 
 func TestOnlyTheEndpointListReadsTheDetection(t *testing.T) {
@@ -254,7 +377,11 @@ func TestThePanelPackageDoesNotReadTheDetectionEither(t *testing.T) {
 //
 // Nothing here may read the detection by any route the source can name — not
 // the classifier, not the field, and not the Endpoint type, whose value
-// carries the field.
+// carries the field. The one exception is the resolver, in the two
+// declarations commandMayNameTheResolver lists: the private-network mode
+// resolves an address, and this is the process that acquires listeners, so the
+// carve-out has to be consumed here or it cannot be consumed at all. What
+// arrives is a set of addresses; why they were chosen stays in the resolver.
 //
 // What cmd/gropius legitimately needs is the URL of the first entry, for the
 // menu-bar title and the clipboard, and reading `.URL` off a value it never
@@ -267,6 +394,9 @@ func TestThePanelPackageDoesNotReadTheDetectionEither(t *testing.T) {
 func TestTheCommandCannotSeeTheDetection(t *testing.T) {
 	dir := filepath.Join("..", "..", "cmd", "gropius")
 	for _, r := range scanForDetection(t, dir) {
+		if commandMayNameTheResolver[r.site()] && strings.HasPrefix(r.what, resolverName+".") {
+			continue
+		}
 		t.Errorf("%s: %s reads the detection (%s) — cmd/gropius decides whether an exposed bind may run at all, and that decision may not rest on another process's state (adr-2609081118587999 rule 2). The menu bar needs the first entry's .URL and nothing else",
 			r.file, r.where, r.what)
 	}
@@ -295,12 +425,12 @@ func TestTheCommandCannotSeeTheDetection(t *testing.T) {
 var detectionSpelling = []string{`"network"`, "private network"}
 
 func TestTheDetectionsSpellingIsNotWrittenDownOutsideTheEndpointList(t *testing.T) {
-	for _, dir := range []string{
-		filepath.Join("..", "gateway"),
-		filepath.Join("..", "..", "cmd", "gropius"),
+	for dir, allowed := range map[string]map[string]bool{
+		filepath.Join("..", "gateway"):              gatewayMayReadTheDetection,
+		filepath.Join("..", "..", "cmd", "gropius"): commandMayNameTheResolver,
 	} {
 		for _, u := range declUnits(t, dir) {
-			if gatewayMayReadTheDetection[u.file+"::"+u.name] {
+			if allowed[u.file+"::"+u.name] {
 				continue
 			}
 			ast.Inspect(u.node, func(n ast.Node) bool {
@@ -402,13 +532,20 @@ type detectionRef struct {
 func (r detectionRef) site() string { return r.file + "::" + r.where }
 
 // scanForDetection reports every place a package's non-test source names the
-// detection: the classifier by package name, the field its answer travels on,
-// and the type its answer travels in. The field and the type are matched as
-// bare identifiers rather than as selector expressions, because a selector is
-// only one of the ways to touch either — `Endpoint{Network: x}` names both and
-// contains no selector at all.
+// detection: the classifier and the resolver by the name the FILE binds them
+// to, the field the answer travels on, and the type it travels in. The field
+// and the type are matched as bare identifiers rather than as selector
+// expressions, because a selector is only one of the ways to touch either —
+// `Endpoint{Network: x}` names both and contains no selector at all.
+//
+// The qualifier is resolved per file rather than matched as a literal word.
+// An alias is the ordinary way past a scan that looks for "netshape" or
+// "private", and it costs one line: `import p ".../internal/bind/private"`
+// renames every call site in the file, and this rule reported nothing at all
+// for it until it read the import.
 func scanForDetection(t *testing.T, dir string) []detectionRef {
 	t.Helper()
+	qualifiers := packageQualifiers(t, dir)
 	var out []detectionRef
 	for _, u := range declUnits(t, dir) {
 		add := func(what string) {
@@ -417,8 +554,10 @@ func scanForDetection(t *testing.T, dir string) []detectionRef {
 		ast.Inspect(u.node, func(n ast.Node) bool {
 			switch v := n.(type) {
 			case *ast.SelectorExpr:
-				if id, ok := v.X.(*ast.Ident); ok && id.Name == detectionName {
-					add(detectionName + "." + v.Sel.Name)
+				if id, ok := v.X.(*ast.Ident); ok {
+					if canonical, isPkg := qualifiers[u.file][id.Name]; isPkg {
+						add(canonical + "." + v.Sel.Name)
+					}
 				}
 			case *ast.Ident:
 				switch v.Name {
@@ -430,6 +569,51 @@ func scanForDetection(t *testing.T, dir string) []detectionRef {
 			}
 			return true
 		})
+	}
+	return out
+}
+
+// packageQualifiers maps each non-test file in a directory to the identifiers
+// that mean the classifier or the resolver in it, and to which of the two each
+// one means.
+//
+// The canonical names are always in the set, so a file that never imports
+// either package still trips on writing one of them down; an alias is added to
+// the set for the file that declares it. A dot-import is a finding rather than
+// something to skip: its calls carry no qualifier at all, so the scan would go
+// quiet exactly where it is needed — the same reasoning, and the same answer,
+// as the subprocess pinning rule's treatment of `os/exec`.
+func packageQualifiers(t *testing.T, dir string) map[string]map[string]string {
+	t.Helper()
+	out := map[string]map[string]string{}
+	watched := map[string]string{detectionPkg: detectionName, resolverPkg: resolverName}
+	for path, file := range parsePkgFiles(t, dir) {
+		base := filepath.Base(path)
+		names := map[string]string{detectionName: detectionName, resolverName: resolverName}
+		for _, spec := range file.Imports {
+			imported, err := strconv.Unquote(spec.Path.Value)
+			if err != nil {
+				continue
+			}
+			canonical, ok := watched[imported]
+			if !ok {
+				continue
+			}
+			if spec.Name == nil {
+				continue // imported under its own name, already in the set
+			}
+			switch spec.Name.Name {
+			case "_":
+				// A blank import references nothing, so there is nothing to
+				// find; it is also a dependency, which the import rule above
+				// is what covers.
+			case ".":
+				t.Errorf("%s dot-imports %s, so its uses carry no qualifier and this scan cannot see them at all. Import it under a name", base, imported)
+			default:
+				names[spec.Name.Name] = canonical
+			}
+		}
+		out[base] = names
 	}
 	return out
 }

@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/intentdriven/Gropius/internal/bind"
 	"github.com/intentdriven/Gropius/internal/capability"
 	"github.com/intentdriven/Gropius/internal/config"
 	"github.com/intentdriven/Gropius/internal/hub"
@@ -38,6 +39,23 @@ type App struct {
 	StatsStore *stats.FileStore
 	Log        *slog.Logger
 
+	// logLevel is Options.LogLevel: the variable Log's handler reads. Held so
+	// that applyLogLevel can move it at a save. Nil is the switched-off case
+	// and every method below tolerates one.
+	logLevel *slog.LevelVar
+
+	// bindPlan is the set of addresses this process acquired at startup, which
+	// is what the endpoint list and the panel report. It is fixed for the life
+	// of the process: nothing re-binds (adr-2609091123526871 rule 9), so a
+	// value read from the configuration instead would drift from what the
+	// sockets actually are the moment a bind narrowed.
+	bindPlan bind.Plan
+	// startup is the configuration the process started under. Config() is
+	// live and moves with every save; the listeners, the port and the Bonjour
+	// advert do not, and what the panel says about them has to answer from
+	// what was in force when they were made (adr-2609081118587999 rule 4).
+	startup config.Config
+
 	// machineRAM is how much memory this Mac has, or 0 when that cannot be
 	// read. Read once, at construction: a machine does not grow while the
 	// process runs, and every figure derived from it — the default budget, the
@@ -61,12 +79,44 @@ type App struct {
 	cfgMu sync.RWMutex
 	cfg   config.Config
 
-	// dlMu guards in-flight downloads so a repo cannot be downloaded twice at
-	// once, and so a download can be cancelled from the UI.
+	// dlMu guards everything that decides who may touch a model's directory:
+	// the in-flight downloads, the removals in progress, and whether this app
+	// is still accepting either. Those three are one decision — a download must
+	// not start onto a directory a removal is walking, and a removal must not
+	// start on one a download is writing — so they are one lock.
+	//
+	// It sits *under* the pool's mutex in the order adr-2609070004056820
+	// records: modelSource.Resolve takes it while the pool holds p.mu, because
+	// refusing a launch onto a model being deleted has to happen where the
+	// launch is decided. So nothing may hold dlMu while calling into the pool,
+	// which is why Delete releases it before Pool.Unload and Close releases it
+	// before Pool.Close. It is never held across a configuration read either,
+	// so it adds no edge to cfgMu or saveMu.
 	dlMu      sync.Mutex
 	downloads map[string]*download
+	// deleting names the models whose files are being removed right now.
+	// Registry.Remove drops the index entry before it unlinks the directory, so
+	// without this there is a window in which the model looks absent to the
+	// index and present on disk — long enough for a download to start writing
+	// into a directory that is being carried away, or for a request to launch a
+	// model server onto one.
+	deleting map[string]bool
+	// dlClosed records that Close has taken its snapshot. A download registered
+	// after that would add to dlWG a goroutine Close is no longer waiting for.
+	dlClosed bool
 	// dlWG lets Close wait for cancelled downloads to actually stop writing.
+	// Every counter increment happens under dlMu, beside the map entry it
+	// belongs to, so Close cannot see an empty map and a zero counter while a
+	// download is on its way in.
 	dlWG sync.WaitGroup
+
+	// measureDir sums a model directory's bytes. New sets it to dirSize and
+	// nothing else changes it in a running app; it is a seam because where
+	// this walk happens is the property, not an implementation detail. It has
+	// to finish before dlMu is taken, since the pool waits on that lock for
+	// every load, and only a test that can hold the walk still can tell the
+	// order the code is in from the order the machine happened to run it in.
+	measureDir func(string) int64
 }
 
 // download is one in-flight fetch.
@@ -99,12 +149,30 @@ type Options struct {
 	// test that cannot see a launched process cannot see whether that wiring
 	// is connected.
 	Launcher runtime.Launcher
+	// Bind is the set of addresses the process acquired. The zero value means
+	// "whatever Config.Host names", which is what every caller that does not
+	// acquire listeners — every test — wants, and what the app did before a
+	// bind became a set.
+	Bind bind.Plan
+	// LogLevel is the variable the process's log handler reads on every line,
+	// so that saving a new log_level takes effect on the next line rather than
+	// at the next start. Nil — what every test that does not care builds — means
+	// the level is fixed for the life of the process, which is what it was
+	// before this field existed.
+	//
+	// It is the level and not the logger: Log above is what the app writes
+	// through, and handing the app a second way to reach the handler would be a
+	// second answer to "what level is in force".
+	LogLevel *slog.LevelVar
 }
 
 // New wires the application together.
 func New(opts Options) (*App, error) {
 	if opts.Log == nil {
 		opts.Log = slog.Default()
+	}
+	if opts.Bind.Loopback == "" {
+		opts.Bind = bind.ForHost(opts.Config.Host)
 	}
 	if err := opts.Paths.EnsureDirs(); err != nil {
 		return nil, err
@@ -127,7 +195,7 @@ func New(opts Options) (*App, error) {
 	}
 
 	hc := hub.New()
-	hc.Token = opts.Config.HFToken
+	hc.SetToken(opts.Config.HFToken)
 
 	store := stats.NewStore(opts.Paths.Stats, stats.StoreOptions{
 		Months:   opts.Config.StatsMonths,
@@ -148,8 +216,13 @@ func New(opts Options) (*App, error) {
 		Stats:       stats.New(stats.Options{Store: store}),
 		StatsStore:  store,
 		Log:         opts.Log,
+		logLevel:    opts.LogLevel,
 		cfg:         opts.Config,
+		bindPlan:    opts.Bind,
+		startup:     opts.Config,
 		downloads:   map[string]*download{},
+		deleting:    map[string]bool{},
+		measureDir:  dirSize,
 	}
 
 	launcher := opts.Launcher
@@ -167,10 +240,13 @@ func New(opts Options) (*App, error) {
 		launcher = exec
 	}
 
-	// Settings read from disk have not been through SetConfig's checks, so the
-	// pinned list is folded onto the registry's spellings before anything sees
-	// it — the pool, the panel and the next save all join on these strings.
-	a.cfg.Pinned = a.adoptPinned(a.cfg.Pinned)
+	// Settings read from disk have not been through SetConfig's checks: the
+	// file can be hand-edited, restored from a backup, or written by another
+	// build. Fold the per-model settings onto the registry's spellings here,
+	// before anything sees them — the pool, the panel and the next save all
+	// join on these strings — and where the log exists to say what was
+	// dropped.
+	a.cfg.Models = a.adoptModels(a.cfg.Models)
 
 	grace, maxWait := evictionGraceFor(opts.Config)
 	// Held down here for the same reason SetConfig holds it down below: the
@@ -181,7 +257,7 @@ func New(opts Options) (*App, error) {
 	grace = clampGraceToIdle(grace, time.Duration(opts.Config.IdleTimeoutSec)*time.Second)
 	a.Pool = runtime.NewPool(runtime.PoolOptions{
 		Launcher:    launcher,
-		Models:      modelSource{reg},
+		Models:      modelSource{a},
 		IdleTimeout: time.Duration(opts.Config.IdleTimeoutSec) * time.Second,
 		// Resolved here rather than left to the pool, so that the budget the
 		// pool enforces, the ceiling a save is checked against and the share
@@ -197,7 +273,7 @@ func New(opts Options) (*App, error) {
 		// them while recording is off. Adapting here keeps internal/stats a
 		// leaf package that imports nothing of ours.
 		Observer:        poolObserver{rec: a.Stats, log: opts.Log},
-		Pinned:          a.cfg.Pinned,
+		Pinned:          a.cfg.PinnedIDs(),
 		EvictionGrace:   grace,
 		MaxEvictionWait: maxWait,
 		Log:             opts.Log,
@@ -206,19 +282,15 @@ func New(opts Options) (*App, error) {
 		MaxLoadWaitersPerSource: 2,
 	})
 	a.applyStatistics(opts.Config)
-
-	// Settings read from disk have not been through SetConfig's checks: the
-	// file can be hand-edited, restored from a backup, or written by another
-	// build. Fold them onto the registry's spellings here, where the log
-	// exists to say what was dropped.
-	a.cfg.PerModel = a.adoptPerModel(a.cfg.PerModel)
+	a.applyLogLevel(opts.Config)
 
 	// The fit check cannot refuse a file — a hand-edited one can pin anything —
 	// so an over-budget set reaches the pool whatever this says. Passing the
 	// same list as both the incoming and the current set is what says "nothing
 	// was added here": every problem it finds is warned about, none refused.
 	budget := a.Pool.MemoryBudget()
-	_ = a.checkPinnedFit(a.cfg.Pinned, a.cfg.Pinned, budget, budget)
+	pinned := a.cfg.PinnedIDs()
+	_ = a.checkPinnedFit(pinned, pinned, budget, budget)
 
 	// The ceiling cannot refuse a file, so a budget larger than this Mac is
 	// applied and said out loud — the one place a headless install says
@@ -266,6 +338,51 @@ func (a *App) preload(ids []string) {
 	}
 }
 
+// Bind is the set of addresses this process acquired, as it turned out: with a
+// second address dropped, and the reason recorded, when the bind narrowed.
+//
+// It is read rather than derived, and it is read from here rather than from
+// the configuration, because the two can differ — a private-network mode with
+// no address to select serves this Mac, and a panel that reported the
+// configuration would say it was serving something else.
+//
+// No lock: it is written once, at construction, and never again. Nothing
+// re-binds while the process runs (adr-2609091123526871 rule 9), so there is
+// no second writer for a reader to race.
+func (a *App) Bind() bind.Plan { return a.bindPlan }
+
+// BindPort is the port the listeners were acquired on. A saved port moves
+// Config() at once and the sockets at the next start.
+func (a *App) BindPort() int { return a.startup.Port }
+
+// Advertising reports the decision cmd/gropius made at start about the Bonjour
+// advert. The advert is started once and stopped at shutdown, so a live change
+// to the setting reaches nothing until the next start, and this stays what it
+// was. It does not know whether the start succeeded: a failure to advertise is
+// logged and is not fatal.
+func (a *App) Advertising() bool { return Advertises(a.startup, a.bindPlan) }
+
+// Advertises is the one spelling of whether Gropius advertises itself: the
+// setting is on, the mode is not the private-network one, and the bind reaches
+// another machine. The advert is mDNS on the local link, so under the
+// private-network mode and on any bind that narrowed to this Mac every advert
+// would name an address its recipients cannot reach — while disclosing this
+// Mac's hostname, the port, the model count and whether a key is required to
+// exactly the network the bind excludes (adr-2609091123526871 rule 8).
+//
+// It reads the configured mode and the plan, never the classifier. Both are
+// state Gropius owns end to end, which is what keeps this out of
+// adr-2609081118587999 rule 2.
+func Advertises(cfg config.Config, plan bind.Plan) bool {
+	if !cfg.Advertise {
+		return false
+	}
+	if cfg.BindMode == config.BindModePrivateNetwork {
+		return false
+	}
+	return plan.ReachesOtherMachines()
+}
+
 // Config returns the current settings.
 func (a *App) Config() config.Config {
 	a.cfgMu.RLock()
@@ -285,12 +402,11 @@ func (a *App) SetConfig(c config.Config) error {
 	if err := c.Validate(); err != nil {
 		return err
 	}
-	perModel, err := a.canonicalPerModel(c.PerModel)
+	models, err := a.canonicalModels(c.Models)
 	if err != nil {
 		return err
 	}
-	c.PerModel = perModel
-	c.Pinned = a.canonicalPinned(c.Pinned)
+	c.Models = models
 	// Judged on what the operator asked for, applied as what this Mac can hold:
 	// the checks are about their figure, the pool is bounded by the machine.
 	asked := a.effectiveBudget(c.MaxResidentBytes)
@@ -299,7 +415,7 @@ func (a *App) SetConfig(c config.Config) error {
 		return err
 	}
 	budget := a.enforcedBudget(c.MaxResidentBytes)
-	if err := a.checkPinnedFit(c.Pinned, a.Config().Pinned, budget, a.Pool.MemoryBudget()); err != nil {
+	if err := a.checkPinnedFit(c.PinnedIDs(), a.Config().PinnedIDs(), budget, a.Pool.MemoryBudget()); err != nil {
 		return err
 	}
 	if err := config.Save(a.Paths.Config, c); err != nil {
@@ -316,11 +432,14 @@ func (a *App) SetConfig(c config.Config) error {
 	// off is asking for it to stop, not for a history to be destroyed.
 	a.applyStatistics(c)
 
-	a.Hub.Token = c.HFToken
+	// Behind the hub's own lock: download goroutines read the token to build
+	// every request they issue, and a download already running keeps the token
+	// it started with rather than changing horses mid-repo.
+	a.Hub.SetToken(c.HFToken)
 	// Applied live, so a model already in memory is protected from the next
 	// eviction rather than from the one after a restart. The pool takes its own
 	// lock, the one both eviction paths hold while they read the set.
-	a.Pool.SetPinned(c.Pinned)
+	a.Pool.SetPinned(c.PinnedIDs())
 	// Applied live for the same reason, and it unloads nothing: a lowered
 	// budget governs the next load, so no model is pulled out from under the
 	// operator at the moment they pressed Save.
@@ -330,7 +449,43 @@ func (a *App) SetConfig(c config.Config) error {
 	// already waiting rather than leaving them to sit out a grace nobody wants
 	// any more.
 	a.Pool.SetEvictionGrace(a.enforcedGrace(c))
+	// A served window is an input to what a model is charged, and this save may
+	// have changed one. The models in memory are charged again from what the
+	// settings now say, so the panel reports what the pool is enforcing rather
+	// than what it was enforcing before the save — the gateway already refuses
+	// against the new window from the next request.
+	a.Pool.RefreshCharges()
+	// Applied live, and after every other setting: the line below is written at
+	// whatever level this save just chose, so an operator who switches to
+	// detailed sees the save that switched it in the detail they asked for.
+	a.applyLogLevel(c)
+	// Said out loud, at the sparse level, and last of all — so that a save is
+	// reported only once everything it changed is really in force. On a Mac
+	// several people log into, the control plane asks nobody for a password, so
+	// a server whose settings changed under it is a fact the person reading the
+	// log afterwards has no other way to recover. Only the level is named:
+	// every other field here is either uninteresting or a secret, and a save
+	// line that printed the API key would undo the whole point of having a log
+	// file.
+	a.Log.Info("settings changed", "log_level", c.EffectiveLogLevel())
 	return nil
+}
+
+// applyLogLevel puts the chosen level into force.
+//
+// One function, called from the composition root and from every save, for the
+// reason applyStatistics gives: a start and a save that worked the level out
+// separately would be two answers to what is in force, and the one an operator
+// could not see is the one that would be wrong.
+//
+// A nil variable is the switched-off case — an App assembled without one, which
+// is every test that does not care — and means the level is fixed for the life
+// of the process, exactly as it was before this existed.
+func (a *App) applyLogLevel(c config.Config) {
+	if a.logLevel == nil {
+		return
+	}
+	a.logLevel.Set(c.SlogLevel())
 }
 
 // evictionGraceFor turns the stored settings into the two intervals the pool
@@ -471,10 +626,11 @@ func (a *App) BudgetWarnAbove() int64 {
 // end of its range, and "" for one in the middle.
 //
 // Advice rather than a refusal at both ends. At the top, what a Mac can carry
-// is not a figure Gropius knows: a loaded model is charged its weights and a
-// fifth, and not the cache a long conversation adds (iss-3), so a machine fully
-// committed on paper can still run out under load — and equally, a Mac that
-// runs nothing else can carry more than the default share. At the bottom, a
+// is not a figure Gropius knows: a model's charge is worked out from its own
+// configuration rather than measured here, and everything else on the machine
+// draws on the same memory, so a Mac fully committed on paper can still run
+// out under load — and equally, a Mac that runs nothing else can carry more
+// than the default share. At the bottom, a
 // budget under the smallest model's charge refuses every request and hides
 // every model from the search tab, and the operator should hear that from the
 // panel rather than from the first client to be turned away.
@@ -491,7 +647,7 @@ func (a *App) MemoryBudgetWarning() string {
 		return ""
 	}
 	return fmt.Sprintf(
-		"The memory budget (%s) is most of this Mac's memory (%s). macOS and everything else running share it, and a model is charged what it loads rather than what a long conversation adds to it, so requests can still run the machine out of memory.",
+		"The memory budget (%s) is most of this Mac's memory (%s). macOS and everything else running share it, and a model's charge is worked out from its configuration rather than measured on this Mac, so requests can still run the machine out of memory.",
 		runtime.HumanBytes(budget), runtime.HumanBytes(a.machineRAM))
 }
 
@@ -530,73 +686,11 @@ func (a *App) smallestChargeableModel() (int64, string) {
 		if size <= 0 {
 			continue
 		}
-		if cost := runtime.LoadCost(size); smallest == 0 || cost < smallest {
+		if cost := a.chargeOf(m, size); smallest == 0 || cost < smallest {
 			smallest, id = cost, m.RepoID
 		}
 	}
 	return smallest, id
-}
-
-// canonicalPinned rewrites each pinned id to the registry's spelling of the
-// model it names, for the reason canonicalPerModel does: that spelling is the
-// one the operator sees everywhere else, the one the panel joins its boxes on,
-// and the one Settings shows back to them. A pin for a model this machine does
-// not have is kept as it was typed, so a model can be pinned before it is
-// downloaded.
-//
-// Unlike the per-model maps, nothing here can fail: config.Validate has already
-// refused an entry that is not a well-formed repo id and refused two spellings
-// of one model, and folding onto the registry cannot turn two distinct ids into
-// one — two ids that fold differently name different models.
-func (a *App) canonicalPinned(in []string) []string {
-	if len(in) == 0 {
-		return nil
-	}
-	out := make([]string, 0, len(in))
-	for _, id := range in {
-		out = append(out, a.canonicalModelKey(id))
-	}
-	return out
-}
-
-// adoptPinned is canonicalPinned for a list read from disk rather than
-// submitted through Settings: an entry it cannot use is dropped and named in
-// the log, the way an unusable per-model key is, rather than refused.
-//
-// Without this pass a pin spelled in another case than the registry's protects
-// the model — the pool folds — while the panel, which joins its boxes on the
-// exact string, draws it unticked. Ticking that box then posts both spellings,
-// which Validate refuses as two names for one model, and every settings change
-// there is, the API key included, is refused with it until someone edits the
-// file by hand.
-func (a *App) adoptPinned(in []string) []string {
-	if len(in) == 0 {
-		return nil
-	}
-	out := make([]string, 0, len(in))
-	seen := map[string]bool{}
-	var dropped []string
-	for _, id := range in {
-		if !config.ValidRepoID(id) {
-			dropped = append(dropped, id)
-			continue
-		}
-		canonical := a.canonicalModelKey(id)
-		if seen[config.FoldRepoID(canonical)] {
-			dropped = append(dropped, id)
-			continue
-		}
-		seen[config.FoldRepoID(canonical)] = true
-		out = append(out, canonical)
-	}
-	if len(dropped) > 0 {
-		a.Log.Warn("dropped pinned models whose id is not a well-formed model id, or names one another entry already names",
-			"models", dropped)
-	}
-	if len(out) == 0 {
-		return nil
-	}
-	return out
 }
 
 // checkPinnedFit refuses a save that pins more than can be in memory at once.
@@ -610,7 +704,7 @@ func (a *App) adoptPinned(in []string) []string {
 // under a budget they did not lower, is accepted and warned about however badly
 // it fits, because the fit is a fact about this Mac and the set may have
 // arrived from another one — and a settings page that will not save an API key
-// until an unrelated setting is fixed is the wedge adoptPinned exists to
+// until an unrelated setting is fixed is the wedge adoptModels exists to
 // prevent. The budget is judged at its incoming value, so one save that changes
 // both the pins and the budget is measured on what it is asking for.
 //
@@ -721,8 +815,25 @@ type poolObserver struct {
 
 func (o poolObserver) LoadStarted(repoID string) { o.rec.LoadStarted(repoID) }
 
+// LoadFinished records the load and says, in one sparse line, whether the
+// model is now serving.
+//
+// A model arriving in memory and a model failing to arrive are two of the
+// handful of events an operator reads the log to reconstruct, so each gets one
+// line at the sparse level and neither carries a figure. How long the load
+// took is a figure, and so is the error: a launch failure wraps whatever the
+// child process said, which on this path can be an os.PathError carrying
+// absolute paths out of this account's own home directory. Both go to the
+// detailed level, where the operator has asked for them.
 func (o poolObserver) LoadFinished(repoID string, took time.Duration, err error) {
 	o.rec.LoadFinished(repoID, took, err)
+	if err != nil {
+		o.log.Info("model failed to load", "model", repoID)
+		o.log.Debug("model failed to load", "model", repoID, "took", took, "err", err)
+		return
+	}
+	o.log.Info("model loaded", "model", repoID)
+	o.log.Debug("model loaded", "model", repoID, "took", took)
 }
 
 func (o poolObserver) EntryStopped(repoID string, reason runtime.StopReason) {
@@ -738,6 +849,13 @@ func (o poolObserver) EntryStopped(repoID string, reason runtime.StopReason) {
 		mapped = string(reason)
 	}
 	o.rec.Removed(repoID, mapped)
+	// The other half of the pair above: a model that is no longer in memory,
+	// and which of the seven ways it went. The reason is on the sparse line
+	// rather than below it because "unloaded" and "evicted" are different
+	// events to the person reading, not two levels of detail about one — an
+	// operator whose model keeps going away needs to know at a glance whether
+	// something took it or it timed out.
+	o.log.Info("model unloaded", "model", repoID, "reason", mapped)
 }
 
 // stopReasons maps every reason the pool can give onto the recorder's own. It
@@ -763,51 +881,63 @@ var stopReasons = map[runtime.StopReason]string{
 // re-downloaded at a larger quantization grows. Nothing refuses either, so the
 // panel says so instead, beside the warning about an open LAN endpoint.
 func (a *App) PinnedFitWarning() string {
-	problem := a.pinnedFitProblem(a.Config().Pinned, a.Pool.MemoryBudget())
+	problem := a.pinnedFitProblem(a.Config().PinnedIDs(), a.Pool.MemoryBudget())
 	if problem == nil {
 		return ""
 	}
 	return "The pinned models can no longer all be kept in memory: " + problem.Error() + "."
 }
 
-// adoptPinnedSpelling re-folds the pinned list onto the registry's spellings
-// once a model has arrived.
+// adoptModelSpelling re-keys the per-model settings onto the registry's
+// spellings once a model has arrived.
 //
-// A pin may be set before its model is downloaded, and is kept as it was typed
+// A model can be given settings — a pin, a merging switch, a sampling
+// override — before it is downloaded, and the key is kept as it was typed
 // because there is nothing to fold it onto yet. Every surface that joins on the
-// id joins on the registry's spelling, so a pin left in another one shows the
+// id joins on the registry's spelling, so a key left in another one shows the
 // model as unpinned on its card and draws a second, ticked box for a model
 // "not on this Mac" — while the pool, which folds, protects it.
 //
 // It changes the running settings only. config.json keeps the operator's
-// spelling until the next save, which folds it through canonicalPinned anyway;
+// spelling until the next save, which folds it through canonicalModels anyway;
 // writing the file from here would make this a second writer of it.
-func (a *App) adoptPinnedSpelling() {
+func (a *App) adoptModelSpelling() {
 	a.saveMu.Lock()
 	defer a.saveMu.Unlock()
 
 	a.cfgMu.RLock()
-	pinned := append([]string(nil), a.cfg.Pinned...)
+	models := maps.Clone(a.cfg.Models)
 	a.cfgMu.RUnlock()
-	if len(pinned) == 0 {
+	if len(models) == 0 {
 		return
 	}
 
-	folded := make([]string, 0, len(pinned))
+	folded := make(map[string]config.ModelSettings, len(models))
 	changed := false
-	for _, id := range pinned {
+	for _, id := range perModelKeys(models) {
 		canonical := a.canonicalModelKey(id)
 		changed = changed || canonical != id
-		folded = append(folded, canonical)
+		// The entry that already holds the canonical spelling keeps it, and
+		// the colliding one stays under the spelling it was written with
+		// rather than overwriting it. Two entries for one model is what
+		// canonicalModels refuses at a save, and choosing a winner here would
+		// decide for the operator which set of settings survives.
+		if _, dup := folded[canonical]; dup {
+			folded[id] = models[id]
+			continue
+		}
+		folded[canonical] = models[id]
 	}
 	if !changed {
 		return
 	}
 	a.cfgMu.Lock()
-	a.cfg.Pinned = folded
+	a.cfg.Models = folded
 	a.cfgMu.Unlock()
-	a.Pool.SetPinned(folded)
-	a.Log.Info("a pinned model arrived; its pin now names it as the registry does", "pinned", folded)
+	pinned := config.Config{Models: folded}.PinnedIDs()
+	a.Pool.SetPinned(pinned)
+	a.Log.Info("a model with settings arrived; they now name it as the registry does",
+		"models", perModelKeys(folded), "pinned", pinned)
 }
 
 // pinnedCharge is what a pinned set costs the memory budget, and the names of
@@ -832,9 +962,25 @@ func (a *App) pinnedCharge(pinned []string) (sum int64, unsized []string) {
 			unsized = append(unsized, m.RepoID)
 			continue
 		}
-		sum += runtime.LoadCost(size)
+		sum += a.chargeOf(m, size)
 	}
 	return sum, unsized
+}
+
+// chargeOf is what one model costs the memory budget, asked of the one place
+// that answers it. Every figure the pool charges is here too — the window this
+// model is served at, what a token of it costs, and the decode concurrency its
+// server is launched with — because a pinned set the app says fits and the
+// pool then refuses is the disagreement this single home exists to prevent.
+// The size is a parameter because a model still downloading is charged the
+// size it declares rather than the bytes so far.
+func (a *App) chargeOf(m registry.Model, size int64) int64 {
+	return capability.LoadCostOf(capability.Load{
+		DiskBytes:        size,
+		KVChargePerToken: m.KVChargePerToken,
+		Window:           a.Config().ServedContext(m.RepoID, m.ContextLength),
+		Sequences:        int64(a.Pool.DecodeConcurrency()),
+	})
 }
 
 // chargeable reports whether a model could occupy memory at all. Anything the
@@ -859,7 +1005,7 @@ func addsAPin(incoming, current []string) bool {
 	return false
 }
 
-// canonicalPerModel checks the keys of a per-model settings map submitted
+// canonicalModels checks the keys of a per-model settings map submitted
 // through Settings and rewrites each to the registry's spelling of the model
 // it names.
 //
@@ -870,27 +1016,37 @@ func addsAPin(incoming, current []string) bool {
 // operator is present to be told about a key that names nothing — rather than
 // on every request. A key for a model this machine does not have is kept as it
 // was typed, and folded onto the registry's spelling at the next startup after
-// the model arrives (see adoptPerModel), so setting a model up before
+// the model arrives (see adoptModels), so setting a model up before
 // downloading it works whatever case it is typed in.
-func (a *App) canonicalPerModel(in map[string]config.ModelSettings) (map[string]config.ModelSettings, error) {
+func (a *App) canonicalModels(in map[string]config.ModelSettings) (map[string]config.ModelSettings, error) {
 	if len(in) == 0 {
 		return nil, nil
 	}
-	if err := config.ValidatePerModelKeys(in); err != nil {
+	if err := config.ValidateModelKeys(in); err != nil {
 		return nil, err
 	}
 	out := make(map[string]config.ModelSettings, len(in))
 	for _, id := range perModelKeys(in) {
 		canonical := a.canonicalModelKey(id)
 		if _, dup := out[canonical]; dup {
-			return nil, fmt.Errorf("per-model settings name %s more than once", canonical)
+			return nil, fmt.Errorf("settings name %s more than once", canonical)
+		}
+		// An entry with nothing on it is not stored, the way config.Load does
+		// not keep one read from the file: a model with every box cleared has
+		// no settings, and writing an empty object under its name would hold a
+		// slot against the ceiling and come back on the next save.
+		if in[id].IsZero() {
+			continue
 		}
 		out[canonical] = in[id]
+	}
+	if len(out) == 0 {
+		return nil, nil
 	}
 	return out, nil
 }
 
-// adoptPerModel is canonicalPerModel for settings read from disk rather than
+// adoptModels is canonicalModels for settings read from disk rather than
 // submitted through Settings: a key it cannot use is dropped and named in the
 // log, the way an unusable preload entry is, rather than refused.
 //
@@ -898,7 +1054,7 @@ func (a *App) canonicalPerModel(in map[string]config.ModelSettings) (map[string]
 // settings into its form and the form posts them back, so one unusable key
 // would return on the next save and be refused — wedging every settings change
 // there is, the API key included, until someone edited the file by hand.
-func (a *App) adoptPerModel(in map[string]config.ModelSettings) map[string]config.ModelSettings {
+func (a *App) adoptModels(in map[string]config.ModelSettings) map[string]config.ModelSettings {
 	if len(in) == 0 {
 		return nil
 	}
@@ -958,17 +1114,44 @@ func perModelKeys(in map[string]config.ModelSettings) []string {
 }
 
 // modelSource adapts the registry to runtime.ModelSource.
-type modelSource struct{ reg *registry.Registry }
+//
+// It resolves through the App rather than the registry alone because the
+// registry is not the whole answer to "may this model be launched now": a
+// removal in progress has already dropped the index entry and is still
+// unlinking the files, and the pool decides to launch inside this call.
+type modelSource struct{ app *App }
 
-func (s modelSource) Resolve(repoID string) (string, int64, error) {
-	m, err := s.reg.Get(repoID)
+func (s modelSource) Resolve(repoID string) (runtime.ResolvedModel, error) {
+	// Asked before the index, because the index is not what says whether this
+	// model may be launched. The window is precise: Delete calls Pool.Unload
+	// and then Registry.Remove, and between Unload returning and Remove's index
+	// write there is nothing holding p.mu — so an Acquire can take p.mu, enter
+	// startLocked, resolve this model from an index that still lists it, and
+	// launch a server onto a directory that is about to be unlinked. Nothing
+	// else closes that window: the pool's own ErrBusy check is point-in-time
+	// and has already passed, and Registry.Remove drops the entry before it
+	// touches the files. It is sub-millisecond and it is real, and what comes
+	// through it is a model server answering requests from unlinked files after
+	// every surface that reports what this Mac holds has stopped listing it.
+	if s.app.isDeleting(repoID) {
+		return runtime.ResolvedModel{}, fmt.Errorf("%s is being deleted", repoID)
+	}
+	m, err := s.app.Registry.Get(repoID)
 	if err != nil {
-		return "", 0, fmt.Errorf("%s is not downloaded", repoID)
+		return runtime.ResolvedModel{}, fmt.Errorf("%s is not downloaded", repoID)
 	}
 	if !m.Ready() {
-		return "", 0, fmt.Errorf("%s is not ready (%s)", repoID, m.State)
+		return runtime.ResolvedModel{}, fmt.Errorf("%s is not ready (%s)", repoID, m.State)
 	}
-	return m.Path, m.Bytes, nil
+	// The window is the one the operator has this model served at, which is
+	// the model's own declared cap unless they have lowered it: the pool
+	// charges what the gateway will let a client fill.
+	return runtime.ResolvedModel{
+		Path:             m.Path,
+		Bytes:            m.Bytes,
+		ServedContext:    s.app.Config().ServedContext(m.RepoID, m.ContextLength),
+		KVChargePerToken: m.KVChargePerToken,
+	}, nil
 }
 
 // ErrAlreadyDownloading is returned when a download is requested twice.
@@ -977,6 +1160,19 @@ var ErrAlreadyDownloading = errors.New("already downloading")
 // ErrInvalidRepoID is returned when a model id is not a well-formed
 // "<org>/<name>". Callers (the control plane) map it to 400, not 409.
 var ErrInvalidRepoID = errors.New("invalid model id")
+
+// ErrDeleting is returned when a model's files are being removed and something
+// asks to download or delete it again. It is a conflict, not a failure: the
+// removal is running and the operator can ask again once it has finished.
+var ErrDeleting = errors.New("model is being deleted")
+
+// ErrShuttingDown is returned when a download is asked for after Close.
+//
+// Refused rather than accepted-and-abandoned: Close cancels the downloads it
+// can see and then waits for them, so a download started after that snapshot
+// would go on writing into the models directory of an app that believes it has
+// stopped.
+var ErrShuttingDown = errors.New("shutting down")
 
 // Download fetches a model in the background and tracks it in the registry.
 //
@@ -1001,6 +1197,18 @@ func (a *App) Download(repoID string) error {
 	}
 
 	a.dlMu.Lock()
+	if a.dlClosed {
+		a.dlMu.Unlock()
+		return fmt.Errorf("cannot download %s: %w", repoID, ErrShuttingDown)
+	}
+	// A removal in progress owns this directory until it is finished. Checked
+	// under the same lock the removal marks itself with, so the two orderings
+	// are the only two there are: either this download registers first and the
+	// removal waits for it, or the removal is marked first and this is refused.
+	if a.deleting[dlKey(repoID)] {
+		a.dlMu.Unlock()
+		return fmt.Errorf("%s is being deleted; try again once it is gone: %w", repoID, ErrDeleting)
+	}
 	if _, busy := a.downloads[dlKey(repoID)]; busy {
 		a.dlMu.Unlock()
 		return ErrAlreadyDownloading
@@ -1008,7 +1216,28 @@ func (a *App) Download(repoID string) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	dl := &download{repoID: repoID, cancel: cancel, done: make(chan struct{})}
 	a.downloads[dlKey(repoID)] = dl
+	// Counted here rather than beside the `go` below: Close snapshots this map
+	// and then waits on dlWG, so a registration that is visible to Delete but
+	// not yet to the wait group is a download Close would return without.
+	a.dlWG.Add(1)
 	a.dlMu.Unlock()
+
+	// From the unlock above this handle is public: a Delete can already be
+	// parked on dl.done. Every way out of this function that does not reach the
+	// goroutine has to release it, or that Delete waits for a goroutine nobody
+	// ever started — one control-plane handler stuck for the life of the
+	// process. A registry write failing is not hypothetical here: in
+	// shared-cache mode another account owns the index file.
+	handedOff := false
+	defer func() {
+		if handedOff {
+			return
+		}
+		cancel()
+		a.finishDownload(dl, nil)
+		close(dl.done)
+		a.dlWG.Done()
+	}()
 
 	dest := a.Paths.ModelDir(repoID)
 	// Remember whether a ready model is already being served from dest: a
@@ -1031,11 +1260,10 @@ func (a *App) Download(repoID string) error {
 		State:   registry.StateDownloading,
 		AddedAt: addedAt,
 	}); err != nil {
-		a.finishDownload(dl, nil)
 		return err
 	}
 
-	a.dlWG.Add(1)
+	handedOff = true
 	go func() {
 		defer a.dlWG.Done()
 		defer close(dl.done)
@@ -1074,23 +1302,45 @@ func (a *App) Download(repoID string) error {
 		// Each branch publishes its final state and deregisters the download
 		// in one step (see finishDownload). Logging stays outside it: the log
 		// is not what another goroutine is waiting to see.
+		//
+		// So does every reading of the disk. dlMu is on the model-load path —
+		// modelSource.Resolve takes it while the pool holds p.mu — and walking
+		// a multi-gigabyte model directory under it would let the size of the
+		// model that just arrived set how long every other model's load waits
+		// for the pool's own lock. That is the rule pool.go states for its
+		// refusal path, and it applies here for the same reason. What is left
+		// inside is the publication itself: the registry write and the
+		// deregistration, which have to be one step or a caller can see a model
+		// finish and still be refused its next Download.
 		switch {
 		case err == nil:
+			// Re-derive the size from disk rather than trusting the manifest,
+			// and read the context length through the registry's own primitive,
+			// so the download path and the rescan apply one key rule — a model
+			// carries its context length from the moment it is ready, not only
+			// after the next startup rescan. Both touch the disk, so both are
+			// done here, before the lock.
+			bytes := a.measureDir(dest)
+			facts := registry.ReadModelFacts(dest)
+			// And what the Hub says this model is. It is the one reading here
+			// that is not on the disk — nothing in a model directory says
+			// whether it transcribes speech or holds a conversation — so it is
+			// read from the Hub, once, at the only moment we are certain to be
+			// talking to it about this repo.
+			pipelineTag, tags := a.repoCategory(ctx, repoID)
 			var perr error
 			a.finishDownload(dl, func() {
-				// Re-derive the size from disk rather than trusting the manifest.
 				perr = a.Registry.Put(registry.Model{
-					RepoID: repoID,
-					Path:   dest,
-					Bytes:  dirSize(dest),
-					// Read through the registry's own primitive, so the download
-					// path and the rescan apply one key rule; a model carries its
-					// context length from the moment it is ready, not only after
-					// the next startup rescan.
-					ContextLength: registry.ReadContextLength(dest),
-					State:         registry.StateReady,
-					Progress:      100,
-					AddedAt:       addedAt,
+					RepoID:           repoID,
+					Path:             dest,
+					Bytes:            bytes,
+					ContextLength:    facts.ContextLength,
+					KVChargePerToken: facts.KVChargePerToken,
+					PipelineTag:      pipelineTag,
+					Tags:             tags,
+					State:            registry.StateReady,
+					Progress:         100,
+					AddedAt:          addedAt,
 				})
 			})
 			if perr != nil {
@@ -1104,17 +1354,26 @@ func (a *App) Download(repoID string) error {
 			// which spelling its pin should carry, and what the pinned set
 			// costs. Neither refuses anything here — there is no save to
 			// refuse — so the second is a warning the panel repeats.
-			a.adoptPinnedSpelling()
+			a.adoptModelSpelling()
 			if w := a.PinnedFitWarning(); w != "" {
 				a.Log.Warn("a model arrived and the pinned set no longer fits", "warning", w)
 			}
+			// A model that has just landed on top of one already in memory —
+			// a re-download of a revision with a different window — changes
+			// what the pool should be charging it. Asked for outside
+			// finishDownload, because the pool resolves models through this
+			// App and would take dlMu again from under it.
+			a.Pool.RefreshCharges()
 
 		case errors.Is(err, context.Canceled):
 			// A cancelled download leaves .part files behind on purpose: they let
 			// the next attempt resume instead of starting over.
+			// Asked before the lock: it validates the model directory, which
+			// is disk work, and dlMu is on the model-load path.
+			restorable := a.canRestoreReady(dest, wasReady)
 			var restored bool
 			a.finishDownload(dl, func() {
-				restored = a.restoreReady(repoID, dest, wasReady, prior)
+				restored = restorable && a.restoreReady(repoID, dest, prior)
 				if !restored {
 					a.Registry.SetState(repoID, registry.StateFailed, 0, "cancelled")
 				}
@@ -1126,9 +1385,10 @@ func (a *App) Download(repoID string) error {
 			}
 
 		default:
+			restorable := a.canRestoreReady(dest, wasReady)
 			var restored bool
 			a.finishDownload(dl, func() {
-				restored = a.restoreReady(repoID, dest, wasReady, prior)
+				restored = restorable && a.restoreReady(repoID, dest, prior)
 				if !restored {
 					a.Registry.SetState(repoID, registry.StateFailed, 0, err.Error())
 				}
@@ -1144,9 +1404,53 @@ func (a *App) Download(repoID string) error {
 	return nil
 }
 
+// repoCategoryTimeout bounds the metadata request. The download it follows has
+// already succeeded, and the model is on disk: a Hub that has gone slow between
+// the last file and this call must not hold a finished download open, so the
+// wait is short and the answer optional.
+const repoCategoryTimeout = 15 * time.Second
+
+// repoCategory reads what HuggingFace says a model is: its pipeline tag and its
+// tags, as the Hub spells them.
+//
+// Best-effort by design. A failure — the Hub unreachable, the repo gated to a
+// token that lists files but not metadata, a body that will not decode —
+// records no category, which is exactly the state of a repo the Hub does not
+// tag: the model is ready, it is served, and a client is told nothing about its
+// kind rather than told something wrong. It is never an error a download fails
+// on, because the download has already succeeded by the time it is asked.
+//
+// Called before the registry write and outside dlMu, like the two readings
+// beside it: dlMu is on the model-load path, and a network request under it
+// would let a slow Hub decide how long every other model's load waits.
+func (a *App) repoCategory(ctx context.Context, repoID string) (string, []string) {
+	ctx, cancel := context.WithTimeout(ctx, repoCategoryTimeout)
+	defer cancel()
+	info, err := a.Hub.RepoInfo(ctx, repoID)
+	if err != nil {
+		a.Log.Info("the hub did not say what kind of model this is", "model", repoID, "err", err)
+		return "", nil
+	}
+	return info.PipelineTag, info.Tags
+}
+
+// canRestoreReady answers the disk half of the question restoreReady acts on:
+// was this model ready before the attempt, and do its files still validate?
+//
+// It is a function of its own so that the caller can ask it before taking
+// dlMu, which the pool waits on for every load. Asking it a moment earlier
+// costs nothing: the download goroutine is the only writer of this directory
+// while it runs, and a Delete that would take the files away is parked on
+// dl.done, which does not close until that goroutine has finished.
+func (a *App) canRestoreReady(dest string, wasReady bool) bool {
+	return wasReady && validateModelDir(dest) == nil
+}
+
 // restoreReady puts a model back into the ready state after a failed or
-// cancelled download attempt, provided it was ready before the attempt and its
-// files still validate. It reports whether the model was restored.
+// cancelled download attempt. It reports whether the model was restored.
+//
+// Callers ask canRestoreReady first; this is the write alone, so that the only
+// thing done under dlMu is the publication.
 //
 // Everything it restores comes from prior — the record the model had before
 // the attempt — rather than from the directory: measuring the directory now
@@ -1155,18 +1459,18 @@ func (a *App) Download(repoID string) error {
 // revision's context length beside the old revision's size. A record that
 // predates the figure still gains it, because the startup rescan re-derives
 // it from the directory that is actually being served.
-func (a *App) restoreReady(repoID, dest string, wasReady bool, prior registry.Model) bool {
-	if !wasReady || validateModelDir(dest) != nil {
-		return false
-	}
+func (a *App) restoreReady(repoID, dest string, prior registry.Model) bool {
 	if perr := a.Registry.Put(registry.Model{
-		RepoID:        repoID,
-		Path:          dest,
-		Bytes:         prior.Bytes,
-		ContextLength: prior.ContextLength,
-		State:         registry.StateReady,
-		Progress:      100,
-		AddedAt:       prior.AddedAt,
+		RepoID:           repoID,
+		Path:             dest,
+		Bytes:            prior.Bytes,
+		ContextLength:    prior.ContextLength,
+		KVChargePerToken: prior.KVChargePerToken,
+		PipelineTag:      prior.PipelineTag,
+		Tags:             prior.Tags,
+		State:            registry.StateReady,
+		Progress:         100,
+		AddedAt:          prior.AddedAt,
 	}); perr != nil {
 		a.Log.Error("could not restore the ready model record", "model", repoID, "err", perr)
 		return false
@@ -1204,6 +1508,17 @@ func (a *App) finishDownload(dl *download, publish func()) {
 // dlKey is the in-flight downloads map key: case-folded like the registry's,
 // so a case variant of a running download is seen as that download.
 func dlKey(repoID string) string { return config.FoldRepoID(repoID) }
+
+// isDeleting reports whether this model's files are being removed right now.
+//
+// It takes dlMu and calls nothing while holding it, which is what lets the pool
+// ask it from inside startLocked — under p.mu — without inverting the recorded
+// order (adr-2609070004056820).
+func (a *App) isDeleting(repoID string) bool {
+	a.dlMu.Lock()
+	defer a.dlMu.Unlock()
+	return a.deleting[dlKey(repoID)]
+}
 
 // CancelDownload stops an in-flight download.
 //
@@ -1248,12 +1563,30 @@ func (a *App) Delete(repoID string) error {
 	if m, err := a.Registry.Get(repoID); err == nil {
 		repoID = m.RepoID
 	}
+	// Claim the model and read the in-flight download in one step. Claiming it
+	// is what makes the removal atomic against everything that would otherwise
+	// start touching the directory while it is half gone — a Download, and a
+	// request-triggered load through modelSource.Resolve — because both consult
+	// this map under this lock. Reading the download here rather than in a
+	// second pass is what leaves no gap between the two: a download that is not
+	// in the map at this moment cannot start after it.
+	a.dlMu.Lock()
+	if a.deleting[dlKey(repoID)] {
+		a.dlMu.Unlock()
+		return fmt.Errorf("%s is already being deleted: %w", repoID, ErrDeleting)
+	}
+	a.deleting[dlKey(repoID)] = true
+	dl, downloading := a.downloads[dlKey(repoID)]
+	a.dlMu.Unlock()
+	defer func() {
+		a.dlMu.Lock()
+		delete(a.deleting, dlKey(repoID))
+		a.dlMu.Unlock()
+	}()
+
 	// Cancel any download of this model AND wait for it to stop. Cancelling alone
 	// is not enough: the goroutine would keep writing into the directory we are
 	// about to remove, and the model would reappear moments after being deleted.
-	a.dlMu.Lock()
-	dl, downloading := a.downloads[dlKey(repoID)]
-	a.dlMu.Unlock()
 	if downloading {
 		dl.cancel()
 		<-dl.done
@@ -1279,6 +1612,10 @@ func (a *App) Delete(repoID string) error {
 // files after the app believed it had shut down.
 func (a *App) Close() error {
 	a.dlMu.Lock()
+	// Set before the snapshot below, under the same lock a download registers
+	// itself with, so the set cancelled here is the whole set there will ever
+	// be: a Download arriving after this is refused rather than left writing.
+	a.dlClosed = true
 	for _, dl := range a.downloads {
 		dl.cancel()
 	}

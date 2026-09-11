@@ -103,10 +103,10 @@ jobs:
       - name: Test (race, internal)
         run: go test -race ./internal/...
 
-  # Secrets never land in history: full-history scan on every push/PR. Run as a
-  # pinned, checksum-verified CLI (not the marketplace action), so it needs no
-  # GitHub Advanced Security and its supply chain is hash-anchored. A non-zero
-  # exit means gitleaks found a secret.
+  # Secrets never land in history: the whole history OF THE REF UNDER TEST is
+  # scanned on every push/PR. Run as a pinned, checksum-verified CLI (not the
+  # marketplace action), so it needs no GitHub Advanced Security and its supply
+  # chain is hash-anchored. A non-zero exit means gitleaks found a secret.
   gitleaks:
     timeout-minutes: 10
     runs-on: ubuntu-latest
@@ -115,6 +115,10 @@ jobs:
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
+          # Full history, and it stays full: the scan below walks every commit
+          # reachable from HEAD, so a truncated fetch would silently stop
+          # examining anything below the cut — including a secret that was
+          # committed and later removed.
           fetch-depth: 0
           persist-credentials: false
       - name: Install gitleaks (pinned, checksum-verified)
@@ -129,8 +133,27 @@ jobs:
           tar -xzf "$base" gitleaks
           sudo install gitleaks /usr/local/bin/gitleaks
           gitleaks version
-      - name: Scan full history
-        run: gitleaks git --redact --no-banner .
+      # Scoped to the ref under test, not to every fetched ref
+      # (iss-2609081014210884). With no --log-opts, gitleaks 8.24.3 runs
+      # `git log -p -U0 --full-history --all` (sources.NewGitLogCmd), and --all
+      # is every branch and tag the fetch-depth-0 checkout brought down. A
+      # finding is anchored to the commit that INTRODUCED the string, so a
+      # fixture on any unrelated branch failed THIS ref's run, whose tree
+      # contains nothing of it — and clearing it meant rewriting that branch's
+      # history, because removing the string later does not retract the finding.
+      #
+      # A non-empty --log-opts REPLACES those default arguments rather than
+      # adding to them: NewGitLogCmd builds `log -p -U0` and appends these words
+      # verbatim. So this walks the whole history of the checked-out HEAD and
+      # nothing else. Coverage is not lost — a branch push scans its own HEAD, a
+      # pull request scans the merge result, a queue entry scans the candidate —
+      # so nothing reaches the default branch unscanned.
+      #
+      # The quoting is deliberate: gitleaks splits this value on spaces and
+      # warns about elements that are themselves quoted (upstream #1153), so the
+      # shell must strip the quotes and pass `--full-history HEAD` through.
+      - name: Scan this ref's history
+        run: gitleaks git --redact --no-banner --log-opts='--full-history HEAD' .
 
   # Audit the workflows themselves (pwn requests, template injection, cache
   # poisoning, unpinned uses). Run as a digest-pinned CLI image (no SARIF upload

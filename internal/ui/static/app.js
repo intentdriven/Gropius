@@ -124,6 +124,7 @@ function render() {
   renderSetup();
   renderModels();
   renderConnect();
+  renderPosture();
   renderSettings();
   // Independent of renderSettings, which returns early while the form is
   // being edited: the list of models to choose from is live state, not a
@@ -323,6 +324,15 @@ $('searchForm').addEventListener('submit', async (e) => {
   }
 });
 
+// pipelineLabel is what a search result says it is: HuggingFace's own pipeline
+// tag, or "no tag" when the Hub has none for that repo. "no tag" is a fact
+// about the repository — plenty of good models carry none — so it is said
+// rather than left as a blank the reader has to interpret.
+function pipelineLabel(m) {
+  const tag = (m && m.pipeline_tag) || '';
+  return tag ? escapeHtml(tag) : 'no tag';
+}
+
 function renderSearch(data) {
   const box = $('searchResults');
   const results = (data && data.results) || [];
@@ -359,10 +369,11 @@ function renderSearch(data) {
     const quant = m.quantization
       ? `<span class="pill quant">${escapeHtml(m.quantization)}</span>` : '';
     const size = m.size_bytes ? ` · ${bytes(m.size_bytes)}` : '';
+    const kind = pipelineLabel(m);
     card.innerHTML = `
       <div class="meta">
         <div class="name">${escapeHtml(m.id)}${quant}</div>
-        <div class="info">${(m.downloads || 0).toLocaleString()} downloads · ${m.likes || 0} likes${size}</div>
+        <div class="info">${kind} · ${(m.downloads || 0).toLocaleString()} downloads · ${m.likes || 0} likes${size}</div>
       </div>
       <div class="actions"></div>`;
 
@@ -452,6 +463,224 @@ resp = client.chat.completions.create(
 print(resp.choices[0].message.content)`;
 }
 
+// ── posture ──────────────────────────────────────────────
+// One page that says what is on (itd-2609081718534201). Every line below is
+// derived from the state snapshot and from no other source: no fetch, no
+// second reading, no new way to be wrong. Each line names the snapshot fields
+// it read in `reads`, which internal/ui's tests hold to the Go type the
+// control plane publishes; a line with no fields is a fact about the binary
+// rather than an observation of this server, and there are two of those.
+//
+// What the RUNNING bind is — whether it reaches another machine, which mode
+// is in force, whether it is the wildcard — is read from state.bind, which
+// the control plane fills from the plan the sockets were acquired under. It
+// is never inferred from the stored configuration, which a save changes
+// before a restart applies it, nor from the endpoint list, which omits
+// addresses it cannot name while the sockets answer on them.
+//
+// The lines say what is, in the present tense, and say where Gropius's view
+// stops. They state which network an address is on and nothing about what
+// that network is worth (adr-2609081118587999 rule 1), and nothing here is an
+// input to any decision the server makes: the page reports and gates nothing.
+
+// advertising reads the decision the process made at start about the
+// Bonjour advert, which the bind state carries: the advert is started once
+// and stopped at shutdown, so the stored setting — which a save changes at
+// once — is not what is running. It returns which of the three reasons in
+// that rule (the setting, the mode, the reach) keeps the advert off, or ''
+// when it is on.
+function advertising(state) {
+  const bind = state.bind || {};
+  if (bind.advertising) return '';
+  if (bind.mode_in_force === 'private-network') return 'mode';
+  if (!bind.reaches_other_machines) return 'bind';
+  return 'setting';
+}
+
+// postureLines is the page: an array of {id, heading, text, reads}.
+function postureLines(state) {
+  const c = state.config || {};
+  const bind = state.bind || {};
+  const eps = (state.endpoints || []).map(endpointOf).filter((ep) => ep.url);
+  const urls = eps.map((ep) => ep.url);
+  const lines = [];
+  const list = (items) => items.length < 2 ? items.join('')
+    : `${items.slice(0, -1).join(', ')} and ${items[items.length - 1]}`;
+  const reaches = !!bind.reaches_other_machines;
+
+  // Who can reach it: what the running bind acquired, and the addresses the
+  // list can name. The bind is observable; reachability is not, and the
+  // line says so. Under the wildcard the list is not exhaustive — it names
+  // what it can — and its first entry is a name and not an address.
+  let reach;
+  if (!reaches) {
+    reach = `This server answers on this Mac and on no other address: ${list(urls)}. ` +
+      'A request from another machine reaches nothing.';
+  } else if (bind.wildcard) {
+    reach = `This server answers on every address this Mac holds. The ones Gropius can name are ${list(urls)}; ` +
+      "a name ending in .local is this Mac's name on the local network and not an address. ";
+  } else if (bind.bound) {
+    reach = `This server answers on ${bind.bound} and on this Mac; the addresses clients can use are ${list(urls)}. `;
+  } else {
+    // A bound address the panel cannot write as a URL — one carrying an
+    // interface zone — is answered on all the same, and the list below
+    // leaves it out; the page says so rather than leaving a gap.
+    reach = 'This server answers on this Mac and on one more address, which Gropius cannot write as a URL; ' +
+      `the addresses it can name are ${list(urls)}. `;
+  }
+  if (reaches) {
+    reach += 'Which machines can reach an address is decided by the network it is on, and Gropius does not see that.';
+  }
+  if (bind.refusal) reach += ` The bind narrowed to this Mac: ${bind.refusal}.`;
+  lines.push({ id: 'reach', heading: 'Who can reach it', text: reach,
+    reads: ['endpoints.url', 'bind.reaches_other_machines', 'bind.wildcard', 'bind.bound', 'bind.refusal'] });
+
+  // The private network, when there is one: the mark says which network, and
+  // this line says what that mark cannot see. Sharing and public tunnelling
+  // both change who reaches the address and neither touches the interface.
+  const marked = eps.filter((ep) => ep.network);
+  const chosen = bind.mode === 'private-network';
+  const running = bind.mode_in_force === 'private-network';
+  if (marked.length || chosen || running) {
+    let text = marked.length
+      ? `${list(marked.map((ep) => ep.url))} ${marked.length === 1 ? 'is' : 'are'} on a private network. `
+      : 'No address on a private network is being answered on. ';
+    text += 'Gropius reads that from the interface an address sits on and the range it falls in, and reads ' +
+      'nothing from the network itself. Whether that network has since been shared with machines you do not ' +
+      'own, or whether a feature of the network publishes this port to the internet, Gropius cannot see, ' +
+      'and neither changes the address or the mark.';
+    if (running) {
+      text += bind.selected
+        ? ` The private-network choice selected ${bind.selected}.`
+        : ' The private-network choice is in force and selected no address, so the server answers on this Mac.';
+    } else if (chosen) {
+      text += ' The private-network choice is saved and is not in force until Gropius next starts.';
+    }
+    lines.push({ id: 'private', heading: 'The private network', text,
+      reads: ['endpoints.url', 'endpoints.network', 'bind.mode', 'bind.mode_in_force', 'bind.selected'] });
+  }
+
+  lines.push({ id: 'transport', heading: 'What carries a request', reads: [],
+    text: 'Every address is plain HTTP. Gropius does no TLS: whatever protection a request has on its way ' +
+      'here comes from the network it travelled, and Gropius does not see that either.' });
+
+  lines.push({ id: 'panel', heading: 'This control panel', reads: [],
+    text: 'This panel, and the API it is drawn from, answer on this Mac alone whichever bind is chosen. ' +
+      'Every account on this Mac can open it.' });
+
+  // Two key lines, never one: withAuth admits a loopback connection with a
+  // loopback Host without the key, so this Mac — another account on it
+  // included — is served without it while every other machine is refused.
+  const keySet = !!c.api_key;
+  let fromNetwork;
+  if (keySet) {
+    fromNetwork = reaches
+      ? 'A request arriving from another machine has to carry the API key. A key is set.'
+      : 'A key is set. The bind reaches no other machine, so nothing arrives from one to carry it.';
+  } else {
+    fromNetwork = reaches
+      ? 'No API key is set. A request arriving from another machine is served without one.'
+      : 'No API key is set, and the bind reaches no other machine.';
+  }
+  lines.push({ id: 'key-network', heading: 'A request from another machine', text: fromNetwork,
+    reads: ['config.api_key', 'bind.reaches_other_machines'] });
+  lines.push({ id: 'key-local', heading: 'A request from this Mac', reads: ['config.api_key'],
+    text: keySet
+      ? 'A request from this Mac to a loopback address is served without the key, and that includes a ' +
+        'request from another account on this Mac. The key applies to the network and not to this Mac.'
+      : 'A request from this Mac is served without a key, as every request is.' });
+
+  // The announcement: the one thing Gropius sends to every machine on the
+  // local network, and what it carries. The service is named after this Mac
+  // and published under a name of Gropius's own, never the Mac's own .local
+  // name (internal/discovery); with no name to read, the advert says gropius.
+  const off = advertising(state);
+  const name = state.hostname || 'gropius';
+  let announce;
+  if (!off) {
+    announce = 'Gropius is announcing this server to every machine on the local network, as a Bonjour ' +
+      `service named after this Mac's name, ${name}, shortened where it is too long for a service name. ` +
+      `The announcement carries this Mac's addresses, port ${bind.port}, how many models are ready, whether ` +
+      'a key is required, and the fixed words saying it speaks the OpenAI API under /v1. It carries no ' +
+      'model names and no key.';
+  } else {
+    const why = {
+      setting: 'announcing was switched off when Gropius started',
+      mode: 'the announcement travels over the local network, which the private-network choice excludes',
+      bind: 'the bind reaches no other machine',
+    }[off];
+    announce = `Gropius is not announcing this server: ${why}.`;
+  }
+  announce += ' This line reads the decision made when Gropius started, from the setting and the bind then in ' +
+    'force; a setting changed since then takes effect at the next start, and an announcement that failed to ' +
+    'start is reported in the log and not here.';
+  lines.push({ id: 'announce', heading: 'The local network', text: announce,
+    reads: ['bind.advertising', 'bind.port', 'bind.mode_in_force', 'bind.reaches_other_machines', 'hostname'] });
+
+  // The level is applied live — a save moves it on the next line — so the
+  // stored setting is the level in force, unlike the bind and the advert.
+  const level = c.log_level || 'sparse';
+  lines.push({ id: 'log', heading: 'The request log', reads: ['config.log_level'],
+    text: "Each request to the API's endpoints is written to the server log as its method, path, status and " +
+      'duration. The line carries no client address, no prompt, no answer and no key. The log is at the ' +
+      `${level} level` + (level === 'detailed'
+        ? ', which adds to each line the figures the sparse level leaves out'
+        : ', one line for each thing that mattered') +
+      ", and is kept in the logs folder of this account's Gropius data folder, in a file created for this " +
+      'account alone.' });
+
+  // What is recorded, where, and for how long. The store's figures ride the
+  // snapshot while recording is on, so their absence is the observation — and
+  // a store that could not be opened says so before any figure, because a
+  // refused store reported as an empty one would have the operator believing
+  // records were accumulating.
+  let stats;
+  if (c.statistics) {
+    const store = state.stats_store || {};
+    let kept;
+    if (store.refused) {
+      kept = 'Gropius could not open the store where records are kept, so nothing is on disk and the ' +
+        'figures in the Statistics tab are held in memory; its own log says why';
+    } else if (store.oldest) {
+      kept = `records from ${new Date(store.oldest * 1000).toISOString().slice(0, 10)} onwards, ` +
+        `${bytes(store.bytes)} in ${store.files} file${store.files === 1 ? '' : 's'}`;
+    } else {
+      kept = 'none kept yet';
+    }
+    if (!store.refused && store.stalled) {
+      kept += ', and the disk did not answer in time, so the newest records may be missing from that';
+    }
+    stats = 'Request statistics are being recorded on this Mac: for each request, the model, when it ' +
+      'arrived, how it ended, whether it streamed, the tokens in and out, and how long it took; and beside ' +
+      'those, when a model was loaded or evicted, and the settings in force. A record holds no prompt, no ' +
+      `answer, no key and no client address. Records are kept for ${c.stats_months} months and within ` +
+      `${bytes(c.stats_max_bytes)}, in this account's Gropius data folder; ${kept}. Anyone who can open ` +
+      'this panel can read them, which is every account on this Mac.';
+  } else {
+    stats = 'Request statistics are off: no request is recorded.';
+  }
+  lines.push({ id: 'stats', heading: 'Request statistics', text: stats,
+    reads: ['config.statistics', 'config.stats_months', 'config.stats_max_bytes',
+      'stats_store.refused', 'stats_store.oldest', 'stats_store.bytes', 'stats_store.files', 'stats_store.stalled'] });
+
+  return lines;
+}
+
+// postureShown is the markup last drawn. The snapshot arrives every couple of
+// seconds, and prose someone is reading or selecting must not be torn down
+// and rebuilt under them when nothing in it changed.
+let postureShown = '';
+
+// renderPosture draws the lines into the view's own container and nowhere
+// else: the page is somewhere the operator goes, and it interrupts nothing.
+function renderPosture() {
+  const html = postureLines(state).map((l) =>
+    `<div class="fact"><h3>${escapeHtml(l.heading)}</h3><p>${escapeHtml(l.text)}</p></div>`).join('');
+  if (html === postureShown) return;
+  postureShown = html;
+  $('posture').innerHTML = html;
+}
+
 // ── settings ─────────────────────────────────────────────
 let settingsTouched = false;
 document.querySelectorAll('#settingsForm input, #settingsForm select')
@@ -508,11 +737,123 @@ function describeSampling(values) {
     .join(' · ');
 }
 
+// extraBindOption reports the bind address the select has to be given an
+// option for before the stored host can be assigned to it, or null when it
+// already offers that address.
+//
+// HTMLSelectElement.value has no notion of a value the element does not carry:
+// assigning one sets selectedIndex to -1 and leaves .value the empty string. A
+// host config.json accepts and this select never offered — "localhost", "[::1]",
+// one specific address — was therefore posted back as "" on every save, a save
+// that changed nothing about the bind included, and refused with "host must not
+// be empty": a field the pane never showed the operator as wrong, and nothing
+// on the pane saveable again until they edited config.json by hand.
+function extraBindOption(host, offered) {
+  if (!host || offered.includes(host)) return null;
+  return host;
+}
+
+// PRIVATE_BIND is the third choice in the bind select. It is a MODE, not an
+// address: it is posted in bind_mode and never in host, because a word in host
+// passes the server's host validation as a name and then fails to listen.
+const PRIVATE_BIND = 'private-network';
+
+// bindSelectValue is what the select shows for a configuration: the mode when
+// a mode is in force, and the bind address otherwise.
+function bindSelectValue(c) {
+  return c.bind_mode === PRIVATE_BIND ? PRIVATE_BIND : c.host;
+}
+
+// bindSelectBody is the pair of fields a save posts for the chosen bind.
+//
+// Choosing the mode leaves host as it was stored, so that switching the mode
+// off puts back the bind the operator had — and so that a save is never
+// refused, or silently changed, over a field they did not touch.
+function bindSelectBody(chosen, storedHost) {
+  return chosen === PRIVATE_BIND
+    ? { host: storedHost, bind_mode: PRIVATE_BIND }
+    : { host: chosen, bind_mode: '' };
+}
+
+// privateBindLabel says what the mode would bind, or why it cannot.
+//
+// It states which network an address is on and nothing about what that network
+// is worth: Gropius cannot see whether the network has been published to the
+// internet or shared with machines the operator does not own, and neither
+// transition touches the address.
+function privateBindLabel(bind) {
+  const found = (bind && bind.candidates) || [];
+  // What the running mode bound comes first: the address a private network
+  // hands out can change under a running server, and the pane has to name the
+  // one being answered on rather than the one that matches now.
+  const bound = (bind && bind.selected) || '';
+  if (bound) return `A private network (${bound}) — and this Mac`;
+  if (found.length === 1) return `A private network (${found[0]}) — and this Mac`;
+  // Named rather than counted: a refusal the operator can act on is one that
+  // says which addresses it would not choose between.
+  if (found.length > 1) return `A private network — ${found.join(', ')} all match, so Gropius will not choose`;
+  return 'A private network — no matching address on this Mac';
+}
+
+// privateBindDisabled reports whether the choice cannot be made at all.
+//
+// A mode already in force stays selectable with nothing to select: a select
+// cannot show a value it does not offer, so disabling it there would blank the
+// control and post the mode away on the next save — the fault the bind select
+// was fixed for.
+function privateBindDisabled(bind) {
+  const found = (bind && bind.candidates) || [];
+  return found.length === 0 && (!bind || bind.mode !== PRIVATE_BIND);
+}
+
+// bindNoticeText is what the pane says when the bind narrowed: the reason the
+// server gave, or nothing at all when nothing was refused.
+function bindNoticeText(bind) {
+  return (bind && bind.refusal) || '';
+}
+
+// renderBindMode labels the third choice with what it would bind, and takes it
+// away when there is nothing to bind.
+function renderBindMode(select, bind) {
+  for (const opt of Array.from(select.options)) {
+    if (opt.value !== PRIVATE_BIND) continue;
+    opt.textContent = privateBindLabel(bind);
+    opt.disabled = privateBindDisabled(bind);
+  }
+}
+
+// renderBindOptions makes the bind-address select offer the host in force,
+// labeled with the address itself, so the value round-trips and the pane shows
+// the bind Gropius is actually serving on rather than a blank control.
+//
+// The option added last time is dropped first. renderSettings runs on every
+// live update, so without that a pane left open across a bind change would
+// collect one option per address it has held, and offer the operator addresses
+// this Mac no longer serves on.
+function renderBindOptions(select, host) {
+  for (const opt of Array.from(select.options)) {
+    if (opt.dataset.extraBind) opt.remove();
+  }
+  const extra = extraBindOption(host, Array.from(select.options, (o) => o.value));
+  if (extra === null) return;
+  const opt = document.createElement('option');
+  opt.value = extra;
+  opt.textContent = extra;
+  opt.dataset.extraBind = 'true';
+  select.appendChild(opt);
+}
+
 function renderSettings() {
   // Don't stomp on what the user is typing while live updates arrive.
   if (settingsTouched) return;
   const c = state.config;
-  $('setHost').value = c.host;
+  // Before the assignment, never after: an unoffered value assigns as "".
+  renderBindOptions($('setHost'), c.host);
+  renderBindMode($('setHost'), state.bind);
+  const notice = bindNoticeText(state.bind);
+  $('bindNotice').textContent = notice;
+  $('bindNotice').hidden = notice === '';
+  $('setHost').value = bindSelectValue(c);
   $('setPort').value = c.port;
   $('setKey').value  = c.api_key || '';
   $('setIdle').value = c.idle_timeout_sec;
@@ -529,17 +870,30 @@ function renderSettings() {
   $('setGraceSec').value = c.eviction_grace_sec || '';
   $('setGraceWait').value = c.eviction_max_wait_sec || '';
   updateGraceHint();
+  // The rule in force, which is what the server answers with — never blank
+  // while a default stands behind it, because this form posts back what it
+  // shows and two blank fields mean "test nothing".
+  const rule = c.chat_rule || {};
+  $('setChatPipelines').value = (rule.pipeline_tags || []).join(', ');
+  $('setChatTags').value = (rule.required_tags || []).join(', ');
   $('setStats').checked = !!c.statistics;
   $('setStatsMonths').value = c.stats_months;
   // Typed in megabytes and stored in bytes, which is how every other size in
   // this panel is shown.
   $('setStatsMB').value = Math.round((c.stats_max_bytes || 0) / (1024 * 1024));
   renderStatsStore();
+  // An absent value is the default, not a blank: a settings file written
+  // before this field existed, and a fresh install, both mean sparse.
+  $('setLogLevel').value = c.log_level || 'sparse';
   writeSampling('input', c.sampling);
-  overrides = { ...(c.model_sampling || {}) };
+  overrides = {};
+  Object.entries(c.models || {}).forEach(([id, ms]) => {
+    if (ms && ms.sampling) overrides[id] = ms.sampling;
+  });
   renderOverrides();
   renderMergeSwitches();
   renderPinSwitches();
+  renderContextFields();
 }
 
 // renderPinSwitches draws one box per downloaded model, and the figure that
@@ -576,7 +930,7 @@ function renderPinSwitches() {
 // Mac, then one per pin that names a model this Mac does not have.
 //
 // The second half is not a nicety. The form carries through every pin it does
-// not list (see pinnedModels), so a pin with no box could never be removed —
+// not list (see modelSettings), so a pin with no box could never be removed —
 // and a model deleted after it was pinned, or pinned before it was downloaded,
 // leaves exactly that. Showing it is what makes every pin removable by the
 // form that made it.
@@ -609,30 +963,51 @@ function checkedPinModels() {
   return pinBoxes().filter((cb) => cb.checked).map((cb) => cb.dataset.model);
 }
 
-// pinnedModels returns the whole pinned list a save posts. The server replaces
-// what it holds with this, so a model whose box is clear is simply left out —
-// a list cannot be shortened by omission any other way. A pin for a model the
-// form does not list is carried through, because a model can be pinned before
-// it is downloaded and a form with no box for it has nothing to say about it.
-function pinnedModels(current, listed, checked) {
-  const shown = new Set((listed || []).map(foldRepoID));
-  const out = (current || []).filter((id) => !shown.has(foldRepoID(id)));
-  (checked || []).forEach((id) => out.push(id));
-  return out;
+// servedContext is the window Gropius serves a model at, which is what it is
+// charged for and what the gateway holds a request to: the operator's figure
+// for that model, or the window the model itself declares when they have set
+// none or set one the model cannot address. It is config.Config.ServedContext
+// written out again here, and a test in internal/ui holds the two together.
+function servedContext(config, repoID, declared) {
+  const models = (config || {}).models || {};
+  let set = 0;
+  Object.keys(models).forEach((id) => {
+    if (foldRepoID(id) === foldRepoID(repoID)) set = models[id].served_context || 0;
+  });
+  if (set <= 0 || (declared > 0 && set > declared)) return declared || 0;
+  return set;
 }
 
-// pinnedCharge is what the pinned models cost against the memory budget: each
-// one's size plus a fifth, which is what the pool charges a loaded model
-// (runtime.LoadCost). A model still downloading is charged the size it
-// declares, because ticking its box now is a promise about the memory it will
-// take when it lands. A pin naming a model this Mac does not have at all has
-// no size to charge.
-function pinnedCharge(models, pinned) {
+// modelCharge is what one model costs the memory budget, and it is the Go
+// charge (capability.LoadCostOf) written out again here: the weights plus a
+// fifth for the working set, plus the cache the window this model is served at
+// will build, once per sequence its server may decode at once. A model whose
+// configuration says nothing about its cache is charged the flat figure.
+//
+// No ceiling: a charge is what the model will cost. The safety factor is not
+// here either — what the models list carries is already the charged cost per
+// token, so the panel multiplies and nothing more. A test in internal/ui holds
+// this to the Go figure; if you change one, change both.
+function modelCharge(model, config, sequences) {
+  const m = model || {};
+  // A model still downloading is charged the size it declares, because ticking
+  // its box now is a promise about the memory it will take when it lands.
+  const bytes = m.bytes || m.size_bytes || 0;
+  const flat = bytes + Math.floor(bytes / 5);
+  const perToken = m.kv_charge_per_token || 0;
+  const window = servedContext(config, m.repo_id, m.context_length || 0);
+  const seq = sequences || 0;
+  if (perToken <= 0 || window <= 0 || seq <= 0) return flat;
+  return flat + perToken * window * seq;
+}
+
+// pinnedCharge is what the pinned models cost against the memory budget. A pin
+// naming a model this Mac does not have at all has no size to charge.
+function pinnedCharge(models, pinned, config, sequences) {
   const want = new Set((pinned || []).map(foldRepoID));
   return (models || []).reduce((sum, m) => {
     if (!want.has(foldRepoID(m.repo_id))) return sum;
-    const b = m.bytes || m.size_bytes || 0;
-    return sum + b + Math.floor(b / 5);
+    return sum + modelCharge(m, config, sequences);
   }, 0);
 }
 
@@ -689,7 +1064,7 @@ function budgetHint(machine) {
     parts.push(`The models in memory use ${size(resident)} of it.`);
   }
   if (m.warn_above && budget > m.warn_above) {
-    parts.push('macOS and everything else running share this memory, and a model is charged the weights it loads rather than what a long conversation adds to it.');
+    parts.push('macOS and everything else running share this memory, and a model\'s charge is worked out from its configuration rather than measured on this Mac.');
   }
   return parts.join(' ');
 }
@@ -726,7 +1101,11 @@ function updatePinBudget() {
   const line = $('pinBudget');
   if (!line) return;
   const budget = (state.machine && state.machine.budget) || 0;
-  const charge = pinnedCharge(state.models || [], checkedPinModels());
+  // The decode concurrency is part of the charge: each sequence a server may
+  // run at once holds its own cache, so the panel reads the figure the pool is
+  // running with rather than assuming one.
+  const sequences = (state.config && state.config.decode_concurrency) || 0;
+  const charge = pinnedCharge(state.models || [], checkedPinModels(), state.config, sequences);
   if (!budget) {
     line.textContent = charge ? `Pinned models use about ${size(charge)}.` : '';
     line.className = 'hint';
@@ -745,7 +1124,7 @@ function updatePinBudget() {
 function renderMergeSwitches() {
   const box = $('mergeList');
   const models = state.models || [];
-  const per = state.config.per_model || {};
+  const per = state.config.models || {};
   box.innerHTML = '';
   if (!models.length) {
     box.innerHTML = '<p class="hint">Download a model and it appears here.</p>';
@@ -767,6 +1146,58 @@ function renderMergeSwitches() {
   });
 }
 
+// renderContextFields draws one window field per downloaded model. A blank
+// field is the model's own declared window, which is what the placeholder
+// shows, so the operator types a figure only for a model they want served
+// shorter than it was built for.
+function renderContextFields() {
+  const box = $('contextList');
+  if (!box) return;
+  const models = state.models || [];
+  const per = state.config.models || {};
+  box.innerHTML = '';
+  if (!models.length) {
+    box.innerHTML = '<p class="hint">Download a model and it appears here.</p>';
+    return;
+  }
+  models.forEach((m) => {
+    const row = document.createElement('label');
+    row.className = 'field';
+    const name = document.createElement('span');
+    name.textContent = m.repo_id;
+    const input = document.createElement('input');
+    input.type = 'number';
+    input.min = '0';
+    input.dataset.model = m.repo_id;
+    input.placeholder = m.context_length ? String(m.context_length) : 'the model\'s own window';
+    const set = per[m.repo_id] && per[m.repo_id].served_context;
+    input.value = set ? String(set) : '';
+    input.addEventListener('input', () => { settingsTouched = true; updatePinBudget(); });
+    row.appendChild(name);
+    row.appendChild(input);
+    box.appendChild(row);
+  });
+}
+
+// contextInputs are the fields drawn above, one per model the form lists.
+function contextInputs() {
+  return Array.from(document.querySelectorAll('#contextList input[type=number]'));
+}
+
+// listedContextModels lists the models the form drew a field for.
+function listedContextModels() {
+  return contextInputs().map((el) => el.dataset.model);
+}
+
+// typedContextModels is what has been typed into those fields, by model. A
+// blank or unusable field is zero, which applyModelNumber reads as "the
+// model's own window" and leaves no setting behind.
+function typedContextModels() {
+  const out = {};
+  contextInputs().forEach((el) => { out[el.dataset.model] = parseInt(el.value, 10) || 0; });
+  return out;
+}
+
 // mergeBoxes are the boxes drawn above, one per model the form lists.
 function mergeBoxes() {
   return Array.from(document.querySelectorAll('#mergeList input[type=checkbox]'));
@@ -782,32 +1213,66 @@ function checkedMergeModels() {
   return mergeBoxes().filter((cb) => cb.checked).map((cb) => cb.dataset.model);
 }
 
-// perModelSettings returns the whole per-model map a save posts. The server
-// replaces what it holds with this, so a model whose box is clear is simply
-// left out and its merging goes off — a map cannot be switched off by omission
-// any other way.
+// modelSettings returns the whole per-model map a save posts: one map holding
+// every setting that belongs to a model rather than to the machine — merging,
+// pinning and the sampling override.
 //
-// Two things are therefore carried through rather than rebuilt. Settings this
-// form does not own stay on the model that has them, so ticking a box never
-// wipes a model's other settings. And a model the form does not list keeps
-// everything it has, because a model can be given settings before it is
-// downloaded and a form with no box for it has nothing to say about it.
-function perModelSettings(current, listed, checked) {
-  const shown = new Set(listed || []);
+// The server replaces what it holds with this, so a model whose box is clear
+// is simply left out and the setting goes off — a map cannot be switched off
+// by omission any other way. Two things are therefore carried through rather
+// than rebuilt. A setting this form does not own stays on the model that has
+// it, so ticking one box never wipes another setting. And a model the form
+// does not list keeps everything it has, because a model can be given settings
+// before it is downloaded and a form with no box for it has nothing to say
+// about it.
+//
+// The sampling overrides are not a box but a whole editor, which holds every
+// override there is while it is open, so they are assigned rather than
+// toggled: a model missing from them has had its override removed.
+function modelSettings(current, overrides, listedMerge, checkedMerge, listedPin, checkedPin, listedContext, typedContext) {
   const out = {};
   Object.keys(current || {}).forEach((id) => {
-    if (!shown.has(id)) {
-      out[id] = current[id];
-      return;
-    }
-    const rest = Object.assign({}, current[id]);
-    delete rest.merge_system_messages;
-    if (Object.keys(rest).length) out[id] = rest;
+    out[id] = Object.assign({}, current[id]);
+    delete out[id].sampling;
   });
-  (checked || []).forEach((id) => {
-    out[id] = Object.assign({}, out[id] || {}, { merge_system_messages: true });
+  Object.keys(overrides || {}).forEach((id) => {
+    out[id] = Object.assign({}, out[id] || {}, { sampling: overrides[id] });
+  });
+  applyModelSwitch(out, 'merge_system_messages', listedMerge, checkedMerge);
+  applyModelSwitch(out, 'pinned', listedPin, checkedPin);
+  applyModelNumber(out, 'served_context', listedContext, typedContext);
+  // A model left with no settings at all is left out entirely, so that
+  // clearing every box for a model removes it rather than storing an empty
+  // object under its name.
+  Object.keys(out).forEach((id) => {
+    if (!Object.keys(out[id]).length) delete out[id];
   });
   return out;
+}
+
+// applyModelSwitch writes one row of boxes into the map being posted: every
+// model the form drew a box for loses the setting, and every model whose box
+// is ticked gets it back. A model with no box is not touched.
+function applyModelNumber(models, field, listed, typed) {
+  (listed || []).forEach((id) => {
+    if (models[id]) delete models[id][field];
+  });
+  Object.keys(typed || {}).forEach((id) => {
+    const n = typed[id];
+    // A blank or unusable field is the model's own window, which is the
+    // absence of the setting rather than a figure of zero.
+    if (!(n > 0)) return;
+    models[id] = Object.assign({}, models[id] || {}, { [field]: n });
+  });
+}
+
+function applyModelSwitch(models, field, listed, checked) {
+  (listed || []).forEach((id) => {
+    if (models[id]) delete models[id][field];
+  });
+  (checked || []).forEach((id) => {
+    models[id] = Object.assign({}, models[id] || {}, { [field]: true });
+  });
 }
 
 function renderOverrides() {
@@ -945,6 +1410,10 @@ function renderStatsStore() {
   if (store.unsummarized) {
     parts.push(`${store.unsummarized} removed without a summary`);
   }
+  if (store.stalled) {
+    parts.push('the disk did not answer in time, so these figures may not include the newest records ' +
+      '(its own log says so, and they come back as soon as it does)');
+  }
   if (store.dropped) {
     parts.push(`${store.dropped} not written — the disk could not keep up`);
   }
@@ -952,6 +1421,25 @@ function renderStatsStore() {
     parts.push(`${store.skipped} unreadable lines`);
   }
   line.textContent = `${parts.join(' · ')}.`;
+}
+
+// chatRule turns the two settings fields into the rule the server holds: two
+// lists of HuggingFace's own words, as typed, trimmed, with the blanks a comma
+// or two leaves behind dropped.
+//
+// A cleared field posts an empty list rather than nothing at all. The two are
+// different settings on the server — an absent rule means the shipped default,
+// an empty list means "do not test this half" — and a cleared field is the
+// operator asking for the second.
+function chatRule(pipelines, tags) {
+  return { pipeline_tags: splitTagField(pipelines), required_tags: splitTagField(tags) };
+}
+
+function splitTagField(value) {
+  return String(value || '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter((s) => s !== '');
 }
 
 $('genKey').addEventListener('click', () => {
@@ -972,7 +1460,9 @@ $('settingsForm').addEventListener('submit', async (e) => {
   // preserved server-side — sending advertise:true here used to silently
   // re-enable LAN advertising on every save.
   const body = {
-    host:               $('setHost').value,
+    // The bind is two fields — an address and a mode — and the select carries
+    // whichever one the operator chose.
+    ...bindSelectBody($('setHost').value, state.config.host),
     port:               parseInt($('setPort').value, 10),
     api_key:            $('setKey').value,
     idle_timeout_sec:   parseInt($('setIdle').value, 10) || 0,
@@ -985,15 +1475,20 @@ $('settingsForm').addEventListener('submit', async (e) => {
     // a figure nobody typed.
     eviction_grace_sec:    parseInt($('setGraceSec').value, 10) || 0,
     eviction_max_wait_sec: parseInt($('setGraceWait').value, 10) || 0,
+    chat_rule:          chatRule($('setChatPipelines').value, $('setChatTags').value),
     statistics:         $('setStats').checked,
     stats_months:       parseInt($('setStatsMonths').value, 10) || 6,
     stats_max_bytes:    (parseInt($('setStatsMB').value, 10) || 200) * 1024 * 1024,
+    log_level:          $('setLogLevel').value,
     // A blank sampling field is sent as null, not as zero: the model server is
     // handed a flag only for a parameter that has a value.
     sampling:           readSampling('input'),
-    model_sampling:     overrides,
-    per_model:         perModelSettings(state.config.per_model, listedMergeModels(), checkedMergeModels()),
-    pinned:            pinnedModels(state.pinned, listedPinModels(), checkedPinModels()),
+    models: modelSettings(
+      state.config.models, overrides,
+      listedMergeModels(), checkedMergeModels(),
+      listedPinModels(), checkedPinModels(),
+      listedContextModels(), typedContextModels(),
+    ),
   };
   try {
     const res = await api('/api/settings', {

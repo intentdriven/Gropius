@@ -1,10 +1,10 @@
 ---
 id: adr-2609070004056820
 slug: the-app-s-three-locks-have-one-order-the-pool-s-mutex-then-t
-status: accepted
+status: superseded
 date: 2026-09-07
 supersedes: null
-superseded_by: null
+superseded_by: adr-2609091239058072
 related_intents: [itd-2609061441241254]
 related_rfcs: []
 related_adrs: []

@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -9,10 +10,12 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/intentdriven/Gropius/internal/app"
+	"github.com/intentdriven/Gropius/internal/bind"
 	"github.com/intentdriven/Gropius/internal/config"
 	"github.com/intentdriven/Gropius/internal/registry"
 )
@@ -347,7 +350,7 @@ func TestEndpointsIncludeLoopbackAndHostname(t *testing.T) {
 	cfg := config.Default()
 	cfg.Port = 11535
 
-	eps := Endpoints(cfg)
+	eps := Endpoints(cfg, bind.ForHost(cfg.Host))
 	var hasLoopback, hasLocal bool
 	for _, e := range eps {
 		if strings.Contains(e.URL, "127.0.0.1:11535/v1") {
@@ -370,7 +373,7 @@ func TestLoopbackOnlyConfigAdvertisesNoLANAddress(t *testing.T) {
 	cfg := config.Default()
 	cfg.Host = "127.0.0.1"
 
-	for _, e := range Endpoints(cfg) {
+	for _, e := range Endpoints(cfg, bind.ForHost(cfg.Host)) {
 		if strings.Contains(e.URL, "192.168.") || strings.Contains(e.URL, "10.") {
 			t.Errorf("a loopback-bound server advertised a LAN address: %s", e.URL)
 		}
@@ -450,10 +453,11 @@ func TestEventStreamIsSSE(t *testing.T) {
 	}
 }
 
-// /api/search's "limit" must be bounded: it is reachable even from a blind,
-// Origin-less cross-origin GET (loopbackOnly's Origin check never sees a
-// header on a request like <img src>), and an unbounded value turns one
-// request into an unbounded fan-out of outbound Hub lookups.
+// /api/search's "limit" must be bounded: an unbounded value turns one request
+// into an unbounded fan-out of outbound Hub lookups, and the cap does not
+// depend on who can reach the route — a browser too old to send Sec-Fetch-Site
+// still makes the blind, Origin-less cross-origin GET that loopbackOnly's
+// Origin check never sees.
 func TestSearchLimitIsBounded(t *testing.T) {
 	cases := []struct {
 		raw  string
@@ -502,7 +506,7 @@ func TestSavingPinnedModelsNeedsNoRestart(t *testing.T) {
 	srv, a := newTestControlApp(t, config.Default())
 
 	body := `{"host":"0.0.0.0","port":11535,"api_key":"","decode_concurrency":4,` +
-		`"idle_timeout_sec":0,"pinned":["org/keeper"]}`
+		`"idle_timeout_sec":0,"models":{"org/keeper":{"pinned":true}}}`
 	resp := postJSON(t, srv, "/api/settings", body)
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
@@ -527,13 +531,13 @@ func TestSavingPinnedModelsNeedsNoRestart(t *testing.T) {
 // unpin one.
 func TestSavingSettingsWithoutNamingPinnedKeepsThePins(t *testing.T) {
 	cfg := config.Default()
-	cfg.Pinned = []string{"org/keeper"}
+	cfg.Models = pinnedModels("org/keeper")
 	srv, a := newTestControlApp(t, cfg)
 
 	resp := postJSON(t, srv, "/api/settings",
 		`{"host":"0.0.0.0","port":11535,"api_key":"","decode_concurrency":4,"idle_timeout_sec":0}`)
 	resp.Body.Close()
-	if got := a.Config().Pinned; len(got) != 1 || got[0] != "org/keeper" {
+	if got := a.Config().PinnedIDs(); len(got) != 1 || got[0] != "org/keeper" {
 		t.Errorf("Pinned = %v after an unrelated save, want the pin kept", got)
 	}
 }
@@ -551,30 +555,30 @@ func TestSettingsRefusesAPinnedSetLargerThanTheBudget(t *testing.T) {
 
 	resp := postJSON(t, srv, "/api/settings",
 		`{"host":"0.0.0.0","port":11535,"api_key":"","decode_concurrency":4,`+
-			`"idle_timeout_sec":0,"pinned":["org/enormous"]}`)
+			`"idle_timeout_sec":0,"models":{"org/enormous":{"pinned":true}}}`)
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400 for a pinned set that cannot fit", resp.StatusCode)
 	}
-	if got := a.Config().Pinned; len(got) != 0 {
+	if got := a.Config().PinnedIDs(); len(got) != 0 {
 		t.Errorf("the refused pins reached the running configuration: %v", got)
 	}
 }
 
-// A save that names the pinned list replaces it. Unlike the two per-model maps
-// beside it, no guard is needed for that — encoding/json resets a slice's
-// length rather than merging into it — but the difference is subtle enough
-// that removing a pin deserves a test of its own.
+// A save that names the per-model settings replaces them, so a model left out
+// of the posted map is unpinned. encoding/json merges into an existing map
+// rather than replacing it, which is exactly what the handler's one reset
+// guards against — and unpinning is the case that guard is easiest to lose.
 func TestSavingAShorterPinnedListRemovesTheRest(t *testing.T) {
 	cfg := config.Default()
-	cfg.Pinned = []string{"org/one", "org/two"}
+	cfg.Models = pinnedModels("org/one", "org/two")
 	srv, a := newTestControlApp(t, cfg)
 
 	resp := postJSON(t, srv, "/api/settings",
 		`{"host":"0.0.0.0","port":11535,"api_key":"","decode_concurrency":4,`+
-			`"idle_timeout_sec":0,"pinned":["org/one"]}`)
+			`"idle_timeout_sec":0,"models":{"org/one":{"pinned":true}}}`)
 	resp.Body.Close()
-	if got := a.Config().Pinned; len(got) != 1 || got[0] != "org/one" {
+	if got := a.Config().PinnedIDs(); len(got) != 1 || got[0] != "org/one" {
 		t.Errorf("Pinned = %v, want only the model the save named", got)
 	}
 	if got := a.Pool.Pinned(); len(got) != 1 || got[0] != "org/one" {
@@ -585,9 +589,9 @@ func TestSavingAShorterPinnedListRemovesTheRest(t *testing.T) {
 	// are its members" everywhere else in this handler.
 	resp = postJSON(t, srv, "/api/settings",
 		`{"host":"0.0.0.0","port":11535,"api_key":"","decode_concurrency":4,`+
-			`"idle_timeout_sec":0,"pinned":null}`)
+			`"idle_timeout_sec":0,"models":null}`)
 	resp.Body.Close()
-	if got := a.Config().Pinned; len(got) != 0 {
+	if got := a.Config().PinnedIDs(); len(got) != 0 {
 		t.Errorf("Pinned = %v after an explicit null, want none", got)
 	}
 }
@@ -612,7 +616,7 @@ func TestStateWarnsWhenThePinnedSetNoLongerFits(t *testing.T) {
 	// Pinned while the model was not there to be charged, as a delete and a
 	// re-download leave it.
 	cfg := a.Config()
-	cfg.Pinned = []string{"org/gone"}
+	cfg.Models = pinnedModels("org/gone")
 	if err := a.SetConfig(cfg); err != nil {
 		t.Fatal(err)
 	}
@@ -652,7 +656,7 @@ func TestStateCarriesThePinnedSetAndTheMemoryBudget(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfg := a.Config()
-	cfg.Pinned = []string{"org/keeper"}
+	cfg.Models = pinnedModels("org/keeper")
 	if err := a.SetConfig(cfg); err != nil {
 		t.Fatal(err)
 	}
@@ -736,5 +740,437 @@ func TestEndpointURLRefusesAHostNoURLCanCarry(t *testing.T) {
 		if got := endpointURL(host, 11535); got != want {
 			t.Errorf("endpointURL(%q) = %q, want %q — refusing this one would drop an address the server answers on", host, got, want)
 		}
+	}
+}
+
+// A setting the file could not carry as written is repaired on load and is in
+// force in a changed form — an API key trimmed to the ceiling is the key
+// clients must send from then on. A log line at startup is not where the
+// operator finds that out: the panel shows the key as asterisks either way, so
+// without a warning on this channel the trim is invisible on the surface the
+// operator is actually looking at.
+func TestStateWarnsAboutASettingRepairedOnLoad(t *testing.T) {
+	srv, _ := newTestControlAppNoticed(t, config.Default(), config.Notices{
+		Repaired: []string{"api_key (trimmed to the 512-byte ceiling)"},
+	})
+
+	var found string
+	for _, w := range stateOf(t, srv).Warnings {
+		if strings.Contains(w, "api_key") {
+			found = w
+		}
+	}
+	if found == "" {
+		t.Fatalf("no warning named the repaired setting: %v", stateOf(t, srv).Warnings)
+	}
+	if strings.Contains(found, "ignor") {
+		t.Errorf("the warning %q says the setting was ignored; it is in force", found)
+	}
+}
+
+// Saving rewrites config.json from the values in force, so the file no longer
+// carries anything that needed repairing — and a warning that outlives the fix
+// is the same class of untruth as the wording it replaced.
+func TestASuccessfulSaveClearsTheRepairWarning(t *testing.T) {
+	srv, _ := newTestControlAppNoticed(t, config.Default(), config.Notices{
+		Repaired: []string{"api_key (trimmed to the 512-byte ceiling)"},
+	})
+
+	resp := postJSON(t, srv, "/api/settings", `{"idle_timeout_sec":120}`)
+	defer resp.Body.Close()
+	io.Copy(io.Discard, resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+
+	for _, w := range stateOf(t, srv).Warnings {
+		if strings.Contains(w, "api_key") {
+			t.Errorf("the repair warning survived the save that fixed it: %q", w)
+		}
+	}
+}
+
+// A setting this build ignored is not in force at all, and the operator has to
+// hear that on the surface they are looking at. A per-model setting whose key
+// this build no longer reads is the case that makes it urgent: a model that
+// was pinned is not pinned any more, and nothing on the panel would say so —
+// the operator finds out when a request is refused for memory the pin was
+// supposed to be holding.
+func TestStateWarnsAboutASettingIgnoredOnLoad(t *testing.T) {
+	srv, _ := newTestControlAppNoticed(t, config.Default(), config.Notices{
+		Ignored: []string{"pinned (replaced by models[<id>].pinned)"},
+	})
+
+	var found string
+	for _, w := range stateOf(t, srv).Warnings {
+		if strings.Contains(w, "pinned") {
+			found = w
+		}
+	}
+	if found == "" {
+		t.Fatalf("no warning named the ignored setting: %v", stateOf(t, srv).Warnings)
+	}
+	if !strings.Contains(found, "not in force") {
+		t.Errorf("the warning %q does not say the setting is not in force", found)
+	}
+	if !strings.Contains(found, "again") {
+		t.Errorf("the warning %q does not say the setting must be set again", found)
+	}
+}
+
+// The ignored warning is cleared by a save, like the repair warning beside it:
+// the save rewrites config.json without the keys this build ignores, so there
+// is nothing left in the file to warn about.
+func TestASuccessfulSaveClearsTheIgnoredWarning(t *testing.T) {
+	srv, _ := newTestControlAppNoticed(t, config.Default(), config.Notices{
+		Ignored: []string{"pinned (replaced by models[<id>].pinned)"},
+	})
+
+	resp := postJSON(t, srv, "/api/settings", `{"idle_timeout_sec":120}`)
+	defer resp.Body.Close()
+	io.Copy(io.Discard, resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+
+	for _, w := range stateOf(t, srv).Warnings {
+		if strings.Contains(w, "not in force") {
+			t.Errorf("the ignored warning survived the save that rewrote the file: %q", w)
+		}
+	}
+}
+
+// A body naming a setting this build no longer reads is refused, naming the
+// key and what carries it now. The keys decode into nothing, so the save would
+// otherwise succeed and answer "saved" to a caller — a script, or someone's
+// own shell; the panel never posts them — whose pins and overrides were not
+// stored at all.
+func TestSettingsRefusesASupersededKey(t *testing.T) {
+	for _, tc := range []struct {
+		name, body, want string
+	}{
+		{"pinned", `{"idle_timeout_sec":120,"pinned":["org/a"]}`, "pinned"},
+		{"per_model", `{"idle_timeout_sec":120,"per_model":{"org/a":{"merge_system_messages":true}}}`, "per_model"},
+		{"model_sampling", `{"idle_timeout_sec":120,"model_sampling":{"org/a":{"temperature":0.2}}}`, "model_sampling"},
+		// encoding/json matches field names case-insensitively, so the refusal
+		// has to fold too or one spelling walks straight past it.
+		{"another spelling", `{"idle_timeout_sec":120,"Per_Model":{}}`, "per_model"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, a := newTestControlApp(t, config.Default())
+			before := a.Config().IdleTimeoutSec
+
+			resp := postJSON(t, srv, "/api/settings", tc.body)
+			defer resp.Body.Close()
+			body, _ := io.ReadAll(resp.Body)
+			if resp.StatusCode != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400 for a body naming %s", resp.StatusCode, tc.want)
+			}
+			if !strings.Contains(string(body), tc.want) {
+				t.Errorf("the refusal %q does not name %s", body, tc.want)
+			}
+			if !strings.Contains(string(body), "models") {
+				t.Errorf("the refusal %q does not say where the setting lives now", body)
+			}
+			if got := a.Config().IdleTimeoutSec; got != before {
+				t.Errorf("the refused save applied the rest of the body: idle timeout %d -> %d", before, got)
+			}
+		})
+	}
+}
+
+// newTestControlAppNoticed is newTestControlApp with what the load had to
+// change about config.json, which is what the panel warns about.
+func newTestControlAppNoticed(t *testing.T, cfg config.Config, notices config.Notices) (*httptest.Server, *app.App) {
+	t.Helper()
+
+	paths := config.NewPaths(t.TempDir())
+	a, err := app.New(app.Options{Paths: paths, Config: cfg})
+	if err != nil {
+		t.Fatalf("app.New: %v", err)
+	}
+	t.Cleanup(func() { a.Close() })
+
+	ctrl := &Control{App: a, Notices: notices}
+	mux := http.NewServeMux()
+	ctrl.Routes(mux)
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	return srv, a
+}
+
+// A save reads the current settings, decodes the posted body into a copy of
+// them, and writes the result back — so two saves that overlap each write a
+// configuration that never saw the other's change, and whichever calls
+// SetConfig last silently reverts a field it was never asked about. Two
+// browser tabs, or the panel and a script, are enough.
+func TestConcurrentSavesEachKeepTheirOwnField(t *testing.T) {
+	srv, a := newTestControlApp(t, config.Default())
+
+	// A pair of saves is repeated rather than sent once: the window between
+	// reading the settings and writing them is short, so one pair can
+	// interleave harmlessly and prove nothing.
+	for i := range 40 {
+		idle, decode := 60+i, 1+i%8
+		bodies := []string{
+			fmt.Sprintf(`{"idle_timeout_sec":%d}`, idle),
+			fmt.Sprintf(`{"decode_concurrency":%d}`, decode),
+		}
+		results := make(chan error, len(bodies))
+		var wg sync.WaitGroup
+		for _, body := range bodies {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				req, err := http.NewRequest(http.MethodPost, srv.URL+"/api/settings",
+					strings.NewReader(body))
+				if err != nil {
+					results <- err
+					return
+				}
+				req.Header.Set("Content-Type", "application/json")
+				resp, err := srv.Client().Do(req)
+				if err != nil {
+					results <- err
+					return
+				}
+				defer resp.Body.Close()
+				io.Copy(io.Discard, resp.Body)
+				if resp.StatusCode != http.StatusOK {
+					results <- fmt.Errorf("POST %s: status %d", body, resp.StatusCode)
+					return
+				}
+				results <- nil
+			}()
+		}
+		wg.Wait()
+		close(results)
+		for err := range results {
+			if err != nil {
+				t.Fatalf("round %d: %v", i, err)
+			}
+		}
+
+		got := a.Config()
+		if got.IdleTimeoutSec != idle {
+			t.Fatalf("round %d: idle_timeout_sec = %d, want %d — the save that set it was overwritten by one that never saw it",
+				i, got.IdleTimeoutSec, idle)
+		}
+		if got.DecodeConcurrency != decode {
+			t.Fatalf("round %d: decode_concurrency = %d, want %d — the save that set it was overwritten by one that never saw it",
+				i, got.DecodeConcurrency, decode)
+		}
+	}
+}
+
+// The panel is served the rule in force, not the empty record of a rule nobody
+// has saved yet: the form shows what it is given and posts it back, so a blank
+// pair of fields would read as "test nothing" and hand every model to the
+// picker at the next save.
+func TestTheSettingsAnswerCarriesTheRuleInForce(t *testing.T) {
+	srv := newTestControl(t, config.Default())
+
+	resp, err := srv.Client().Get(srv.URL + "/api/settings")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var out struct {
+		ChatRule config.ChatRule `json:"chat_rule"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	if !out.ChatRule.Equal(config.DefaultChatRule()) {
+		t.Errorf("the panel is served %+v, want the rule in force %+v", out.ChatRule, config.DefaultChatRule())
+	}
+}
+
+// The rule is one more setting, and the file is a surface an operator edits by
+// hand: a save that names it must not disturb anything else, and a save that
+// does not name it must not disturb the rule.
+func TestSavingTheChatRuleTouchesNothingElse(t *testing.T) {
+	cfg := config.Default()
+	cfg.Advertise = true
+	cfg.Preload = []string{"mlx-community/Qwen3-8B-4bit"}
+	cfg.Models = pinnedModels("org/keeper")
+	srv, a := newTestControlApp(t, cfg)
+
+	resp := postJSON(t, srv, "/api/settings",
+		`{"host":"0.0.0.0","port":11535,"api_key":"","decode_concurrency":4,"idle_timeout_sec":0,`+
+			`"chat_rule":{"pipeline_tags":["text-generation"],"required_tags":[]}}`)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	got := a.Config()
+	if len(got.ChatRule.PipelineTags) != 1 || got.ChatRule.PipelineTags[0] != "text-generation" {
+		t.Errorf("chat rule = %+v, want the one just saved", got.ChatRule)
+	}
+	if len(got.ChatRule.RequiredTags) != 0 || got.ChatRule.RequiredTags == nil {
+		t.Errorf("required tags = %v, want the empty list the operator asked for", got.ChatRule.RequiredTags)
+	}
+	// The per-model map among them: the rule is machine-wide and sits beside
+	// it, so a save that names one must not disturb the other.
+	if !got.Advertise || len(got.Preload) != 1 || !got.Models["org/keeper"].Pinned {
+		t.Errorf("an unrelated setting moved: advertise=%v preload=%v models=%v", got.Advertise, got.Preload, got.Models)
+	}
+}
+
+// And the other direction: a save that says nothing about the rule keeps it —
+// including the rule of an operator who cleared both fields, which is a rule
+// they set and not a rule they never had. Restoring the shipped default there
+// would mark half their models as unable to chat on the next unrelated save.
+func TestSavingSettingsWithoutNamingTheChatRuleKeepsIt(t *testing.T) {
+	cases := []struct {
+		name string
+		rule config.ChatRule
+	}{
+		{
+			name: "a rule the operator narrowed",
+			rule: config.ChatRule{PipelineTags: []string{"text-generation"}, RequiredTags: []string{}},
+		},
+		{
+			name: "a rule the operator cleared entirely",
+			rule: config.ChatRule{PipelineTags: []string{}, RequiredTags: []string{}},
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			cfg := config.Default()
+			cfg.ChatRule = c.rule
+			srv, a := newTestControlApp(t, cfg)
+
+			resp := postJSON(t, srv, "/api/settings",
+				`{"host":"0.0.0.0","port":11535,"api_key":"","decode_concurrency":4,"idle_timeout_sec":0}`)
+			resp.Body.Close()
+			got := a.Config().ChatRule
+			if !got.Equal(c.rule) {
+				t.Errorf("chat rule = %+v after an unrelated save, want %+v", got, c.rule)
+			}
+			if got.IsZero() {
+				t.Error("the rule read back as unset, so the shipped default is in force again")
+			}
+		})
+	}
+}
+
+// The bounds are the settings path's too. An oversized rule posted to the panel
+// is refused and named, rather than accepted, written to config.json and cut
+// down at the next restart — which would leave a rule in force that nobody
+// agreed to, in a file that says otherwise.
+func TestSavingAnOversizedChatRuleIsRefused(t *testing.T) {
+	srv, a := newTestControlApp(t, config.Default())
+
+	many := make([]string, config.MaxChatRuleTags+1)
+	for i := range many {
+		many[i] = fmt.Sprintf("tag-%d", i)
+	}
+	body, err := json.Marshal(map[string]any{
+		"host": "0.0.0.0", "port": 11535, "api_key": "", "decode_concurrency": 4,
+		"idle_timeout_sec": 0,
+		"chat_rule":        map[string]any{"pipeline_tags": many, "required_tags": []string{}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp := postJSON(t, srv, "/api/settings", string(body))
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", resp.StatusCode)
+	}
+	var out struct {
+		Error struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.Error.Message, "chat_rule.pipeline_tags") {
+		t.Errorf("the refusal reads %q; it must name the field the operator has to fix", out.Error.Message)
+	}
+	if !a.Config().ChatRule.IsZero() {
+		t.Errorf("the refused rule reached the configuration anyway: %+v", a.Config().ChatRule)
+	}
+}
+
+// pinnedModels is the per-model settings map that pins exactly these models.
+// Pinning is a field on a model's settings rather than a list of its own
+// (iss-2609062213413447).
+func pinnedModels(ids ...string) map[string]config.ModelSettings {
+	out := make(map[string]config.ModelSettings, len(ids))
+	for _, id := range ids {
+		out[id] = config.ModelSettings{Pinned: true}
+	}
+	return out
+}
+
+// The model-action endpoints decode a caller-supplied body, so they are bounded
+// the way the two handlers beside them are: the settings save at
+// config.MaxConfigBytes and the completions handler at maxRequestBody. Without a
+// cap the decoder buffers whatever it is fed on the way to the first JSON value.
+// Loopback-only is not the bound — a hostile browser tab reaches loopback.
+func TestModelActionsRefuseAnOversizedBody(t *testing.T) {
+	srv := newTestControl(t, config.Default())
+
+	modelPaths := []string{
+		"/api/models/download",
+		"/api/models/cancel",
+		"/api/models/delete",
+		"/api/models/load",
+		"/api/models/unload",
+	}
+
+	huge := `{"model":"` + strings.Repeat("a", config.MaxConfigBytes) + `"}`
+	for _, path := range modelPaths {
+		resp := postJSON(t, srv, path, huge)
+		var body struct {
+			Error struct {
+				Message string `json:"message"`
+			} `json:"error"`
+		}
+		json.NewDecoder(resp.Body).Decode(&body)
+		resp.Body.Close()
+
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Errorf("%s: status = %d for an oversized body, want 400", path, resp.StatusCode)
+		}
+		if !strings.Contains(body.Error.Message, "too large") {
+			t.Errorf("%s: message = %q, want it to name the body as too large",
+				path, body.Error.Message)
+		}
+	}
+
+	// A body of the size these endpoints actually take is untouched: it reaches
+	// the handler and is answered on its merits, not refused for its length.
+	for _, path := range modelPaths {
+		resp := postJSON(t, srv, path, `{"model":"acme/not-a-real-model"}`)
+		var body struct {
+			Error struct {
+				Message string `json:"message"`
+			} `json:"error"`
+		}
+		json.NewDecoder(resp.Body).Decode(&body)
+		resp.Body.Close()
+
+		if strings.Contains(body.Error.Message, "too large") {
+			t.Errorf("%s: an ordinary body was refused as too large: %q", path, body.Error.Message)
+		}
+	}
+
+	// A body with no model at all still gets the answer it always got.
+	resp := postJSON(t, srv, "/api/models/load", `{}`)
+	var body struct {
+		Error struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	json.NewDecoder(resp.Body).Decode(&body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest ||
+		!strings.Contains(body.Error.Message, `a "model" field is required`) {
+		t.Errorf("empty body: status = %d, message = %q; want 400 and the model-required message",
+			resp.StatusCode, body.Error.Message)
 	}
 }

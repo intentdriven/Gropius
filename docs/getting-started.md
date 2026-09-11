@@ -124,6 +124,9 @@ print(resp.choices[0].message.content)
 If `your-mac.local` does not resolve, use the IP address shown in the Connect tab
 instead.
 
+To reach the server from a machine that is not on this network, see
+[Serve models over a mesh VPN](mesh-vpn.md).
+
 ## 6. Lock it down (optional but recommended)
 
 By default anyone on your network can use the server. To require a key:
@@ -193,6 +196,26 @@ make install-shared     # creates /Users/Shared/Gropius, needs your password
 
 After that, whoever launches Gropius first runs the server; everyone else's
 menu-bar app just points at it. One copy on disk, one on the GPU.
+
+The shared folder holds the model files and the download cache they arrive
+through. A folder set up by an earlier version may also hold a `registry.json`
+and a `logs` folder, which nothing uses any more; they are safe to delete, and
+Gropius does not remove them for you. Everything belonging to one account
+stays in that
+account's own `~/Library/Application Support/Gropius`: its settings
+(`config.json`, which holds the API key and the HuggingFace token), its list of
+models (`registry.json`), its model-server logs, Gropius's own log, its request
+statistics, and
+the private Python runtime it starts model servers with. So an API key or a
+token one account sets is never readable by another. What Gropius writes in
+that log, and how to make it say more while you are diagnosing something, is on
+the [logging page](logging.md).
+
+The first time an account runs with the shared cache, its list of models starts
+empty and is rebuilt from the models already in the shared folder — nothing is
+downloaded again. If that account had used the shared cache before this became
+the rule, the settings it kept in the shared folder are moved into its own on
+that first start, and are no longer readable by anyone else on the Mac.
 
 Request statistics stay with the account that runs the server: if that account
 has recording on, its records cover every request the server handled, from any
@@ -270,7 +293,8 @@ rm -rf ~/Library/Application\ Support/Gropius
 That directory holds the private Python runtime, your downloaded models and
 any request statistics you recorded — deleting it removes every trace. If you
 set up the shared cache (step 9), the models live in `/Users/Shared/Gropius`
-instead; remove that too:
+instead, while your settings and model list stay in the folder above; remove
+the shared one too, once every account has finished with it:
 
 ```sh
 sudo rm -rf /Users/Shared/Gropius

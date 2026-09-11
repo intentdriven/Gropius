@@ -724,8 +724,9 @@ func (s *FileStore) Summaries(ctx context.Context, opts SummaryOptions, fn func(
 		return got, nil
 	}
 	// The same flush a read of the records does, so a caller that reads both
-	// sees one store rather than two moments of it.
-	if err := s.Flush(); err != nil {
+	// sees one store rather than two moments of it — and under the caller's
+	// context for the same reason it is there.
+	if err := s.flush(ctx); err != nil {
 		return got, err
 	}
 	root, err := openStoreRoot(s.dir)

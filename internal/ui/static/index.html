@@ -51,6 +51,7 @@
   <button class="tab" data-tab="search">Find Models</button>
   <button class="tab" data-tab="stats">Statistics</button>
   <button class="tab" data-tab="connect">Connect</button>
+  <button class="tab" data-tab="posture">Posture</button>
   <button class="tab" data-tab="settings">Settings</button>
 </nav>
 
@@ -184,6 +185,23 @@
   <pre id="pyExample" class="code"></pre>
 </section>
 
+<!-- ── Posture ───────────────────────────────────────────── -->
+<!-- One page that says what is on (itd-2609081718534201). Every line is
+     derived from the state snapshot and from no other source, in postureLines; the
+     page reports and changes nothing, and nothing brings a reader here but the
+     tab. -->
+<section id="tab-posture" class="panel">
+  <h2>Where this server stands</h2>
+  <p class="hint">Each line says what is, as Gropius sees it now, and says where its view
+    stops. Nothing here is a warning and nothing here changes a setting; the warning for
+    an exposed server with no key still appears at the top of this panel, and Settings
+    is where a setting changes.</p>
+  <div id="posture"></div>
+  <p class="hint">What each line is read from, and what none of them can see, is on the
+    <a href="https://github.com/intentdriven/Gropius/blob/main/docs/posture-reference.md">posture
+    page reference</a>.</p>
+</section>
+
 <!-- ── Settings ──────────────────────────────────────────── -->
 <section id="tab-settings" class="panel">
   <form id="settingsForm">
@@ -192,8 +210,15 @@
       <select id="setHost">
         <option value="0.0.0.0">0.0.0.0 — reachable from your whole network</option>
         <option value="127.0.0.1">127.0.0.1 — this Mac only</option>
+        <!-- Labeled from the live state: the address it would bind, or why it
+             cannot be chosen. -->
+        <option value="private-network">A private network</option>
       </select>
     </label>
+    <p id="bindNotice" class="hint" hidden></p>
+    <p class="hint">The server takes its addresses once, at startup, so a change
+      here applies when Gropius next starts. Until then the Connect tab lists
+      what it is answering on.</p>
     <label>
       <span>Port</span>
       <input id="setPort" type="number" min="1" max="65535">
@@ -253,6 +278,28 @@
       <span>HuggingFace token <em>(only needed for gated models)</em></span>
       <input id="setHF" type="password" placeholder="hf_…">
     </label>
+
+    <fieldset class="group">
+      <legend>Which models can chat</legend>
+      <p class="hint">Each model carries the words HuggingFace puts on it — a pipeline
+        tag such as <code>text-generation</code>, and tags such as
+        <code>conversational</code> — recorded when it was downloaded. This rule decides
+        which of them the models list marks as able to hold a conversation, so a chat
+        client can leave an OCR or a speech model out of its picker. It filters nothing:
+        every model stays callable over the API by name, whatever the rule says of it.
+        Clear a field to stop testing that half; clear both and every model is marked as
+        able to chat. A model downloaded before Gropius recorded these words, or while
+        HuggingFace could not be reached, carries none and is marked as unable — download
+        it again to give it the words.</p>
+      <label>
+        <span>Pipeline tags that count (comma-separated)</span>
+        <input id="setChatPipelines" type="text" placeholder="text-generation, image-text-to-text">
+      </label>
+      <label>
+        <span>Tags a model must carry (comma-separated)</span>
+        <input id="setChatTags" type="text" placeholder="conversational">
+      </label>
+    </fieldset>
 
     <fieldset class="group">
       <legend>Sampling defaults</legend>
@@ -352,6 +399,33 @@
     </fieldset>
 
     <fieldset class="group">
+      <legend>Server log</legend>
+      <label>
+        <span>How much the log says</span>
+        <select id="setLogLevel">
+          <option value="sparse">Sparse — one line per event that mattered</option>
+          <option value="detailed">Detailed — the figures behind each one</option>
+        </select>
+      </label>
+      <p class="hint">Gropius keeps its own log in your account's data folder, beside the
+        model servers' logs. <strong>Sparse</strong>, the default, writes a line for each
+        thing that mattered: a request refused and which refusal it was, a model loading or
+        leaving memory, a model server that would not start, the server starting and
+        stopping, and a save on this page. <strong>Detailed</strong> keeps those lines and
+        adds the figures they leave out — how long a load took, how many requests were
+        already in flight, the memory budget, how long a request waited, and the error
+        behind a launch that failed. Neither level ever writes a prompt, an answer, an API
+        key, a HuggingFace token or the address of the client that sent a request. Changing
+        this takes effect on the next line; nothing needs restarting. The log is kept to a
+        fixed size and the oldest file is removed as it grows. This is Gropius's own log
+        level and never the model servers', which are always run at their INFO level — at
+        their debug level they write prompts and answers to their own logs, and no setting
+        here can ask for that. The
+        <a href="https://github.com/intentdriven/Gropius/blob/main/docs/logging.md">logging
+        page</a> says what each level writes and where the file is.</p>
+    </fieldset>
+
+    <fieldset class="group">
       <legend>Merge system messages</legend>
       <p class="hint">Some models refuse a conversation whose instructions are not all at
         the top, so an assistant that repeats its instructions mid-conversation gets an
@@ -361,6 +435,16 @@
         to that model and nothing else, keeps none of what it reads, and writes none of it
         down.</p>
       <div id="mergeList"></div>
+    </fieldset>
+
+    <fieldset class="group">
+      <legend>Served context</legend>
+      <p class="hint">The context window Gropius serves each model at, in tokens. Leave a
+        field blank to serve the window the model itself declares. A request whose prompt
+        and answer are estimated to be larger is refused, and the memory budget charges
+        the cache this window costs — so lowering it is how a long-context model is made
+        to fit a Mac that will not hold it at its full window.</p>
+      <div id="contextList"></div>
     </fieldset>
 
     <fieldset class="group">

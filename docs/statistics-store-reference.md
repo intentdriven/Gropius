@@ -10,11 +10,12 @@ In a `stats` folder inside your own Gropius data folder — normally
 `~/Library/Application Support/Gropius/stats`.
 
 On a Mac with the [shared model cache](getting-started.md#9-sharing-across-user-accounts-optional)
-the store is the one thing that does not follow the models: the models,
-`config.json` and `registry.json` move to the shared folder, and the records
-stay in the serving account's own `~/Library/Application Support/Gropius/stats`.
-A shared folder is writable by every account on the Mac, and one account's
-record of what it served has no business there.
+the store stays where it is: the models and the download cache they arrive
+through move to the shared folder, while `config.json`, `registry.json`, the
+server logs and the records stay in the serving account's own
+`~/Library/Application Support/Gropius`. A shared folder is writable by every
+account on the Mac, and one account's settings, its list of models and its
+record of what it served have no business there.
 
 The folder is yours alone (mode `0700`), and so is every file in it (`0600`).
 Gropius refuses to write records into a folder any other account on this Mac
@@ -43,7 +44,7 @@ Every line carries two fields before anything else:
 | Field | Meaning |
 | --- | --- |
 | `v` | The version of this format the line was written under. A later Gropius can still read an older file. |
-| `kind` | Which of the six kinds below the line is: `request`, `load`, `removed`, `settings`, `summary` or `summary_index`. A load and a removal are two spellings of the one event kind the [decision record](../.abcd/development/decisions/adrs/2609061610107154-statistics-store-format-json-lines-size-rotated-per-account.md) names, and the last two belong to the summary that is kept when detail is dropped, which is why that record counts three kinds and this page counts six. |
+| `kind` | Which of the six kinds below the line is: `request`, `load`, `removed`, `settings`, `summary` or `summary_index`. The first four are the record kinds the [decision record](../.abcd/development/decisions/adrs/2609090716413337-the-statistics-store-s-record-kinds-are-request-load-removed.md) ratifies, and the last two belong to the summary that is kept when detail is dropped, which is why that record counts four kinds and this page counts six. |
 
 A reader should ignore a field it does not know, and skip a line it cannot
 parse. A line whose `v` is newer than the reader understands is one to skip:

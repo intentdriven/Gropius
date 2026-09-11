@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/intentdriven/Gropius/internal/capability"
 	"github.com/intentdriven/Gropius/internal/mlxtest"
 )
 
@@ -19,19 +20,31 @@ import (
 type fakeSource struct {
 	mu     sync.Mutex
 	models map[string]int64 // repoID -> size
+	// facts overrides what Resolve reports for a model, so a test can give one
+	// the window and cache cost a real model's configuration would carry. A
+	// model with no entry here resolves with neither, which is how a model
+	// whose configuration says nothing is charged — the flat figure.
+	facts map[string]ResolvedModel
 }
 
 // Resolve matches the registry's case-insensitive lookup, so a differently
 // cased id resolves and launches here exactly as it does in production.
-func (s *fakeSource) Resolve(repoID string) (string, int64, error) {
+func (s *fakeSource) Resolve(repoID string) (ResolvedModel, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for id, size := range s.models {
-		if strings.EqualFold(id, repoID) {
-			return "/models/" + id, size, nil
+		if !strings.EqualFold(id, repoID) {
+			continue
 		}
+		m := ResolvedModel{Path: "/models/" + id, Bytes: size}
+		for factID, f := range s.facts {
+			if strings.EqualFold(factID, repoID) {
+				m.ServedContext, m.KVChargePerToken = f.ServedContext, f.KVChargePerToken
+			}
+		}
+		return m, nil
 	}
-	return "", 0, fmt.Errorf("%s is not downloaded", repoID)
+	return ResolvedModel{}, fmt.Errorf("%s is not downloaded", repoID)
 }
 
 // fakeProc is a Process backed by an in-process fake mlx server.
@@ -40,7 +53,13 @@ type fakeProc struct {
 	done    chan struct{}
 	stopped chan struct{}
 	once    sync.Once
-	err     error
+	exited  sync.Once
+	// holdExit keeps Done() open after Stop returns, so a test can hold a
+	// server in the state a real one is in between being told to go and the
+	// kernel actually reclaiming its memory: told to stop, still resident.
+	// exit() ends it.
+	holdExit bool
+	err      error
 }
 
 func (p *fakeProc) Done() <-chan struct{} { return p.done }
@@ -49,11 +68,16 @@ func (p *fakeProc) Pid() int              { return 4242 }
 func (p *fakeProc) Stop(ctx context.Context) error {
 	p.once.Do(func() {
 		p.srv.Close()
-		close(p.done)
 		close(p.stopped)
+		if !p.holdExit {
+			p.exit()
+		}
 	})
 	return nil
 }
+
+// exit closes Done, as the operating system does when the process finally goes.
+func (p *fakeProc) exit() { p.exited.Do(func() { close(p.done) }) }
 
 // fakeLauncher stands up a fake mlx server per model, and records launches.
 type fakeLauncher struct {
@@ -66,6 +90,13 @@ type fakeLauncher struct {
 	// dieAfter makes the process exit on its own shortly after launch, as a
 	// real model server does when the weights are corrupt.
 	dieAfter map[string]bool
+	// holdExitFor names a model whose process does not exit when it is stopped
+	// until the test says so, which is what a real server does for the length
+	// of its SIGTERM grace: out of the pool, still holding its memory.
+	holdExitFor string
+	// loadDelayFor overrides loadDelay for one model, so a test can have one
+	// model never become ready while the others load at once.
+	loadDelayFor map[string]time.Duration
 
 	mu        sync.Mutex
 	prechecks int
@@ -80,10 +111,11 @@ type fakeLauncher struct {
 
 func newFakeLauncher() *fakeLauncher {
 	return &fakeLauncher{
-		specs:    map[string]Spec{},
-		procs:    map[string]*fakeProc{},
-		servers:  map[string]*mlxtest.Server{},
-		dieAfter: map[string]bool{},
+		specs:        map[string]Spec{},
+		procs:        map[string]*fakeProc{},
+		servers:      map[string]*mlxtest.Server{},
+		dieAfter:     map[string]bool{},
+		loadDelayFor: map[string]time.Duration{},
 	}
 }
 
@@ -106,6 +138,9 @@ func (l *fakeLauncher) Launch(ctx context.Context, spec Spec) (Process, error) {
 	}
 
 	loadDelay := l.loadDelay
+	if d, ok := l.loadDelayFor[spec.RepoID]; ok {
+		loadDelay = d
+	}
 	if l.dieAfter[spec.RepoID] {
 		// A process that dies during startup never finished loading, so it must
 		// never answer a completion successfully. Keep it "loading" forever; it
@@ -119,7 +154,12 @@ func (l *fakeLauncher) Launch(ctx context.Context, spec Spec) (Process, error) {
 	// The pool addresses the server by port, so the fake must answer there. We
 	// cheat by rewriting the pool's expected port to the httptest port via a
 	// custom HTTP client in the tests below.
-	p := &fakeProc{srv: srv, done: make(chan struct{}), stopped: make(chan struct{})}
+	p := &fakeProc{
+		srv:      srv,
+		done:     make(chan struct{}),
+		stopped:  make(chan struct{}),
+		holdExit: l.holdExitFor == spec.RepoID,
+	}
 
 	l.launched = append(l.launched, spec.RepoID)
 	l.specs[spec.RepoID] = spec
@@ -130,7 +170,7 @@ func (l *fakeLauncher) Launch(ctx context.Context, spec Spec) (Process, error) {
 		p.err = errors.New("exit status 1")
 		go func() {
 			time.Sleep(20 * time.Millisecond)
-			p.once.Do(func() { srv.Close(); close(p.done); close(p.stopped) })
+			p.once.Do(func() { srv.Close(); close(p.stopped); p.exit() })
 		}()
 	}
 	return p, nil
@@ -815,9 +855,34 @@ func TestCloseStopsEverything(t *testing.T) {
 	}
 }
 
-func TestLoadCostAddsHeadroom(t *testing.T) {
-	if got := LoadCost(1000); got != 1200 {
-		t.Errorf("LoadCost(1000) = %d, want 1200 (weights + KV-cache headroom)", got)
+// The pool charges a resident model exactly what internal/capability charges
+// it, because that is the figure the "fits" filter hides models against: a
+// second copy here is how the filter came to show models the pool would refuse.
+// Asserted through admission rather than by comparing two functions, so the
+// binding holds on what the pool does and not on what it declares.
+func TestThePoolChargesTheFigureTheFitsFilterUses(t *testing.T) {
+	const size = 1000
+	for _, tc := range []struct {
+		name   string
+		budget int64
+		want   bool
+	}{
+		{"charged exactly the budget loads", capability.LoadCost(size), true},
+		{"one byte of budget short is refused", capability.LoadCost(size) - 1, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			l := newFakeLauncher()
+			src := &fakeSource{models: map[string]int64{"org/a": size}}
+			p := newTestPool(t, l, src, PoolOptions{MaxResidentBytes: tc.budget})
+			_, release, err := p.Acquire(context.Background(), "org/a")
+			if got := err == nil; got != tc.want {
+				t.Errorf("Acquire under a budget of %d: loaded = %v, want %v (err %v)",
+					tc.budget, got, tc.want, err)
+			}
+			if release != nil {
+				release()
+			}
+		})
 	}
 }
 
@@ -1163,7 +1228,7 @@ func TestMemoryBudgetReportsTheCeilingEvictionUses(t *testing.T) {
 	}
 	if _, _, err := p.Acquire(context.Background(), "org/over"); err == nil {
 		t.Errorf("a model charged %d loaded under a budget of %d",
-			LoadCost(205), p.MemoryBudget())
+			capability.LoadCost(205), p.MemoryBudget())
 	}
 	_, release, err := p.Acquire(context.Background(), "org/fits")
 	if err != nil {
@@ -1175,6 +1240,12 @@ func TestMemoryBudgetReportsTheCeilingEvictionUses(t *testing.T) {
 
 // testClock is an injectable clock, so eviction order is set by the test
 // rather than by how long the test took to run.
+//
+// It moves the pool's view of a model's idleness and nothing else: advance()
+// neither wakes a parked waiter nor ages one, because a waiter is clocked on
+// real time by design (see loadWaiter). A test that advances past the grace
+// expecting a waiting request to be served will see nothing happen until a real
+// grace has elapsed.
 type testClock struct {
 	mu  sync.Mutex
 	now time.Time

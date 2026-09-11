@@ -25,6 +25,9 @@ import (
 	"time"
 
 	"github.com/intentdriven/Gropius/internal/app"
+	"github.com/intentdriven/Gropius/internal/applog"
+	"github.com/intentdriven/Gropius/internal/bind"
+	"github.com/intentdriven/Gropius/internal/bind/private"
 	"github.com/intentdriven/Gropius/internal/config"
 	"github.com/intentdriven/Gropius/internal/discovery"
 	"github.com/intentdriven/Gropius/internal/gateway"
@@ -65,6 +68,9 @@ func main() {
 		return
 	}
 
+	// Until the data root is known there is nowhere to put a file, so the first
+	// few lines go to standard error alone — which is where every line went
+	// before this app had a log at all.
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
 	rootDir := *root
@@ -78,56 +84,79 @@ func main() {
 	}
 	paths := config.NewPaths(rootDir)
 
+	// From here on the log is a file as well as a stream. This is the whole
+	// point of the file: a Finder-launched .app has no standard error, so
+	// everything below — a settings file that would not parse, a bind that was
+	// narrowed, a model that would not start — used to go nowhere anybody
+	// could read it.
+	//
+	// Opened before the port is claimed, so the reason a start went wrong is
+	// written down even when this process goes on to be a client of a server
+	// that is already running. A log that could not be opened is a warning and
+	// nothing more: appLog.Logger is the stderr-only logger in that case, and
+	// a server that will not start because it cannot write about starting is
+	// the worse outcome.
+	appLog, logErr := applog.Open(applog.Options{Dir: paths.Logs})
+	defer appLog.Close()
+	log = appLog.Logger
+	if logErr != nil {
+		log.Warn("could not open this account's log file; logging to standard error only, which a Finder-launched app discards",
+			"path", paths.Logs, "err", logErr)
+	}
+	// The first line of every run, and the one that says where the rest of them
+	// are. An operator who has just been asked "what does the log say" needs
+	// the path before they need anything else.
+	log.Info("gropius starting", "version", version, "log", appLog.Path)
+
+	// Settings are this account's own. Under a shared cache installed before
+	// they were, this account's settings are still in the shared folder, so
+	// carry them over before anything reads them — otherwise the first start
+	// after an upgrade would quietly run from the shipping defaults with the
+	// operator's API key and token left behind. Nothing is adopted from another
+	// account, and a failure here is not fatal: it means this account starts
+	// from the defaults, which is what it would have done anyway.
+	adopted, err := paths.AdoptSharedConfig()
+	if adopted {
+		log.Info("this account's settings now live in its own folder, not the shared one", "path", paths.Config)
+	}
+	if err != nil {
+		// Two failures, one line: the settings could not be read (this account
+		// starts from the shipping defaults, as it would have anyway), or they
+		// were copied and the original could not be removed — which leaves a
+		// superseded API key and HuggingFace token in the shared folder.
+		log.Warn("could not carry this account's settings out of the shared folder",
+			"path", paths.Config, "err", err)
+	}
+
 	start := loadStartupConfig(paths.Config)
 	cfg := start.Config
+	// The level the operator chose, in force from the next line on. Set here
+	// rather than left to app.New because the lines between this point and the
+	// app being built — the bind, the key, the listeners — are exactly the ones
+	// an operator switches to detailed to read. From the app onwards
+	// App.applyLogLevel owns it, at a start and at every save alike.
+	appLog.Level.Set(cfg.SlogLevel())
 	if start.Problem != "" {
 		log.Error(start.Problem, start.Args...)
 	}
-	warnDroppedSettings(log, start.Dropped)
+	warnStartupNotices(log, start.Notices)
 
-	// Fail closed on an exposed bind with no key. A LAN-bound listener with no
-	// API key is reachable, unauthenticated, by everyone on the network, and a
-	// warning is not a control: the operator running headless never reads it,
-	// and the window between first launch and setting a key is exactly when the
-	// machine is undefended. Generate a key, persist it so it survives the
-	// restart, and announce it loudly enough to be used.
-	//
-	// Done before app.New so the gateway never serves a request under the empty
-	// key. A save that fails is fatal to the exposure, not to the process: the
-	// bind drops to loopback rather than continuing open, because a key held
-	// only in memory would vanish on restart and reopen the endpoint.
-	if cfg.ExposedToLAN() && cfg.APIKey == "" {
-		lockDown := func(msg string, args ...any) {
-			log.Error(msg, args...)
-			cfg.APIKey = ""
-			cfg.Host = loopbackBind
-			cfg.Advertise = false
-		}
-		key, err := config.GenerateAPIKey()
-		switch {
-		case err != nil:
-			lockDown("could not generate an API key for a LAN-exposed bind — starting locked down to loopback only", "err", err)
-		default:
-			cfg.APIKey = key
-			if err := config.Save(paths.Config, cfg); err != nil {
-				lockDown("could not save the generated API key — starting locked down to loopback only so the endpoint is not left open", "path", paths.Config, "err", err)
-				break
-			}
-			log.Warn("SECURITY: this server binds a LAN address, so an API key was generated and saved; clients must send it as \"Authorization: Bearer <key>\". Change or clear it in Settings.",
-				"api_key", key)
-		}
-	}
+	// Work out the addresses to acquire. A bind is a set of listeners rather
+	// than an address (adr-2609091123526871): loopback is in every one of them,
+	// so narrowing the bind never costs the operator the control panel they
+	// narrowed it from, and it is the address the port-ownership challenge
+	// contacts.
+	plan := resolveBind(cfg)
 
 	// Claim the port. Losing this race to a live server is a normal outcome, not
 	// an error: another account (or another copy of the app) is already serving.
-	// A predecessor still shutting down is NOT a loss — acquireListener waits for
+	// A predecessor still shutting down is NOT a loss — acquireBind waits for
 	// the port to free rather than falling into client mode with nothing serving.
-	addr := fmt.Sprintf("%s:%d", cfg.Host, cfg.Port)
-	ln, claimed, err := acquireListener(addr, 5*time.Second, func() portHolder {
+	lns, plan, claimed, err := acquireBind(plan, cfg.Port, 5*time.Second, func() portHolder {
 		return probePortHolder(paths, cfg.Port)
 	})
 	if err != nil {
-		log.Error("cannot listen", "addr", addr, "err", err)
+		log.Error("cannot listen", "port", cfg.Port, "err", err)
 		os.Exit(1)
 	}
 	if !claimed {
@@ -137,9 +166,59 @@ func main() {
 		return
 	}
 
-	if err := runServer(ln, paths, cfg, *headless, log); err != nil {
+	// The order here is the decision (adr-2609091123526871 rule 7): the sockets
+	// are acquired, then the key is settled against what was actually acquired,
+	// and only then does anything serve. app.New and the gateway come after
+	// this line, so no request is ever answered under the empty key — and a
+	// bind that cannot be given a key is narrowed by closing the socket rather
+	// than by hoping nothing arrives on it.
+	lns, plan, saved := secureExposedBind(paths, &cfg, lns, plan, log)
+	if saved {
+		// That save wrote the file from the settings in force — repairs
+		// included, and without the keys this build no longer reads — so there
+		// is nothing left in it to warn about.
+		start.Notices = config.Notices{}
+	}
+	announceBind(log, cfg, plan)
+
+	if err := runServer(lns, plan, paths, cfg, start.Notices, *headless, appLog); err != nil {
 		log.Error("server stopped", "err", err)
 		os.Exit(1)
+	}
+}
+
+// resolveBind is the one place in this command that names the private-network
+// resolver.
+//
+// It hands back a set of addresses and nothing else: what the mode read to
+// choose them stays inside the resolver, and cmd/gropius acquires what it is
+// given without knowing why. That separation is what
+// adr-2609081118587999's amendment is narrow enough to permit —
+// internal/archtest/enforcement_detection_test.go allows this declaration and
+// no other, because this command also holds the strongest enforcement decision
+// in the app.
+func resolveBind(cfg config.Config) bind.Plan {
+	return private.Resolve(cfg)
+}
+
+// announceBind says what the server ended up listening on, in the log the
+// operator running headless reads.
+//
+// A narrowing is reported at error level. It is not an error in the sense that
+// something went wrong with this process — the server is running and this Mac
+// can reach it — but it is the operator's setting not being in force, and a
+// warning buried among startup lines is how a server ends up quietly serving
+// less, or being believed to serve less, than it does.
+func announceBind(log *slog.Logger, cfg config.Config, plan bind.Plan) {
+	if len(plan.Candidates) > 0 {
+		log.Info("addresses on a private network", "addresses", strings.Join(plan.Candidates, ", "))
+	}
+	if plan.Refusal != "" {
+		log.Error("the bind narrowed to this Mac: "+plan.Refusal, "port", cfg.Port)
+		return
+	}
+	if !plan.LoopbackOnly() {
+		log.Info("serving on this Mac and one other address", "address", plan.Extra, "port", cfg.Port)
 	}
 }
 
@@ -147,7 +226,7 @@ func main() {
 // it got there.
 type startupConfig struct {
 	Config  config.Config
-	Dropped []string
+	Notices config.Notices
 	// Problem is the message explaining a lockdown, empty when config.json
 	// loaded cleanly. Args carries its structured fields.
 	Problem string
@@ -177,13 +256,14 @@ type startupConfig struct {
 //     the objection was to something else and the defaults are all that is
 //     left.
 func loadStartupConfig(path string) startupConfig {
-	cfg, dropped, err := config.Load(path)
+	cfg, notices, err := config.Load(path)
 	if err == nil {
-		return startupConfig{Config: cfg, Dropped: dropped}
+		return startupConfig{Config: cfg, Notices: notices}
 	}
 
 	lockedDefaults := config.Default()
 	lockedDefaults.Host = loopbackBind
+	lockedDefaults.BindMode = config.BindModeHost
 	lockedDefaults.Advertise = false
 
 	var invalid *config.InvalidError
@@ -197,6 +277,10 @@ func loadStartupConfig(path string) startupConfig {
 
 	locked := invalid.Parsed
 	locked.Host = loopbackBind
+	// A bind is a Host and a mode, so narrowing it narrows both. A mode left
+	// in place would resolve an address and serve on it under a log line
+	// saying the bind was locked down to loopback.
+	locked.BindMode = config.BindModeHost
 	locked.Advertise = false
 	if err := locked.Validate(); err != nil {
 		return startupConfig{
@@ -207,30 +291,51 @@ func loadStartupConfig(path string) startupConfig {
 	}
 	return startupConfig{
 		Config:  locked,
-		Dropped: invalid.Dropped,
+		Notices: invalid.Notices,
 		Problem: "config.json is not a valid configuration — the bind address is locked down to loopback only and the rest of your settings are kept; fix it in Settings and restart",
 		Args:    []any{"path", path, "err", invalid.Err},
 	}
 }
 
-// warnDroppedSettings reports the settings that were read but not applied.
+// warnStartupNotices reports what loading config.json had to change about it.
 //
-// A sampling preference the model server would refuse is ignored rather than
-// fatal: applying it would break every request that omits that parameter, and
-// refusing the file would lock the server down to loopback. Dropping it
-// silently would be worse than either — the field simply shows as blank in the
-// panel with nothing to say where it went.
-func warnDroppedSettings(log *slog.Logger, dropped []string) {
-	if len(dropped) == 0 {
-		return
+// Two lines, because the two lists mean opposite things to the person reading
+// them. A setting that was IGNORED is not in force: a sampling preference the
+// model server would refuse is dropped rather than applied, because applying it
+// would break every request that omits that parameter and refusing the file
+// would lock the server down to loopback — and dropping it silently would be
+// worse than either, leaving a field that shows as blank in the panel with
+// nothing to say where it went.
+//
+// A setting that was REPAIRED is in force right now, in a changed form. Saying
+// it was ignored sends an operator to look for a setting that is working, and
+// for one of them it is worse than that: a trimmed API key is the key their
+// clients must send from that moment on. Neither line blames the model server,
+// which has nothing to do with a length this build chose.
+func warnStartupNotices(log *slog.Logger, n config.Notices) {
+	if len(n.Ignored) > 0 {
+		log.Warn("ignoring settings this build cannot use — set them again in Settings",
+			"fields", strings.Join(n.Ignored, ", "))
 	}
-	log.Warn("ignoring settings the model server would not accept — set them again in Settings",
-		"fields", strings.Join(dropped, ", "))
+	if len(n.Repaired) > 0 {
+		log.Warn("some settings could not be used as written and are in force in a changed form — check them in Settings",
+			"fields", strings.Join(n.Repaired, ", "))
+	}
 }
 
 // runServer is the primary instance: it owns the models and the GPU.
-func runServer(ln net.Listener, paths config.Paths, cfg config.Config, headless bool, log *slog.Logger) error {
-	a, err := app.New(app.Options{Paths: paths, Config: cfg, Log: log})
+//
+// notices names what config.json could not be used for as written — settings
+// in force in a changed form, and settings not in force at all — which the
+// control panel warns about until a save rewrites the file. They are carried
+// in rather than re-derived because loading happens once, before the bind is
+// decided, and nothing downstream can tell a value that was repaired from one
+// the operator wrote that way.
+func runServer(lns []net.Listener, plan bind.Plan, paths config.Paths, cfg config.Config, notices config.Notices, headless bool, appLog *applog.Log) error {
+	log := appLog.Logger
+	// The level variable travels with the logger, so a save in Settings moves
+	// the level this handler reads rather than the level of a copy.
+	a, err := app.New(app.Options{Paths: paths, Config: cfg, Log: log, Bind: plan, LogLevel: appLog.Level})
 	if err != nil {
 		return err
 	}
@@ -261,7 +366,7 @@ func runServer(ln net.Listener, paths config.Paths, cfg config.Config, headless 
 	// Control plane + web UI — administrative, so loopback-only (Control.Handler
 	// enforces it). Mounted at "/" as the catch-all for everything that is not a
 	// /v1 or /health request.
-	ctrl := &gateway.Control{App: a, UI: ui.Handler(), Root: paths.Root}
+	ctrl := &gateway.Control{App: a, UI: ui.Handler(), Root: paths.Root, Notices: notices}
 	mux.Handle("/", ctrl.Handler())
 
 	srv := &http.Server{
@@ -271,16 +376,18 @@ func runServer(ln net.Listener, paths config.Paths, cfg config.Config, headless 
 		IdleTimeout:       120 * time.Second,
 	}
 
-	go func() {
+	for _, ln := range lns {
 		log.Info("serving", "addr", ln.Addr().String(), "ui", panelURL(cfg))
-		if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+	}
+	serveAll(srv, lns, func(err error) {
+		if !errors.Is(err, http.ErrServerClosed) {
 			log.Error("http server failed", "err", err)
 		}
-	}()
+	})
 
 	// Advertise on the network so other machines can find this Mac by name.
 	var adv *discovery.Advertiser
-	if cfg.Advertise && cfg.ExposedToLAN() {
+	if advertises(cfg, plan) {
 		adv = &discovery.Advertiser{
 			Port:         cfg.Port,
 			Models:       func() int { return len(a.Registry.Ready()) },
@@ -364,8 +471,13 @@ func panelURL(cfg config.Config) string {
 
 // openBrowser opens the control panel. Reap the child in the background: a
 // Start without Wait leaves one zombie per menu click for the app's lifetime.
+//
+// /usr/bin/open by absolute path, not by name: the URL handed over carries
+// this server's address, and on a Mac shared by several accounts a directory
+// another account writes can sit ahead of /usr/bin on this one's PATH. Same
+// rule as internal/capability's /usr/sbin/sysctl.
 func openBrowser(url string) {
-	cmd := exec.Command("open", url)
+	cmd := exec.Command("/usr/bin/open", url)
 	if cmd.Start() == nil {
 		go cmd.Wait()
 	}

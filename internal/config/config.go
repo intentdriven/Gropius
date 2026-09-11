@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"maps"
 	"net"
 	"os"
@@ -20,6 +21,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"unicode/utf8"
 )
 
 // Paths is the on-disk layout. All fields are absolute.
@@ -30,11 +32,20 @@ type Paths struct {
 	Python  string // uv-managed CPython installs (UV_PYTHON_INSTALL_DIR)
 	Models  string // downloaded model directories: Models/<org>/<name>
 	HFCache string // HF_HUB_CACHE; must exist or mlx_lm.server's /v1/models panics
-	Logs    string
-	Config  string // config.json
-	State   string // registry.json
-	// Stats is where the request statistics store keeps its files. It is the
-	// one entry that is not always under Root: see StatsDir.
+	// Account is the directory holding everything that belongs to THIS macOS
+	// account rather than to the installation. Under the shared root that is
+	// the account's own Application Support directory; everywhere else it is
+	// the root itself. See accountDir.
+	Account string
+	// Logs, Config (config.json) and State (registry.json) are this account's
+	// own and live under Account. A log is one account's record of what its own
+	// subprocess printed, and the settings hold its API key and HuggingFace
+	// token; neither belongs in a directory shared with every other account.
+	Logs   string
+	Config string
+	State  string
+	// Stats is where the request statistics store keeps its files: under
+	// Account, in a "stats" directory. See StatsDir.
 	Stats string
 }
 
@@ -45,6 +56,25 @@ type Paths struct {
 // `make install-shared`), every account shares one set of models.
 const SharedRoot = "/Users/Shared/Gropius"
 
+// sharedRoot is the shared root everything actually compares against, so a
+// test can stand a temporary directory in its place and exercise the real
+// derivation rather than a hand-copied one. It is unexported and never written
+// outside this package's own tests: the shipped binary holds one value, the
+// constant above.
+var sharedRoot = SharedRoot
+
+// userSupportDir is this account's own Gropius directory in Application
+// Support — the one place a per-user install lives, and the one place a shared
+// install keeps what an account does not share. It is derived once here so the
+// default root and accountDir cannot come to disagree about where it is.
+func userSupportDir() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("resolve home dir: %w", err)
+	}
+	return filepath.Join(home, "Library", "Application Support", "Gropius"), nil
+}
+
 // DefaultRoot returns where Gropius keeps its data.
 //
 // Order: $GROPIUS_ROOT, then the shared directory if an administrator created
@@ -54,14 +84,10 @@ func DefaultRoot() (string, error) {
 	if env := os.Getenv("GROPIUS_ROOT"); env != "" {
 		return env, nil
 	}
-	if sharedRootShape(SharedRoot) == nil && writableDir(SharedRoot) {
-		return SharedRoot, nil
+	if sharedRootShape(sharedRoot) == nil && writableDir(sharedRoot) {
+		return sharedRoot, nil
 	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", fmt.Errorf("resolve home dir: %w", err)
-	}
-	return filepath.Join(home, "Library", "Application Support", "Gropius"), nil
+	return userSupportDir()
 }
 
 // sharedRootShape reports whether dir is a shared root an administrator
@@ -134,30 +160,58 @@ func writableDir(dir string) bool {
 // resolved falls back to the root, where the provisioner's own refusal to run
 // an interpreter that is not owned by this account or root is what stops it.
 // This function decides where to look, never whether the place is safe.
-func ExecRoot(root string) string {
-	if !sameDir(root, SharedRoot) {
+func ExecRoot(root string) string { return accountDir(root) }
+
+// accountDir is this repository's one rule for "the directory that belongs to
+// THIS macOS account" given a data root, and every part of the layout that is
+// not shared resolves through it: the executables (ExecRoot), the statistics
+// store (StatsDir), and this account's own state files — config.json and
+// registry.json.
+//
+// Everywhere but the shared root that is the root itself, so an installation
+// stays one folder to delete. The shared root is the exception: it is
+// group-writable and sticky by design (see the Makefile's install-shared), and
+// anything that belongs to one account has no business in a directory every
+// other account on the Mac can write to and this one cannot re-mode.
+//
+// It must stay one function rather than one rule copied into several. The three
+// callers ask the same question — where does this account keep what it does not
+// share — and an answer that differed between them would put one account's
+// secrets where another account's rule said it was safe to look.
+//
+// A home directory that cannot be resolved falls back to the root, where each
+// caller's own refusal is what stops the unsafe write: this function decides
+// where to look, never whether the place is safe.
+func accountDir(root string) string {
+	if !sameDir(root, sharedRoot) {
 		return root
 	}
-	home, err := os.UserHomeDir()
+	dir, err := userSupportDir()
 	if err != nil {
 		return root
 	}
-	return filepath.Join(home, "Library", "Application Support", "Gropius")
+	return dir
 }
 
 // NewPaths derives the layout from a root directory.
+//
+// What is shared and what is this account's own is the whole of the split: the
+// models and the HuggingFace cache they arrive through sit in the root, and
+// everything that belongs to one account — its executables, its settings, its
+// registry, its logs and its statistics — resolves through accountDir.
 func NewPaths(root string) Paths {
-	exec := ExecRoot(root)
+	acct := accountDir(root)
 	return Paths{
 		Root:    root,
-		Bin:     filepath.Join(exec, "bin"),
-		Venv:    filepath.Join(exec, "venv"),
-		Python:  filepath.Join(exec, "python"),
+		Bin:     filepath.Join(acct, "bin"),
+		Venv:    filepath.Join(acct, "venv"),
+		Python:  filepath.Join(acct, "python"),
 		Models:  filepath.Join(root, "models"),
 		HFCache: filepath.Join(root, "hf", "hub"),
-		Logs:    filepath.Join(root, "logs"),
-		Config:  filepath.Join(root, "config.json"),
-		State:   filepath.Join(root, "registry.json"),
+		Account: acct,
+		Logs:    filepath.Join(acct, "logs"),
+		Config:  filepath.Join(acct, "config.json"),
+		State:   filepath.Join(acct, "registry.json"),
 		Stats:   StatsDir(root),
 	}
 }
@@ -179,16 +233,7 @@ func NewPaths(root string) Paths {
 // store's own refusal to create itself in a group- or other-writable directory
 // is what stops the records being written: this function decides where to
 // look, never whether the place is safe.
-func StatsDir(root string) string {
-	if !sameDir(root, SharedRoot) {
-		return filepath.Join(root, "stats")
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return filepath.Join(root, "stats")
-	}
-	return filepath.Join(home, "Library", "Application Support", "Gropius", "stats")
-}
+func StatsDir(root string) string { return filepath.Join(accountDir(root), "stats") }
 
 // sameDir reports whether two paths name the same directory.
 //
@@ -234,7 +279,7 @@ func ValidRepoID(s string) bool {
 }
 
 // MaxRepoComponent bounds each half of a repo id. HuggingFace itself allows no
-// more, and the bound is what turns "at most MaxModelSampling overrides" into a
+// more, and the bound is what turns "at most MaxModels models" into a
 // bound on the size of config.json rather than only on its entry count — an
 // unbounded key would let a legal number of entries write a file Load then
 // refuses to read.
@@ -299,8 +344,17 @@ func (p Paths) ModelDir(repoID string) string {
 
 // EnsureDirs creates every directory in the layout.
 //
-// Every entry is created and inspected relative to an os.Root opened at the
-// data root. Under a setgid (shared) root each must be a real directory: that
+// Every entry that is UNDER the data root is created and inspected relative to
+// an os.Root opened there. Under a shared cache the layout straddles two
+// directories — accountDir holds this account's executables and state files
+// outside the root — and those entries are created plainly: they sit in a
+// directory no other account can write to, so the co-tenant this walk defends
+// against cannot reach them. A shared data directory (one marked widen below)
+// that resolves outside the root is still refused, since widening one to
+// group-writable elsewhere is the very thing being prevented.
+//
+// Under a setgid (shared) root each entry under the root must be a real
+// directory: that
 // root is group-writable, so another local account can plant a symlink under
 // a layout name before it exists (and the account that launched first owns
 // the real ones and can swap them later). A path-based MkdirAll and Chmod
@@ -333,12 +387,30 @@ func (p Paths) EnsureDirs() error {
 	if err := os.MkdirAll(p.Root, 0o755); err != nil {
 		return fmt.Errorf("create %s: %w", p.Root, err)
 	}
+	// This account's own state directory, created closed and closed if it is
+	// already there. Under the shared root it is the one directory holding
+	// things no other account may have — config.json's API key and HuggingFace
+	// token, and the registry that decides what this account's gateway serves.
+	// The chmod is not belt and braces: an account that ran a per-user install
+	// before joining a shared cache already has this directory at 0755, and
+	// MkdirAll would leave it there. Everywhere else it IS the root, created
+	// just above, and nothing changes.
+	//
+	// A chmod that fails is not fatal, as for every other mode in this
+	// function: the files inside are written 0600 whatever the directory says,
+	// and a directory this account cannot re-mode is one it does not own.
+	if acct := p.accountStateDir(); acct != filepath.Clean(p.Root) {
+		if err := os.MkdirAll(acct, 0o700); err != nil {
+			return fmt.Errorf("create %s: %w", acct, err)
+		}
+		_ = os.Chmod(acct, 0o700)
+	}
 	layout := []struct {
 		abs   string
-		widen bool // data directory: group-writable setgid sticky under a setgid root
+		widen bool // SHARED data directory: group-writable setgid sticky under a setgid root
 	}{
-		{p.Bin, false}, {p.Venv, false}, {p.Python, false},
-		{p.Models, true}, {filepath.Dir(p.HFCache), true}, {p.HFCache, true}, {p.Logs, true},
+		{p.Bin, false}, {p.Venv, false}, {p.Python, false}, {p.Logs, false},
+		{p.Models, true}, {filepath.Dir(p.HFCache), true}, {p.HFCache, true},
 	}
 	fi, err := os.Stat(p.Root)
 	if err != nil {
@@ -361,7 +433,36 @@ func (p Paths) EnsureDirs() error {
 	for _, d := range layout {
 		rel, err := filepath.Rel(p.Root, d.abs)
 		if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
-			return fmt.Errorf("%s is outside the data root %s", d.abs, p.Root)
+			// Outside the data root. Under a shared cache the layout straddles
+			// two directories by design: accountDir puts this account's
+			// executables and its own files in its Application Support
+			// directory, so no account ever executes another's binaries or
+			// writes into another's files. Those entries are created plainly,
+			// like the per-user branch above and for the same reason — the
+			// adversary the os.Root walk defends against is a co-tenant of the
+			// group-writable root, and a path outside that root is one they
+			// cannot reach.
+			//
+			// What makes the plain MkdirAll safe is that the path is inside this
+			// account's home directory, which macOS creates at 0700: no other
+			// account can create a component of it, so there is nothing to
+			// re-check between the creation and the use. The account's own state
+			// directory is held to 0700 above for the same reason. A path
+			// outside the root that is NOT in this account's home would need the
+			// same re-check the in-root branch does; nothing in the layout puts
+			// one there.
+			//
+			// A SHARED data directory outside the root is a different matter and
+			// is still refused: the models and the HuggingFace cache are
+			// what the root exists to hold, and widening one to group-writable
+			// somewhere else is what the refusal was written to stop.
+			if d.widen {
+				return fmt.Errorf("%s is shared with every account but is outside the data root %s", d.abs, p.Root)
+			}
+			if err := os.MkdirAll(d.abs, 0o755); err != nil {
+				return fmt.Errorf("create %s: %w", d.abs, err)
+			}
+			continue
 		}
 		if err := root.Mkdir(rel, 0o755); err != nil && !errors.Is(err, fs.ErrExist) {
 			return fmt.Errorf("create %s: %w", d.abs, err)
@@ -383,8 +484,24 @@ func (p Paths) EnsureDirs() error {
 // Config is the user-facing settings file.
 type Config struct {
 	// Host to bind the gateway to. 0.0.0.0 exposes it to the LAN.
+	//
+	// It is one of the addresses this server answers on rather than the only
+	// one: loopback is acquired alongside whatever this names, so narrowing
+	// the bind never costs the operator their own control panel
+	// (adr-2609091123526871, iss-7). internal/bind turns this into the set of
+	// addresses actually acquired.
 	Host string `json:"host"`
-	Port int    `json:"port"`
+	// BindMode decides how the bind is worked out. Empty — the default, and
+	// what every configuration written before this field carries — means Host
+	// decides. BindModePrivateNetwork means the address is resolved from this
+	// Mac's interfaces instead, and Host is left as the operator last set it
+	// so that switching back restores their choice.
+	//
+	// Its own field rather than a sentinel in Host, deliberately: a word like
+	// "private" passes host validation as a name, then fails to listen, and
+	// the app exits with no panel and no recovery but editing the file.
+	BindMode string `json:"bind_mode"`
+	Port     int    `json:"port"`
 
 	// APIKey, when non-empty, requires "Authorization: Bearer <key>" on /v1
 	// requests. Empty (the default) means the LAN endpoint is open.
@@ -425,17 +542,6 @@ type Config struct {
 	// best-effort — an invalid or too-large entry is logged and skipped, never
 	// blocking startup.
 	Preload []string `json:"preload,omitempty"`
-
-	// Pinned lists repo ids that stay in memory: a pinned model is never chosen
-	// as an eviction victim and is never unloaded by the idle timeout, so a
-	// request that would need its memory is refused instead.
-	//
-	// Separate from Preload, and the two do different things. Preload loads a
-	// model at startup and leaves it as evictable as any other; pinning
-	// protects a model but loads nothing, so a pinned model is protected from
-	// the moment something loads it. A model named in both is loaded at startup
-	// and protected from then on.
-	Pinned []string `json:"pinned,omitempty"`
 
 	// MaxResidentBytes caps the total charged size of the models that may be
 	// in memory at once. Zero — the default, and what a fresh install stores —
@@ -479,10 +585,6 @@ type Config struct {
 	// launched with, so a request that omits a parameter is served with them.
 	Sampling Sampling `json:"sampling,omitzero"`
 
-	// ModelSampling overrides Sampling for individual models, keyed by repo id.
-	// A model with no entry is served with the machine-wide set.
-	ModelSampling map[string]Sampling `json:"model_sampling,omitempty"`
-
 	// Statistics turns on content-free recording of the requests this Mac
 	// serves: which model, how it ended, how many tokens and how long it took.
 	// It is off until the operator turns it on, and while it is off nothing
@@ -499,15 +601,56 @@ type Config struct {
 	StatsMonths   int   `json:"stats_months,omitempty"`
 	StatsMaxBytes int64 `json:"stats_max_bytes,omitempty"`
 
-	// PerModel holds the per-model settings that are not sampling parameters,
-	// keyed by the registry's canonical repo id. A model with no entry runs on
-	// the machine-wide settings above, which is what every model does until the
-	// operator says otherwise.
-	PerModel map[string]ModelSettings `json:"per_model,omitempty"`
+	// LogLevel decides how much Gropius writes about itself, in its own log and
+	// on standard error. "sparse" — the default, and what every configuration
+	// written before this field carries — is one line per event that mattered:
+	// a refusal, a model loading or leaving, a launch that failed, the server
+	// starting and stopping, a settings save. "detailed" adds the figures those
+	// lines omit: how many requests were already in flight, the memory budget
+	// in bytes, how long a request waited, the wrapped launch error, and the
+	// drain behind an eviction.
+	//
+	// It is Gropius's own level and reaches nothing else. In particular it
+	// never reaches the model servers, which are launched at INFO whatever this
+	// says (adr-2609061503319212, and the guard in
+	// internal/archtest/statistics_switch_test.go): at DEBUG mlx_lm writes
+	// prompts and completions to its log, and no setting in this file may ask
+	// for that.
+	//
+	// Empty means sparse, the way an empty BindMode means Host decides. Read it
+	// through EffectiveLogLevel, so "unset" has one meaning and not one per
+	// caller.
+	LogLevel string `json:"log_level,omitempty"`
+
+	// ChatRule decides which models are published on the models list as able
+	// to hold a conversation, from the Hub's own words for what a model is.
+	// Absent — the default, and what a fresh install stores — means the rule
+	// Gropius ships (DefaultChatRule). It is not a second representation of
+	// that rule: a rule whose two lists are present and empty tests nothing,
+	// which is how an operator says "offer every model for chat".
+	//
+	// Machine-wide, and deliberately not one of the per-model settings below:
+	// it is one rule read against every model's own words, not a thing the
+	// operator says model by model. It filters nothing either way — every
+	// model stays callable by name over the API whatever the rule says of it.
+	ChatRule ChatRule `json:"chat_rule,omitzero"`
+
+	// Models holds every setting that belongs to one model rather than to the
+	// machine, keyed by the registry's canonical repo id. A model with no
+	// entry runs on the machine-wide settings above, which is what every model
+	// does until the operator says otherwise.
+	//
+	// One map, and exactly one. Gropius carried three of these — a sampling
+	// override map, a per-model settings map and a pinned list — each with its
+	// own ceiling, its own sanitiser, its own guard in the settings handler
+	// and its own canonicalisation, held to the same rules by prose in three
+	// files (iss-2609062213413447). A new per-model setting is a field on
+	// ModelSettings, and internal/archtest holds the count at one.
+	Models map[string]ModelSettings `json:"models,omitempty"`
 }
 
-// ModelSettings are the settings of a single model that are not sampling
-// parameters, which have their own map above.
+// ModelSettings are the settings of a single model: everything Gropius does
+// differently for one model rather than for the machine.
 //
 // Every field is off or zero by default, so a model gains a behavior only when
 // the operator switches it on for that model in Settings.
@@ -529,64 +672,210 @@ type ModelSettings struct {
 	// reads (adr-2609061610102325). Off unless the operator switches it on for
 	// this model.
 	MergeSystemMessages bool `json:"merge_system_messages,omitempty"`
+
+	// Pinned keeps this model in memory: a pinned model is never chosen as an
+	// eviction victim and is never unloaded by the idle timeout, so a request
+	// that would need its memory is refused instead.
+	//
+	// Separate from Preload, and the two do different things. Preload loads a
+	// model at startup and leaves it as evictable as any other; pinning
+	// protects a model but loads nothing, so a pinned model is protected from
+	// the moment something loads it. A model in both is loaded at startup and
+	// protected from then on.
+	Pinned bool `json:"pinned,omitempty"`
+
+	// Sampling overrides the machine-wide sampling defaults for this model. A
+	// parameter it does not name keeps the machine-wide value, so an override
+	// that says only "temperature 0.2" still gets the machine's token budget.
+	Sampling Sampling `json:"sampling,omitzero"`
+
+	// ServedContext is the context window Gropius serves this model at, in
+	// tokens. Zero means the window the model's own configuration declares,
+	// which is the default and what most models will run at.
+	//
+	// It is one figure with two effects, and that is the point of it: the
+	// memory budget charges the attention cache this window costs, and the
+	// gateway refuses a request estimated to be larger than it. Lowering it is
+	// how a model whose declared window will not fit this Mac becomes one that
+	// does. Read through Config.ServedContext, never off this field, so that
+	// the default is applied in one place.
+	ServedContext int64 `json:"served_context,omitempty"`
 }
 
-// ValidatePerModelKeys reports whether every key of a per-model settings map
+// MaxContextLength bounds every context window Gropius will believe, declared
+// or served. A model directory's config.json is, in shared-cache mode, a file
+// another local account can write, and so is config.json itself; the figure is
+// served to the LAN and decides how much memory a model is charged, so a
+// hostile or corrupt one must not be able to hand a client an absurd number to
+// size buffers from or fill this Mac's memory with. 8,388,608 tokens is far
+// above any window in use and far below anything that could be mistaken for
+// one. The registry bounds a declared window by this same constant.
+const MaxContextLength = 1 << 23
+
+// IsZero reports whether a model's settings say nothing at all. An entry like
+// that is dropped rather than stored — by sanitizeModels on the way in from
+// the file, and by the settings path on the way in from a save — so an empty
+// object neither holds a slot against the ceiling nor reaches config.json.
+//
+// Declared rather than inherited: Sampling has an IsZero of its own, and an
+// embedded or promoted one would report a pinned model with no sampling
+// override as having no settings.
+func (m ModelSettings) IsZero() bool {
+	return !m.MergeSystemMessages && !m.Pinned && m.ServedContext == 0 && m.Sampling.IsZero()
+}
+
+// ServedContext is the window Gropius serves the named model at: the
+// operator's figure, or declared — the window the model's own configuration
+// states — when they have set none or set one the model cannot address.
+//
+// The one home of that question. The memory budget charges this window, the
+// gateway refuses a request larger than it, the models list publishes it and
+// the panel shows it; a second reading of the setting anywhere is how those
+// four come to mean different windows by one number.
+//
+// A setting above the declared window is not honoured: the operator can ask
+// for less than the model was built for and cannot ask for more, and a model
+// that declares nothing has no window to serve.
+func (c Config) ServedContext(repoID string, declared int64) int64 {
+	set := c.Models[repoID].ServedContext
+	if set == 0 {
+		// Folded, because a request resolves to the registry's spelling and
+		// the settings file is written by hand as often as by the panel.
+		//
+		// Every variant is read and the largest kept, rather than the first
+		// the map hands over. Two spellings of one id are refused on the
+		// settings path and dropped on the file path, so a map holding both
+		// reached here some other way — assembled in Go, or written by a build
+		// with different rules — and taking whichever came first would answer
+		// differently on different runs of the same binary. The largest is the
+		// one choice that is both deterministic and no smaller than what the
+		// operator asked for anywhere.
+		folded := FoldRepoID(repoID)
+		for id, ms := range c.Models {
+			if FoldRepoID(id) == folded && ms.ServedContext > set {
+				set = ms.ServedContext
+			}
+		}
+	}
+	if set <= 0 || (declared > 0 && set > declared) {
+		return declared
+	}
+	return set
+}
+
+// Clone returns a copy that shares no pointer with the original — the sampling
+// override's fields are pointers, because a blank field and a zero are
+// different answers.
+func (m ModelSettings) Clone() ModelSettings {
+	m.Sampling = m.Sampling.Clone()
+	return m
+}
+
+// ValidateModelKeys reports whether every key of a per-model settings map
 // names a model, i.e. is a well-formed "<org>/<name>" repo id.
 //
 // A key is matched against the id a request resolves to, so a key of any other
 // shape names nothing and would sit in the settings file looking effective
 // while applying to no request ever made. Refusing it at the point of saving
 // is the only moment the operator is there to see it.
-func ValidatePerModelKeys(m map[string]ModelSettings) error {
+func ValidateModelKeys(m map[string]ModelSettings) error {
 	// Sorted, so a file with several unusable keys names the same one every
 	// time it is refused rather than whichever the map iteration reached first.
-	for _, id := range perModelKeys(m) {
+	for _, id := range modelKeys(m) {
 		if !ValidRepoID(id) {
-			return fmt.Errorf("per-model settings for %q: not a model id of the form <org>/<name>", id)
+			return fmt.Errorf("settings for model %q: not a model id of the form <org>/<name>", id)
 		}
 	}
-	if len(m) > MaxPerModel {
-		return fmt.Errorf("per-model settings name %d models, more than the %d this holds", len(m), MaxPerModel)
+	if len(m) > MaxModels {
+		return fmt.Errorf("per-model settings name %d models, more than the %d this holds", len(m), MaxModels)
 	}
 	return nil
 }
 
-// MaxPerModel bounds the per-model settings map for the same reason
-// MaxModelSampling bounds the sampling overrides beside it, and to the same
-// figure: everything saved is written to config.json, which Load refuses above
-// MaxConfigBytes, and a config.json that cannot be read sends the next start
-// into its fail-closed loopback-only branch. Two per-model maps means two
-// levers for that, so both are bounded.
-const MaxPerModel = MaxModelSampling
+// MaxModels bounds the per-model settings map: everything saved is written to
+// config.json, which Load refuses above MaxConfigBytes, and a config.json that
+// cannot be read sends the next start into its fail-closed loopback-only
+// branch, taking the LAN endpoint with it. A bounded map keeps this field from
+// being the lever for that, whether it is filled from the control plane or by
+// another local account editing the file in shared-cache mode. Nobody has
+// hundreds of models on one Mac.
+//
+// The memory budget bounds how many models can usefully be pinned, but
+// Validate is machine-independent, so the count is what is bounded here.
+const MaxModels = 256
 
-// perModelKeys returns a per-model settings map's keys in a stable order, so
-// that a map with more than one problem in it names the same one every time
-// rather than whichever the map iteration reached first.
-func perModelKeys(m map[string]ModelSettings) []string {
+// modelKeys returns a per-model settings map's keys in a stable order, so that
+// a map with more than one problem in it names the same one every time rather
+// than whichever the map iteration reached first.
+func modelKeys(m map[string]ModelSettings) []string {
 	return slices.Sorted(maps.Keys(m))
 }
 
-// sanitizePerModel drops every per-model entry this build cannot use and
-// returns what it dropped, so a settings file written by hand, restored from a
-// backup, or produced by another build still loads.
+// PinnedIDs names the models pinned in memory, in a stable order.
+//
+// The pool, the fit check and the panel all take a list; the settings hold a
+// map, because pinning is a setting of one model like any other. This is the
+// one place the two shapes meet.
+func (c Config) PinnedIDs() []string {
+	var out []string
+	for _, id := range modelKeys(c.Models) {
+		if c.Models[id].Pinned {
+			out = append(out, id)
+		}
+	}
+	return out
+}
+
+// validateModels checks the per-model settings the way the machine-wide ones
+// are checked: this is the settings path, where a human is waiting for an
+// answer, so an entry that names no model is refused rather than dropped.
+func (c Config) validateModels() error {
+	if err := ValidateModelKeys(c.Models); err != nil {
+		return err
+	}
+	seen := map[string]string{}
+	for _, id := range modelKeys(c.Models) {
+		// Two spellings of one repo id are two entries in the map but one
+		// model, so the effective settings would depend on which the lookup
+		// reached first. sanitizeModels drops the duplicate on the file path;
+		// here, where a human is waiting for an answer, say so instead.
+		folded := FoldRepoID(id)
+		if first, ok := seen[folded]; ok {
+			return fmt.Errorf("settings for %q and %q name the same model", first, id)
+		}
+		seen[folded] = id
+		if err := c.Models[id].Sampling.Validate(); err != nil {
+			return fmt.Errorf("%s: %w", id, err)
+		}
+		if sc := c.Models[id].ServedContext; sc < 0 || sc > MaxContextLength {
+			return fmt.Errorf(
+				"%s: served_context must be between 0 (the model's own window) and %d, got %d",
+				id, int64(MaxContextLength), sc)
+		}
+	}
+	return nil
+}
+
+// sanitizeModels drops every per-model entry this build cannot use — and every
+// value inside one the model server would refuse — returning what it dropped,
+// so a settings file written by hand, restored from a backup, or produced by
+// another build still loads.
 //
 // Refusing the file instead would be worse than useless. The panel serves the
 // stored settings into its form and the form posts them back, so one unusable
 // key would return on the next save and be refused there — wedging every
 // settings change there is, the API key included, until someone edited the
-// file by hand. This is the same treatment the sampling overrides beside it
-// get, for the same reason.
-func (c *Config) sanitizePerModel() []string {
-	if len(c.PerModel) == 0 {
+// file by hand.
+func (c *Config) sanitizeModels() []string {
+	if len(c.Models) == 0 {
 		return nil
 	}
 	var dropped []string
-	kept := make(map[string]ModelSettings, len(c.PerModel))
+	kept := make(map[string]ModelSettings, len(c.Models))
 	seen := map[string]string{} // folded id -> the spelling kept
-	for _, id := range perModelKeys(c.PerModel) {
+	for _, id := range modelKeys(c.Models) {
 		if !ValidRepoID(id) {
-			dropped = append(dropped, "per_model["+id+"]")
+			dropped = append(dropped, "models["+id+"]")
 			continue
 		}
 		// Two spellings of one repo id would make the effective settings
@@ -594,95 +883,64 @@ func (c *Config) sanitizePerModel() []string {
 		// outcome is the same on every start.
 		folded := FoldRepoID(id)
 		if first, ok := seen[folded]; ok {
-			dropped = append(dropped, "per_model["+id+"] (duplicate of "+first+")")
+			dropped = append(dropped, "models["+id+"] (duplicate of "+first+")")
 			continue
 		}
-		if len(kept) >= MaxPerModel {
-			dropped = append(dropped, "per_model["+id+"] (beyond the "+
-				strconv.Itoa(MaxPerModel)+"-model ceiling)")
+		if len(kept) >= MaxModels {
+			dropped = append(dropped, "models["+id+"] (beyond the "+
+				strconv.Itoa(MaxModels)+"-model ceiling)")
+			continue
+		}
+		ms := c.Models[id].Clone()
+		sampling, names := ms.Sampling.Sanitized()
+		ms.Sampling = sampling
+		for _, n := range names {
+			dropped = append(dropped, "models["+id+"].sampling."+n)
+		}
+		// A window this build cannot use is dropped on its own, leaving the
+		// model's other settings in force: the alternative is a file whose one
+		// bad figure takes a pin and a sampling override down with it.
+		if ms.ServedContext < 0 || ms.ServedContext > MaxContextLength {
+			ms.ServedContext = 0
+			dropped = append(dropped, "models["+id+"].served_context")
+		}
+		// An entry that says nothing is not kept, and is not reported either:
+		// nothing was ignored, because nothing was asked for. Keeping it would
+		// let empty objects fill the map to its ceiling and stand between the
+		// operator and a model they do want settings for.
+		if ms.IsZero() {
 			continue
 		}
 		seen[folded] = id
-		kept[id] = c.PerModel[id]
+		kept[id] = ms
 	}
 	if len(kept) == 0 {
 		kept = nil
 	}
-	c.PerModel = kept
+	c.Models = kept
 	return dropped
 }
 
-// MaxPinned bounds the pinned list for the same reason MaxPerModel bounds the
-// per-model settings beside it, and to the same figure: everything saved is
-// written to config.json, which Load refuses above MaxConfigBytes, and a
-// config.json that cannot be read sends the next start into its fail-closed
-// loopback-only branch. The memory budget bounds how many pins can be *useful*,
-// but Validate is machine-independent, so the count is what is bounded here.
-const MaxPinned = MaxPerModel
+// MaxPreload bounds the preload list, for the reason MaxModels bounds the
+// per-model settings beside it and to the same figure: a config.json grown
+// without limit is one the next start cannot read, and a start that cannot
+// read it locks the server down to loopback. The list names models to load
+// into memory at startup, so it cannot usefully be longer than the models this
+// Mac can hold — a bound the memory budget puts in the single digits — while
+// Validate has to be machine-independent, so what is bounded here is the
+// count, at the figure the per-model settings already use.
+const MaxPreload = MaxModels
 
-// validatePinned checks the pinned list the way validateSampling checks the
-// sampling overrides: this is the settings path, where a human is waiting for
-// an answer, so an entry that names no model is refused rather than dropped.
-func (c Config) validatePinned() error {
-	if len(c.Pinned) > MaxPinned {
-		return fmt.Errorf("at most %d models may be pinned, got %d", MaxPinned, len(c.Pinned))
-	}
-	seen := map[string]string{}
-	for _, id := range c.Pinned {
-		if !ValidRepoID(id) {
-			return fmt.Errorf("pinned model %q: not a model id of the form <org>/<name>", id)
-		}
-		// Two spellings of one repo id are two entries but one model. The pool
-		// folds its lookup, so the duplicate would protect nothing extra while
-		// counting twice against the fit check the save is about to run.
-		folded := FoldRepoID(id)
-		if first, ok := seen[folded]; ok {
-			return fmt.Errorf("pinned models %q and %q name the same model", first, id)
-		}
-		seen[folded] = id
-	}
-	return nil
-}
-
-// sanitizePinned drops every pinned entry this build cannot use and returns
-// what it dropped, so a settings file written by hand, restored from a backup,
-// or produced by another build still loads.
+// MaxAPIKeyBytes bounds the API key, for the same reason and against the same
+// hazard.
 //
-// Refusing the file instead would be worse than useless, for the reason
-// sanitizePerModel gives: the panel serves the stored settings into its form
-// and the form posts them back, so one unusable entry would return on the next
-// save and be refused there, wedging every settings change there is.
-func (c *Config) sanitizePinned() []string {
-	if len(c.Pinned) == 0 {
-		return nil
-	}
-	var dropped []string
-	kept := make([]string, 0, len(c.Pinned))
-	seen := map[string]string{} // folded id -> the spelling kept
-	for _, id := range c.Pinned {
-		if !ValidRepoID(id) {
-			dropped = append(dropped, "pinned["+id+"]")
-			continue
-		}
-		folded := FoldRepoID(id)
-		if first, ok := seen[folded]; ok {
-			dropped = append(dropped, "pinned["+id+"] (duplicate of "+first+")")
-			continue
-		}
-		if len(kept) >= MaxPinned {
-			dropped = append(dropped, "pinned["+id+"] (beyond the "+
-				strconv.Itoa(MaxPinned)+"-model ceiling)")
-			continue
-		}
-		seen[folded] = id
-		kept = append(kept, id)
-	}
-	if len(kept) == 0 {
-		kept = nil
-	}
-	c.Pinned = kept
-	return dropped
-}
+// GenerateAPIKey produces 43 characters (32 random bytes, base64 without
+// padding), which is what a fresh install carries and what almost every
+// install keeps. The ceiling is an order of magnitude above that, so a
+// passphrase a person chose or a password manager produced fits with room to
+// spare, and the field stops being a lever for growing config.json towards
+// MaxConfigBytes from the settings endpoint.
+const MaxAPIKeyBytes = 512
 
 // sanitizeBudget drops a memory budget this build cannot use and names what it
 // dropped, so a hand-edited file still loads.
@@ -700,6 +958,70 @@ func (c *Config) sanitizeBudget() []string {
 	return dropped
 }
 
+// sanitizePreload cuts a preload list this build cannot use down to the
+// ceiling and names what it cut, so a hand-edited file, a backup or another
+// build's settings still load.
+//
+// Cut rather than refused, for the reason sanitizeModels gives: the panel
+// serves the stored settings into its form and the form posts them back, so a
+// list that is refused rather than trimmed would come back on the next save
+// and be refused there — wedging every settings change there is, the API key
+// included, until someone edited the file by hand.
+//
+// The entries kept are the ones at the front. They are all equally
+// well-formed — only their position is the problem — so one line naming the
+// field and the count says everything an operator can act on, where a line per
+// entry would say the same thing two hundred times.
+func (c *Config) sanitizePreload() []string {
+	if len(c.Preload) <= MaxPreload {
+		return nil
+	}
+	cut := len(c.Preload) - MaxPreload
+	c.Preload = c.Preload[:MaxPreload]
+	return []string{"preload (" + strconv.Itoa(cut) + " entries beyond the " +
+		strconv.Itoa(MaxPreload) + "-model ceiling)"}
+}
+
+// sanitizeAPIKey trims an API key this build cannot use and says that it did,
+// so a hand-edited file, a backup or another build's settings still load.
+//
+// Trimmed rather than cleared: clearing it would turn one over-long value in a
+// file into a LAN-exposed server that anyone on the network can use, which is
+// the one outcome this configuration is never allowed to arrive at by
+// accident. Trimmed rather than refused, for the reason the sanitizers above
+// give — a refused file locks the next start down to loopback, and the key
+// would come back on the next save and be refused there.
+//
+// What is left is still a key, and a client using the old one is refused: the
+// file was already carrying a value no save would have written, and the panel
+// shows the operator exactly what is in force now. The value is never named in
+// what is reported — it is the secret this field exists to hold.
+func (c *Config) sanitizeAPIKey() []string {
+	if len(c.APIKey) <= MaxAPIKeyBytes {
+		return nil
+	}
+	key := c.APIKey[:MaxAPIKeyBytes]
+	// A cut through the middle of a multi-byte character would leave a string
+	// that is not valid UTF-8, which Save would re-encode as something else
+	// again. Step back to the last whole character; at most three steps for a
+	// value that is UTF-8 at all.
+	whole := key
+	for len(whole) > 0 && !utf8.ValidString(whole) {
+		whole = whole[:len(whole)-1]
+	}
+	// A value with no whole character anywhere in it leaves nothing to step
+	// back to, and the raw cut is kept rather than the empty string this would
+	// otherwise produce. Nothing reaches here with one today — Load's decoder
+	// coerces invalid UTF-8 to U+FFFD — and the guard does not depend on that
+	// staying true: an empty key is an open server on a LAN-exposed install,
+	// which is the one repair this function must never make.
+	if whole != "" {
+		key = whole
+	}
+	c.APIKey = key
+	return []string{"api_key (trimmed to the " + strconv.Itoa(MaxAPIKeyBytes) + "-byte ceiling)"}
+}
+
 // Clone returns a copy that shares no slice, map or pointer with the original.
 //
 // The settings endpoint decodes a posted body into a copy of the live config
@@ -713,22 +1035,22 @@ func (c Config) Clone() Config {
 	if c.Preload != nil {
 		out.Preload = append([]string(nil), c.Preload...)
 	}
-	if c.Pinned != nil {
-		out.Pinned = append([]string(nil), c.Pinned...)
-	}
 	out.Sampling = c.Sampling.Clone()
-	if c.ModelSampling != nil {
-		out.ModelSampling = make(map[string]Sampling, len(c.ModelSampling))
-		for k, v := range c.ModelSampling {
-			out.ModelSampling[k] = v.Clone()
+	if c.Models != nil {
+		out.Models = make(map[string]ModelSettings, len(c.Models))
+		for k, v := range c.Models {
+			out.Models[k] = v.Clone()
 		}
 	}
-	if c.PerModel != nil {
-		out.PerModel = make(map[string]ModelSettings, len(c.PerModel))
-		for k, v := range c.PerModel {
-			out.PerModel[k] = v
-		}
-	}
+	// Both halves of the rule: the settings write path decodes a posted body
+	// into a clone, and a shared backing array would land a caller's words in
+	// the live rule before Validate had looked at them.
+	//
+	// ChatRule.Clone copies with make and copy rather than appending onto a nil
+	// slice, which for an empty half would yield nil — turning a rule an
+	// operator cleared back into a rule they never set, and so reinstating the
+	// shipped default at the next save of any unrelated setting.
+	out.ChatRule = c.ChatRule.Clone()
 	return out
 }
 
@@ -880,6 +1202,70 @@ func Default() Config {
 	}
 }
 
+// The two levels Gropius writes its own log at. Sparse is one line per event
+// that mattered; detailed adds the figures sparse omits. They are the strings
+// config.json carries, the strings the control panel posts, and the strings
+// docs/logging.md prints — one spelling, so a level cannot mean one thing in
+// the panel and another in the file.
+const (
+	LogLevelSparse   = "sparse"
+	LogLevelDetailed = "detailed"
+)
+
+// EffectiveLogLevel is the level in force: the one that was set, or sparse.
+//
+// Empty is the default rather than a level of its own, so a settings file
+// written before this field existed, a field the operator cleared, and a fresh
+// install all mean the same thing — the rule GraceSeconds and MaxWaitSeconds
+// already follow for their own unset figures.
+func (c Config) EffectiveLogLevel() string {
+	if c.LogLevel == "" {
+		return LogLevelSparse
+	}
+	return c.LogLevel
+}
+
+// SlogLevel is what the handler reads: sparse is Info and above, detailed is
+// Debug and above.
+//
+// The mapping lives here, beside the names, because it is the whole of what
+// the two words mean. Anything that turned a level name into a slog.Level
+// somewhere else would be a second definition of "detailed", and the first
+// time the two disagreed the panel would promise an operator figures the
+// process was not writing.
+func (c Config) SlogLevel() slog.Level {
+	if c.EffectiveLogLevel() == LogLevelDetailed {
+		return slog.LevelDebug
+	}
+	return slog.LevelInfo
+}
+
+// validLogLevel reports whether name is one this build writes at. It is the
+// one predicate both the repair and the refusal below are decided by.
+func validLogLevel(name string) bool {
+	return name == "" || name == LogLevelSparse || name == LogLevelDetailed
+}
+
+// sanitizeLogLevel repairs a log level this build cannot use and says that it
+// did, so a hand-edited file, a backup or another build's settings still load.
+//
+// Repaired rather than refused, for the reason sanitizeStats gives: a refused
+// config.json sends the next start into its fail-closed loopback-only branch,
+// and a machine-wide outage is far too much to pay for a word that decides how
+// much the log says. Reported rather than repaired silently, because the level
+// IS in force in a changed form — an operator who wrote "verbose" and reads
+// nothing would go looking in a detailed log that was never written. Save
+// still refuses the same value outright, which is the moment the operator is
+// there to read why.
+func (c *Config) sanitizeLogLevel() []string {
+	if validLogLevel(c.LogLevel) {
+		return nil
+	}
+	repaired := []string{"log_level=" + c.LogLevel}
+	c.LogLevel = ""
+	return repaired
+}
+
 // sanitizeStats repairs a retention figure this build cannot use and returns
 // what it repaired, so a hand-edited file, a backup or another build's
 // settings still load.
@@ -920,12 +1306,31 @@ func (c Config) Validate() error {
 	// that repeats it. Load turns a refusal here into a lock-down to loopback,
 	// which is the same fail-closed path a corrupt file takes.
 	if !ValidBindHost(c.Host) {
-		return fmt.Errorf("host %q is neither an IP address (bracketed, as \"[::1]\", for IPv6) nor a host name", c.Host)
+		return fmt.Errorf("host %q is neither an IP address nor a host name", c.Host)
+	}
+	// An unrecognised bind mode decides the bind, and nothing downstream knows
+	// what it decided. Refused rather than repaired, in the direction every
+	// other bind fault runs: Load turns this into a loopback bind with the
+	// rest of the operator's settings kept, and Save turns it into a message
+	// while they are there to read it.
+	if c.BindMode != BindModeHost && c.BindMode != BindModePrivateNetwork {
+		return fmt.Errorf("bind_mode %q is not a bind mode this build has; leave it out for the address in \"host\", or set %q", c.BindMode, BindModePrivateNetwork)
 	}
 	if c.DecodeConcurrency < 1 {
 		return fmt.Errorf("decode_concurrency must be >= 1, got %d", c.DecodeConcurrency)
 	}
-	if err := c.validatePinned(); err != nil {
+	// Named fields, both of them: this is the settings path, where a person is
+	// waiting to be told which of a form's worth of settings was refused.
+	if len(c.APIKey) > MaxAPIKeyBytes {
+		return fmt.Errorf("api_key must be at most %d bytes, got %d", MaxAPIKeyBytes, len(c.APIKey))
+	}
+	if len(c.Preload) > MaxPreload {
+		return fmt.Errorf("preload names %d models, more than the %d this holds", len(c.Preload), MaxPreload)
+	}
+	if err := c.validateModels(); err != nil {
+		return err
+	}
+	if err := c.ChatRule.validate(); err != nil {
 		return err
 	}
 	// Eviction grace on an open endpoint is a denial-of-service lever: a parked
@@ -935,8 +1340,24 @@ func (c Config) Validate() error {
 	// to tell callers apart. Loopback-only installs are unaffected: there is no
 	// network caller to defend against, and the check turns on exposure rather
 	// than on the key alone.
-	if c.EvictionGrace && c.ExposedToLAN() && c.APIKey == "" {
-		return errors.New("eviction grace needs an API key on a LAN-exposed server: without one the wait queue cannot be shared out between callers, and one client can hold up model loading for everyone")
+	// The private-network mode counts as exposed HERE and only here. This runs
+	// on a stored configuration — at a save, and at a load before any socket
+	// exists — so nothing can say what the mode would bind, and "might serve
+	// network callers" is the strongest thing that can be asked of it. Erring
+	// closed costs a key on a feature that is off by default; erring open
+	// costs the queue this rule protects.
+	if c.EvictionGrace && c.APIKey == "" {
+		// Two spellings of one rule, because the operator has to recognise the
+		// server being described. A loopback Host under the private-network
+		// mode is not a LAN-exposed server, and telling them it is sends them
+		// to look at a bind address that is not what fired this.
+		const why = ": without one the wait queue cannot be shared out between callers, and one client can hold up model loading for everyone"
+		switch {
+		case c.ExposedToLAN():
+			return errors.New("eviction grace needs an API key on a LAN-exposed server" + why)
+		case c.BindMode == BindModePrivateNetwork:
+			return errors.New("eviction grace needs an API key on a server that may reach other machines (private-network mode)" + why)
+		}
 	}
 	if c.StatsMonths < 1 || c.StatsMonths > MaxStatsMonths {
 		return fmt.Errorf("keep statistics for between 1 and %d months, got %d", MaxStatsMonths, c.StatsMonths)
@@ -944,6 +1365,14 @@ func (c Config) Validate() error {
 	if c.StatsMaxBytes < MinStatsMaxBytes || c.StatsMaxBytes > MaxStatsMaxBytes {
 		return fmt.Errorf("the statistics store's limit must be between %d and %d bytes, got %d",
 			MinStatsMaxBytes, MaxStatsMaxBytes, c.StatsMaxBytes)
+	}
+	// The one enum in this file that is repaired on the way in and refused
+	// here: Load sanitizes before it validates, so a hand-edited word never
+	// reaches this check, and what does reach it is a save the operator is
+	// standing in front of.
+	if !validLogLevel(c.LogLevel) {
+		return fmt.Errorf("log_level %q is not one this build writes at; use %q or %q",
+			c.LogLevel, LogLevelSparse, LogLevelDetailed)
 	}
 	if c.MaxResidentBytes < 0 {
 		return fmt.Errorf("max_resident_bytes must not be negative, got %d", c.MaxResidentBytes)
@@ -959,33 +1388,43 @@ func (c Config) Validate() error {
 	return c.validateSampling()
 }
 
+// The two bind modes. A third choice in Settings, never automatic: switching
+// it on changes who can reach an existing install, and a default that moves
+// the day someone installs a VPN is a default change wearing a feature's
+// clothes.
+const (
+	// BindModeHost is the default: Config.Host is the bind.
+	BindModeHost = ""
+	// BindModePrivateNetwork serves on the one address this Mac holds on a
+	// private network, and on this Mac. It fails closed to this Mac alone when
+	// there is no such address, or more than one — it never picks between them
+	// (adr-2609081118587999, amendment condition 1).
+	BindModePrivateNetwork = "private-network"
+)
+
 // ValidBindHost reports whether a value is something cmd/gropius can bind.
 //
 // It is as wide as the listener and no wider, and that is checked rather than
 // asserted: every value the table in host_test.go marks bindable was watched
 // to produce a listener, and every value it refuses was watched to fail.
 //
-// The address is built as "<host>:<port>", so an IPv6 literal binds only when
-// the configuration carries it bracketed. That is a rule about spelling, not
-// about which addresses exist: "[::1]:11535" listens and "::1:11535" is
-// refused by net.SplitHostPort as "too many colons in address" — at every
-// port, for every IPv6 address, on every machine. An earlier version of this
-// comment said both spellings had to stay legal "or a working install stops
-// starting", which had it exactly backwards: an unbracketed IPv6 host is one
-// no working install can be carrying, because main.go logs "cannot listen"
-// and exits 1 before it serves anything. Accepting it turned a hand-edited
-// typo into an app that would not start; refusing it sends Load down the
-// narrow-to-loopback path, and the app starts and says why. A zone
-// ("[fe80::1%en0]") binds and stays legal, even though URLHost refuses to put
-// one in a URL.
+// An IPv6 literal is accepted in either spelling. The listen address is built
+// by internal/bind through net.JoinHostPort (adr-2609091123526871 rule 5),
+// which brackets a host carrying colons itself, so "::1" and "[::1]" name the
+// same bind and both listen. That was not true while the address was built
+// with fmt.Sprintf: "::1:11535" came back from net.SplitHostPort as "too many
+// colons in address" and the app exited before it served anything, which is
+// iss-7's second fault. The bracketed spelling stays accepted because
+// config.json files carry it.
+//
+// What a colon still cannot do is carry a port. "192.168.1.5:8080" parses as
+// no address, and a colon is not legal in a host-name label, so it is refused
+// here rather than bracketed by JoinHostPort into an address no listener
+// takes. A zone ("fe80::1%en0", bracketed or not) binds and stays legal, even
+// though URLHost refuses to put one in a URL.
 func ValidBindHost(host string) bool {
 	bare, ok := unbracket(host)
 	if !ok {
-		return false
-	}
-	// Unbracketed, a colon is the port separator, so no value carrying one is
-	// a host cmd/gropius can bind — neither "::1" nor "192.168.1.5:8080".
-	if !strings.HasPrefix(host, "[") && strings.Contains(bare, ":") {
 		return false
 	}
 	if addr, zone, hasZone := strings.Cut(bare, "%"); hasZone {
@@ -1180,6 +1619,14 @@ func validHostLabel(label string) bool {
 // direction the errors have to run: a name resolves to whatever the resolver
 // says today, and a malformed value binds nothing at all, and neither is a
 // reason to stand down.
+//
+// What it does NOT answer is what the running server is exposed on. A bind is
+// a set of addresses now, the set can be narrower than the configuration asked
+// for, and the bind mode may name no address at all — so everything that
+// decides at startup or reports at runtime asks bind.Plan.ReachesOtherMachines
+// instead, which is a question about sockets (adr-2609091123526871 rule 7).
+// This is the answer about a stored configuration, which is what a stored
+// configuration can be asked, and Validate below is its remaining reader.
 func (c Config) ExposedToLAN() bool {
 	bare, ok := unbracket(c.Host)
 	if !ok {
@@ -1227,27 +1674,112 @@ func (c Config) ExposedToLAN() bool {
 // hang startup before the fail-closed branch in main could ever run, and a
 // symlinked or oversized file is refused rather than applied. Any such refusal
 // is an error, which main treats as "lock down to loopback".
-func Load(path string) (Config, []string, error) {
+func Load(path string) (Config, Notices, error) {
 	cfg := Default()
 	b, err := ReadRegular(path, MaxConfigBytes)
 	if errors.Is(err, fs.ErrNotExist) {
-		return cfg, nil, nil
+		return cfg, Notices{}, nil
 	}
 	if err != nil {
-		return cfg, nil, fmt.Errorf("read config: %w", err)
+		return cfg, Notices{}, fmt.Errorf("read config: %w", err)
 	}
 	if err := json.Unmarshal(b, &cfg); err != nil {
-		return Default(), nil, fmt.Errorf("parse config %s: %w", path, err)
+		return Default(), Notices{}, fmt.Errorf("parse config %s: %w", path, err)
 	}
-	dropped := append(cfg.sanitizeSampling(), cfg.sanitizePerModel()...)
-	dropped = append(dropped, cfg.sanitizePinned()...)
-	dropped = append(dropped, cfg.sanitizeStats()...)
-	dropped = append(dropped, cfg.sanitizeBudget()...)
-	dropped = append(dropped, cfg.sanitizeGrace()...)
+	var n Notices
+	// Ignored: the setting is not in force at all, and setting it again is the
+	// only way to get it.
+	n.Ignored = append(n.Ignored, SupersededSettings(b)...)
+	n.Ignored = append(n.Ignored, cfg.sanitizeSampling()...)
+	n.Ignored = append(n.Ignored, cfg.sanitizeModels()...)
+	n.Ignored = append(n.Ignored, cfg.sanitizePreload()...)
+	// Repaired: the setting IS in force, in a changed form. Telling an
+	// operator to set it again would send them looking for a value that is
+	// working — and for the API key it would be worse than that, because the
+	// trimmed key is the one their clients must now send.
+	n.Repaired = append(n.Repaired, cfg.sanitizeStats()...)
+	n.Repaired = append(n.Repaired, cfg.sanitizeBudget()...)
+	n.Repaired = append(n.Repaired, cfg.sanitizeGrace()...)
+	n.Repaired = append(n.Repaired, cfg.sanitizeAPIKey()...)
+	n.Repaired = append(n.Repaired, cfg.sanitizeLogLevel()...)
+	n.Repaired = append(n.Repaired, cfg.sanitizeChatRule()...)
 	if err := cfg.Validate(); err != nil {
-		return Default(), nil, &InvalidError{Path: path, Err: err, Parsed: cfg, Dropped: dropped}
+		return Default(), Notices{}, &InvalidError{Path: path, Err: err, Parsed: cfg, Notices: n}
 	}
-	return cfg, dropped, nil
+	return cfg, n, nil
+}
+
+// superseded names the settings keys this build no longer reads, and what
+// carries each of them now.
+//
+// Every one of them was a per-model setting with a shape of its own. They are
+// one map today (iss-2609062213413447), and pre-1.0 that migration is made by
+// the operator rather than by a compatibility path nobody would ever be able
+// to delete: the old keys are not read, and the next save writes the new shape.
+var superseded = map[string]string{
+	"model_sampling": "replaced by models[<id>].sampling",
+	"per_model":      "replaced by models[<id>]",
+	"pinned":         "replaced by models[<id>].pinned",
+}
+
+// SupersededSettings names the superseded keys a settings body or file still
+// carries, each with what carries it now.
+//
+// One function for both surfaces, because they owe the same answer. On the
+// file path Load reports them as ignored, so an operator is told once — at the
+// start that ignored them — rather than left to wonder why a model is no
+// longer pinned. On the settings path the endpoint refuses the body outright:
+// a caller posting one of these keys is a script or a shell of someone's own,
+// and answering "saved" to a save that changed nothing is the one reply that
+// leaves them believing it worked.
+//
+// Read off the raw bytes, because the fields are gone from the type and
+// encoding/json says nothing about a key it does not know. Matched the way
+// encoding/json matches a field name, case-insensitively, so a hand-edited
+// "Pinned" is reported rather than silently dropped.
+func SupersededSettings(b []byte) []string {
+	var named map[string]json.RawMessage
+	if err := json.Unmarshal(b, &named); err != nil {
+		return nil
+	}
+	var out []string
+	for _, key := range slices.Sorted(maps.Keys(superseded)) {
+		for k := range named {
+			if strings.EqualFold(k, key) {
+				out = append(out, key+" ("+superseded[key]+")")
+				break
+			}
+		}
+	}
+	return out
+}
+
+// Notices is what Load had to change about a settings file to make it usable,
+// kept in two lists because the difference is the whole of what an operator
+// needs to hear.
+//
+// A setting in Ignored is not in force at all: it named nothing this build can
+// use, and setting it again is the only way to get it. A setting in Repaired
+// IS in force, in a changed form — trimmed, clamped, or replaced by the
+// default that stands behind it. One message for both said "ignoring settings
+// the model server would not accept — set them again", which is untrue of
+// every repair and dangerous for exactly one of them: a trimmed API key is the
+// key clients must send from that moment on, and an operator told it was
+// ignored has been told the opposite of what happened.
+type Notices struct {
+	Ignored  []string
+	Repaired []string
+}
+
+// Empty reports whether the file needed no changing at all.
+func (n Notices) Empty() bool { return len(n.Ignored) == 0 && len(n.Repaired) == 0 }
+
+// All names everything Load changed, ignored and repaired together, for a
+// caller that wants the fields and not the distinction.
+func (n Notices) All() []string {
+	out := make([]string, 0, len(n.Ignored)+len(n.Repaired))
+	out = append(out, n.Ignored...)
+	return append(out, n.Repaired...)
 }
 
 // InvalidError reports a config.json that read and parsed cleanly and then
@@ -1271,9 +1803,10 @@ type InvalidError struct {
 	// Parsed is the configuration as it was read: sanitized, and invalid in
 	// whatever way Err names. It is not safe to run as it stands.
 	Parsed Config
-	// Dropped names the sampling preferences sanitizeSampling discarded, as
-	// Load's second return value would have carried them.
-	Dropped []string
+	// Notices names what sanitizing changed on the way here, split the way
+	// Load's second return value would have carried it: settings that are not
+	// in force at all, and settings that are in force in a changed form.
+	Notices Notices
 }
 
 func (e *InvalidError) Error() string { return "invalid config " + e.Path + ": " + e.Err.Error() }
@@ -1302,6 +1835,13 @@ func Save(path string, c Config) error {
 		return fmt.Errorf("settings are %d bytes, over the %d-byte limit config.json can be read back from",
 			len(b)+1, MaxConfigBytes)
 	}
+	return writeSettingsFile(path, append(b, '\n'))
+}
+
+// writeSettingsFile writes a settings file atomically and closed (0600). It is
+// the one writer of config.json — Save and the shared-root adoption below both
+// go through it — so the hardening below is stated once and cannot drift.
+func writeSettingsFile(path string, b []byte) error {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
@@ -1321,7 +1861,7 @@ func Save(path string, c Config) error {
 		tmp.Close()
 		return err
 	}
-	if _, err := tmp.Write(append(b, '\n')); err != nil {
+	if _, err := tmp.Write(b); err != nil {
 		tmp.Close()
 		return err
 	}
@@ -1338,6 +1878,155 @@ func Save(path string, c Config) error {
 		return err
 	}
 	return os.Rename(tmpName, path)
+}
+
+// accountStateDir is Account, cleaned so it can be compared with the root. It
+// falls back to the directory holding config.json for a Paths built by hand
+// without the field.
+func (p Paths) accountStateDir() string {
+	if p.Account != "" {
+		return filepath.Clean(p.Account)
+	}
+	return filepath.Dir(p.Config)
+}
+
+// AdoptSharedConfig copies the settings this account left in the shared root
+// into its own state directory, once, and reports whether it did.
+//
+// Before per-account state, every account under a shared cache wrote its
+// settings to one config.json beside the models — which worked for exactly one
+// account and left every later one unable to read or write anything. Those
+// settings are not derivable from anything else (an API key, a HuggingFace
+// token, a port, a memory budget), so the first start after the change carries
+// them over rather than silently resetting the account to the shipping
+// defaults. A registry needs no such rescue: it is derived from the model
+// directories, and the startup rescan rebuilds it.
+//
+// Three rules make this safe to run against a directory every account on the
+// Mac can write to:
+//
+//   - Only the account that OWNS the file adopts it. The shared config.json is
+//     0600 and belongs to whichever account wrote it; a file this account does
+//     not own is either another account's settings — whose API key and token
+//     must never cross the boundary, however readable the mode has been made —
+//     or something planted under that name. Neither is adopted.
+//   - The read is the hardened one (ReadRegular): a symlink, a FIFO, or an
+//     oversized file is refused rather than followed or blocked on.
+//   - The original is REMOVED once the copy is in place. The sticky bit stops
+//     other accounts unlinking it, not its owner, and its owner is the only
+//     account that ever gets here — so leaving it would leave a copy of an API
+//     key and a HuggingFace token in a group-writable directory for as long as
+//     the install lasts, still live for anything that reads that path. An
+//     operator who rotates the key and later runs an older build would put the
+//     superseded key back into service; starting that build from the shipping
+//     defaults, which generates a fresh key for an exposed bind, is the safer
+//     of the two failures.
+//
+// Adoption happens only when this account has no settings of its own yet, so it
+// can never overwrite what the operator has saved since.
+func (p Paths) AdoptSharedConfig() (bool, error) {
+	acct := p.accountStateDir()
+	if acct == filepath.Clean(p.Root) {
+		return false, nil // per-user layout: the settings are already here
+	}
+	if _, err := os.Lstat(p.Config); err == nil {
+		return false, nil // this account has its own settings
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return false, err
+	}
+	legacy := filepath.Join(p.Root, "config.json")
+	b, info, err := ReadRegularInfo(legacy, MaxConfigBytes)
+	if errors.Is(err, fs.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		// A file another account owns is unreadable to this one, which is the
+		// expected case and not a fault: this account simply has no settings to
+		// carry over. Anything else is worth saying out loud.
+		if errors.Is(err, fs.ErrPermission) {
+			return false, nil
+		}
+		return false, fmt.Errorf("read %s: %w", legacy, err)
+	}
+	if err := privateToThisAccount(info); err != nil {
+		// Not "no settings to carry over" but "settings that are not this
+		// account's alone", which is worth naming: the operator is left on the
+		// shipping defaults and the file is still sitting there.
+		return false, fmt.Errorf("refusing to adopt %s: %w", legacy, err)
+	}
+	if err := os.MkdirAll(acct, 0o700); err != nil {
+		return false, err
+	}
+	if err := writeSettingsFile(p.Config, b); err != nil {
+		return false, err
+	}
+	// Make the copy durable before unlinking the original. writeSettingsFile
+	// fsyncs the file's contents, but the rename that gives it its name lives in
+	// the directory, and a power loss can make the unlink durable while that
+	// rename is still only in the page cache — leaving neither copy, and with it
+	// the API key and the HuggingFace token gone for good. Fsyncing the
+	// directory orders the two.
+	if err := syncDir(acct); err != nil {
+		return false, fmt.Errorf("flush %s: %w", acct, err)
+	}
+	if err := os.Remove(legacy); err != nil {
+		// The copy is in place, so the settings are not lost; what is left is a
+		// stale secret in a directory shared with every account, which the
+		// operator should hear about.
+		return true, fmt.Errorf("remove %s once copied: %w", legacy, err)
+	}
+	return true, nil
+}
+
+// syncDir flushes a directory's own entries to disk, which is what makes a
+// rename or an unlink inside it durable. Opening a directory read-only and
+// calling Sync is the portable spelling on this platform.
+func syncDir(dir string) error {
+	d, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	if err := d.Sync(); err != nil {
+		d.Close()
+		return err
+	}
+	return d.Close()
+}
+
+// privateToThisAccount reports whether a file read out of a group-writable
+// directory is one only this account could have written, and says why not when
+// it is not. It is the account boundary for the settings adoption, and takes
+// three facts from the fstat of the handle the bytes came from — never a second
+// stat of the path, which could be raced.
+//
+// Ownership alone is not the boundary, which an earlier version of this comment
+// claimed. Two things a co-tenant can do defeat it:
+//
+//   - A hard link. Any account that can write the shared root can link a file
+//     THIS account owns — a log, a model's config.json — under the name being
+//     adopted. The uid then reads as ours while the content is whatever the
+//     linked file holds. A file this account wrote through writeSettingsFile
+//     has exactly one link, so more than one means someone else made it.
+//   - A loose mode. A settings file left group- or world-writable (what a
+//     recursive chmod of the shared root produces, which the installer's
+//     comment warns against) is one another account could have written an
+//     api_key or a host into before this start read it. Anything outside 0600
+//     is refused rather than adopted.
+func privateToThisAccount(info os.FileInfo) error {
+	st, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return errors.New("cannot read the file's ownership on this platform")
+	}
+	if int(st.Uid) != os.Getuid() {
+		return fmt.Errorf("it belongs to another account (uid %d)", st.Uid)
+	}
+	if st.Nlink != 1 {
+		return fmt.Errorf("it has %d hard links, so another account may have linked it here", st.Nlink)
+	}
+	if perm := info.Mode().Perm(); perm&0o077 != 0 {
+		return fmt.Errorf("its mode is %#o, so another account could have read or written it", perm)
+	}
+	return nil
 }
 
 // GenerateAPIKey returns a fresh random API key, 32 bytes of crypto/rand

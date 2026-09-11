@@ -167,8 +167,8 @@ func TestOutOfRangeSamplingIsRefusedAndChangesNothing(t *testing.T) {
 func TestSamplingReloadsNamesOnlyTheModelsWhoseValueMoved(t *testing.T) {
 	before := config.Default()
 	before.Sampling = config.Sampling{Temperature: f64(0.7)}
-	before.ModelSampling = map[string]config.Sampling{
-		"org/pinned": {Temperature: f64(0.1)},
+	before.Models = map[string]config.ModelSettings{
+		"org/pinned": {Sampling: config.Sampling{Temperature: f64(0.1)}},
 	}
 	after := before.Clone()
 	after.Sampling = config.Sampling{Temperature: f64(1.2)}
@@ -216,19 +216,19 @@ func TestRemovingAPerModelOverrideRemovesIt(t *testing.T) {
 	srv, a := newTestControlApp(t, config.Default())
 
 	resp := postJSON(t, srv, "/api/settings", `{"host":"127.0.0.1","port":11535,"decode_concurrency":4,
-		"model_sampling":{"org/a":{"temperature":0.1},"org/b":{"temperature":0.2}}}`)
+		"models":{"org/a":{"sampling":{"temperature":0.1}},"org/b":{"sampling":{"temperature":0.2}}}}`)
 	resp.Body.Close()
-	if n := len(a.Config().ModelSampling); n != 2 {
+	if n := len(a.Config().Models); n != 2 {
 		t.Fatalf("saved %d overrides, want 2", n)
 	}
 
 	resp = postJSON(t, srv, "/api/settings", `{"host":"127.0.0.1","port":11535,"decode_concurrency":4,
-		"model_sampling":{"org/a":{"temperature":0.1}}}`)
+		"models":{"org/a":{"sampling":{"temperature":0.1}}}}`)
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
 	}
-	got := a.Config().ModelSampling
+	got := a.Config().Models
 	if _, still := got["org/b"]; still {
 		t.Errorf("org/b survived its removal: %+v", got)
 	}
@@ -237,9 +237,9 @@ func TestRemovingAPerModelOverrideRemovesIt(t *testing.T) {
 	}
 
 	resp2 := postJSON(t, srv, "/api/settings", `{"host":"127.0.0.1","port":11535,"decode_concurrency":4,
-		"model_sampling":{}}`)
+		"models":{}}`)
 	defer resp2.Body.Close()
-	if n := len(a.Config().ModelSampling); n != 0 {
+	if n := len(a.Config().Models); n != 0 {
 		t.Errorf("%d overrides remain after removing every one", n)
 	}
 }
@@ -250,13 +250,13 @@ func TestSettingsWithoutModelSamplingKeepsTheOverrides(t *testing.T) {
 	srv, a := newTestControlApp(t, config.Default())
 
 	resp := postJSON(t, srv, "/api/settings", `{"host":"127.0.0.1","port":11535,"decode_concurrency":4,
-		"model_sampling":{"org/a":{"temperature":0.1}}}`)
+		"models":{"org/a":{"sampling":{"temperature":0.1}}}}`)
 	resp.Body.Close()
 
 	resp = postJSON(t, srv, "/api/settings", `{"host":"127.0.0.1","port":11535,"decode_concurrency":4}`)
 	defer resp.Body.Close()
-	if _, ok := a.Config().ModelSampling["org/a"]; !ok {
-		t.Error("an override was dropped by a save that never mentioned model_sampling")
+	if _, ok := a.Config().Models["org/a"]; !ok {
+		t.Error("an override was dropped by a save that never mentioned models")
 	}
 }
 
@@ -266,12 +266,12 @@ func TestCaseVariantOverrideKeysAreRefused(t *testing.T) {
 	srv, a := newTestControlApp(t, config.Default())
 
 	resp := postJSON(t, srv, "/api/settings", `{"host":"127.0.0.1","port":11535,"decode_concurrency":4,
-		"model_sampling":{"org/Model":{"temperature":0.1},"ORG/model":{"temperature":0.9}}}`)
+		"models":{"org/Model":{"sampling":{"temperature":0.1}},"ORG/model":{"sampling":{"temperature":0.9}}}}`)
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400", resp.StatusCode)
 	}
-	if len(a.Config().ModelSampling) != 0 {
+	if len(a.Config().Models) != 0 {
 		t.Error("the ambiguous pair was saved anyway")
 	}
 }
@@ -332,16 +332,16 @@ func TestOverrideRemovalIsNotDefeatedByKeyCase(t *testing.T) {
 	srv, a := newTestControlApp(t, config.Default())
 
 	resp := postJSON(t, srv, "/api/settings", `{"host":"127.0.0.1","port":11535,"decode_concurrency":4,
-		"model_sampling":{"org/a":{"temperature":0.1},"org/b":{"temperature":0.2}}}`)
+		"models":{"org/a":{"sampling":{"temperature":0.1}},"org/b":{"sampling":{"temperature":0.2}}}}`)
 	resp.Body.Close()
 
 	resp = postJSON(t, srv, "/api/settings", `{"host":"127.0.0.1","port":11535,"decode_concurrency":4,
-		"Model_Sampling":{"org/a":{"temperature":0.1}}}`)
+		"Models":{"org/a":{"sampling":{"temperature":0.1}}}}`)
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
 	}
-	if _, still := a.Config().ModelSampling["org/b"]; still {
+	if _, still := a.Config().Models["org/b"]; still {
 		t.Error("org/b survived a removal posted under a differently-cased key")
 	}
 }

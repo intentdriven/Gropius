@@ -16,6 +16,8 @@ import (
 	"time"
 
 	"github.com/intentdriven/Gropius/internal/app"
+	"github.com/intentdriven/Gropius/internal/bind"
+	"github.com/intentdriven/Gropius/internal/bind/private"
 	"github.com/intentdriven/Gropius/internal/capability"
 	"github.com/intentdriven/Gropius/internal/config"
 	"github.com/intentdriven/Gropius/internal/hub"
@@ -34,6 +36,58 @@ type Control struct {
 	// against it so a future launch can tell this user's server apart from a
 	// process squatting on the port (see cmd/gropius singleton coordination).
 	Root string
+
+	// Notices is what config.Load had to change about config.json to make it
+	// usable: settings put into force in a changed form (a trimmed API key, a
+	// clamped grace, a statistics figure replaced by its default) and settings
+	// not in force at all (a value this build cannot use, a key it no longer
+	// reads). Set once before serving, and cleared by a save, which rewrites
+	// the file from the settings in force.
+	//
+	// It is here because the panel is the surface the operator is looking at.
+	// The startup log says this once, into a stream nobody running the app
+	// from the menu bar ever sees — so without this, a repair that changes
+	// what every client must send, and a setting silently dropped because this
+	// build no longer reads its key, are both invisible to the person who set
+	// them.
+	Notices config.Notices
+
+	// loadMu guards loading, the set of models the Load button already has a
+	// background load running for, keyed by folded repo id.
+	//
+	// The button answers before the load finishes — a large model takes
+	// minutes — so an operator who sees nothing happen clicks it again. Each
+	// click used to start a goroutine of its own, and with eviction grace on
+	// each of those occupies one of the places in the queue for memory for the
+	// whole maximum wait: enough clicks fill the queue and every cold load,
+	// including the ones serving requests from the network, is refused until
+	// they drain.
+	loadMu  sync.Mutex
+	loading map[string]bool
+
+	// noticeMu guards Notices, which the snapshot reads on every state request
+	// and a save clears.
+	noticeMu sync.Mutex
+
+	// settingsMu serialises the whole settings write path: read the settings
+	// in force, decode the posted body into a copy of them, hand the result to
+	// SetConfig, and work out what the change means for the models already
+	// loaded.
+	//
+	// App.SetConfig has a lock of its own, and it cannot be the one that does
+	// this: the snapshot every save starts from is taken before SetConfig is
+	// called, so two overlapping saves each write a configuration that never
+	// saw the other's change and the second reverts a field it was never asked
+	// about — the form posts a whole configuration, so the field need not even
+	// appear in the body. The reload_models list has the same staleness: it
+	// compares the incoming settings against that snapshot.
+	//
+	// This handler is the only caller of SetConfig there is, so serialising it
+	// here serialises every settings write. It is held across SetConfig, which
+	// takes App's own save lock inside it; nothing taken under that lock
+	// reaches back into the control plane, so this adds no order anything can
+	// invert.
+	settingsMu sync.Mutex
 }
 
 // Handler returns the control plane and web UI, restricted to loopback.
@@ -105,7 +159,7 @@ func (c *Control) handleInstance(w http.ResponseWriter, r *http.Request) {
 // attacks that a source-address check alone cannot see.
 //
 // A page the victim visits runs in their browser, which connects from 127.0.0.1
-// — so RemoteAddr is loopback and a bare check waves the request through. Two
+// — so RemoteAddr is loopback and a bare check waves the request through. Three
 // extra guards close that:
 //
 //   - Host allow-list: a DNS-rebinding attack points a hostname it controls at
@@ -114,25 +168,86 @@ func (c *Control) handleInstance(w http.ResponseWriter, r *http.Request) {
 //   - Origin allow-list: a cross-site POST from evil.com carries its origin. The
 //     real UI is same-origin (a loopback origin), so any other origin is refused.
 //     This blocks classic CSRF, which needs no rebinding.
+//   - Sec-Fetch-Site: a no-cors subresource fetch — <img src>, and every other
+//     request a page makes without reading the answer — carries no Origin at
+//     all, so the allow-list above never runs and the route is executed blind.
+//     The browser states where the request came from in this header instead,
+//     and a page cannot forge it. admitToControlPlane below carries the one
+//     exception to this guard: a person following a link to the panel.
+//
+// The four checks are fromThisMachine, which is where the rule lives: the
+// models list admits a keyless install's loopback client on exactly the same
+// terms, and two spellings of "came from this machine" would be two things to
+// keep right. Only the refusal message is the control plane's own.
 func loopbackOnly(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !isLoopback(r.RemoteAddr) {
-			writeError(w, http.StatusForbidden,
-				"the Gropius control panel is only reachable from the computer it runs on")
-			return
-		}
-		if !isLoopbackHost(r.Host) {
-			writeError(w, http.StatusForbidden,
-				"unrecognized Host header — the control panel only answers to localhost")
-			return
-		}
-		if origin := r.Header.Get("Origin"); origin != "" && !isLoopbackOrigin(origin) {
-			writeError(w, http.StatusForbidden,
-				"cross-origin request to the control panel refused")
+		if !admitToControlPlane(r) {
+			writeError(w, http.StatusForbidden, loopbackRefusal(r))
 			return
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// admitToControlPlane is fromThisMachine, plus the one request the fourth
+// guard refuses that this plane must still serve: a person following a link to
+// the panel.
+//
+// A top-level navigation the operator started somewhere else — a link in a
+// rendered page of this project's own documentation, which autolinks the
+// panel's address — is cross-site to the browser, and refusing it would answer
+// a click with a 403 the reader cannot act on. It is not the request iss-11 is
+// about: what that names is a page reading a route it never shows anyone,
+// which is a subresource fetch. A navigation puts the answer in front of the
+// person who asked for it, in a window they can see, and the page that started
+// it cannot read a line of it back.
+//
+// The exception is bounded twice over, because a navigation is only harmless
+// where the answer is a page:
+//
+//   - Method and destination: a GET or HEAD whose Sec-Fetch-Dest is "document".
+//     An <iframe> is "iframe" and an <img> is "image", so neither borrows this,
+//     and the panel therefore still cannot be framed by a site.
+//   - Path: the panel and its assets only. A navigation to /api/ is a blind
+//     read of a route that answers with JSON, so it is refused exactly as the
+//     fetch would be. The gateway's own /v1 routes never reach here at all.
+func admitToControlPlane(r *http.Request) bool {
+	if !sameMachineConnection(r) {
+		return false
+	}
+	return sameOriginFetch(r) || isPanelNavigation(r)
+}
+
+// isPanelNavigation reports whether r is a browser navigating a window to one
+// of the panel's own pages, rather than a page fetching something.
+func isPanelNavigation(r *http.Request) bool {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		return false
+	}
+	if strings.HasPrefix(r.URL.Path, "/api/") {
+		return false
+	}
+	return r.Header.Get("Sec-Fetch-Mode") == "navigate" &&
+		r.Header.Get("Sec-Fetch-Dest") == "document"
+}
+
+// loopbackRefusal says which of fromThisMachine's checks refused r, so the
+// operator reading a 403 learns what to change. Evaluated only on the refusal
+// path, and it enumerates the same checks in the same order.
+func loopbackRefusal(r *http.Request) string {
+	origin := r.Header.Get("Origin")
+	switch {
+	case !isLoopback(r.RemoteAddr):
+		return "the Gropius control panel is only reachable from the computer it runs on"
+	case !isLoopbackHost(r.Host):
+		return "unrecognized Host header — the control panel only answers to localhost"
+	case origin != "" && !isLoopbackOrigin(origin):
+		return "cross-origin request to the control panel refused"
+	default:
+		// The only check left, so this is the one that refused: the request
+		// named a Sec-Fetch-Site other than the panel's own page.
+		return "cross-site request to the control panel refused"
+	}
 }
 
 // isLoopbackHost reports whether an HTTP Host header (with or without a port)
@@ -183,7 +298,11 @@ type State struct {
 	// Endpoints are the URLs other machines should use, each with the kind of
 	// network its address sits on.
 	Endpoints []Endpoint `json:"endpoints"`
-	Hostname  string     `json:"hostname"`
+	// Bind is which bind mode is in force and what it selected. Settings reads
+	// it to show the third choice, to name the address that choice would take,
+	// and to say when the mode is on and not running.
+	Bind     BindState `json:"bind"`
+	Hostname string    `json:"hostname"`
 	// Warnings surface things the user should know, e.g. an open LAN endpoint.
 	Warnings []string `json:"warnings"`
 	// Stats is the per-model summary, present only while the operator has
@@ -226,8 +345,21 @@ type Machine struct {
 	// cannot be measured. Advice, not a limit.
 	WarnAbove int64 `json:"warn_above"`
 	// ResidentBytes is what the models in memory are charged against the
-	// budget, the same 1.2x figure eviction uses.
+	// budget, the same 1.2x figure eviction uses — including the servers in
+	// ExitingBytes, because that is the figure the pool admits a load against.
+	// A panel that counted only the models it lists would report room the pool
+	// will not give out.
 	ResidentBytes int64 `json:"resident_bytes"`
+	// ExitingBytes is the part of that charged to model servers which have left
+	// the pool and whose processes have not exited yet. They appear in no
+	// models list — they are nobody's model any more — but their memory is not
+	// back, so a load can be refused while every model on screen fits.
+	ExitingBytes int64 `json:"exiting_bytes"`
+	// StuckServers is how many of those are past the point where stopping them
+	// should have worked: SIGTERM, then SIGKILL, then nothing. Their memory is
+	// held until the kernel lets go, so the budget is smaller than it looks for
+	// as long as this is not zero.
+	StuckServers int `json:"stuck_servers"`
 	// OverBudget says the models in memory cost more than the budget allows.
 	// Lowering the budget unloads nothing, so this stands until they unload by
 	// the usual rules.
@@ -242,18 +374,25 @@ type Machine struct {
 // is fed exclusively by the stream. One builder, one truth.
 func (c *Control) snapshot() State {
 	cfg := c.App.Config()
+	residency := c.App.Pool.Residency()
 	st := State{
 		Models:    c.App.Registry.List(),
-		Resident:  c.App.Pool.Resident(),
+		Resident:  residency.Models,
 		Setup:     c.App.Provisioner.Status(),
 		Config:    redactConfig(cfg),
 		Pinned:    c.App.Pool.Pinned(),
 		Waiting:   c.App.Pool.Waiting(),
-		Endpoints: Endpoints(cfg),
+		Endpoints: Endpoints(cfg, c.App.Bind()),
+		Bind:      bindState(cfg, c.App.Bind()),
 		Hostname:  hostname(),
 	}
+	st.Bind.Port = c.App.BindPort()
+	st.Bind.Advertising = c.App.Advertising()
 	budget := c.App.Pool.MemoryBudget()
-	resident := residentCharge(st.Resident)
+	// One reading, not two: a stop landing between a models list and a tally
+	// read would count the same server in both, or in neither.
+	exiting, stuck := residency.ExitingBytes, residency.StuckServers
+	resident := residentCharge(st.Resident) + exiting
 	st.Machine = Machine{
 		TotalRAM:        c.App.MachineRAM(),
 		Budget:          budget,
@@ -261,9 +400,23 @@ func (c *Control) snapshot() State {
 		BudgetIsDefault: cfg.MaxResidentBytes == 0,
 		WarnAbove:       c.App.BudgetWarnAbove(),
 		ResidentBytes:   resident,
+		ExitingBytes:    exiting,
+		StuckServers:    stuck,
 		OverBudget:      resident > budget,
 	}
-	if cfg.ExposedToLAN() && cfg.APIKey == "" {
+	if stuck > 0 {
+		st.Warnings = append(st.Warnings, fmt.Sprintf(
+			"%s of memory is held by %d model server(s) that were stopped and have not exited. Until they do, that much of the budget cannot be used.",
+			runtime.HumanBytes(exiting), stuck))
+	}
+	// Asked of the sockets, not of the stored configuration. The endpoint list
+	// beside this warning is derived from what was acquired, and the two have
+	// to read the same source: a bind saved and not yet in force would
+	// otherwise silence the warning while the list went on handing out the LAN
+	// addresses the process is still answering on. It softens only on state
+	// Gropius owns end to end, and never on an inference about another process
+	// (adr-2609081118587999 rule 4).
+	if c.App.Bind().ReachesOtherMachines() && cfg.APIKey == "" {
 		st.Warnings = append(st.Warnings,
 			"This server is reachable by anyone on your network and requires no API key. Set one in Settings to restrict access.")
 	}
@@ -273,6 +426,7 @@ func (c *Control) snapshot() State {
 	if w := c.App.MemoryBudgetWarning(); w != "" {
 		st.Warnings = append(st.Warnings, w)
 	}
+	st.Warnings = append(st.Warnings, c.noticeWarnings()...)
 	if !c.App.Provisioner.Installed() {
 		st.Warnings = append(st.Warnings,
 			"The MLX runtime is not installed yet — models cannot be served until setup finishes.")
@@ -285,13 +439,16 @@ func (c *Control) snapshot() State {
 	return st
 }
 
-// residentCharge is what the models in memory cost the budget: each one's size
-// on disk plus a fifth, which is the figure the pool charges (runtime.LoadCost)
-// and therefore the only one that can be compared with the budget.
+// residentCharge is what the models in memory cost the budget. The figure is
+// the pool's own — the charge it admitted each model on, which is its weights,
+// their headroom and the cache the window it serves will build — because that
+// is the only figure that can be compared with the budget. Working it out here
+// from the size on disk is what let the panel show room the pool would not
+// give out.
 func residentCharge(resident []runtime.Resident) int64 {
 	var sum int64
 	for _, r := range resident {
-		sum += runtime.LoadCost(r.Bytes)
+		sum += r.Charge
 	}
 	return sum
 }
@@ -310,8 +467,6 @@ func residentCharge(resident []runtime.Resident) int64 {
 func (c *Control) handleStats(w http.ResponseWriter, r *http.Request) {
 	view := c.App.Stats.View()
 	if view.Enabled {
-		status := c.App.StatsStore.Status()
-		view.Store = &status
 		// And what is left of the days the store no longer holds in detail. A
 		// month whose records retention has dropped still has its per-model
 		// totals, and the view says so rather than showing a gap where the
@@ -323,19 +478,35 @@ func (c *Control) handleStats(w http.ResponseWriter, r *http.Request) {
 				view.Summaries = append(view.Summaries, d)
 				return true
 			}); err != nil {
-			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			switch {
+			case errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded):
 				// The reader went away. There is no socket left to answer, and
 				// logging it at Warn would let anyone who can open this
 				// endpoint write an unbounded run of failure lines into the
 				// operator's log.
 				c.App.Log.Debug("a reading of the request statistics summary was abandoned", "err", err)
 				return
+			case errors.Is(err, stats.ErrFlushTimedOut):
+				// A store that has stopped answering rather than one that is
+				// broken. This endpoint is what the panel polls, so it is
+				// answered rather than refused — the live figures are in
+				// memory and are worth showing — and the store status below
+				// carries Stalled, which is what the panel says it out loud
+				// from. Debug, not Warn: the store logs the spell once, and a
+				// line per poll would be an unbounded run of them.
+				c.App.Log.Debug("the request statistics summary was read without a flush the writer answered", "err", err)
+			default:
+				// Logged, not returned: the live figures are worth showing even
+				// when the summary cannot be read, and the reason names the store's
+				// directory, which the control plane must not publish.
+				c.App.Log.Warn("the request statistics summary could not be read", "err", err)
 			}
-			// Logged, not returned: the live figures are worth showing even
-			// when the summary cannot be read, and the reason names the store's
-			// directory, which the control plane must not publish.
-			c.App.Log.Warn("the request statistics summary could not be read", "err", err)
 		}
+		// After the reading, not before it: the figures the panel is handed
+		// have to describe the reading it was handed them with — the lines it
+		// could not use, and a writer it waited on and gave up.
+		status := c.App.StatsStore.Status()
+		view.Store = &status
 	}
 	writeJSON(w, http.StatusOK, view)
 }
@@ -538,6 +709,13 @@ func redactConfig(c config.Config) config.Config {
 	if c.HFToken != "" {
 		c.HFToken = "********"
 	}
+	// The chat rule is resolved rather than reported raw. The panel serves the
+	// stored settings into its form and the form posts them back, so an unset
+	// rule — the state of every install until someone saves — would reach the
+	// form as two blank fields, which this form reads as "test nothing" and
+	// would save as exactly that. The panel shows what is in force, and what it
+	// shows is what it saves.
+	c.ChatRule = c.EffectiveChatRule()
 	return c
 }
 
@@ -560,22 +738,107 @@ type Endpoint struct {
 	Network string `json:"network,omitempty"`
 }
 
+// BindState is what the panel says about the bind: which mode is in force,
+// what that mode selected, what it could select right now, and why it narrowed
+// if it did.
+//
+// It exists because the configuration no longer answers those questions on its
+// own. Under the private-network mode the Host field is whatever the operator
+// last set and is not what the server bound, and a mode that found no address
+// is serving this Mac while the setting still says otherwise. Both surfaces
+// the amendment names — Settings and the posture page — read from here.
+type BindState struct {
+	// Mode is config.BindMode: empty for a bind the Host field decides.
+	Mode string `json:"mode"`
+	// Selected is the address the private-network mode bound, empty when it
+	// bound none. It is the amendment's second condition made visible.
+	Selected string `json:"selected,omitempty"`
+	// Candidates is every address on this Mac carrying the private-network
+	// shape RIGHT NOW, under every mode. It is what tells the pane whether the
+	// mode can be chosen at all, and it is read live because a tunnel comes and
+	// goes while the panel is open.
+	Candidates []string `json:"candidates"`
+	// Refusal is why the bind narrowed to this Mac, in the words the resolver
+	// used. Empty when nothing was refused.
+	Refusal string `json:"refusal,omitempty"`
+	// InForce is the mode the RUNNING bind resolved under, as distinct from
+	// Mode, which is the mode chosen: a mode saved and not yet in force is
+	// chosen and not running, and the two differ until the next start.
+	InForce string `json:"mode_in_force"`
+	// Bound is the address the running bind acquired beside loopback, in the
+	// spelling a URL uses, and empty when it acquired none or acquired the
+	// wildcard; Wildcard says it was the wildcard, so the server answers on
+	// every address this Mac holds rather than on one a list can name.
+	Bound    string `json:"bound,omitempty"`
+	Wildcard bool   `json:"wildcard"`
+	// ReachesOtherMachines is the plan's own answer to whether the running
+	// bind acquired an address another machine can connect to. The posture
+	// page reads it for who can reach the server and for whether the advert
+	// runs, and it is asked of the plan rather than of the stored
+	// configuration or of the endpoint list: a mode saved and not yet in force
+	// has changed nothing, and the list omits addresses it cannot name (an
+	// IPv6-only Mac) while the sockets answer on them — the same rule the
+	// exposure warning is held to (adr-2609081118587999 rule 4).
+	ReachesOtherMachines bool `json:"reaches_other_machines"`
+	// Port is the port the listeners were acquired on, and Advertising is
+	// the decision the process made at start about the Bonjour advert. Both
+	// are read from the app's startup configuration rather than from
+	// Config: a saved port moves the stored value at once and the sockets at
+	// the next start, and a saved advertise setting stops nothing until then.
+	Port        int  `json:"port"`
+	Advertising bool `json:"advertising"`
+}
+
+// bindState reads the classifier for the panel's sake, which rule 1 of
+// adr-2609081118587999 permits — it is an observation, and it is the
+// observation an operator needs in order to see that the mode selected the
+// wrong network or has nothing to select. It decides nothing: no key
+// requirement, no admission, no warning's firing condition reads any of it.
+func bindState(cfg config.Config, plan bind.Plan) BindState {
+	st := BindState{
+		Mode:                 cfg.BindMode,
+		Refusal:              plan.Refusal,
+		Candidates:           private.Candidates(),
+		InForce:              plan.Mode,
+		ReachesOtherMachines: plan.ReachesOtherMachines(),
+	}
+	// boundAddr reads an empty host as the wildcard; a plan that acquired
+	// nothing beside loopback is neither bound nor wild.
+	if !plan.LoopbackOnly() {
+		st.Bound, st.Wildcard = boundAddr(plan.Extra)
+	}
+	// From the plan's mode and not the configuration's. The pane shows the
+	// mode that is CHOSEN, which is the configuration's; a selection is what
+	// the mode that is RUNNING made, and a bind mode saved and not yet in force
+	// has selected nothing at all.
+	if plan.Mode == config.BindModePrivateNetwork {
+		st.Selected = plan.Extra
+	}
+	return st
+}
+
 // Endpoints lists the base URLs clients can point at.
 //
-// It lists only what this server answers on. With a wildcard bind that is
-// every address the machine holds; with a specific bind it is that address
-// alone, because the rest refuse the connection — and an endpoint list that
-// offers a dead address, still worse a marked dead address, is worse than one
-// that offers nothing.
+// It lists what this server ANSWERS on, which is what the bind acquired rather
+// than what the configuration asked for: a mode that narrowed to this Mac
+// because the address it wanted was not there offers loopback and nothing else
+// (adr-2609091123526871 rule 4). An endpoint list that offers a dead address,
+// still worse a marked dead address, is worse than one that offers nothing.
+//
+// Loopback is always in it, because every bind acquires loopback. That is what
+// makes itd-2609081015545349's fourth criterion true by construction instead
+// of by an exception written into the criterion, and it is the fix to iss-7
+// seen from this side: the entry the panel always showed is now one the server
+// answers on.
 //
 // Nothing here is memoized. The private network can appear, disappear or
 // change address while Gropius runs, and the panel rebuilds this list on every
 // snapshot; the classification behind it is interface inspection with no
 // network call and no subprocess, so it can stay on that path.
-func Endpoints(cfg config.Config) []Endpoint {
+func Endpoints(cfg config.Config, plan bind.Plan) []Endpoint {
 	var out []Endpoint
-	bound, wildcard := boundAddr(cfg.Host)
-	if cfg.ExposedToLAN() {
+	bound, wildcard := boundAddr(plan.Extra)
+	if !plan.LoopbackOnly() {
 		addrs := netshape.Addrs()
 		switch {
 		case wildcard:
@@ -593,7 +856,7 @@ func Endpoints(cfg config.Config) []Endpoint {
 			for _, a := range addrs {
 				out = appendEndpoint(out, a.IP, cfg.Port, a.Network)
 			}
-		case bound != "":
+		case bound != "" && stillHeld(addrs, bound):
 			// A specific bind. The .local name resolves to the addresses this
 			// machine holds on the local network, so it answers only when the
 			// bind covers the sole one of those; with others on the machine it
@@ -606,39 +869,42 @@ func Endpoints(cfg config.Config) []Endpoint {
 			}
 			out = appendEndpoint(out, bound, cfg.Port, networkOf(addrs, bound))
 		default:
-			// A Host that is neither a wildcard nor anything a client can be
-			// pointed at. config.Validate refuses it, so reaching here means
-			// the configuration was not loaded through Load; nothing is listed
-			// for it either way. An address the server cannot even bind is the
-			// dead address this list exists to stop offering, and a Host
-			// carrying control characters is worse than dead — it is a base
-			// URL the panel, the menu bar and the clipboard hand out.
+			// Either a bound value a client cannot be pointed at — a zone, or
+			// a Host that was never bindable — or an address this Mac no
+			// longer holds. Both are listed as nothing: an address the server
+			// does not answer on is the dead address this list exists to stop
+			// offering, and a Host carrying control characters is worse than
+			// dead, because it is a base URL the panel, the menu bar and the
+			// clipboard hand out.
 		}
 	}
-	out = appendEndpoint(out, loopbackHost(bound, wildcard), cfg.Port, "")
+	out = appendEndpoint(out, plan.Loopback, cfg.Port, "")
 	return out
 }
 
-// loopbackHost is the loopback address this server answers on.
+// stillHeld reports whether this Mac still holds the acquired address.
 //
-// It is 127.0.0.1 everywhere except under a bind that took IPv6 loopback and
-// nothing else: "[::1]" listens on ::1, refuses 127.0.0.1, and listing the one
-// it refuses while omitting the one it answers on is the dead-address fault in
-// both directions at once. A name — "localhost" — stays 127.0.0.1, because
-// that is what the name resolves to for a client on this Mac.
+// Nothing re-binds, so a listener outlives the address it was taken on: the
+// socket stays open and nothing arrives on it. Going on offering that address
+// is the dead-address fault, so it leaves the list when the machine stops
+// holding it.
 //
-// This is not the whole of the loopback entry's honesty. Under a specific
-// non-loopback bind the server does not answer on loopback at all and the
-// entry is listed anyway; that divergence from the intent's fourth criterion is
-// recorded in TestLoopbackIsListedUnderEveryBindIncludingOneItDoesNotAnswerOn
-// and belongs to iss-7.
-func loopbackHost(bound string, wildcard bool) string {
-	if !wildcard && bound != "" {
-		if ip := net.ParseIP(bound); ip != nil && ip.IsLoopback() && ip.To4() == nil {
-			return bound
+// IPv4 only, because that is all the enumeration covers — an IPv6 bind or a
+// name has nothing to be compared against here, and dropping every one of them
+// would be a worse answer than an unchecked one. That limit is the private
+// mode's third scope condition, stated so a later IPv6 mesh is a visible
+// re-decision rather than a silent miss.
+func stillHeld(addrs []netshape.Addr, bound string) bool {
+	ip := net.ParseIP(bound)
+	if ip == nil || ip.To4() == nil {
+		return true
+	}
+	for _, a := range addrs {
+		if a.IP == bound {
+			return true
 		}
 	}
-	return "127.0.0.1"
+	return false
 }
 
 // boundAddr is the one address this server answers on, and whether the bind is
@@ -735,9 +1001,11 @@ func hostname() string {
 
 // maxSearchLimit bounds the "limit" query parameter on /api/search. Without a
 // ceiling, a single request turns into an unbounded fan-out of outbound
-// RepoSize lookups (internal/hub) against HuggingFace — reachable even from a
-// blind, Origin-less cross-origin GET (e.g. <img src>), since loopbackOnly's
-// Origin check only ever sees an Origin header on same-site or POST requests.
+// RepoSize lookups (internal/hub) against HuggingFace. loopbackOnly now refuses
+// the blind, Origin-less cross-origin GET (e.g. <img src>) that reached this
+// route, on the Sec-Fetch-Site header its Origin check never sees — but the cap
+// stands on its own: a browser too old to send that header still gets here, and
+// the operator's own panel can ask for any number it likes.
 const maxSearchLimit = 100
 
 // searchLimit parses and bounds the "limit" query parameter.
@@ -859,9 +1127,25 @@ type modelRequest struct {
 	Model string `json:"model"`
 }
 
+// decodeModelRequest reads the one model name every model-action endpoint takes.
+// The body is capped here, in the single place all of them share, rather than at
+// five call sites: an uncapped decoder buffers whatever it is handed on the way
+// to the end of the first JSON value, and loopback is reachable from any browser
+// tab the person running this Mac has open.
+//
+// The cap is the settings save's, deliberately reused rather than a second
+// number invented: it is the control plane's one bound, and it is already orders
+// of magnitude more than a repository id needs, so nothing a caller legitimately
+// sends here can reach it.
 func decodeModelRequest(w http.ResponseWriter, r *http.Request) (string, bool) {
 	var req modelRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Model == "" {
+	err := json.NewDecoder(http.MaxBytesReader(w, r.Body, config.MaxConfigBytes)).Decode(&req)
+	var tooLarge *http.MaxBytesError
+	if errors.As(err, &tooLarge) {
+		writeError(w, http.StatusBadRequest, "request body is too large")
+		return "", false
+	}
+	if err != nil || req.Model == "" {
 		writeError(w, http.StatusBadRequest, `a "model" field is required`)
 		return "", false
 	}
@@ -905,14 +1189,21 @@ func (c *Control) handleDelete(w http.ResponseWriter, r *http.Request) {
 }
 
 // modelErrorStatus maps a model-action error to the right HTTP status:
-// a malformed id is the caller's mistake (400), an absent model is 404, and a
-// genuine conflict (already downloading, or busy serving a request) is 409.
+// a malformed id is the caller's mistake (400), an absent model is 404, a
+// server that is going away is 503, and a genuine conflict (already
+// downloading, being deleted, or busy serving a request) is 409.
 func modelErrorStatus(err error) int {
 	switch {
 	case errors.Is(err, app.ErrInvalidRepoID):
 		return http.StatusBadRequest
 	case errors.Is(err, registry.ErrNotFound):
 		return http.StatusNotFound
+	case errors.Is(err, app.ErrShuttingDown):
+		// Named rather than left to the default arm: a conflict says the state
+		// of this model is the problem and asking again about a different one
+		// would work, and neither is true here. The server is stopping, and
+		// 503 is what says so.
+		return http.StatusServiceUnavailable
 	default:
 		return http.StatusConflict
 	}
@@ -926,17 +1217,55 @@ func (c *Control) handleLoad(w http.ResponseWriter, r *http.Request) {
 	}
 	// Loading a large model can take minutes; do not hold the HTTP request open
 	// for it. The UI watches /api/events for the model to appear as resident.
-	go func() {
-		ctx, cancel := contextWithTimeout(15 * time.Minute)
-		defer cancel()
-		_, release, err := c.App.Pool.Acquire(ctx, model)
-		if err != nil {
-			c.App.Log.Error("preload failed", "model", model, "err", err)
-			return
-		}
-		release()
-	}()
+	//
+	// One background load per model, however many times the button is pressed:
+	// a second one would ask the pool for a model the first is already loading
+	// and hold a second place in the queue for memory to do it. A click that
+	// finds a load already running is answered with the same status, because
+	// it is the same true answer — this model is loading.
+	if c.beginLoad(model) {
+		go func() {
+			defer c.endLoad(model)
+			ctx, cancel := contextWithTimeout(15 * time.Minute)
+			defer cancel()
+			_, release, err := c.App.Pool.Acquire(ctx, model)
+			if err != nil {
+				c.App.Log.Error("preload failed", "model", model, "err", err)
+				return
+			}
+			release()
+		}()
+	}
 	writeJSON(w, http.StatusAccepted, map[string]any{"status": "loading", "model": model})
+}
+
+// beginLoad claims the background load of a model, reporting whether this
+// caller is the one that has to run it.
+//
+// Keyed on the folded repo id, which is how the pool itself looks a model up:
+// two spellings are two strings and one model, and keying on the spelling
+// would let a second click through under a different case.
+func (c *Control) beginLoad(model string) bool {
+	key := config.FoldRepoID(model)
+	c.loadMu.Lock()
+	defer c.loadMu.Unlock()
+	if c.loading[key] {
+		return false
+	}
+	if c.loading == nil {
+		c.loading = make(map[string]bool)
+	}
+	c.loading[key] = true
+	return true
+}
+
+// endLoad releases the claim, whether the load succeeded or failed. The next
+// click starts a fresh one — a load that failed is worth retrying, and a model
+// that is now resident costs the pool nothing to acquire again.
+func (c *Control) endLoad(model string) {
+	c.loadMu.Lock()
+	defer c.loadMu.Unlock()
+	delete(c.loading, config.FoldRepoID(model))
 }
 
 func (c *Control) handleUnload(w http.ResponseWriter, r *http.Request) {
@@ -956,8 +1285,6 @@ func (c *Control) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 }
 
 func (c *Control) handleSetSettings(w http.ResponseWriter, r *http.Request) {
-	current := c.App.Config()
-
 	// Everything saved here is written to config.json, which Load refuses to
 	// read above this size — so a larger body could only produce a file the
 	// next start cannot read, and a start that cannot read it locks the server
@@ -973,6 +1300,80 @@ func (c *Control) handleSetSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The body is read before the lock is taken and the answer written after
+	// it is released: a client that uploads or reads slowly is not something
+	// the next save should have to wait behind.
+	out, err := c.applySettings(raw)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+// noticeWarnings is what the panel says about the settings config.json could
+// not be used for as written.
+//
+// Two warnings, never one, because the two lists mean opposite things to the
+// person reading them. A REPAIRED setting is in force in a changed form, and
+// naming it is the only thing an operator can act on: someone who reads "your
+// API key was shortened" can check the key their clients send. Saying
+// "ignored" there would send them to set a key that is already working.
+//
+// An IGNORED setting is not in force at all, and that is the half the log
+// alone never reached: a per-model setting whose key this build no longer
+// reads is gone from a running server whose panel showed nothing about it, and
+// the operator finds out when a request is refused for memory a pin was
+// supposed to be holding.
+func (c *Control) noticeWarnings() []string {
+	c.noticeMu.Lock()
+	defer c.noticeMu.Unlock()
+	var out []string
+	if len(c.Notices.Ignored) > 0 {
+		out = append(out, "Some settings in config.json are not in force: "+
+			strings.Join(c.Notices.Ignored, ", ")+
+			". Set them again here and save.")
+	}
+	if len(c.Notices.Repaired) > 0 {
+		out = append(out, "Some settings in config.json could not be used as written and are in force in a changed form: "+
+			strings.Join(c.Notices.Repaired, ", ")+
+			". Check them here and save to write the values now in force back to the file.")
+	}
+	return out
+}
+
+// clearNotices drops both notices once a save has rewritten config.json from
+// the settings in force: there is nothing left in the file that needed
+// repairing, nothing left in it that this build ignores, and a warning that
+// outlives what it warned about is the same untruth from the other side.
+func (c *Control) clearNotices() {
+	c.noticeMu.Lock()
+	defer c.noticeMu.Unlock()
+	c.Notices = config.Notices{}
+}
+
+// applySettings is the settings write path, from the settings in force to what
+// the save is answered with, run start to finish under settingsMu. It returns
+// what the panel is told, or the refusal to report to the caller — every one of
+// which is the caller's own mistake, and so a 400.
+func (c *Control) applySettings(raw []byte) (map[string]any, error) {
+	c.settingsMu.Lock()
+	defer c.settingsMu.Unlock()
+
+	// A body naming a setting this build no longer reads is refused rather
+	// than half-applied. It would otherwise go wrong in silence — the keys
+	// decode into nothing and the save succeeds — which is exactly the
+	// problem: the caller is a script or a shell of someone's own (the panel
+	// never posts them), and "saved" would tell them their pins and overrides
+	// were stored when the file was written without them.
+	if named := config.SupersededSettings(raw); len(named) > 0 {
+		return nil, fmt.Errorf(
+			"these settings are no longer read: %s — post per-model settings under \"models\"",
+			strings.Join(named, ", "))
+	}
+
+	current := c.App.Config()
+
 	// Decode INTO a copy of the current config, not a fresh zero value: the
 	// settings form posts only the fields it owns, so any field it omits — e.g.
 	// Preload, or Advertise (which has no UI control) — must keep its existing
@@ -986,21 +1387,20 @@ func (c *Control) handleSetSettings(w http.ResponseWriter, r *http.Request) {
 	incoming := current.Clone()
 	// "Keep what you did not send" is a rule about fields, not about the
 	// members of a collection. encoding/json merges into an existing map, so
-	// decoding a posted model_sampling object into the current one reinstates
-	// every override the object leaves out — which is every override the user
-	// just deleted. Naming the field means "these are the overrides", so start
-	// from nothing; omitting it still keeps what is there. The same holds for
-	// per_model, where leaving a model out is how Settings switches its
-	// merging off.
-	if namesModelSampling(raw) {
-		incoming.ModelSampling = nil
-	}
-	if namesPerModel(raw) {
-		incoming.PerModel = nil
+	// decoding a posted models object into the current one reinstates every
+	// model the object leaves out — its merging switched back on, its pin back
+	// on, its sampling override back. Naming the field means "these are the
+	// models with settings", so start from nothing; omitting it still keeps
+	// what is there.
+	//
+	// One collection, one guard. There were two of these maps and a list
+	// beside them, each of which had to be remembered here
+	// (iss-2609062213413447).
+	if namesModels(raw) {
+		incoming.Models = nil
 	}
 	if err := json.Unmarshal(raw, &incoming); err != nil {
-		writeError(w, http.StatusBadRequest, "settings body is not valid JSON")
-		return
+		return nil, errors.New("settings body is not valid JSON")
 	}
 	// The UI is served the redacted placeholder; echoing it back must not
 	// overwrite the real secret with literal asterisks.
@@ -1012,14 +1412,17 @@ func (c *Control) handleSetSettings(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := c.App.SetConfig(incoming); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
-		return
+		return nil, err
 	}
-	// Host and port bind the server, decode concurrency and idle timeout are
-	// pool options — all four are consumed only at startup, and SetConfig
-	// cannot apply them live.
+	// The file has just been written from the settings in force, repairs and
+	// all, so there is nothing left in it to repair.
+	c.clearNotices()
+	// Host, the bind mode and the port bind the server; decode concurrency and
+	// idle timeout are pool options — all five are consumed only at startup,
+	// and SetConfig cannot apply them live.
 	restart := incoming.Port != current.Port ||
 		incoming.Host != current.Host ||
+		incoming.BindMode != current.BindMode ||
 		incoming.DecodeConcurrency != current.DecodeConcurrency ||
 		incoming.IdleTimeoutSec != current.IdleTimeoutSec
 	out := map[string]any{
@@ -1033,16 +1436,13 @@ func (c *Control) handleSetSettings(w http.ResponseWriter, r *http.Request) {
 	if warn := c.App.MemoryBudgetWarning(); warn != "" {
 		out["warning"] = warn
 	}
-	writeJSON(w, http.StatusOK, out)
+	return out, nil
 }
 
-// namesModelSampling reports whether the posted body carries a model_sampling
-// field at all, however it is spelled — including as null.
-func namesModelSampling(body []byte) bool { return namesField(body, "model_sampling") }
-
-// namesPerModel reports the same for per_model, the other collection a save
+// namesModels reports whether the posted body carries a models field at all,
+// however it is spelled — including as null. It is the one collection a save
 // replaces rather than merges into.
-func namesPerModel(body []byte) bool { return namesField(body, "per_model") }
+func namesModels(body []byte) bool { return namesField(body, "models") }
 
 // namesField reports whether the posted body carries this field at all,
 // however it is spelled — including as null.

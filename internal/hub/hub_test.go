@@ -241,7 +241,8 @@ func TestFilesRefusesCrossOriginNextPage(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := &Client{BaseURL: srv.URL, HTTP: srv.Client(), Token: "secret-hf-token"}
+	c := &Client{BaseURL: srv.URL, HTTP: srv.Client()}
+	c.SetToken("secret-hf-token")
 	_, err := c.Files(context.Background(), "org/repo", "")
 	if err == nil {
 		t.Fatal("Files followed a cross-origin next page; it must refuse")
@@ -288,7 +289,8 @@ func TestTokenIsSentAsBearer(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := &Client{BaseURL: srv.URL, HTTP: srv.Client(), Token: "hf_abc123"}
+	c := &Client{BaseURL: srv.URL, HTTP: srv.Client()}
+	c.SetToken("hf_abc123")
 	if _, err := c.Search(context.Background(), SearchQuery{}); err != nil {
 		t.Fatal(err)
 	}
@@ -519,4 +521,69 @@ func containsStr(hay, needle string) bool {
 		}
 		return false
 	})()
+}
+
+// RepoInfo is how a download learns what kind of model it just fetched: the
+// Hub's own pipeline tag and tags, from the repo endpoint, in the same shape a
+// search result carries them.
+func TestRepoInfoReadsTheCategory(t *testing.T) {
+	var gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"id":"mlx-community/Qwen3-8B-4bit","downloads":12,"likes":3,
+			"tags":["mlx","conversational","text-generation"],"pipeline_tag":"text-generation"}`)
+	}))
+	defer srv.Close()
+
+	c := &Client{BaseURL: srv.URL, HTTP: srv.Client()}
+	m, err := c.RepoInfo(context.Background(), "mlx-community/Qwen3-8B-4bit")
+	if err != nil {
+		t.Fatalf("RepoInfo: %v", err)
+	}
+	if gotPath != "/api/models/mlx-community/Qwen3-8B-4bit" {
+		t.Errorf("asked for %q, want the repo endpoint", gotPath)
+	}
+	if m.PipelineTag != "text-generation" {
+		t.Errorf("PipelineTag = %q, want text-generation", m.PipelineTag)
+	}
+	if len(m.Tags) != 3 || m.Tags[1] != "conversational" {
+		t.Errorf("Tags = %v, want the Hub's three", m.Tags)
+	}
+}
+
+// A repo the Hub does not tag is not an error: it is a model with no category,
+// which is a thing that exists and has to stay downloadable.
+func TestRepoInfoOnAnUntaggedRepo(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"id":"org/quiet"}`)
+	}))
+	defer srv.Close()
+
+	c := &Client{BaseURL: srv.URL, HTTP: srv.Client()}
+	m, err := c.RepoInfo(context.Background(), "org/quiet")
+	if err != nil {
+		t.Fatalf("RepoInfo: %v", err)
+	}
+	if m.PipelineTag != "" || len(m.Tags) != 0 {
+		t.Errorf("an untagged repo returned %q/%v, want nothing", m.PipelineTag, m.Tags)
+	}
+}
+
+// And a repo that is gone, or gated, is an error the caller can recognize
+// rather than an empty category it would record as fact.
+func TestRepoInfoSurfacesHTTPError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "no such repo", http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	c := &Client{BaseURL: srv.URL, HTTP: srv.Client()}
+	_, err := c.RepoInfo(context.Background(), "org/missing")
+	if err == nil {
+		t.Fatal("expected an error for HTTP 404")
+	}
+	if !IsNotFound(err) {
+		t.Errorf("err = %v, want a recognizable 404", err)
+	}
 }

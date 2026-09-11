@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/intentdriven/Gropius/internal/runtime"
@@ -107,13 +108,27 @@ func (o *observation) relayed(out relayOutcome) {
 	// and the status line has already gone out saying it was. Which of the two
 	// it was is read off the side that actually failed, not off a cancellation
 	// that may or may not have been delivered yet.
-	o.delivered = !out.clientGone && !out.upstreamCut
-	if o.record.Class != stats.ClassOK {
+	//
+	// An answer that reached its terminal event stopped nowhere: it was
+	// delivered in full, and the failure the relay reports is a failure of the
+	// tidying-up after it. Recording that as a cut answer would throw the
+	// request's token counts away, which is to say the dashboard would
+	// undercount exactly the requests whose clients hung up the moment they
+	// had the whole answer.
+	o.delivered = out.complete || (!out.clientGone && !out.upstreamCut)
+	if o.record.Class != stats.ClassOK || out.complete {
 		return
 	}
 	switch {
 	case out.clientGone:
 		o.record.Class = stats.ClassCancelled
+	case out.oversizeLine:
+		// Ahead of upstreamCut, which is set with it: the model server was
+		// reachable and was answering, and the answer ended because Gropius
+		// stopped reading at a limit Gropius chose. Filing that as
+		// "unreachable" would send an operator reading the statistics after
+		// the wrong piece of software.
+		o.record.Class = stats.ClassGatewayError
 	case out.upstreamCut:
 		o.record.Class = stats.ClassUnreachable
 	}
@@ -172,8 +187,23 @@ type relayOutcome struct {
 	upstreamCut bool
 	// clientGone is a write to the client that failed part-way.
 	clientGone bool
-	firstToken time.Time
-	usage      *usageCounts
+	// complete reports that the answer's terminal "[DONE]" event reached the
+	// client. Past that point there is no more answer: the blank line that
+	// ends the event, and the read that finds the model server's EOF, are
+	// bookkeeping the client has already stopped waiting for. A client that
+	// hangs up on "[DONE]" — which is what an SDK treating it as the end does
+	// — makes both of them fail, so the two flags above are read in its light
+	// rather than on their own.
+	complete bool
+	// oversizeLine is an upstream line that reached maxStreamLine without a
+	// newline, which is the one way the relay itself ends an answer. It is a
+	// fact about this Gropius rather than about either side: it is logged once
+	// by the caller, and it is what the answer is recorded under, because
+	// upstreamCut — which is set with it, the answer having stopped part-way —
+	// would file Gropius's own limit as the model server failing.
+	oversizeLine bool
+	firstToken   time.Time
+	usage        *usageCounts
 }
 
 // relayOptions tell the relay what the observer needs and what the client
@@ -306,3 +336,86 @@ func classifyAcquireError(err error) stats.Class {
 		return stats.ClassRefused
 	}
 }
+
+// refusalClass names a pool refusal for the operator's log, so a line says
+// which of the pool's refusals happened without the operator having to read
+// the message to work it out.
+//
+// It is deliberately coarser than the message: "too large" and the handful of
+// other outright refusals share one name because the pool distinguishes them
+// only by their text, and a bucket named from a string match would be a second
+// classification to keep in step with the first. The message itself is on the
+// same line.
+func refusalClass(err error) string {
+	var noRoom *runtime.NoRoomError
+	var notReady *runtime.NotReadyError
+	switch {
+	case errors.As(err, &noRoom):
+		return "nothing evictable"
+	case errors.As(err, &notReady):
+		return "not ready"
+	case errors.Is(err, runtime.ErrBusy):
+		return "overloaded"
+	default:
+		return "refused"
+	}
+}
+
+// logEvery holds a log line to one per key per interval.
+//
+// It exists for lines a network client can cause at the rate it can send
+// requests. A refusal is exactly that: a client asking for a model that is
+// busy, or one too large to load, gets a refusal every time it asks, and an
+// unentitled client is no longer told why — so the operator needs the reason
+// in the log, and the log needs to not be a place a stranger can write to
+// without limit. One line per model per minute answers both: the first refusal
+// of a run is recorded, and the thousandth adds nothing the first did not say.
+//
+// The key space is bounded by the caller, not by this type: every caller keys
+// on a repo id the registry resolved, never on a string a client chose. The
+// sweep below is housekeeping for a long-running server, not a defense.
+type logEvery struct {
+	every time.Duration
+	// now is the clock, so a test can move it rather than sleep.
+	now func() time.Time
+
+	mu   sync.Mutex
+	last map[string]time.Time
+}
+
+func newLogEvery(every time.Duration) *logEvery {
+	return &logEvery{every: every, now: time.Now, last: map[string]time.Time{}}
+}
+
+// allow reports whether the line for key may be written now, and records that
+// it was. It is the only mutator, so a caller that ignores the answer has
+// still consumed the interval — which is what makes "log if allow" correct.
+//
+// A nil limiter does not limit: New is the only constructor there is, so a nil
+// one means a Gateway assembled some other way, and a missing rate limit must
+// cost a noisy log rather than a panic on the refusal path.
+func (l *logEvery) allow(key string) bool {
+	if l == nil {
+		return true
+	}
+	now := l.now()
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if seen, ok := l.last[key]; ok && now.Sub(seen) < l.every {
+		return false
+	}
+	if len(l.last) >= maxLogEveryKeys {
+		for k, seen := range l.last {
+			if now.Sub(seen) >= l.every {
+				delete(l.last, k)
+			}
+		}
+	}
+	l.last[key] = now
+	return true
+}
+
+// maxLogEveryKeys is when logEvery sweeps entries it no longer needs. A model
+// this server has not refused anything for in the last interval cannot be
+// holding a line back, so its entry says nothing.
+const maxLogEveryKeys = 256

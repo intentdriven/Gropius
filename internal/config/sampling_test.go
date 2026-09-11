@@ -143,7 +143,7 @@ func TestLoadDropsOutOfRangeSamplingRatherThanRefusingTheFile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cfg, dropped, err := Load(path)
+	cfg, notices, err := Load(path)
 	if err != nil {
 		t.Fatalf("Load() = %v, want nil — an out-of-range preference must not lock the server down", err)
 	}
@@ -159,8 +159,8 @@ func TestLoadDropsOutOfRangeSamplingRatherThanRefusingTheFile(t *testing.T) {
 	if cfg.Sampling.MaxTokens == nil || *cfg.Sampling.MaxTokens != 8192 {
 		t.Errorf("max_tokens = %v, want the in-range value kept", cfg.Sampling.MaxTokens)
 	}
-	if len(dropped) != 1 || !strings.Contains(dropped[0], "top_p") {
-		t.Errorf("dropped = %v, want exactly the top_p field named so main can log it", dropped)
+	if len(notices.All()) != 1 || !strings.Contains(notices.All()[0], "top_p") {
+		t.Errorf("dropped = %v, want exactly the top_p field named so main can log it", notices.All())
 	}
 }
 
@@ -168,21 +168,21 @@ func TestLoadDropsAnOverrideWithAnUnusableRepoID(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.json")
 	raw := `{"host":"127.0.0.1","port":11535,"decode_concurrency":4,
-	         "model_sampling":{"../../etc":{"temperature":0.2},"org/name":{"temperature":0.3}}}`
+	         "models":{"../../etc":{"sampling":{"temperature":0.2}},"org/name":{"sampling":{"temperature":0.3}}}}`
 	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	cfg, dropped, err := Load(path)
+	cfg, notices, err := Load(path)
 	if err != nil {
 		t.Fatalf("Load() = %v, want nil", err)
 	}
-	if _, ok := cfg.ModelSampling["../../etc"]; ok {
+	if _, ok := cfg.Models["../../etc"]; ok {
 		t.Error("an override keyed by a malformed repo id survived Load")
 	}
-	if _, ok := cfg.ModelSampling["org/name"]; !ok {
+	if _, ok := cfg.Models["org/name"]; !ok {
 		t.Error("the well-formed override was dropped too")
 	}
-	if len(dropped) == 0 {
+	if len(notices.All()) == 0 {
 		t.Error("dropped = empty, want the rejected key named")
 	}
 }
@@ -192,8 +192,8 @@ func TestLoadDropsAnOverrideWithAnUnusableRepoID(t *testing.T) {
 func TestEffectiveSamplingOverridesPerParameter(t *testing.T) {
 	cfg := Default()
 	cfg.Sampling = Sampling{Temperature: f64(0.7), MaxTokens: intp(4096)}
-	cfg.ModelSampling = map[string]Sampling{
-		"org/Thinker": {Temperature: f64(0.2)},
+	cfg.Models = map[string]ModelSettings{
+		"org/Thinker": {Sampling: Sampling{Temperature: f64(0.2)}},
 	}
 
 	global := cfg.EffectiveSampling("org/other")
@@ -217,13 +217,13 @@ func TestCloneSharesNothingWithTheOriginal(t *testing.T) {
 	cfg := Default()
 	cfg.Preload = []string{"org/one"}
 	cfg.Sampling = Sampling{Temperature: f64(0.7)}
-	cfg.ModelSampling = map[string]Sampling{"org/one": {TopP: f64(0.9)}}
+	cfg.Models = map[string]ModelSettings{"org/one": {Sampling: Sampling{TopP: f64(0.9)}}}
 
 	clone := cfg.Clone()
 	*clone.Sampling.Temperature = 1.5
 	clone.Preload[0] = "org/two"
-	*clone.ModelSampling["org/one"].TopP = 0.1
-	clone.ModelSampling["org/two"] = Sampling{}
+	*clone.Models["org/one"].Sampling.TopP = 0.1
+	clone.Models["org/two"] = ModelSettings{}
 
 	if *cfg.Sampling.Temperature != 0.7 {
 		t.Errorf("temperature = %v, want 0.7 — the clone wrote through a shared pointer", *cfg.Sampling.Temperature)
@@ -231,11 +231,11 @@ func TestCloneSharesNothingWithTheOriginal(t *testing.T) {
 	if cfg.Preload[0] != "org/one" {
 		t.Errorf("preload = %v, want the original slice untouched", cfg.Preload)
 	}
-	if *cfg.ModelSampling["org/one"].TopP != 0.9 {
-		t.Errorf("override top_p = %v, want 0.9", *cfg.ModelSampling["org/one"].TopP)
+	if *cfg.Models["org/one"].Sampling.TopP != 0.9 {
+		t.Errorf("override top_p = %v, want 0.9", *cfg.Models["org/one"].Sampling.TopP)
 	}
-	if len(cfg.ModelSampling) != 1 {
-		t.Errorf("override map grew to %d entries — the map itself is shared", len(cfg.ModelSampling))
+	if len(cfg.Models) != 1 {
+		t.Errorf("per-model map grew to %d entries — the map itself is shared", len(cfg.Models))
 	}
 }
 
@@ -269,9 +269,9 @@ func TestBlankSamplingFieldStaysUnsetThroughJSON(t *testing.T) {
 // lever for that.
 func TestTooManyOverridesIsRefusedAndDroppedOnLoad(t *testing.T) {
 	cfg := Default()
-	cfg.ModelSampling = map[string]Sampling{}
-	for i := range MaxModelSampling + 5 {
-		cfg.ModelSampling[fmt.Sprintf("org/m%d", i)] = Sampling{Temperature: f64(0.5)}
+	cfg.Models = map[string]ModelSettings{}
+	for i := range MaxModels + 5 {
+		cfg.Models[fmt.Sprintf("org/m%d", i)] = ModelSettings{Sampling: Sampling{Temperature: f64(0.5)}}
 	}
 	if err := cfg.Validate(); err == nil {
 		t.Fatal("Validate accepted more overrides than the ceiling allows")
@@ -287,15 +287,15 @@ func TestTooManyOverridesIsRefusedAndDroppedOnLoad(t *testing.T) {
 	if err := os.WriteFile(path, b, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	loaded, dropped, err := Load(path)
+	loaded, notices, err := Load(path)
 	if err != nil {
 		t.Fatalf("Load() = %v, want nil — an oversized override map must not lock the server down", err)
 	}
-	if len(loaded.ModelSampling) != MaxModelSampling {
-		t.Errorf("kept %d overrides, want the ceiling of %d", len(loaded.ModelSampling), MaxModelSampling)
+	if len(loaded.Models) != MaxModels {
+		t.Errorf("kept %d entries, want the ceiling of %d", len(loaded.Models), MaxModels)
 	}
-	if len(dropped) != 5 {
-		t.Errorf("dropped %d, want the 5 beyond the ceiling named", len(dropped))
+	if len(notices.All()) != 5 {
+		t.Errorf("dropped %d, want the 5 beyond the ceiling named", len(notices.All()))
 	}
 }
 
@@ -303,9 +303,9 @@ func TestTooManyOverridesIsRefusedAndDroppedOnLoad(t *testing.T) {
 // two spellings of one id ever reached it.
 func TestEffectiveSamplingIsDeterministic(t *testing.T) {
 	cfg := Default()
-	cfg.ModelSampling = map[string]Sampling{
-		"org/Model": {Temperature: f64(0.1)},
-		"ORG/model": {Temperature: f64(0.9)},
+	cfg.Models = map[string]ModelSettings{
+		"org/Model": {Sampling: Sampling{Temperature: f64(0.1)}},
+		"ORG/model": {Sampling: Sampling{Temperature: f64(0.9)}},
 	}
 	first := cfg.EffectiveSampling("org/model")
 	for range 200 {
@@ -323,14 +323,15 @@ func TestEffectiveSamplingIsDeterministic(t *testing.T) {
 func TestCloneCopiesEveryReferenceInTheType(t *testing.T) {
 	cfg := Default()
 	cfg.Preload = []string{"org/one"}
-	cfg.Pinned = []string{"org/one"}
 	full := Sampling{
 		Temperature: f64(0.7), TopP: f64(0.9), TopK: intp(40),
 		MinP: f64(0.05), MaxTokens: intp(4096),
 	}
 	cfg.Sampling = full.Clone()
-	cfg.ModelSampling = map[string]Sampling{"org/one": full.Clone()}
-	cfg.PerModel = map[string]ModelSettings{"org/one": {MergeSystemMessages: true}}
+	cfg.Models = map[string]ModelSettings{
+		"org/one": {MergeSystemMessages: true, Pinned: true, Sampling: full.Clone()},
+	}
+	cfg.ChatRule = ChatRule{PipelineTags: []string{"text-generation"}, RequiredTags: []string{"conversational"}}
 
 	before := map[string]uintptr{}
 	collectRefs(t, "Config", reflect.ValueOf(cfg), before)
@@ -406,7 +407,7 @@ func TestSaveRefusesAConfigTooLargeToLoadBack(t *testing.T) {
 }
 
 // A repo id is a key in the override map and a directory name on disk. Bounding
-// its length is what makes "at most MaxModelSampling overrides" a bound on
+// its length is what makes "at most MaxModels models" a bound on
 // bytes rather than only on entries.
 func TestValidRepoIDBoundsLength(t *testing.T) {
 	long := strings.Repeat("a", 200)
@@ -428,12 +429,16 @@ func TestValidRepoIDBoundsLength(t *testing.T) {
 // beside the other settings, must still round-trip through the file.
 func TestAFullOverrideMapStillFitsTheConfigFile(t *testing.T) {
 	cfg := Default()
-	cfg.ModelSampling = map[string]Sampling{}
-	for i := range MaxModelSampling {
+	cfg.Models = map[string]ModelSettings{}
+	for i := range MaxModels {
 		id := fmt.Sprintf("%s%03d/%s", strings.Repeat("o", MaxRepoComponent-3), i, strings.Repeat("n", MaxRepoComponent))
-		cfg.ModelSampling[id] = Sampling{
-			Temperature: f64(0.7), TopP: f64(0.95), TopK: intp(40),
-			MinP: f64(0.05), MaxTokens: intp(8192),
+		cfg.Models[id] = ModelSettings{
+			MergeSystemMessages: true,
+			Pinned:              true,
+			Sampling: Sampling{
+				Temperature: f64(0.7), TopP: f64(0.95), TopK: intp(40),
+				MinP: f64(0.05), MaxTokens: intp(8192),
+			},
 		}
 	}
 	if err := cfg.Validate(); err != nil {
@@ -443,15 +448,15 @@ func TestAFullOverrideMapStillFitsTheConfigFile(t *testing.T) {
 	if err := Save(path, cfg); err != nil {
 		t.Fatalf("Save: %v — a legal override map does not fit the file", err)
 	}
-	loaded, dropped, err := Load(path)
+	loaded, notices, err := Load(path)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if len(dropped) != 0 {
-		t.Errorf("dropped %v from a config within every limit", dropped)
+	if len(notices.All()) != 0 {
+		t.Errorf("dropped %v from a config within every limit", notices.All())
 	}
-	if len(loaded.ModelSampling) != MaxModelSampling {
-		t.Errorf("loaded %d overrides, want %d", len(loaded.ModelSampling), MaxModelSampling)
+	if len(loaded.Models) != MaxModels {
+		t.Errorf("loaded %d entries, want %d", len(loaded.Models), MaxModels)
 	}
 }
 
@@ -522,14 +527,14 @@ func TestMaxTokensAboveTheCeilingIsRefusedAndDropped(t *testing.T) {
 	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	cfg, dropped, err := Load(path)
+	cfg, notices, err := Load(path)
 	if err != nil {
 		t.Fatalf("Load() = %v, want nil", err)
 	}
 	if cfg.Sampling.MaxTokens != nil {
 		t.Errorf("max_tokens = %d, want it dropped", *cfg.Sampling.MaxTokens)
 	}
-	if len(dropped) != 1 || !strings.Contains(dropped[0], "max_tokens") {
-		t.Errorf("dropped = %v, want max_tokens named", dropped)
+	if len(notices.All()) != 1 || !strings.Contains(notices.All()[0], "max_tokens") {
+		t.Errorf("dropped = %v, want max_tokens named", notices.All())
 	}
 }

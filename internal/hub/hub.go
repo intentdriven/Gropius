@@ -19,6 +19,7 @@ import (
 	"path"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -29,7 +30,34 @@ const DefaultBaseURL = "https://huggingface.co"
 type Client struct {
 	BaseURL string
 	HTTP    *http.Client
-	Token   string // optional; required for gated repos
+
+	// mu guards token. The access token is written by whoever saves the
+	// settings and read by every request this client builds — a search the
+	// operator typed, and each of the hundreds a multi-file download issues —
+	// so it is not a field a caller may touch directly. Nothing else in this
+	// package takes a lock, so it orders against nothing.
+	mu    sync.RWMutex
+	token string
+}
+
+// SetToken sets the access token sent with every subsequent request. It is
+// optional, and required only for gated repos.
+//
+// A download already in flight is not affected: Download pins the token it
+// starts with and uses that one for the whole repo, so a token saved (or
+// cleared) halfway through cannot turn the second half of a download into a
+// run of 401s against a gated repo.
+func (c *Client) SetToken(token string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.token = token
+}
+
+// Token is the access token currently in force.
+func (c *Client) Token() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.token
 }
 
 // New returns a Client pointed at the public Hub.
@@ -138,13 +166,20 @@ func (c *Client) httpClient() *http.Client {
 	return http.DefaultClient
 }
 
+// newRequest builds a request carrying whatever token is in force right now.
+// A caller that must not see the token change under it — a download, which
+// issues one request per file — reads it once and calls newTokenRequest.
 func (c *Client) newRequest(ctx context.Context, method, u string) (*http.Request, error) {
+	return c.newTokenRequest(ctx, method, u, c.Token())
+}
+
+func (c *Client) newTokenRequest(ctx context.Context, method, u, token string) (*http.Request, error) {
 	req, err := http.NewRequestWithContext(ctx, method, u, nil)
 	if err != nil {
 		return nil, err
 	}
-	if c.Token != "" {
-		req.Header.Set("Authorization", "Bearer "+c.Token)
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
 	}
 	req.Header.Set("User-Agent", "gropius/1.0 (+https://github.com/intentdriven/Gropius)")
 	return req, nil
@@ -228,6 +263,42 @@ func (c *Client) Search(ctx context.Context, q SearchQuery) ([]Model, error) {
 	return models, nil
 }
 
+// RepoInfo returns one repo's summary, in the same shape a search result
+// carries: what the Hub says this model is.
+//
+// It exists for the download path, which needs the repo's pipeline tag and tags
+// and cannot get them any other way — a search result is not in hand when a
+// download is started by name, and nothing in the downloaded files says what
+// kind of model they are. One request, to the host the download is already
+// talking to, bounded by the same maxJSONBody every other decode here is.
+//
+// The caller decides what a failure means. For a download it means no category,
+// which is the same state as a repo the Hub does not tag; it never means the
+// model is unusable.
+func (c *Client) RepoInfo(ctx context.Context, repoID string) (Model, error) {
+	if repoID == "" {
+		return Model{}, errors.New("repo info: repoID is required")
+	}
+	u := c.baseURL() + "/api/models/" + escapePathSegments(repoID)
+	req, err := c.newRequest(ctx, http.MethodGet, u)
+	if err != nil {
+		return Model{}, err
+	}
+	resp, err := c.httpClient().Do(req)
+	if err != nil {
+		return Model{}, fmt.Errorf("read repo info for %s: %w", repoID, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return Model{}, apiError(resp, u)
+	}
+	var m Model
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxJSONBody)).Decode(&m); err != nil {
+		return Model{}, fmt.Errorf("decode repo info for %s: %w", repoID, err)
+	}
+	return m, nil
+}
+
 // maxJSONBody caps how large a Hub JSON response we will buffer/decode. Search
 // results and a single tree page are at most a few MB; a body near this limit is
 // a broken or hostile endpoint, not a real repo listing.
@@ -246,6 +317,13 @@ const maxTreePages = 1000
 // than 1000 tree entries (a heavily-sharded model, say) would otherwise yield a
 // silently truncated list, and the download would "succeed" while missing shards.
 func (c *Client) Files(ctx context.Context, repoID, revision string) ([]File, error) {
+	return c.files(ctx, repoID, revision, c.Token())
+}
+
+// files is Files under a token the caller has already read, so that a download
+// lists and fetches a repo under one token rather than picking up a new one
+// between the listing and the files it names.
+func (c *Client) files(ctx context.Context, repoID, revision, token string) ([]File, error) {
 	if revision == "" {
 		revision = "main"
 	}
@@ -257,7 +335,7 @@ func (c *Client) Files(ctx context.Context, repoID, revision string) ([]File, er
 		if page >= maxTreePages {
 			return nil, fmt.Errorf("file tree for %s did not terminate after %d pages", repoID, maxTreePages)
 		}
-		req, err := c.newRequest(ctx, http.MethodGet, u)
+		req, err := c.newTokenRequest(ctx, http.MethodGet, u, token)
 		if err != nil {
 			return nil, err
 		}

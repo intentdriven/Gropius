@@ -50,8 +50,10 @@ never told which models are protected, or what this Mac is running.
 
 ## Choose how much to pin
 
-Every model in memory is charged its size plus a fifth, and the budget is what
-**Settings → Memory for loaded models** holds — 60% of this Mac's physical RAM
+Every model in memory is charged its weights plus a fifth, plus the attention
+cache its context window costs at the concurrency it is served with, and the
+budget is what **Settings → Memory for loaded models** holds — 60% of this Mac's
+physical RAM
 until you set your own figure. The figure beside the boxes is that sum for the
 models you have ticked. A model that is still downloading is charged the size
 it declares, so pinning one before it lands is measured on the same terms as
@@ -86,6 +88,13 @@ plainly has some.
 Two other things are refused as you tick a box, both rare: pinning a model this
 Mac records no size for — Gropius will not measure a set against the budget with
 a model missing from the sum — and pinning more than 256 models.
+
+## Where the pins are kept
+
+In `config.json`, as `"pinned": true` on the model's entry under `models`,
+beside anything else set for that model. See
+[Reference: sampling parameters](sampling-reference.md#where-the-values-are-kept)
+for the shape of that section.
 
 ## Unpin a model
 

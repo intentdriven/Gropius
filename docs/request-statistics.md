@@ -83,9 +83,10 @@ limits rather than promising a span.
 
 Beside them Settings also shows how much room the records use, and says when
 something went wrong: how many records were dropped rather than made to hold up
-an answer, if the disk could not keep up with a burst; and, if Gropius could not
-open the store at all, that the figures are being kept in memory and nothing is
-on disk.
+an answer, if the disk could not keep up with a burst; that a reading gave up
+waiting for the disk, so the figures beside it may not yet include the newest
+records; and, if Gropius could not open the store at all, that the figures are
+being kept in memory and nothing is on disk.
 
 What is dropped is counted before it goes. For every model and every day among
 the records being removed, Gropius keeps one short line: how many requests that
@@ -208,3 +209,11 @@ else — in particular, never the address of the client that made it.
 Each model server also writes its own log, at the level described above: what
 it is loading, how far a prompt has been processed, its own errors, and no
 prompt and no answer.
+
+## Where to go next
+
+- [The posture page](posture-reference.md) — the control panel's one-page
+  statement of what is recorded and for how long, beside who can reach the
+  server and what is announced.
+- [What the statistics store records](statistics-store-reference.md) — the
+  record, field by field.

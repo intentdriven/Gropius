@@ -34,7 +34,7 @@ func perModelAfterSave(t *testing.T, srv interface {
 	if err := json.NewDecoder(stResp.Body).Decode(&st); err != nil {
 		t.Fatal(err)
 	}
-	return st.Config.PerModel
+	return st.Config.Models
 }
 
 // Switching a per-model setting off is done by saving a Settings form that
@@ -44,13 +44,13 @@ func perModelAfterSave(t *testing.T, srv interface {
 // never remove one.
 func TestSavingSettingsWithoutAModelTurnsItsSwitchOff(t *testing.T) {
 	cfg := config.Default()
-	cfg.PerModel = map[string]config.ModelSettings{
+	cfg.Models = map[string]config.ModelSettings{
 		"mlx-community/Qwen3-8B-4bit": {MergeSystemMessages: true},
 	}
 	srv := newTestControl(t, cfg)
 
 	got := perModelAfterSave(t, srv, srv.URL,
-		`{"host":"0.0.0.0","port":11535,"api_key":"","decode_concurrency":4,"idle_timeout_sec":0,"per_model":{}}`,
+		`{"host":"0.0.0.0","port":11535,"api_key":"","decode_concurrency":4,"idle_timeout_sec":0,"models":{}}`,
 		http.StatusOK)
 
 	if len(got) != 0 {
@@ -62,7 +62,7 @@ func TestSavingSettingsWithoutAModelTurnsItsSwitchOff(t *testing.T) {
 // exactly as it must not wipe Preload or Advertise.
 func TestSavingSettingsThatOmitsPerModelKeepsIt(t *testing.T) {
 	cfg := config.Default()
-	cfg.PerModel = map[string]config.ModelSettings{
+	cfg.Models = map[string]config.ModelSettings{
 		"mlx-community/Qwen3-8B-4bit": {MergeSystemMessages: true},
 	}
 	srv := newTestControl(t, cfg)
@@ -80,14 +80,14 @@ func TestSavingSettingsThatOmitsPerModelKeepsIt(t *testing.T) {
 // settings as they were.
 func TestSettingsRejectsAPerModelKeyThatIsNotAModelID(t *testing.T) {
 	cfg := config.Default()
-	cfg.PerModel = map[string]config.ModelSettings{
+	cfg.Models = map[string]config.ModelSettings{
 		"mlx-community/Qwen3-8B-4bit": {MergeSystemMessages: true},
 	}
 	srv := newTestControl(t, cfg)
 
 	got := perModelAfterSave(t, srv, srv.URL,
 		`{"host":"0.0.0.0","port":11535,"api_key":"","decode_concurrency":4,"idle_timeout_sec":0,`+
-			`"per_model":{"../../etc":{"merge_system_messages":true}}}`,
+			`"models":{"../../etc":{"merge_system_messages":true}}}`,
 		http.StatusBadRequest)
 
 	if !got["mlx-community/Qwen3-8B-4bit"].MergeSystemMessages {
@@ -113,7 +113,7 @@ func TestARefusedSaveDoesNotRewriteTheLivePreloadList(t *testing.T) {
 	resp, err := srv.Client().Post(srv.URL+"/api/settings", "application/json", strings.NewReader(
 		`{"host":"0.0.0.0","port":11535,"api_key":"","decode_concurrency":4,"idle_timeout_sec":0,`+
 			`"preload":["org/planted"],`+
-			`"per_model":{"../../etc":{"merge_system_messages":true}}}`))
+			`"models":{"../../etc":{"merge_system_messages":true}}}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -138,26 +138,22 @@ func TestARefusedSaveDoesNotRewriteTheLivePreloadList(t *testing.T) {
 }
 
 // Naming a collection in the posted body means "these are its members", and
-// null names it. The sampling overrides beside these settings clear on a
-// posted null, and a handler that treated one collection's null as "keep what
-// you have" and the other's as "clear it" would be a difference nobody could
-// predict from the outside.
+// null names it: a posted null clears the whole map, every model's settings
+// with it. The alternative — treating null as "keep what you have" while an
+// empty object clears — is a difference nobody could predict from the outside.
 func TestSavingSettingsWithAPerModelNullClearsIt(t *testing.T) {
 	cfg := config.Default()
-	cfg.PerModel = map[string]config.ModelSettings{
-		"mlx-community/Qwen3-8B-4bit": {MergeSystemMessages: true},
-	}
-	cfg.ModelSampling = map[string]config.Sampling{
-		"mlx-community/Qwen3-8B-4bit": {},
+	cfg.Models = map[string]config.ModelSettings{
+		"mlx-community/Qwen3-8B-4bit": {MergeSystemMessages: true, Pinned: true},
 	}
 	srv := newTestControl(t, cfg)
 
 	got := perModelAfterSave(t, srv, srv.URL,
 		`{"host":"0.0.0.0","port":11535,"api_key":"","decode_concurrency":4,"idle_timeout_sec":0,`+
-			`"per_model":null,"model_sampling":null}`,
+			`"models":null}`,
 		http.StatusOK)
 
 	if len(got) != 0 {
-		t.Errorf("per-model settings after a posted null = %+v, want none — model_sampling clears on the same body", got)
+		t.Errorf("per-model settings after a posted null = %+v, want none", got)
 	}
 }
