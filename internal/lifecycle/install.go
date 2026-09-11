@@ -2,6 +2,7 @@ package lifecycle
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -34,6 +35,11 @@ const (
 	stageRuntime  = "the MLX runtime"
 	stageLink     = "the gropius command"
 )
+
+// bootstrapCommand is what installs Gropius in the first place. A verb that
+// finds nothing to repair names it, because the person reading has an
+// installation problem rather than a repair problem.
+const bootstrapCommand = "curl -fsSL https://raw.githubusercontent.com/intentdriven/Gropius/main/install.sh | bash"
 
 // retryInstall is the command that retries any stage of an install. One
 // command, because the verb repairs what is missing rather than reinstalling
@@ -136,6 +142,23 @@ func runInstall(env Env, args []string, ie InstallEnv) int {
 	progress := env.progress()
 	binary := filepath.Join(ie.Dest, binaryInBundle)
 
+	// With no bundle handed over, this is the REPAIR path — and there is
+	// nothing to repair unless the application is already where it belongs.
+	// Checked before anything else happens, because everything else happens TO
+	// that installation: the quit, the authorisation panel keyed to its binary,
+	// the provisioning, the link that points at it and the launch. Without this
+	// the panel was raised for a binary that does not exist, on a Mac where the
+	// destination was an empty directory another account owned
+	// (iss-2609111240577746).
+	if ie.Bundle == "" {
+		if err := installedAt(ie.Dest); err != nil {
+			writeLine(env.Err, "gropius install: there is nothing to repair at "+redact(ie.Dest, ie.Home)+
+				" — "+err.Error()+".")
+			writeLine(env.Err, "Install Gropius first: "+bootstrapCommand)
+			return ExitFailed
+		}
+	}
+
 	if ie.Bundle != "" {
 		// A running copy is asked to quit first, and only when there is an
 		// installed bundle to replace. Launch Services activates an
@@ -220,13 +243,42 @@ func runInstall(env Env, args []string, ie InstallEnv) int {
 	return ExitOK
 }
 
+// installedAt reports whether a Gropius this verb can repair is at dest, and
+// says what is there instead when there is not.
+//
+// Lstat rather than Stat, and the bundle as well as the binary: the destination
+// directory is group-writable on a stock Mac, so a name there can be a symbolic
+// link another account planted, and following one would point the firewall
+// grant, the command link and the launch at that account's bundle.
+func installedAt(dest string) error {
+	fi, err := os.Lstat(dest)
+	if err != nil {
+		return fmt.Errorf("no application bundle is there")
+	}
+	if fi.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("that name is a symbolic link rather than an application bundle")
+	}
+	if !fi.IsDir() {
+		return fmt.Errorf("that name is not an application bundle")
+	}
+	bin, err := os.Lstat(filepath.Join(dest, binaryInBundle))
+	if err != nil {
+		return fmt.Errorf("the bundle there carries no " + binaryInBundle)
+	}
+	if !bin.Mode().IsRegular() {
+		return fmt.Errorf("the bundle there has something other than a program at " + binaryInBundle)
+	}
+	return nil
+}
+
 // fail reports a stage that did not complete: what failed, why, and the command
-// that retries it.
+// that retries it. Nothing after a failed stage runs: a stage that stopped has
+// left the installation in a state the ones after it were not written for, and
+// the worst of those raises an authorisation panel or launches an application.
 func fail(env Env, ie InstallEnv, stage string, err error) int {
-	// abbreviateAll, not abbreviate: an error is prose with a path in the
-	// middle of it ("rename /Users/…: permission denied"), and abbreviate only
-	// rewrites a prefix, so the account name would survive into output the
-	// privacy rule says must be pasteable into a bug report.
+	// redact, because an error is prose with a path in the middle of it
+	// ("rename /Users/…: permission denied") rather than a path on its own, and
+	// this output is written to be pasted into a bug report.
 	writeLine(env.Err, "gropius install: "+stage+" failed: "+redact(err.Error(), ie.Home))
 	writeLine(env.Err, "Retry with: "+retryInstall)
 	return ExitFailed

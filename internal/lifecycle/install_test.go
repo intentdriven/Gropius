@@ -310,6 +310,172 @@ func TestInstallPlaceOnlyStopsAfterTheSwapAndSaysSo(t *testing.T) {
 	}
 }
 
+// countingSeams replaces every side effect an install has with a counter, so a
+// test can say what was NOT done.
+type countingSeams struct{ quits, panels, launches int }
+
+func (c *countingSeams) attach(ie *InstallEnv) {
+	ie.Quit = func() error { c.quits++; return nil }
+	ie.Firewall = func(string) error { c.panels++; return nil }
+	ie.Launch = func(string) error { c.launches++; return nil }
+}
+
+// `gropius install` with no --bundle is the REPAIR path, and there is nothing
+// to repair unless this Mac already has the application. Without this check it
+// raised the administrator panel for a binary that does not exist — reported
+// against a destination that was an empty directory owned by another account
+// (iss-2609111240577746).
+//
+// The refusal comes before every side effect there is: no quit, no panel, no
+// provisioning, no launch.
+func TestInstallRefusesToRepairWhatIsNotInstalled(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		prepare func(t *testing.T, dest string)
+	}{
+		{"nothing at the destination", func(*testing.T, string) {}},
+		{"an empty directory where the bundle belongs", func(t *testing.T, dest string) {
+			if err := os.MkdirAll(dest, 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"a bundle carrying no binary", func(t *testing.T, dest string) {
+			if err := os.MkdirAll(filepath.Join(dest, "Contents", "MacOS"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"a binary that is not a regular file", func(t *testing.T, dest string) {
+			macos := filepath.Join(dest, "Contents", "MacOS")
+			if err := os.MkdirAll(macos, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Mkdir(filepath.Join(macos, "gropius"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"a destination that is a symbolic link", func(t *testing.T, dest string) {
+			elsewhere := bundleAt(t, filepath.Join(t.TempDir(), "Gropius.app"), "somebody else's")
+			if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(elsewhere, dest); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env, ie, _, errOut := installFixture(t)
+			ie.Bundle = "" // the repair path: nothing was handed over to place
+			seams := &countingSeams{}
+			seams.attach(&ie)
+			tc.prepare(t, ie.Dest)
+
+			if code := runInstall(env, nil, ie); code != ExitFailed {
+				t.Fatalf("exit = %d, want %d", code, ExitFailed)
+			}
+			if seams.quits+seams.panels+seams.launches != 0 {
+				t.Errorf("the refusal came after %d quits, %d authorisation panels and %d launches; it must come "+
+					"before every one of them", seams.quits, seams.panels, seams.launches)
+			}
+			if p := ie.Runtime.(*fakeProvisioner); p.calls != 0 {
+				t.Error("the refusal came after provisioning started")
+			}
+			got := errOut.String()
+			if !strings.Contains(got, "~/Applications/Gropius.app") {
+				t.Errorf("the refusal does not name the destination it looked at:\n%s", got)
+			}
+			if !strings.Contains(got, "install.sh") {
+				t.Errorf("the refusal does not name the command that installs Gropius in the first place:\n%s", got)
+			}
+		})
+	}
+}
+
+// And the repair path runs when there IS something to repair.
+func TestInstallRepairsAnInstalledBundle(t *testing.T) {
+	env, ie, out, _ := installFixture(t)
+	ie.Bundle = ""
+	seams := &countingSeams{}
+	seams.attach(&ie)
+	bundleAt(t, ie.Dest, "installed")
+
+	if code := runInstall(env, nil, ie); code != ExitOK {
+		t.Fatalf("exit = %d, want %d", code, ExitOK)
+	}
+	if seams.panels != 1 || seams.launches != 1 {
+		t.Errorf("a repair raised %d panels and made %d launches, want 1 of each", seams.panels, seams.launches)
+	}
+	if p := ie.Runtime.(*fakeProvisioner); p.calls != 1 {
+		t.Errorf("a repair provisioned %d times, want 1", p.calls)
+	}
+	if !strings.Contains(out.String(), "menu bar") {
+		t.Errorf("a repair did not finish:\n%s", out)
+	}
+}
+
+// Nothing after a failed stage runs. A stage that stopped has left the
+// installation in a state the stages after it were not written for — and the
+// worst of them raises an authorisation panel or launches an application.
+func TestInstallStopsAtTheStageThatFailed(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		breakIt func(t *testing.T, ie *InstallEnv)
+		panels  int
+		runs    int
+	}{
+		{
+			name: "the placement",
+			breakIt: func(_ *testing.T, ie *InstallEnv) {
+				ie.Place = func(string, string) error { return errors.New("no space left on device") }
+			},
+		},
+		{
+			name: "the provisioning",
+			breakIt: func(_ *testing.T, ie *InstallEnv) {
+				ie.Runtime = &fakeProvisioner{ensure: func(p *fakeProvisioner) error {
+					return errors.New("no space left on device")
+				}}
+			},
+			panels: 1,
+			runs:   1,
+		},
+		{
+			name: "the command link",
+			breakIt: func(t *testing.T, ie *InstallEnv) {
+				// A home directory that is a FILE: the link's directory cannot
+				// be created under it.
+				home := filepath.Join(t.TempDir(), "home-is-a-file")
+				if err := os.WriteFile(home, []byte("not a directory"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				ie.Home = home
+			},
+			panels: 1,
+			runs:   1,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env, ie, _, _ := installFixture(t)
+			seams := &countingSeams{}
+			seams.attach(&ie)
+			tc.breakIt(t, &ie)
+
+			if code := runInstall(env, nil, ie); code != ExitFailed {
+				t.Fatalf("exit = %d, want %d", code, ExitFailed)
+			}
+			if seams.panels != tc.panels {
+				t.Errorf("%d authorisation panels were raised, want %d", seams.panels, tc.panels)
+			}
+			if p, ok := ie.Runtime.(*fakeProvisioner); ok && p.calls != tc.runs {
+				t.Errorf("provisioning ran %d times, want %d", p.calls, tc.runs)
+			}
+			if seams.launches != 0 {
+				t.Error("a failed install launched the application anyway")
+			}
+		})
+	}
+}
+
 // The closing lines the bootstrap used to print are still printed, now by the
 // verb that finishes the install: where the app is, and what to do next.
 func TestInstallSaysWhatToDoNext(t *testing.T) {
