@@ -108,9 +108,9 @@ type Report struct {
 }
 
 // DoctorEnv is everything the checks are allowed to ask, handed in as functions
-// so every case is a test with no Mac: a provisioner that says it failed, a
-// root that cannot be written, a port another account holds, a firewall query
-// that would not run.
+// so every case is a test with no Mac: a runtime that is not installed, a root
+// that cannot be written, a settings file that will not parse, a port another
+// account holds, a firewall query that would not run.
 type DoctorEnv struct {
 	Version string
 	Paths   config.Paths
@@ -124,10 +124,16 @@ type DoctorEnv struct {
 	// Holder classifies the process on the server port through the instance
 	// challenge.
 	Holder func() instance.Holder
-	// Runtime is the provisioner's own account of itself. Doctor reports what
-	// the provisioner says rather than re-deriving it, so the terminal and the
-	// panel cannot disagree about whether the runtime is ready.
-	Runtime func() runtime.SetupStatus
+	// RuntimeReady says whether the private Python and MLX runtime is
+	// installed and usable, which the provisioner answers by reading the
+	// filesystem.
+	//
+	// Whether it is installed is all a separate process can honestly ask. The
+	// STAGE of a provisioning run belongs to the process running it: a
+	// provisioner this command constructs has never run one, so its stage is
+	// "idle" on every Mac — including one that is provisioning right now — and
+	// reporting that would be reporting a field rather than a fact.
+	RuntimeReady func() bool
 	// Writable says whether a directory can be written to, and why not.
 	Writable func(dir string) error
 	// Settings is what this account's settings file did when it was read.
@@ -219,18 +225,20 @@ func (r Report) ExitCode() int {
 }
 
 func checkRuntime(env DoctorEnv) Answer {
-	s := env.Runtime()
-	if s.Ready {
+	if env.RuntimeReady() {
 		return Answer{Summary: "installed and usable", Severity: SeverityOK}
 	}
-	summary := "not usable yet (" + string(s.Stage) + ")"
-	if s.Err != "" {
-		summary += ": " + s.Err
-	}
+	// A warning rather than a failure. A Mac where the runtime is not there
+	// yet is usually one that has not finished its first start — provisioning
+	// takes minutes and runs in the server's own process — and doctor exiting
+	// non-zero on the ordinary state of a fresh install would make the code
+	// meaningless.
 	return Answer{
-		Summary:  summary,
-		Severity: SeverityFailed,
-		Commands: []string{"gropius install"},
+		Summary:  "not installed yet, so no model can be loaded until it is",
+		Severity: SeverityWarning,
+		// Starting the server is what provisions it: the run that installs the
+		// runtime is the server's own first start.
+		Commands: []string{"gropius"},
 	}
 }
 
@@ -464,16 +472,16 @@ func liveDoctorEnv(env Env) DoctorEnv {
 		binary = ""
 	}
 	return DoctorEnv{
-		Version:  env.Version,
-		Paths:    env.Paths,
-		Port:     env.Port,
-		Binary:   binary,
-		Home:     home,
-		Holder:   func() instance.Holder { return instance.Probe(env.Paths, env.Port) },
-		Runtime:  func() runtime.SetupStatus { return runtime.NewProvisioner(env.Paths).Status() },
-		Writable: writableDir,
-		Settings: func() SettingsState { return loadSettings(env.Paths.Config) },
-		Firewall: queryFirewall,
+		Version:      env.Version,
+		Paths:        env.Paths,
+		Port:         env.Port,
+		Binary:       binary,
+		Home:         home,
+		Holder:       func() instance.Holder { return instance.Probe(env.Paths, env.Port) },
+		RuntimeReady: func() bool { return runtime.NewProvisioner(env.Paths).Status().Ready },
+		Writable:     writableDir,
+		Settings:     func() SettingsState { return loadSettings(env.Paths.Config) },
+		Firewall:     queryFirewall,
 	}
 }
 

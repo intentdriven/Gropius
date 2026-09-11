@@ -11,7 +11,6 @@ import (
 
 	"github.com/intentdriven/Gropius/internal/config"
 	"github.com/intentdriven/Gropius/internal/instance"
-	"github.com/intentdriven/Gropius/internal/runtime"
 )
 
 // fakeEnv is a Mac where everything Gropius owns is healthy: the runtime is
@@ -26,16 +25,16 @@ func fakeEnv(t *testing.T) DoctorEnv {
 		t.Fatal(err)
 	}
 	return DoctorEnv{
-		Version:  "test",
-		Paths:    config.NewPaths(root),
-		Port:     11535,
-		Binary:   filepath.Join(home, "Applications", "Gropius.app", "Contents", "MacOS", "gropius"),
-		Home:     home,
-		Holder:   func() instance.Holder { return instance.HolderOurs },
-		Runtime:  func() runtime.SetupStatus { return runtime.SetupStatus{Stage: runtime.StageReady, Ready: true} },
-		Writable: func(string) error { return nil },
-		Firewall: func(string) (string, error) { return "is permitted to respond to incoming connections", nil },
-		Settings: func() SettingsState { return SettingsState{Present: true} },
+		Version:      "test",
+		Paths:        config.NewPaths(root),
+		Port:         11535,
+		Binary:       filepath.Join(home, "Applications", "Gropius.app", "Contents", "MacOS", "gropius"),
+		Home:         home,
+		Holder:       func() instance.Holder { return instance.HolderOurs },
+		RuntimeReady: func() bool { return true },
+		Writable:     func(string) error { return nil },
+		Firewall:     func(string) (string, error) { return "is permitted to respond to incoming connections", nil },
+		Settings:     func() SettingsState { return SettingsState{Present: true} },
 	}
 }
 
@@ -240,14 +239,16 @@ func TestTheVerifiedChecksReportWhatGropiusOwns(t *testing.T) {
 			want:  SeverityOK,
 		},
 		{
-			name: "a runtime that is not there",
+			// A warning and not a failure: a Mac where the runtime has not
+			// been provisioned yet is a Mac that has not finished starting,
+			// which is the ordinary state of a fresh install and not a fault
+			// to exit non-zero over.
+			name: "a runtime that is not there yet",
 			alter: func(e *DoctorEnv) {
-				e.Runtime = func() runtime.SetupStatus {
-					return runtime.SetupStatus{Stage: runtime.StageFailed, Err: "uv would not install"}
-				}
+				e.RuntimeReady = func() bool { return false }
 			},
 			check: runtimeCheckName,
-			want:  SeverityFailed,
+			want:  SeverityWarning,
 		},
 		{
 			name:  "a writable root",
@@ -655,5 +656,30 @@ func TestDoctorVerbExitsNonZeroOnAVerifiedFailure(t *testing.T) {
 	}
 	if out.Len() == 0 {
 		t.Error("doctor --json wrote nothing on the failing path")
+	}
+}
+
+// Doctor runs in a process of its own, so it can read whether the runtime is
+// installed and cannot read what a provisioning run in another process is
+// doing. It says the first and does not guess at the second — a stage read from
+// a provisioner this process just constructed would be "idle" on every Mac,
+// including one that is provisioning right now.
+func TestTheRuntimeFindingReportsInstallationAndNotAStage(t *testing.T) {
+	env := fakeEnv(t)
+	env.RuntimeReady = func() bool { return false }
+	f := findingNamed(t, Diagnose(env, DefaultChecks()), runtimeCheckName)
+	if f.Severity != SeverityWarning {
+		t.Errorf("severity = %q, want %q", f.Severity, SeverityWarning)
+	}
+	for _, stage := range []string{"idle", "failed", "installing"} {
+		if strings.Contains(f.Summary, stage) {
+			t.Errorf("summary = %q, which reports a stage this process cannot see", f.Summary)
+		}
+	}
+	if len(f.Commands) == 0 {
+		t.Error("a runtime that is not installed yet leaves the reader nothing to run")
+	}
+	if code := Diagnose(env, DefaultChecks()).ExitCode(); code != ExitOK {
+		t.Errorf("exit = %d, want %d: a runtime still being installed is not a failure", code, ExitOK)
 	}
 }
