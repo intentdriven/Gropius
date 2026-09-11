@@ -359,8 +359,12 @@ release signed.
 ## Open
 
 - **The manual procedure for criterion 1** — the intent's open question, and
-  the only criterion here with no armed detector. It must be written and its
-  recording place decided before the criterion is called met.
+  the only criterion here with no armed detector. It is written, as
+  `.abcd/development/procedures/installer-authorisation-panel.md`, and that
+  file is also where its results are recorded: one row per run, with the date,
+  the build and the account it was run from. What is still open is only the
+  last part of the question — whether a release is blocked on a run of it —
+  which the procedure states rather than settles.
 - **An adversarial security review is a precondition of landing**, not a
   follow-up: this work adds a package that removes files, raises an
   authorisation panel and replaces the running application, beside
