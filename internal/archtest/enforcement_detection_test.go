@@ -138,6 +138,11 @@ var enforcementPath = []string{
 	"github.com/intentdriven/Gropius/internal/registry",
 	"github.com/intentdriven/Gropius/internal/discovery",
 	"github.com/intentdriven/Gropius/internal/stats",
+	// The port holder's classification: it decides whether this process defers
+	// to the process already on the port as its client, or refuses to route
+	// this account's model traffic to it. That is an admission decision, and
+	// it must not start reading which network anything is on to make it.
+	"github.com/intentdriven/Gropius/internal/instance",
 }
 
 // notEnforcement is every other package in the module, each with the reason it

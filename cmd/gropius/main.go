@@ -31,6 +31,7 @@ import (
 	"github.com/intentdriven/Gropius/internal/config"
 	"github.com/intentdriven/Gropius/internal/discovery"
 	"github.com/intentdriven/Gropius/internal/gateway"
+	"github.com/intentdriven/Gropius/internal/instance"
 	"github.com/intentdriven/Gropius/internal/ui"
 )
 
@@ -153,7 +154,7 @@ func main() {
 	// A predecessor still shutting down is NOT a loss — acquireBind waits for
 	// the port to free rather than falling into client mode with nothing serving.
 	lns, plan, claimed, err := acquireBind(plan, cfg.Port, 5*time.Second, func() portHolder {
-		return probePortHolder(paths, cfg.Port)
+		return instance.Probe(paths, cfg.Port)
 	})
 	if err != nil {
 		log.Error("cannot listen", "port", cfg.Port, "err", err)
