@@ -24,7 +24,8 @@ Mac — just change the base URL.
 
 It manages its own runtime: on first launch it installs a private Python and MLX
 under `~/Library/Application Support/Gropius` and never touches your system
-Python. Uninstalling is deleting one folder.
+Python. Uninstalling is one command, which takes the firewall entry with it and
+leaves the models you downloaded.
 
 ## Status
 
@@ -93,6 +94,16 @@ Cross-machine LAN use works; TLS and notarized distribution are not yet included
   announced over Bonjour, what the request log writes down, and what is
   recorded and for how long — and says where Gropius's own view stops
   ([what each line is read from](docs/posture-reference.md)).
+- **It installs, repairs, removes and diagnoses itself** — `gropius install`
+  does the provisioning in the foreground and, run again, repairs what is
+  missing rather than reinstalling what is not. `gropius uninstall` removes the
+  app, the runtime, the settings and the firewall entry every hand-written
+  instruction forgets, and leaves the models you downloaded with their size and
+  the flag that removes them too. `gropius doctor` separates what it verified
+  from what it could only observe — the firewall entry is never a verdict — and
+  says outright that Local Network Privacy cannot be determined from here,
+  rather than guessing it ([how to](docs/lifecycle.md),
+  [reference](docs/lifecycle-reference.md)).
 - **Multi-account** — other user accounts on the same Mac share one copy of each
   model on disk and on the GPU. The models are shared; each account keeps its
   own settings and its own model list, so no key or token crosses accounts.
@@ -107,14 +118,25 @@ through the firewall, and launches it:
 curl -fsSL https://raw.githubusercontent.com/intentdriven/Gropius/main/install.sh | bash
 ```
 
+That command is a bootstrap and only a bootstrap. It downloads the release,
+verifies it against the checksums published beside it, clears the quarantine
+attribute, and hands over to `gropius install` inside the bundle it has just
+verified — so the script and the binary it calls are always the same build.
+The binary does the rest in the foreground, where you can watch it: it places
+the application, asks once for the firewall grant, installs the private Python
+and MLX runtime with a proportion rather than a spinner, links a `gropius`
+command into `~/.local/bin`, and opens the app
+([how to](docs/lifecycle.md), [reference](docs/lifecycle-reference.md)).
+
 The server needs administrator rights once, to allow itself through the macOS
-firewall so other machines can reach it. The installer asks for them at the
-start, through the standard macOS authentication panel: **this account does not
-have to be an administrator** — the panel takes an administrator's name and
-password, so someone else can enter theirs. Decline it and nothing is downloaded
-or installed. The bundle is ad-hoc signed, so its identity changes with every
-build and the firewall grant has to be made again on each update. The chat
-client needs no administrator rights at all.
+firewall so other machines can reach it. It asks through the standard macOS
+authentication panel: **this account does not have to be an administrator** —
+the panel takes an administrator's name and password, so someone else can enter
+theirs. Decline it and the install finishes without the grant, printing the two
+commands that make it by hand; the server then answers on this Mac and other
+machines see an empty response. The bundle is ad-hoc signed, so its identity
+changes with every build and the firewall grant has to be made again on each
+update. The chat client needs no administrator rights at all.
 
 That command and a direct download of the current release are also on the
 project's page at <https://intentdriven.sh/Gropius>, which is where someone who
@@ -146,9 +168,11 @@ gh attestation verify Gropius.app.zip --repo intentdriven/Gropius
 There is no offline signing key; building from source is the escape hatch. The
 binaries are ad-hoc signed, not notarized; because the installer has verified
 the download, it clears the Gatekeeper quarantine so it launches without a
-prompt. The first launch installs
-the MLX runtime (a few minutes, shown in the control panel), then you can download
-and serve models. New here? See **[docs/getting-started.md](docs/getting-started.md)**.
+prompt. The MLX runtime installs while `gropius install` runs, in the terminal
+and with a proportion (a few minutes); a launch from the Finder finishes what
+that run could not and shows progress in the control panel. Then you can
+download and serve models. New here? See
+**[docs/getting-started.md](docs/getting-started.md)**.
 
 ## Build from source
 
