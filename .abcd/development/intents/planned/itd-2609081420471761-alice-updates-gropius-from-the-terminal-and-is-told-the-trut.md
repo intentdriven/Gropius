@@ -1,8 +1,8 @@
 ---
 id: itd-2609081420471761
 slug: alice-updates-gropius-from-the-terminal-and-is-told-the-trut
-spec_id: null
-kind: null
+spec_id: spc-2609111812370705
+kind: standalone
 suggested_kind: null
 reclassification_history: []
 builds_on: [itd-2609081259532589]
@@ -78,27 +78,27 @@ measurement is owed, not assumed, and is the first open question below.
 
 ## Scope Conditions
 
-- macOS 26 or later, and Apple Silicon for the server. The chat client bundle
+- macOS 26 or later, and Apple Silicon for the server. The chat client bundle <!-- cond: cond-2609111812375978 -->
   is placed by the bootstrap's own shell half and is out of scope for this
   record.
-- Ad-hoc-signed, un-notarised bundles with no Developer ID. The administrator
+- Ad-hoc-signed, un-notarised bundles with no Developer ID. The administrator <!-- cond: cond-2609111812377938 -->
   panel on every single update, and the grant that has to be re-made with it,
   exist because of this and are expected to change only if the membership is
   ever bought.
-- `curl`-fetch as the only channel, so an update is always an act Alice takes
+- `curl`-fetch as the only channel, so an update is always an act Alice takes <!-- cond: cond-2609111812375223 -->
   at a terminal. Nothing here runs on a timer, and the release check stays
   opt-in and off by default under the no-public-telemetry commitment, so
   Gropius never learns that Alice is behind and never nags her about it.
-- One release published at a time. There is no rollback target and the version
+- One release published at a time. There is no rollback target and the version <!-- cond: cond-2609111812374283 -->
   currently installed cannot be re-fetched once it is superseded; the tag
   survives and can be rebuilt from source, which is not something Alice can do
   at a terminal.
-- Both destinations are in play and they are not symmetric: the system
+- Both destinations are in play and they are not symmetric: the system <!-- cond: cond-2609111812379843 -->
   applications directory holds ONE bundle that every account launches, while
   the per-account fallback changes nothing for anybody else.
-- Shared Macs with fast user switching, where a second server does not start
+- Shared Macs with fast user switching, where a second server does not start <!-- cond: cond-2609111812376310 -->
   but becomes a client of the one already running.
-- The data root may be shared or per-account, and which it is decides how much
+- The data root may be shared or per-account, and which it is decides how much <!-- cond: cond-2609111812370540 -->
   this command can say: the challenge proves a shared root rather than an
   identity, so the good cross-account report exists only where the root is
   shared.
@@ -226,3 +226,7 @@ measurement is owed, not assumed, and is the first open question below.
 ## Audit Notes
 
 _Empty. Populated by intent-auditor when intent moves to shipped/._
+
+## Grounds
+
+- pursued: reporting the installed version and the serving version as two separate facts removes the failure, because the failure is not a bad swap but a true statement about a bundle offered as a statement about a machine — the swap succeeds, the grant is renewed, and on a Mac where another account holds the port every one of those is true while nothing about what answers requests has changed; wrong if the serving version cannot be obtained at all, since the instance challenge proves a shared data root rather than an identity and the honest answer then degrades to 'something holds the port and did not identify itself, version unknown', and wrong a second way if re-making the path-keyed firewall grant is measured on a real shared Mac to take LAN reachability away from the still-running old server, which would mean the update broke what was serving rather than merely failing to change it — planned autonomously on the maintainer's instruction of 2026-09-10, adopting the brief's recommendations
