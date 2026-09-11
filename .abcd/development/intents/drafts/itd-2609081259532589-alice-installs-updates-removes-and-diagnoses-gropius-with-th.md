@@ -32,10 +32,14 @@ words "a few minutes". When the command finishes, Gropius is serving.
 
 Later, something is wrong: a machine across the room gets an empty response.
 Alice runs `gropius doctor`. It tells her what it can actually determine — the
-runtime is healthy, the root is writable, this build is current, and another
+runtime is healthy, the root is writable, this is build *X*, and another
 account on this Mac is holding the port — and, for the firewall grant, it tells
 her the truth: that it can see the entry is listed but cannot verify the grant
-still covers this build, and here are the two commands that re-grant it.
+still covers this build, and here are the two commands that re-grant it. It
+says which build this is by reading itself, and it contacts nothing to do it:
+whether that build is the current one is a question for `gropius update`, which
+is a record of its own and which asks the network nothing until Alice turns it
+on.
 
 When she is done with it, `gropius uninstall` removes the app, the runtime, and
 the firewall entry that every current instruction forgets. It leaves the models
@@ -59,10 +63,19 @@ We expect visible foreground provisioning to fix abandonment because the
 failure being reported is opacity rather than duration: the current banner
 gives no proportion complete, states no size anywhere in the documentation, and
 offers no retry control, so a person cannot distinguish "working" from "stuck"
-at any point in a multi-minute install. We are wrong if people abandon installs
-at the same rate once progress is visible, which would mean the wait itself is
-the problem and the answer is to make it smaller — pre-warming, a smaller
-default runtime — rather than to narrate it.
+at any point in a multi-minute install. We are wrong if the installs Alice, Bob
+and Carol report as stuck are reported at the same stage and at the same
+frequency once the progress line names a proportion, which would mean the wait
+itself is the problem and the answer is to make it smaller — pre-warming, a
+smaller default runtime — rather than to narrate it.
+
+The evidence for that is anecdotal by policy, and the record says so rather
+than implying a measurement it will never have. An abandonment rate needs
+instrumentation of the install, and adr-2609061503319212 refuses it: Gropius
+makes no outbound connection beyond fetching models and provisioning the
+runtime. So the falsifier is a report the maintainer collects by asking the
+people who installed it — at which stage, and how often — not one the product
+collects by watching them.
 
 ## Scope Conditions
 
@@ -85,6 +98,11 @@ default runtime — rather than to narrate it.
   fetch the version currently installed.
 - The verbs are reached through a per-user link, so they are as available as
   that account's own bin directory is — which is not a given on every Mac.
+- Shared-cache mode moves the whole data root, not only the models.
+  `config.DefaultRoot` returns the shared directory whenever an administrator
+  has created it, so the configuration file, the private Python runtime, the
+  registry and the models all live there and only the statistics store stays
+  per-account. Three of the removing criteria turn on that.
 
 ## Acceptance Criteria
 
@@ -159,14 +177,31 @@ default runtime — rather than to narrate it.
   total size and the flag that would have removed them.
 - Given `--purge`, when standard input is not a terminal and `--yes` was not
   passed, then nothing is deleted and the refusal names the flag.
-- Given a shared-cache installation, when Alice runs uninstall, then the shared
-  root is not touched at all, and the output names what remains there, its
-  size, and the one deliberate command that removes it. Removing another
+- Given a shared-cache installation, when Alice runs uninstall, then this
+  account's own files under the shared root are removed and nothing another
+  account owns is, and the output names what remains, its size, the accounts it
+  belongs to counted rather than named, and the one deliberate command that
+  removes the root. The sticky bit on the shared directory's `3775` mode
+  already makes that the only removal the filesystem permits, so the criterion
+  is what the output says as much as what it deletes. Removing another
   account's models is a separate act, not the unelevated half of this one.
-- Given any removal, when it runs, then it never elevates, never invokes an
-  external removal command, and never derives a deletion path from an
-  environment variable or a flag, because a directory that any local account
-  can pre-create as a symlink would otherwise choose what is deleted.
+- Given any file or directory removal, when it runs, then it never elevates,
+  never invokes an external removal command, and never derives a deletion path
+  from an environment variable or a flag, because a directory that any local
+  account can pre-create as a symlink would otherwise choose what is deleted.
+- Given `GROPIUS_ROOT` or `-root` names a data root, when uninstall runs, then
+  that root is never a deletion path: the removal acts only on the fixed
+  locations this account's install actually uses, and the output names the root
+  it did not remove and what is still in it. This follows from the criterion
+  above rather than qualifying it, and is written out because a reader would
+  otherwise expect the variable to be honoured.
+- Given the firewall entry is machine-wide state that no per-account route can
+  remove, when uninstall removes it, then it raises exactly one system
+  authorisation panel, states there why it is asking, and a refusal leaves
+  everything else removed and reports the entry as the one thing that remains
+  with the command that removes it. That panel is the single exception to the
+  criterion above, which governs deletion paths on this Mac's filesystem; no
+  other step of any lifecycle verb elevates.
 
 **Holding the boundary**
 
@@ -189,28 +224,19 @@ default runtime — rather than to narrate it.
 
 ## Open Questions
 
-- **The enforcement tests for the last two boundary criteria are deliberately
-  not in the first cut.** Both want an architecture test that walks the tree,
-  and `internal/archtest` currently holds seven hand-rolled walkers that
-  disagree about what to exclude — a problem recorded as iss-2609081427104462,
-  with iss-2609081441311030 for the one that walks out of the repository
-  entirely. Writing these two now makes an eighth and ninth. The order that
-  costs one conversion instead of two: the in-flight change to that package
-  lands, the shared walker replaces the hand-rolled exclusions, and these
-  criteria are then written against it from the start. Until then the two
-  criteria are held as behaviour with no armed detector, and this note is the
-  record saying so rather than a gap nobody declared.
-- **The doctor carve-out needs its own decision before the spec is written.**
-  Reporting the firewall entry as observed is a detection over state Gropius
-  does not own, and adr-2609081118587999 closes a warning's firing condition to
-  exactly that class of signal. The argument for a carve-out has to stand on
-  its own: a diagnostic a person invokes deliberately, that changes no
-  behaviour, admits no request and gates nothing, is not a warning firing on
-  inferred state — it is a report of what was seen, labelled as such, next to
-  the commands that would settle it. That reasoning is untested. It cannot lean
-  on the way the installer's authorisation panel avoided the same tension,
-  because that avoided it by never reading the state at all, which a diagnostic
-  cannot do and remain a diagnostic.
+- **What the manual authorisation-panel procedure is, exactly.** The headline
+  installing criterion cannot be proven by the suite: a runner has no console
+  for a system authorisation panel, `install.sh` skips both privileged steps
+  under CI and prints two warnings saying a green run proves nothing about
+  them, and that shape is what produced iss-2609080855033159. So the evidence
+  for "installs cleanly, grants the firewall once, provisions with progress" is
+  a run a person makes, across an administrator account and a standard account
+  on a real Mac, and the spec carries a written procedure instead of a test.
+  What is not settled is the procedure itself: what it checks in what order,
+  where its result is recorded so a reader can see when it was last run and
+  against which build, and whether a release is blocked on it or merely
+  reported beside it. Every other criterion here is armed by a test the spec
+  names.
 
 ## Audit Notes
 
