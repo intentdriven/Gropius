@@ -70,6 +70,34 @@ type SetupStatus struct {
 	Detail string `json:"detail"`
 	Err    string `json:"err,omitempty"`
 	Ready  bool   `json:"ready"`
+	// Step is how many of Steps provisioning stages are COMPLETE, and Steps is
+	// how many there are. Together they are the proportion the terminal prints
+	// and the panel draws.
+	//
+	// It lives here rather than in either renderer because both read this one
+	// value: the words on the terminal and the words in the panel cannot drift
+	// when there is one source for them. Counting stages rather than bytes is
+	// the coarsest honest unit — the three stages have no common measure, and a
+	// byte count for one of them would be a proportion of the wrong whole — and
+	// it is what distinguishes "working" from "stuck", which is the failure
+	// being reported.
+	Step  int `json:"step"`
+	Steps int `json:"steps"`
+}
+
+// provisionSteps is how many stages Ensure runs: uv, the Python virtualenv, and
+// the MLX packages.
+const provisionSteps = 3
+
+// stagesComplete is how many stages are behind each stage. StageFailed is
+// deliberately absent: a failure keeps the count the run had reached, so the
+// report says how far it got as well as where it stopped.
+var stagesComplete = map[SetupStage]int{
+	StageIdle:   0,
+	StageUV:     0,
+	StagePython: 1,
+	StageMLX:    2,
+	StageReady:  provisionSteps,
 }
 
 // Provisioner installs and verifies the private Python runtime.
@@ -106,7 +134,11 @@ func (p *Provisioner) Status() SetupStatus {
 
 func (p *Provisioner) setStatus(stage SetupStage, detail, errMsg string) {
 	p.mu.Lock()
-	p.status = SetupStatus{Stage: stage, Detail: detail, Err: errMsg}
+	done := p.status.Step
+	if d, known := stagesComplete[stage]; known {
+		done = d
+	}
+	p.status = SetupStatus{Stage: stage, Detail: detail, Err: errMsg, Step: done, Steps: provisionSteps}
 	p.mu.Unlock()
 }
 

@@ -143,6 +143,17 @@ function renderWarnings() {
   });
 }
 
+// setupHeading is what the setup banner says it is doing, and how far it has
+// got. The proportion comes from the server's own SetupStatus — the same value
+// `gropius install` renders in the terminal — so the two surfaces cannot drift.
+// A status carrying no count at all still gets the heading it always had.
+function setupHeading(s) {
+  if (s.stage === 'failed') return 'Setup failed';
+  const steps = Number(s.steps) || 0;
+  if (steps > 0) return `Setting up: ${s.stage}… (${Number(s.step) || 0} of ${steps} done)`;
+  return `Setting up: ${s.stage}…`;
+}
+
 function renderSetup() {
   const banner = $('setupBanner');
   const s = state.setup || {};
@@ -155,7 +166,7 @@ function renderSetup() {
   // the words "Setup failed" they tell the operator to wait for something that
   // is not happening, and the panel offers no other signal that it has stopped.
   const failed = s.stage === 'failed';
-  $('setupStage').textContent = failed ? 'Setup failed' : `Setting up: ${s.stage}…`;
+  $('setupStage').textContent = setupHeading(s);
   $('setupSpinner').hidden = failed;
   $('setupFailMark').hidden = !failed;
   $('setupBlurb').textContent = failed
