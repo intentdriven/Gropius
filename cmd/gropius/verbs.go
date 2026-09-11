@@ -20,6 +20,21 @@ var lifecycleVerbs = map[string]func(lifecycle.Env, []string) int{
 	"uninstall": lifecycle.RunUninstall,
 }
 
+// verbEnvFor is how the runner gets the world a verb runs in.
+//
+// A variable, not a call, and that is the whole of the repair for
+// iss-2609111240578491: the runner used to build its environment from the live
+// process — this account's root, its home, its /Applications, its osascript —
+// with nothing a test could put in the way. A test that reached a writing verb
+// therefore acted on the machine it was running on, and one did: it quit the
+// running copy and raised the administrator panel twice.
+//
+// cmd/gropius's TestMain replaces this, and the writing entries of
+// lifecycleVerbs, before any test runs; a guard beside them asserts that the
+// defaults in a test binary are the fakes, and internal/lifecycle refuses to
+// build a live install or uninstall environment inside a test binary at all.
+var verbEnvFor = verbEnv
+
 // runCommandVerb runs one verb and returns the code the process exits with. It
 // starts no server, opens no listener and advertises nothing: a verb is a
 // question asked in a terminal, and it answers and stops.
@@ -53,7 +68,7 @@ func runCommandVerb(cmd commandLine, out, errOut io.Writer) int {
 		fmt.Fprintln(errOut, "gropius "+cmd.Verb+": this build lists the verb and does not run it")
 		return lifecycle.ExitUsage
 	}
-	env, err := verbEnv()
+	env, err := verbEnvFor()
 	if err != nil {
 		fmt.Fprintln(errOut, "gropius "+cmd.Verb+": "+err.Error())
 		return lifecycle.ExitFailed

@@ -150,8 +150,10 @@ func TestVersionPrintsTheBuildAndRefusesAStrayArgument(t *testing.T) {
 // person who read the record and typed it correctly learns that they typed it
 // correctly.
 func TestAVerbThisBuildDoesNotCarryIsRefusedByName(t *testing.T) {
-	// update is itd-2609081420471761 and is not in this build; install and
-	// uninstall are, so running them here would run them for real.
+	// update is itd-2609081420471761 and is not in this build. install and
+	// uninstall ARE in it, and are not listed here because they are not
+	// refused by name any more — they are dispatched, to the fakes TestMain
+	// puts in their place (see verbfakes_test.go, and the reason there).
 	for _, verb := range []string{"update"} {
 		var out, errOut bytes.Buffer
 		if code := runCommandVerb(commandLine{Kind: kindVerb, Verb: verb}, &out, &errOut); code != lifecycle.ExitUsage {

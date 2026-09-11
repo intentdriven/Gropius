@@ -103,16 +103,34 @@ type InstallEnv struct {
 
 // RunInstall is the install verb.
 func RunInstall(env Env, args []string) int {
-	home, err := os.UserHomeDir()
+	ie, err := liveInstallEnv(env)
 	if err != nil {
 		writeLine(env.Err, "gropius install: "+err.Error())
 		return ExitFailed
 	}
-	dest := installDest(home)
-	return runInstall(env, args, InstallEnv{
+	return runInstall(env, args, ie)
+}
+
+// liveInstallEnv is the world a real install acts on: this account's home, the
+// destination the fixed rule chooses, and every side effect wired to the thing
+// that performs it.
+//
+// It refuses to be built inside a test binary (see live.go): every function it
+// fills in quits an application, raises an authorisation panel, downloads a
+// runtime or replaces a bundle, and a test that reaches this by accident does
+// all four to the machine it is running on.
+func liveInstallEnv(env Env) (InstallEnv, error) {
+	if err := liveEnvGuard("install"); err != nil {
+		return InstallEnv{}, err
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return InstallEnv{}, err
+	}
+	return InstallEnv{
 		Paths:    env.Paths,
 		Home:     home,
-		Dest:     dest,
+		Dest:     installDest(home),
 		PathEnv:  os.Getenv("PATH"),
 		Place:    PlaceBundle,
 		Quit:     quitRunningCopy,
@@ -121,7 +139,7 @@ func RunInstall(env Env, args []string) int {
 		Launch:   launchBundle,
 		Serving:  func() bool { return instance.Probe(env.Paths, env.Port) == instance.HolderOurs },
 		Poll:     250 * time.Millisecond,
-	})
+	}, nil
 }
 
 func runInstall(env Env, args []string, ie InstallEnv) int {

@@ -82,6 +82,9 @@ func RunUninstall(env Env, args []string) int {
 // liveUninstallEnv resolves what a real run acts on, from the fixed locations
 // and from nothing else.
 func liveUninstallEnv(env Env) (UninstallEnv, error) {
+	if err := liveEnvGuard("uninstall"); err != nil {
+		return UninstallEnv{}, err
+	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return UninstallEnv{}, err

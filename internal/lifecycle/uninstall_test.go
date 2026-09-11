@@ -292,6 +292,12 @@ func TestGropiusRootIsNeverADeletionPath(t *testing.T) {
 	t.Setenv("HOME", home)
 	t.Setenv("GROPIUS_ROOT", decoy)
 
+	// The live resolution is what this case is about — which root uninstall
+	// picks when the environment names another one — so the guard that keeps
+	// every other test off this path is opened deliberately, for this test
+	// only.
+	allowLiveEnvInTest(t)
+
 	env, _, _ := testEnv()
 	ue, err := liveUninstallEnv(env)
 	if err != nil {
