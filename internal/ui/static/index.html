@@ -243,9 +243,16 @@
       <input id="setKey" type="text" placeholder="no key — anyone on the network can use this server">
       <button type="button" id="genKey" class="link">Generate a key</button>
     </label>
+    <!-- No min and no max on either of the two fields below. The server bounds
+         neither of them, and a bound here that the server does not have is one
+         the browser enforces before the submit listener ever runs: a
+         config.json holding a figure outside it loads, and then the form
+         cannot be submitted at all, over a field nobody touched. The guidance
+         the bounds used to carry is in the labels instead, where it advises
+         rather than refuses (itd-2609081259493890). -->
     <label>
       <span>Unload models after idle (seconds, 0 = never)</span>
-      <input id="setIdle" type="number" min="0">
+      <input id="setIdle" type="number">
     </label>
     <label>
       <span>Memory for loaded models (GB, blank for the default)</span>
@@ -286,8 +293,8 @@
     </fieldset>
 
     <label>
-      <span>Batched requests (decode concurrency)</span>
-      <input id="setConc" type="number" min="1" max="64">
+      <span>Batched requests (decode concurrency, 1 or more)</span>
+      <input id="setConc" type="number">
     </label>
     <label>
       <span>HuggingFace token <em>(only needed for gated models)</em></span>

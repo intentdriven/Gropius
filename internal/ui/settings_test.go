@@ -368,3 +368,101 @@ func settingsPane(t *testing.T, markup string) string {
 	}
 	return markup[start : start+end]
 }
+
+// Every control accepts a stored value the server accepts — including the ones
+// only a hand edit or another Mac's file produces.
+//
+// This is the value half of the never-refused promise, and it runs the panel's
+// own functions rather than reading the markup: the stored settings are
+// written into the controls the way renderSettings writes them, and read back
+// out the way the submit body reads them. A control that cannot hold a stored
+// value posts something else, and the operator's next save silently changes a
+// setting they never touched — the same wedge as a refusal, from the other
+// side.
+//
+// Zero is the case worth having. A blank sampling field means "pass no flag"
+// and zero means greedy decoding, so a control that rendered zero as blank
+// would turn a saved temperature of 0 into the model server's own default on
+// the next unrelated save.
+//
+// Node-gated, and the Go companion in controls_test.go is what holds the same
+// promise on a machine with no node — which is where two of the three wedge
+// incidents would have gone unnoticed.
+func TestEveryControlAcceptsAStoredValue(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		stored string
+	}{
+		{"zero is a value and not a blank", `{"temperature":0,"top_p":1,"top_k":0,"min_p":0,"max_tokens":1}`},
+		{"the ceilings the server accepts", `{"temperature":2,"top_p":1,"top_k":1024,"min_p":1,"max_tokens":1048576}`},
+		{"a figure with more digits than a box suggests", `{"temperature":0.123456789,"top_p":0.95,"top_k":40,"min_p":0.05,"max_tokens":512}`},
+		// Nothing stored at all: every field blank, and blank read back as
+		// null rather than as zero.
+		{"nothing set", `{"temperature":null,"top_p":null,"top_k":null,"min_p":null,"max_tokens":null}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, which := range []string{"input", "over"} {
+				got := evalPanelControls(t, tc.stored, which)
+				var want map[string]any
+				if err := json.Unmarshal([]byte(tc.stored), &want); err != nil {
+					t.Fatal(err)
+				}
+				if !reflect.DeepEqual(got, want) {
+					t.Errorf("the %q controls turned %s into %v — a stored value the server accepts is not "+
+						"one the panel can hold, so an unrelated save rewrites it", which, tc.stored, got)
+				}
+			}
+		})
+	}
+}
+
+// evalPanelControls writes one set of stored sampling values into the panel's
+// controls and reads back what a save would post, with the panel's element
+// lookup stubbed: these functions touch nothing of a control but its value, so
+// a plain object per id is the whole of the DOM they need.
+func evalPanelControls(t *testing.T, stored, which string) map[string]any {
+	t.Helper()
+	src := readPanelSource(t)
+	var b strings.Builder
+	// The stub coerces on assignment, because that is the one thing about a
+	// real control that matters here: HTMLInputElement.value is a string, so
+	// writing the number 0 into a field and reading it back gives "0" and not
+	// 0. A stub that kept the number would pass a round trip the browser fails.
+	b.WriteString("const els = {};\n" +
+		"const cell = () => { let v = ''; return { get value() { return v; }, set value(x) { v = String(x); } }; };\n" +
+		"const $ = (id) => els[id] || (els[id] = cell());\n")
+	b.WriteString(extractConst(t, src, "SAMPLING_FIELDS"))
+	b.WriteString("\n")
+	for _, name := range []string{"numberOrNull", "writeSampling", "readSampling"} {
+		b.WriteString(extractFunction(t, src, name))
+		b.WriteString("\n")
+	}
+	fmt.Fprintf(&b, "writeSampling(%q, %s);\n", which, stored)
+	fmt.Fprintf(&b, "process.stdout.write(JSON.stringify(readSampling(%q)));", which)
+
+	var out map[string]any
+	if err := json.Unmarshal([]byte(evalJS(t, b.String())), &out); err != nil {
+		t.Fatalf("the panel returned something that is not an object: %v", err)
+	}
+	return out
+}
+
+// extractConst returns the source of a top-level `const NAME = ...;`
+// declaration, to the line that closes it. The tables the panel drives its
+// controls from are data rather than functions, and a test that retyped one
+// here would be asserting against its own copy.
+func extractConst(t *testing.T, src, name string) string {
+	t.Helper()
+	start := strings.Index(src, "const "+name+" = ")
+	if start < 0 {
+		t.Fatalf("the control panel declares no const %s", name)
+	}
+	rest := src[start:]
+	for _, closing := range []string{"\n];", "\n};"} {
+		if end := strings.Index(rest, closing); end >= 0 {
+			return rest[:end+len(closing)]
+		}
+	}
+	t.Fatalf("the declaration of %s is never closed", name)
+	return ""
+}
