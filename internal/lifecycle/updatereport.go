@@ -101,7 +101,6 @@ const (
 	servingReasonSilent      = "something holds the port and answered no identity challenge"
 	servingReasonUnproven    = "something holds the port and answered the identity challenge wrongly"
 	servingReasonIdle        = "nothing is serving on this Mac"
-	servingReasonNotServing  = "nothing was answering when this command returned"
 	installedReasonNoVersion = "the downloaded build did not answer its own version verb"
 )
 
