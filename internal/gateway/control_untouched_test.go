@@ -368,3 +368,75 @@ func modelsOrEmpty(m map[string]config.ModelSettings) map[string]config.ModelSet
 	}
 	return m
 }
+
+// A refusal never says whether a guessed secret was the right one.
+//
+// THE ATTACK. The control plane is loopback-only and asks nobody for a
+// password, and loopback includes every other account on this Mac. A refusal
+// that names the settings a save would have changed is computed by comparing
+// the stored configuration with the posted one — so if the comparison covers
+// the API key, a caller can post a guess beside any value that is certain to
+// be refused and read the answer: "changed api_key, stats_months" means the
+// guess was wrong, "changed stats_months" alone means it was right. That is a
+// per-candidate equality oracle on two secrets, from a request that is refused
+// and therefore leaves nothing behind in the settings file. The HuggingFace
+// token has no other local confirmation channel at all — the control plane
+// redacts it and never echoes it back.
+//
+// THE RULE. A secret is named as changed when the body carries it and the
+// caller did not post the redacted placeholder, and never by comparing it with
+// what is stored. A caller who posted a value learns only that they posted it,
+// which they already knew.
+func TestARefusalDoesNotSayWhetherAGuessedSecretWasRight(t *testing.T) {
+	stored := config.Default()
+	stored.APIKey = "bh_the-real-key"
+	stored.HFToken = "hf_the-real-token"
+
+	// stats_months of zero is refused by Validate whatever else the body says,
+	// so the refusal path runs for every probe below.
+	const refused = `"stats_months":0,"host":"0.0.0.0","bind_mode":"","port":11535,"decode_concurrency":4`
+	probe := func(t *testing.T, body string) string {
+		t.Helper()
+		srv := newTestControl(t, stored)
+		resp := postJSON(t, srv, "/api/settings", body)
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400", resp.StatusCode)
+		}
+		return refusalText(t, resp)
+	}
+
+	for _, tc := range []struct {
+		name           string
+		right, wrong   string
+		secret, posted string
+	}{
+		{"the API key", stored.APIKey, "bh_a-wrong-guess", "api_key", "api_key"},
+		{"the HuggingFace token", stored.HFToken, "hf_a-wrong-guess", "hf_token", "hf_token"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			hit := probe(t, `{`+refused+`,"`+tc.posted+`":"`+tc.right+`"}`)
+			miss := probe(t, `{`+refused+`,"`+tc.posted+`":"`+tc.wrong+`"}`)
+			if hit != miss {
+				t.Errorf("a right guess and a wrong one are answered differently, which tells a caller on "+
+					"this Mac when they have guessed %s:\n  right: %s\n  wrong: %s", tc.secret, hit, miss)
+			}
+			// And the value itself never appears, in either direction.
+			for _, msg := range []string{hit, miss} {
+				if strings.Contains(msg, tc.right) {
+					t.Errorf("the refusal carries the stored secret:\n%s", msg)
+				}
+			}
+		})
+	}
+
+	// The placeholder is the panel's own unedited save: it means "leave the
+	// secret alone", so it is not a change and must not be reported as one.
+	if msg := probe(t, `{`+refused+`,"api_key":"`+redacted+`"}`); strings.Contains(msg, "api_key") {
+		t.Errorf("posting the redacted placeholder was reported as changing the key:\n%s", msg)
+	}
+	// A body that does not name a secret at all never names it either.
+	if msg := probe(t, `{`+refused+`}`); strings.Contains(msg, "api_key") || strings.Contains(msg, "hf_token") {
+		t.Errorf("a save that never named a secret reported one as changed:\n%s", msg)
+	}
+}

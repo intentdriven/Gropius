@@ -1413,7 +1413,7 @@ func (c *Control) applySettings(raw []byte) (map[string]any, error) {
 	}
 
 	if err := c.App.SetConfig(incoming); err != nil {
-		return nil, refusalNamingWhatChanged(err, current, incoming)
+		return nil, refusalNamingWhatChanged(err, current, incoming, raw)
 	}
 	// The file has just been written from the settings in force, repairs and
 	// all, so there is nothing left in it to repair.
@@ -1465,8 +1465,16 @@ func (c *Control) applySettings(raw []byte) (map[string]any, error) {
 // always names a field this save changed, or says the save changed nothing —
 // which is the thing most worth knowing, because a save that changed nothing
 // and was refused anyway is the wedge itself.
-func refusalNamingWhatChanged(err error, before, after config.Config) error {
-	changed := changedSettings(before, after)
+//
+// It costs two marshals and one unmarshal of a configuration on the REFUSED
+// path, under settingsMu, which every save queues behind. That is accepted
+// rather than overlooked: the body is already capped at MaxConfigBytes, the
+// work is bounded by the configuration's own size, and a caller who can reach
+// this endpoint can already make a save do more work than this by posting a
+// full settings body. Moving it off the lock would mean restructuring the
+// write path around a function that only runs when a save has already failed.
+func refusalNamingWhatChanged(err error, before, after config.Config, posted []byte) error {
+	changed := changedSettings(before, after, posted)
 	if len(changed) == 0 {
 		return fmt.Errorf("%w (this save changed no setting)", err)
 	}
@@ -1482,7 +1490,17 @@ func refusalNamingWhatChanged(err error, before, after config.Config) error {
 // without this function being taught about it. A whole nested object is named
 // by its own key — "sampling" rather than "sampling.top_p" — which is as
 // precise as a refusal needs to be about where to look.
-func changedSettings(before, after config.Config) []string {
+//
+// THE TWO SECRETS ARE NOT COMPARED, and that is the whole of why this function
+// takes the posted body. Comparing them would publish an equality oracle: the
+// control plane is loopback-only and asks nobody for a password, and loopback
+// includes every other account on this Mac, so a caller could post a guessed
+// key beside a value certain to be refused and read the answer — the key named
+// among the changes means the guess was wrong, the key absent means it was
+// right. A secret is therefore reported as changed when the BODY carries it
+// and the caller did not post the redacted placeholder, which tells them only
+// what they themselves sent.
+func changedSettings(before, after config.Config, posted []byte) []string {
 	was, now := encodedSettings(before), encodedSettings(after)
 	keys := map[string]bool{}
 	for key := range was {
@@ -1493,12 +1511,46 @@ func changedSettings(before, after config.Config) []string {
 	}
 	out := []string{}
 	for key := range keys {
+		if secretSettingKeys[key] {
+			if postedASecret(posted, key) {
+				out = append(out, key)
+			}
+			continue
+		}
 		if !bytes.Equal(was[key], now[key]) {
 			out = append(out, key)
 		}
 	}
 	sort.Strings(out)
 	return out
+}
+
+// secretSettingKeys are the settings whose value may never be compared with a
+// guess, because the comparison's result is published in a refusal. They are
+// the two redactConfig blanks, and a third secret added to the configuration
+// belongs here the day it is added.
+var secretSettingKeys = map[string]bool{"api_key": true, "hf_token": true}
+
+// postedASecret reports whether this body asks to change the named secret: it
+// carries the key, and what it carries is not the placeholder the panel echoes
+// back for a secret it is leaving alone.
+func postedASecret(body []byte, field string) bool {
+	var named map[string]json.RawMessage
+	if err := json.Unmarshal(body, &named); err != nil {
+		return false
+	}
+	for key, raw := range named {
+		// Folded, the way encoding/json matched it into the struct.
+		if !strings.EqualFold(key, field) {
+			continue
+		}
+		var value string
+		if err := json.Unmarshal(raw, &value); err != nil {
+			return true // not a string at all, so not the placeholder
+		}
+		return value != redacted
+	}
+	return false
 }
 
 // encodedSettings is one configuration as the keys config.json would carry,
