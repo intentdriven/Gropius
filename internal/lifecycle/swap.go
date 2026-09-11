@@ -21,7 +21,16 @@ import (
 // it refuses a destination that is a non-empty directory. The order below is
 // what makes the failure safe — the installed bundle is renamed ASIDE, the new
 // one is renamed in, and the set-aside copy is removed only once the new one is
-// in place — so no failure path leaves the Mac with no application.
+// in place.
+//
+// So no failure path leaves the Mac with no application, and that sentence is
+// only true because of the last rule below: where the new bundle did not go in
+// AND the set-aside one could not be put back, the staging directory holding it
+// is NOT cleaned up, and the failure says where the only remaining copy is. An
+// earlier version removed it and destroyed the installation on a path it
+// claimed to protect — rename(2) refuses a non-empty directory, so anything
+// that creates one at the destination between the two renames is enough to
+// reach it.
 
 // stagingPrefix names a staging directory. It is a dot name so it does not
 // appear in a Finder listing of the destination while the swap runs.
@@ -60,7 +69,14 @@ func placeBundle(src, dest string, rename renameFunc) error {
 	if err != nil {
 		return fmt.Errorf("stage the new bundle in %s: %w", destDir, err)
 	}
-	defer os.RemoveAll(staging)
+	// Cleared only where the staging directory may safely go: while it holds
+	// the only copy of the application, it stays.
+	keep := false
+	defer func() {
+		if !keep {
+			os.RemoveAll(staging)
+		}
+	}()
 
 	staged := filepath.Join(staging, filepath.Base(dest))
 	if err := copyTree(src, staged); err != nil {
@@ -85,13 +101,15 @@ func placeBundle(src, dest string, rename renameFunc) error {
 	// which rename(2) does replace — succeed silently on somebody else's
 	// behalf.
 	if _, err := os.Lstat(dest); err == nil {
-		restore(rename, retired, dest)
-		return fmt.Errorf("%s was created while the new bundle was being staged; refusing to replace it", dest)
+		put, note := restore(rename, retired, dest)
+		keep = !put && retired != ""
+		return fmt.Errorf("%s was created while the new bundle was being staged; refusing to replace it%s", dest, note)
 	}
 
 	if err := rename(staged, dest); err != nil {
-		restore(rename, retired, dest)
-		return fmt.Errorf("move the new bundle into place: %w (the previous copy is left as it was)", err)
+		put, note := restore(rename, retired, dest)
+		keep = !put && retired != ""
+		return fmt.Errorf("move the new bundle into place: %w%s", err, note)
 	}
 
 	// And only now is the set-aside copy removed, by the deferred RemoveAll of
@@ -100,14 +118,22 @@ func placeBundle(src, dest string, rename renameFunc) error {
 }
 
 // restore puts a set-aside bundle back, so a failure is a no-op rather than an
-// uninstall. A failure to restore is not reported over the failure that caused
-// it: the caller is already returning the cause, and there is nothing a second
-// error would let them do differently.
-func restore(rename renameFunc, retired, dest string) {
+// uninstall. It reports whether the bundle is back, and the sentence the caller
+// should append to the failure it is already returning.
+//
+// A restore that fails is the one case where a person has to do something: the
+// application is not where it belongs, and the only copy of it is sitting under
+// a name they would never think to look for. So the failure names that path,
+// and the caller keeps the directory it is in.
+func restore(rename renameFunc, retired, dest string) (put bool, note string) {
 	if retired == "" {
-		return
+		return true, " (nothing was installed there before, and nothing was removed)"
 	}
-	_ = rename(retired, dest)
+	if err := rename(retired, dest); err != nil {
+		return false, " — and the installed bundle could NOT be put back (" + err.Error() + "). " +
+			"It is intact at " + retired + "; move it to " + dest + " to restore the application."
+	}
+	return true, " (the previous copy is left as it was)"
 }
 
 // copyTree copies a directory recursively: regular files, directories and

@@ -152,6 +152,74 @@ func TestSwapLeavesTheInstalledBundleWhenTheSecondRenameFails(t *testing.T) {
 	assertNoStagingLeft(t, filepath.Dir(dest))
 }
 
+// The failure the file's own claim rests on: the new bundle does not go in AND
+// the set-aside bundle cannot be put back. The set-aside copy is then the only
+// one there is, and it must survive — with the failure naming where it is.
+//
+// Reachable without anything exotic: rename(2) refuses a non-empty directory,
+// so anything that creates one at the destination between the two renames makes
+// the restore fail with ENOTEMPTY. Removing the staging directory on that path
+// would delete the last copy of the application.
+func TestSwapKeepsTheSetAsideBundleWhenItCannotBePutBack(t *testing.T) {
+	dir := t.TempDir()
+	src := bundleAt(t, filepath.Join(dir, "verified", "Gropius.app"), "new")
+	dest := bundleAt(t, filepath.Join(dir, "Applications", "Gropius.app"), "old")
+
+	// Call 1 sets the installed bundle aside. Call 2 puts the new one in
+	// place, and fails. Call 3 is the restore, and fails too.
+	calls := 0
+	rename := func(oldpath, newpath string) error {
+		calls++
+		if calls >= 2 {
+			return errors.New("no space left on device")
+		}
+		return os.Rename(oldpath, newpath)
+	}
+
+	err := placeBundle(src, dest, rename)
+	if err == nil {
+		t.Fatal("placeBundle reported success although nothing moved into place")
+	}
+
+	// The set-aside bundle is the only copy left, so it must still exist and
+	// the message must say where.
+	retired := findRetired(t, filepath.Dir(dest))
+	if retired == "" {
+		t.Fatal("the swap deleted the set-aside bundle after failing to put it back — the Mac is left with no application")
+	}
+	if got := markerAt(t, retired); got != "old" {
+		t.Errorf("what was set aside holds %q, want the installed bundle", got)
+	}
+	if !strings.Contains(err.Error(), retired) {
+		t.Errorf("the failure %q does not say where the only remaining copy of the application is", err)
+	}
+}
+
+// findRetired returns the set-aside bundle left inside a staging directory, or
+// an empty string when there is none.
+func findRetired(t *testing.T, dir string) string {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if !strings.HasPrefix(e.Name(), stagingPrefix) {
+			continue
+		}
+		inner, err := os.ReadDir(filepath.Join(dir, e.Name()))
+		if err != nil {
+			continue
+		}
+		for _, f := range inner {
+			if strings.HasSuffix(f.Name(), ".retired") {
+				return filepath.Join(dir, e.Name(), f.Name())
+			}
+		}
+	}
+	return ""
+}
+
 // The staging name is unguessable. A predictable name — the pid, the bundle's
 // own name — hands anyone watching the destination directory a reliable signal
 // for when to act on it, and on a Mac where /Applications is group-writable by
