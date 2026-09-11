@@ -198,9 +198,91 @@ all, and so is also what the falsification is read against.
 
 ## Audit Notes
 
-<!-- abcd-review: OWED receipt=rcp-7c7801af51c9 -->
-Fidelity review OWED (receipt rcp-7c7801af51c9).
+<!-- abcd-review: INGESTED receipt=rcp-7c7801af51c9 -->
+Fidelity review — receipt rcp-7c7801af51c9 (verifier intent-auditor claude-opus-5[1m]).
 
+Provenance: intent-auditor@claude-opus-5[1m] · rubric_hash sha256:2cdbbce50fc13dca3d08dcc78749119691ee02d9e587e33f854c26b7bc8abfee · prompt_hash sha256:542ed2cd51ff938717a3f47b2b332e8d47910beec0ca7ecdfd238ae7edf5ced5
+Input attestations: diff:1d94018^1..1d94018 (PR #36, feat/security-posture-page)@sha256:f53e79937bf4a4f3f5a5abc4e20ef778afc5b81b9fdf3cb7758c48e3f728a6e5; diff:9a5a6a4^1..9a5a6a4 (PR #37; carries only a captured test-flake note, no posture code)@-; tree:HEAD dd6463de7bddcceb1b303876efa8d4a0139f32ec (worktree .claude/worktrees/posture)@-;
+
+Acceptance rollup: MET 7 · MET_WITH_CONCERNS 1 · NOT_MET 0 · INCONCLUSIVE 0
+
+Per-criterion verdicts:
+- ac-1 — MET: postureLines renders eight lines on a plain bind and nine with a private-network address, covering every clause of the criterion in the present tense: reach and addresses, key-from-network with whether one is set, key-from-this-Mac including another account, the Bonjour advert and its payload, the request log's contents and omissions, and the statistics store's contents, location and retention; TestThePostureLinesStateWhatIsOn pins each one by id and by wording, and style.css gives every line the same weight with no colour and no icon so none reads as a warning.
+  evidence: internal/ui/static/app.js:535 — "lines.push({ id: 'reach', heading: 'Who can reach it', text: reach,"
+  evidence: internal/ui/static/app.js:617 — "lines.push({ id: 'announce', heading: 'The local network', text: announce,"
+  evidence: internal/ui/static/app.js:623 — "lines.push({ id: 'log', heading: 'The request log', reads: ['config.log_level'],"
+  evidence: internal/ui/static/app.js:662 — "lines.push({ id: 'stats', heading: 'Request statistics', text: stats,"
+  evidence: internal/ui/posture_test.go:147 — "func TestThePostureLinesStateWhatIsOn(t *testing.T) {"
+  evidence: internal/ui/static/style.css:208 — "Posture: one fact per block, stated and not styled as a warning — no colour, no icon, the same weight for every line."
+- ac-2 — MET: The page pushes two separate lines, key-network and key-local, with different answers, and the answers match what withAuth actually does: with a key configured, a loopback connection carrying a loopback Host is served without the bearer check while every other machine falls through to it, which is exactly what the two lines say.
+  evidence: internal/ui/static/app.js:585 — "lines.push({ id: 'key-network', heading: 'A request from another machine', text: fromNetwork,"
+  evidence: internal/ui/static/app.js:588 — "'A request from this Mac to a loopback address is served without the key, and that includes a request from another account on this Mac. The key applies to the network and not to this Mac.'"
+  evidence: internal/gateway/gateway.go:176 — "if isLoopbackHost(r.Host) { next.ServeHTTP(w, r); return }"
+  evidence: internal/ui/posture_test.go:179 — "func TestTheTwoKeyLinesHaveDifferentAnswers(t *testing.T) {"
+- ac-3 — MET_WITH_CONCERNS: Every line that reports server state is derived from the snapshot and names the fields it read, and each bounded line states what Gropius cannot see rather than implying an assurance — but two of the eight lines, transport and panel, carry reads: [] and are static facts about the binary rather than anything this running server was observed to be, which the source itself admits and the page does not mark for the reader.
+  evidence: internal/ui/static/app.js:471 — "a line with no fields is a fact about the binary rather than an observation of this server, and there are two of those."
+  evidence: internal/ui/static/app.js:563 — "lines.push({ id: 'transport', heading: 'What carries a request', reads: [],"
+  evidence: internal/ui/static/app.js:567 — "lines.push({ id: 'panel', heading: 'This control panel', reads: [],"
+  evidence: internal/ui/static/app.js:533 — "reach += 'Which machines can reach an address is decided by the network it is on, and Gropius does not see that.';"
+  evidence: internal/ui/posture_test.go:359 — "func TestEveryPostureLineTracesToTheSnapshot(t *testing.T) {"
+- ac-4 — MET: The private line states that sharing with machines the operator does not own and a feature of the network publishing the port to the internet are both invisible to Gropius and change neither the address nor the mark; it names no vendor and makes no encryption claim, and the archtest claim scan over app.js confirms both, since postureLines is a top-level function mentioning the mark so every literal in it is in scope.
+  evidence: internal/ui/static/app.js:552 — "Whether that network has since been shared with machines you do not own, or whether a feature of the network publishes this port to the internet, Gropius cannot see, and neither changes the address or the mark."
+  evidence: internal/archtest/honest_marking_test.go:337 — "func markLiterals(src string) []string {"
+  evidence: internal/ui/posture_test.go:253 — "func TestThePrivateNetworkLineStatesTheLimits(t *testing.T) {"
+- ac-5 — MET: renderPosture writes into #posture and nowhere else, app.js never navigates to the view itself, and the diff adds no modal and no step in any task — only a tab button and an ordinary hidden panel section; the exposed-server-with-no-key warning in snapshot() is outside every hunk of the delivered control.go diff and still fires on the same condition it did before.
+  evidence: internal/ui/static/app.js:681 — "$('posture').innerHTML = html;"
+  evidence: internal/ui/static/index.html:54 — "< button class="tab" data-tab="posture">Posture< /button>"
+  evidence: internal/gateway/control.go:419 — "if c.App.Bind().ReachesOtherMachines() && cfg.APIKey == "" {"
+  evidence: internal/ui/posture_test.go:463 — "func TestThePostureViewIsReachedByNavigationAlone(t *testing.T) {"
+- ac-6 — MET: The posture view issues no api(), fetch(), post or EventSource call, so it can change nothing; the only enforcement-path file the diff touches is cmd/gropius/bind.go, where advertises is moved verbatim into app.Advertises with an identical three-condition body, and the startup refusal path that generates a key or drops to loopback is untouched.
+  evidence: internal/ui/posture_test.go:513 — "func TestThePostureViewReadsAndNeverWrites(t *testing.T) {"
+  evidence: cmd/gropius/bind.go:185 — "return app.Advertises(cfg, plan)"
+  evidence: internal/app/app.go:377 — "func Advertises(cfg config.Config, plan bind.Plan) bool {"
+  evidence: cmd/gropius/bind.go:148 — "if !plan.ReachesOtherMachines() || cfg.APIKey != "" {"
+- ac-7 — MET: The new BindState fields (InForce, Bound, Wildcard, ReachesOtherMachines, Port, Advertising) are written in snapshot() and read by no enforcement code anywhere in internal/ or cmd/ — a grep over non-test Go finds only the writes; the exposure warning still asks the plan directly rather than the published state, and the flow that was added runs the other way, with presentation reading enforcement's own Advertises rule, which rules 2 and 4 permit.
+  evidence: internal/gateway/control.go:389 — "st.Bind.Port = c.App.BindPort()"
+  evidence: internal/gateway/control.go:796 — "requirement, no admission, no warning's firing condition reads any of it."
+  evidence: internal/app/app.go:360 — "func (a *App) Advertising() bool { return Advertises(a.startup, a.bindPlan) }"
+  evidence: internal/archtest/enforcement_detection_test.go:131 — "var enforcementPath = []string{"
+- ac-8 — MET: The claim scan's script scope derives from the source rather than a hand-written function list, and postureLines is a top-level function whose body names the mark, so every literal it renders is scanned; go test ./internal/archtest/ passes, and the panel-side twin test holds the same functions to the closed forbidden list.
+  evidence: internal/archtest/honest_marking_test.go:344 — "if regionAboutTheMark || mentionsTheMark(lit) {"
+  evidence: internal/archtest/honest_marking_test.go:224 — "func TestTheDocumentationAndThePanelClaimNothingAboutAPrivateNetwork(t *testing.T) {"
+  evidence: internal/ui/posture_test.go:530 — "func TestThePostureStringsNameNoVendorAndPromiseNothing(t *testing.T) {"
+
+Gap audit:
+- honoured:
+  - One page Alice opens and reads, reached by going there and not by being taken there
+    evidence: internal/ui/static/index.html:193 — "< section id="tab-posture" class="panel">"
+    evidence: internal/ui/posture_test.go:471 — "app.js navigates to the posture view itself — the page is somewhere the operator goes, never somewhere they are taken"
+  - Two key answers, never one, because withAuth's loopback exemption makes them different
+    evidence: internal/ui/static/app.js:587 — "lines.push({ id: 'key-local', heading: 'A request from this Mac', reads: ['config.api_key'],"
+  - The running bind is published from the plan the sockets were acquired under, never from the stored configuration
+    evidence: internal/gateway/control.go:803 — "ReachesOtherMachines: plan.ReachesOtherMachines(),"
+  - The banner stays and this page neither replaces it nor changes when it fires
+    evidence: internal/gateway/control.go:420 — "This server is reachable by anyone on your network and requires no API key. Set one in Settings to restrict access."
+  - The page says where Gropius's view stops rather than implying an assurance
+    evidence: internal/ui/static/app.js:552 — "Gropius cannot see, and neither changes the address or the mark."
+  - Open question resolved: the statistics line says 'off' when statistics are off
+    evidence: internal/ui/static/app.js:660 — "stats = 'Request statistics are off: no request is recorded.';"
+- diverged:
+  - It says only what Gropius can actually observe — delivered as six observation-derived lines plus two static facts about the binary (transport, panel) that carry no snapshot fields and are not marked as such on the page
+    evidence: internal/ui/static/app.js:563 — "lines.push({ id: 'transport', heading: 'What carries a request', reads: [],"
+    evidence: internal/ui/static/app.js:471 — "a line with no fields is a fact about the binary rather than an observation of this server, and there are two of those."
+  - The four warnings routed to documentation are the ones this page replaces — delivered as the four staying in docs/mesh-vpn.md with a cross-link added to the new page rather than as the page becoming the single place they live
+    evidence: docs/mesh-vpn.md:110 — "- [The posture page] (posture-reference.md) — the control panel's one-page"
+    evidence: docs/mesh-vpn.md:112 — "with the four things above stated as the limits of what Gropius can see."
+- missing: (none)
+
+Scope-condition dispositions:
+- cond-2609081750374720 — survived: The page reports and gates nothing: its three functions issue no call to the control plane, the exposed-with-no-key warning and the startup path that generates a key or narrows to loopback are both untouched, so nothing Gropius refuses today became a disclosure on this page instead.
+  evidence: internal/ui/posture_test.go:513 — "func TestThePostureViewReadsAndNeverWrites(t *testing.T) {"
+  evidence: internal/gateway/control.go:419 — "if c.App.Bind().ReachesOtherMachines() && cfg.APIKey == "" {"
+  evidence: cmd/gropius/bind.go:148 — "if !plan.ReachesOtherMachines() || cfg.APIKey != "" {"
+- cond-2609081750370330 — narrowed: The two things the condition named — the broadcast Gropius sends and the request log it writes — are both reported from observed state, and the per-model log files and the hosts the binary contacts are correctly absent; but the page also carries two lines that are static facts about the binary rather than observations of this running server, which is the shape the condition put out of scope.
+  narrowing: The assumption holds for the six snapshot-derived lines (reach, private, key-network, key-local, announce, log, stats); the transport and panel lines carry reads: [] and are static facts about the source, stated on the page beside the observations with nothing distinguishing them to a reader.
+  evidence: internal/ui/static/app.js:471 — "a line with no fields is a fact about the binary rather than an observation of this server, and there are two of those."
+  evidence: internal/ui/static/app.js:567 — "lines.push({ id: 'panel', heading: 'This control panel', reads: [],"
+  evidence: internal/ui/static/app.js:617 — "lines.push({ id: 'announce', heading: 'The local network', text: announce,"
 ## Grounds
 
 - pursued: the four facts an operator needs have no home. adr-2609081118587999 routed them to documentation, that documentation does not exist, and itd-2609081015545349 deliberately makes the endpoint mark say the minimum an app can honestly say — which is right and leaves the question it raises unanswered anywhere. So the operator who wants to know where they stand has nowhere to look, and the only surface that speaks is a banner that fires after something is already wrong. Shown wrong if, once the page ships, those facts still have to be repeated in the banner and in the docs to reach anyone: that would mean the page did not become the single place they live, and the information had to be in the operator's way after all.

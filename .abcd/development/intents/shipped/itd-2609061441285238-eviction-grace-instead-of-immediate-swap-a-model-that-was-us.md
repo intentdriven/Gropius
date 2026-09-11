@@ -120,76 +120,123 @@ tolerate, in which case grace only delays the same swaps.
 
 ## Audit Notes
 
-<!-- abcd-review: OWED receipt=rcp-5c77e5d702ce -->
-Fidelity review OWED (receipt rcp-5c77e5d702ce).
+<!-- abcd-review: INGESTED receipt=rcp-5c77e5d702ce -->
+Fidelity review — receipt rcp-5c77e5d702ce (verifier intent-auditor claude-opus-5[1m]).
 
-2026-09-07 — Acceptance criterion 3 shipped narrower than it is written here,
-and the criterion is left as written because a shipped record is not rewritten.
-The wait is reported in the two response headers, as the resolved Open Question
-says — but only on an install that has an API key configured. An adversarial
-security review found that they are residency facts: `warm` attests that the
-model was in memory with a free concurrency slot, and `waited` on a model the
-same client has just seen warm is that model's in-flight count at its batch
-ceiling, which is other clients using it at that moment. `/v1/models` withholds
-exactly that from an unauthenticated server (the decision of 2026-09-06 on
-residency fields), and the argument that blesses leaking bare residency — a
-client can already learn it by timing — does not reach it: in total latency the
-wait is inseparable from generation time, while the header separates it to the
-millisecond on every request, for free. On the shipping default, which has no
-key, Carol's answer therefore reports nothing, and the press release's promise
-that "the answer she gets back tells her she waited and for how long" holds only
-once Bob sets a key. Scope condition cond-2609061822386054 conditions this
-record on grace being switched on and says nothing about a key, so it is
-narrowed the same way. **The fidelity audit should record criterion 3 as
-diverged, for the maintainer to adopt or reject.** The alternative the review
-offered — keep the headers open and record the widened disclosure — was
-rejected: a decision to tell an open network who is busy is not one this record
-should take on the residency record's behalf. Held by
-`gateway.TestTheWaitHeadersFollowTheResidencyRule`, whose first case asserts
-that an unkeyed install tells a network client nothing.
+Provenance: intent-auditor@claude-opus-5[1m] · rubric_hash sha256:4c74f3e107c9c556e166e99f28e9e3ec975f96554690b04f8ea72c4080239917 · prompt_hash sha256:542ed2cd51ff938717a3f47b2b332e8d47910beec0ca7ecdfd238ae7edf5ced5
+Input attestations: diff:working tree at HEAD 18f1a4e286fd85f6e94bb2ae1d2ecba40e13cc77 (history rewritten during the rename; no reliable per-spec commit range, so the tree as shipped was audited)@sha256:unknown;
 
-2026-09-07 — Acceptance criterion 6 also shipped narrower, and is also left as
-written. Past the load-waiter cap a request is refused immediately, as the
-criterion says, *unless it needs nothing unloaded* — its model is already in
-memory, or it fits in memory nobody is using — in which case it is served. The
-first cut refused it, and the same security review showed what that meant: a
-bound on how many requests may *wait* had become a bound on how many may be
-*served*, so eight connections denied model loading to every other client on the
-network, including requests that would have cost the machine nothing. The
-concession is exactly one thing and no more: such a caller may take free memory
-and may not take a victim, because the waiter at the head is parked precisely
-because that free memory is not enough for it. **The fidelity audit should
-record criterion 6 as diverged, for the maintainer to adopt or reject.** Held by
-`runtime.TestAFullQueueDoesNotRefuseALoadThatNeedsNoEviction` and
-`runtime.TestAQueueFullArrivalTakesNoVictimAndCostsNoSyscall`.
+Acceptance rollup: MET 5 · MET_WITH_CONCERNS 2 · NOT_MET 0 · INCONCLUSIVE 0
 
-2026-09-07 — Acceptance criterion 7 is met, with a qualification worth recording
-because the wording invites a stronger reading. A budget raise wakes every
-waiting request, and every one the raise fits is served on it without anything
-having to finish — no model unloads, no request ends. They are served in queue
-order rather than at once: the oldest loads, and leaving the queue wakes the
-next, which is then the oldest. Held by
-`runtime.TestRaisingTheMemoryBudgetServesEveryWaiterItFits`, which parks four
-and is mutation-checked against a build where the cascade does not happen.
+Per-criterion verdicts:
+- ac-1 — MET: With the grace at zero the wait verdict is waitNoGrace before any queue is consulted and every resident model is an eviction candidate, so the swap is immediate and nothing parks; the default config ships the switch off and a test asserts the eviction and Waiting()==0.
+  evidence: internal/runtime/pool.go:1078 — "if !mayWait || p.grace <= 0 { return waitNoGrace"
+  evidence: internal/runtime/pool.go:1025 — "if p.grace <= 0 || waited >= p.grace { return true"
+  evidence: internal/config/config.go:410 — "EvictionGrace bool `json:"eviction_grace,omitempty"`"
+  evidence: internal/runtime/grace_test.go:53 — "func TestWithGraceOffAModelIsEvictedAtOnceAndNothingWaits"
+  evidence: internal/config/grace_test.go:40 — "func TestAFreshInstallHasEvictionGraceOffWithTheDefaultIntervals"
+- ac-2 — MET: A model whose lastUsed is inside the grace is dropped from the candidate set before the least-recently-used sort, so the load finds no plan and parks as a loadWaiter rather than being answered; the test holds the resident model in memory and asserts the competing Acquire has not returned.
+  evidence: internal/runtime/pool.go:995 — "if !p.graceElapsedLocked(e, waited) { continue"
+  evidence: internal/runtime/pool.go:1039 — "return p.opts.now().Sub(e.lastUsed) >= p.grace"
+  evidence: internal/runtime/pool.go:624 — "w = &loadWaiter{arrived: time.Now(), need: noRoom.need, signal: make(chan struct{}, 1)}"
+  evidence: internal/runtime/grace_test.go:78 — "func TestAModelThatJustFinishedIsNotEvictedAndTheRequestWaits"
+  evidence: internal/runtime/grace_test.go:99 — "t.Fatalf("Acquire(org/b) returned %v inside the grace; it must still be waiting", err)"
+- ac-3 — MET_WITH_CONCERNS: The load half is fully realised — the waiter is woken when the protected model falls past its grace and the acquisition carries the wait it paid — but the reporting half is gated on the install having an API key configured, so on the shipping default (no key) the response reports nothing; concern: 'the response reports how long the request waited' holds only on a keyed install. I reached this independently and agree with the intent's own Audit Note that criterion 3 shipped narrower than written.
+  evidence: internal/runtime/pool.go:736 — "QueueWait: waited + p.opts.now().Sub(loaded),"
+  evidence: internal/gateway/gateway.go:439 — "setWaitHeaders(w.Header(), g.admittedKeyed(r), up.Waits.LoadWait+up.Waits.QueueWait)"
+  evidence: internal/gateway/gateway.go:565 — "func setWaitHeaders(h http.Header, keyed bool, waited time.Duration) { if !keyed { return }"
+  evidence: internal/runtime/grace_test.go:125 — "func TestARequestIsServedOnceTheProtectedModelFallsPastItsGrace"
+  evidence: internal/gateway/waitheaders_test.go:277 — "t.Run("an open server tells a network client nothing", func(t *testing.T) {"
+- ac-4 — MET: graceElapsedLocked's first clause lets a waiter whose own age has reached the grace take any candidate, and the candidate set already excludes entries with work in flight, so a trickle renews idleness but cannot starve the waiter; the test trickles requests at 40 ms and asserts the waiter is served far short of the maximum.
+  evidence: internal/runtime/pool.go:1025 — "if p.grace <= 0 || waited >= p.grace {"
+  evidence: internal/runtime/pool.go:989 — "if e.inFlight > 0 || !isReady(e) { continue"
+  evidence: internal/runtime/pool.go:1033 — "if e.inFlight > 0 { return false }"
+  evidence: internal/runtime/grace_test.go:159 — "func TestATrickleOfRequestsCannotStarveAWaitingRequest"
+- ac-5 — MET: canEverFitLocked sums only the pinned entries against the budget — i.e. what would remain after freeing every unpinned model — and a load that cannot fit that way is given waitNeverFits before any waiter is created, so it is refused without queueing; the test asserts the refusal is under a second and Waiting() stayed zero.
+  evidence: internal/runtime/pool.go:1092 — "if !p.canEverFitLocked(noRoom.need) { return waitNeverFits"
+  evidence: internal/runtime/pool.go:1136 — "if p.isPinnedLocked(e.repoID) { protected += LoadCost(e.bytes)"
+  evidence: internal/runtime/grace_test.go:218 — "func TestARequestThatCanNeverFitIsRefusedWithoutWaiting"
+  evidence: internal/runtime/grace_test.go:245 — "t.Errorf("the refusal took %s; a request that can never fit must not wait", took)"
+- ac-6 — MET_WITH_CONCERNS: Past MaxLoadWaiters a new arrival gets waitQueueFull and is refused without joining the queue, as promised — but admissionLocked grants such an arrival admitFreeRoom, so a request that needs no eviction (its model already resident, or it fits in unused memory) is served instead of refused; concern: the criterion's 'refused immediately' holds only for arrivals that would need a victim. I reached this independently and agree with the intent's own Audit Note that criterion 6 shipped narrower than written.
+  evidence: internal/runtime/pool.go:1097 — "return waitQueueFull"
+  evidence: internal/runtime/pool.go:1176 — "if w == nil && len(p.waiters) >= p.opts.MaxLoadWaiters { return admitFreeRoom"
+  evidence: internal/runtime/pool.go:959 — "case admitFreeRoom: return len(victims) == 0"
+  evidence: internal/runtime/grace_test.go:253 — "func TestPastTheLoadWaiterCapARequestIsRefusedAtOnce"
+  evidence: internal/runtime/grace_test.go:1008 — "func TestAFullQueueDoesNotRefuseALoadThatNeedsNoEviction"
+  evidence: internal/runtime/grace_test.go:1061 — "func TestAQueueFullArrivalTakesNoVictimAndCostsNoSyscall"
+- ac-7 — MET: SetMemoryBudget wakes every parked waiter under the same lock the eviction paths read the figure under, and a woken waiter whose need now fits takes the early 'enough room' return of the eviction plan with an empty victim list, so it proceeds with nothing unloaded and no request ended; four parked waiters are all served on one raise while every one of them is still held open.
+  evidence: internal/runtime/pool.go:352 — "p.wakeWaitersLocked()"
+  evidence: internal/runtime/pool.go:974 — "if used+need <= p.maxResident { return nil, true }"
+  evidence: internal/runtime/grace_test.go:343 — "func TestRaisingTheMemoryBudgetWakesAWaitingRequest"
+  evidence: internal/runtime/grace_test.go:1116 — "func TestRaisingTheMemoryBudgetServesEveryWaiterItFits"
 
+Gap audit:
+- honoured:
+  - On the Macs where nobody turns this on, requests are served exactly as they are today — grace is off by default and the pool takes its victim at once.
+    evidence: internal/config/config.go:827 — "EvictionGraceSec: DefaultEvictionGraceSec,"
+    evidence: internal/runtime/pool.go:1078 — "if !mayWait || p.grace <= 0 {"
+    evidence: internal/runtime/grace_test.go:53 — "func TestWithGraceOffAModelIsEvictedAtOnceAndNothingWaits"
+  - Carol's request waits a little rather than tearing Alice's model out of memory: a model that just finished work is skipped by the eviction rule and the competing request parks.
+    evidence: internal/runtime/pool.go:995 — "if !p.graceElapsedLocked(e, waited) {"
+    evidence: internal/runtime/grace_test.go:78 — "func TestAModelThatJustFinishedIsNotEvictedAndTheRequestWaits"
+  - A trickle of small requests to one model cannot deny another client indefinitely — the waiting request's own age bounds the protection.
+    evidence: internal/runtime/pool.go:1025 — "if p.grace <= 0 || waited >= p.grace {"
+    evidence: internal/runtime/grace_test.go:159 — "func TestATrickleOfRequestsCannotStarveAWaitingRequest"
+  - If nothing frees up in time, Carol gets a clear refusal instead of a silent swap; a request that could never fit is refused at once rather than made to wait.
+    evidence: internal/runtime/pool.go:1092 — "if !p.canEverFitLocked(noRoom.need) {"
+    evidence: internal/runtime/pool.go:1102 — "if time.Since(w.arrived) >= p.maxWait { return waitTimedOut"
+    evidence: internal/runtime/grace_test.go:218 — "func TestARequestThatCanNeverFitIsRefusedWithoutWaiting"
+    evidence: internal/runtime/grace_test.go:484 — "func TestAWaitingRequestGivesUpAfterTheMaximumWait"
+  - Bob decides how long a wait is acceptable: the grace and the maximum wait are Settings fields behind an enable switch, bounded and never longer than the idle timeout.
+    evidence: internal/config/config.go:741 — "if c.EvictionGrace && c.IdleTimeoutSec > 0 && c.GraceSeconds() > c.IdleTimeoutSec {"
+    evidence: internal/config/config.go:755 — "if c.EvictionGrace && c.MaxWaitSeconds() < c.GraceSeconds() {"
+    evidence: internal/ui/grace_test.go:15 — "func TestSettingsFormPostsTheEvictionGraceFields"
+    evidence: internal/app/grace_test.go:54 — "func TestSetConfigAppliesTheEvictionGraceWithoutARestart"
+  - A change to the memory budget or to the pinned list wakes waiting requests, so a change that makes room is acted on immediately.
+    evidence: internal/runtime/pool.go:327 — "p.wakeWaitersLocked()"
+    evidence: internal/runtime/pool.go:352 — "p.wakeWaitersLocked()"
+    evidence: internal/runtime/grace_test.go:1116 — "func TestRaisingTheMemoryBudgetServesEveryWaiterItFits"
+  - Waiting requests have their own cap, separate from the per-model queue depth, and are served oldest first.
+    evidence: internal/runtime/pool.go:263 — "const defaultMaxLoadWaiters = 8"
+    evidence: internal/runtime/pool.go:1174 — "if len(p.waiters) == 0 || (w != nil && p.waiters[0] == w) { return admitEvict"
+    evidence: internal/runtime/grace_test.go:644 — "func TestARequestThatFitsDoesNotStepOverTheWaiterAtTheHead"
+  - No reservation interface and no second process were adopted — the grace, the queue and the wait all live inside the existing pool.
+    evidence: internal/runtime/pool.go:202 — "waiters []*loadWaiter"
+    evidence: internal/runtime/pool.go:524 — "func (p *Pool) acquire(ctx context.Context, repoID string, mayWait bool) (*Upstream, func(), error) {"
+- diverged:
+  - "The answer she gets back tells her she waited and for how long" (ac-3): the two response headers are written only on an install that has an API key configured, so on the shipping default — no key — a network client is told nothing. The wait is still measured and still recorded in the statistics; only the disclosure is gated, on the residency rule the models list already follows.
+    evidence: internal/gateway/gateway.go:565 — "func setWaitHeaders(h http.Header, keyed bool, waited time.Duration) { if !keyed { return }"
+    evidence: internal/gateway/gateway.go:414 — "obs.waited(runtime.AcquireStats{QueueWait: noRoom.Waited})"
+    evidence: internal/gateway/waitheaders_test.go:275 — "func TestTheWaitHeadersFollowTheResidencyRule"
+  - "As many requests are already waiting as the cap allows, then one more is refused immediately" (ac-6): past the cap an arrival that needs nothing unloaded is served rather than refused. The concession is bounded to free memory — such a caller may not take a victim, because the waiter at the head is parked precisely because that free room is not enough for it.
+    evidence: internal/runtime/pool.go:1176 — "if w == nil && len(p.waiters) >= p.opts.MaxLoadWaiters { return admitFreeRoom"
+    evidence: internal/runtime/pool.go:959 — "case admitFreeRoom: return len(victims) == 0"
+    evidence: internal/runtime/grace_test.go:1008 — "func TestAFullQueueDoesNotRefuseALoadThatNeedsNoEviction"
+    evidence: internal/runtime/grace_test.go:1061 — "func TestAQueueFullArrivalTakesNoVictimAndCostsNoSyscall"
+  - "It proceeds without waiting for anything else to finish" (ac-7) is delivered, but the several waiters a raise fits are served in queue order rather than simultaneously: the oldest loads and leaving the queue wakes the next. Nothing has to finish, so the criterion's words hold; the stronger reading the wording invites does not.
+    evidence: internal/runtime/pool.go:456 — "p.wakeWaitersLocked()"
+    evidence: internal/runtime/pool.go:1174 — "if len(p.waiters) == 0 || (w != nil && p.waiters[0] == w) {"
+    evidence: internal/runtime/grace_test.go:1116 — "func TestRaisingTheMemoryBudgetServesEveryWaiterItFits"
+- missing: (none)
 
-2026-09-08 — **Adopted, both.** The maintainer adopts criteria 3 and 6 as
-diverged. Both narrowings came out of the adversarial security review rather
-than the anti-wedge argument, and both are adopted on that review's reasoning:
-for criterion 3, that `warm` and `waited` are residency facts and an
-unauthenticated server already withholds exactly those, so the wait report
-follows the residency rule rather than leaking around it; for criterion 6, that
-a bound on how many requests may WAIT had become a bound on how many may be
-SERVED, and a caller needing nothing unloaded costs the machine nothing. The
-alternative the review offered for criterion 3 — keep the headers open and
-record the widened disclosure — stays rejected.
-
-The cost is accepted with the adoption and is stated here so it is not
-rediscovered as a defect: on the shipping default, which has no key, the press
-release's promise that the answer tells Carol she waited does not hold. It holds
-once a key is set. An independent review (receipt rcp-5c77e5d702ce) confirmed
-both narrowings from the code first, at `internal/gateway/gateway.go:565` and
-`internal/runtime/pool.go:1176`.
+Scope-condition dispositions:
+- cond-2609061822386054 — narrowed: Grace is off by default and switching it on is the only gate on the pool-side behaviour, but it is not the only gate on the record's client-facing promise: the wait report additionally requires a configured API key, which this condition does not mention.
+  narrowing: holds in full only for installs that have switched grace on AND have an API key configured; on a keyed-less install that switches grace on, the waiting and the protection happen but the response reports nothing
+  evidence: internal/config/grace_test.go:40 — "func TestAFreshInstallHasEvictionGraceOffWithTheDefaultIntervals"
+  evidence: internal/gateway/gateway.go:565 — "func setWaitHeaders(h http.Header, keyed bool, waited time.Duration) { if !keyed { return }"
+  evidence: internal/gateway/waitheaders_test.go:277 — "t.Run("an open server tells a network client nothing", func(t *testing.T) {"
+- cond-2609061822384266 — survived: The eviction plan returns 'enough room, no victims' before any candidate is considered when the load already fits the budget, and the queue is only ever joined off a NoRoomError, so where the models all fit nothing waits and grace never engages.
+  evidence: internal/runtime/pool.go:974 — "if used+need <= p.maxResident { return nil, true }"
+  evidence: internal/runtime/pool.go:1086 — "if !errors.As(err, &noRoom) { return waitNoGrace"
+  evidence: internal/runtime/grace_test.go:1116 — "func TestRaisingTheMemoryBudgetServesEveryWaiterItFits"
+- cond-2609061822385597 — survived: Pinned entries are removed from the candidate set before the least-recently-used comparison and are the only memory counted as permanently spoken for in the can-this-ever-fit test, so unpinned models remain the sole eviction candidates under grace exactly as they are without it.
+  evidence: internal/runtime/pool.go:992 — "if p.isPinnedLocked(e.repoID) { continue"
+  evidence: internal/runtime/pool.go:1136 — "if p.isPinnedLocked(e.repoID) { protected += LoadCost(e.bytes)"
+  evidence: internal/runtime/grace_test.go:382 — "func TestPinningTheOnlyCandidateReleasesAWaitingRequestAtOnce"
+- cond-2609061822389052 — survived: A client that gives up first cancels its context: the waiter leaves the queue and Acquire returns ctx.Err(), and the gateway returns on context.Canceled before any wait header or body is written, so that client sees only its own error.
+  evidence: internal/runtime/pool.go:640 — "p.leaveQueueLocked(w) p.mu.Unlock() return nil, nil, ctx.Err()"
+  evidence: internal/gateway/gateway.go:416 — "if errors.Is(err, context.Canceled) { obs.failed(stats.ClassCancelled) return // the client hung up while the model was loading"
+  evidence: internal/runtime/grace_test.go:306 — "func TestACancelledWaiterGivesItsPlaceBack"
 ## Grounds
 
 - pursued: we expect a shared Mac to serve several agents without their models evicting each other once the operator can pin, budget and grace, and once keyed clients can see what is warm; we are wrong if model swaps stay as frequent with those controls set as they were without them, measured by the statistics store
