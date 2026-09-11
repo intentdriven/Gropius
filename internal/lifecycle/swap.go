@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // The staged swap, in Go, because the shell cannot express it.
@@ -228,4 +229,22 @@ func copyFile(src, dst string, perm os.FileMode) error {
 		return err
 	}
 	return out.Close()
+}
+
+// keptStagingPath reads the placer's own failure for the directory it kept.
+//
+// PlaceBundle names that path when it is the only remaining copy of the
+// application, and repeating the sentence here would be a second place for it
+// to drift. What is read out is the path itself, so the report can say what to
+// do with it.
+func keptStagingPath(failure string) string {
+	i := strings.Index(failure, stagingPrefix)
+	if i < 0 {
+		return ""
+	}
+	rest := failure[i:]
+	if j := strings.IndexAny(rest, " ;"); j >= 0 {
+		rest = rest[:j]
+	}
+	return rest
 }

@@ -82,6 +82,7 @@ const (
 	servingReasonNoField     = "the running server does not publish its version"
 	servingReasonUnanswered  = "the server did not answer the control plane"
 	servingReasonSilent      = "something holds the port and answered no identity challenge"
+	servingReasonUnproven    = "something holds the port and answered the identity challenge wrongly"
 	servingReasonIdle        = "nothing is serving on this Mac"
 	servingReasonNotServing  = "nothing was answering when this command returned"
 	installedReasonNoVersion = "the downloaded build did not answer its own version verb"
@@ -151,7 +152,7 @@ type updateReport struct {
 // under a per-account data root, is exactly what another account's Gropius
 // looks like from here.
 func (r updateReport) servedByAnother() bool {
-	if r.Holder == portSilent {
+	if r.Holder == portSilent || r.Holder == portUnproven {
 		return true
 	}
 	return r.Serving != "" && r.Installed != "" && r.Serving != r.Installed

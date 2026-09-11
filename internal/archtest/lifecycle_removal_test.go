@@ -162,6 +162,111 @@ func TestNoLifecycleVerbReadsStandardInput(t *testing.T) {
 	})
 }
 
+// The control plane is READ from this package and never asked to do anything.
+//
+// The route that would make a cross-account quit cheap is exactly the route the
+// boundary forbids: it would hand every local account a stop button on a plane
+// with no bearer check. So the package has ONE place that speaks to the running
+// server, it is a GET, and the routes it may ask for are listed here.
+var readOnlyControlPlaneRoutes = map[string]string{
+	"/api/state": "the snapshot the control panel already polls — status reads the address and the models from it, and update reads the running server's version",
+}
+
+func TestTheLifecycleVerbsOnlyEverREADTheControlPlane(t *testing.T) {
+	sites := map[string][]int{}
+	routes := map[string]bool{}
+
+	forEachLifecycleFile(t, func(rel string, fset *token.FileSet, file *ast.File) {
+		ast.Inspect(file, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			// A verb that asked the server to DO something would spell it as
+			// one of these. Get is counted too, so the single read site is
+			// visible rather than merely allowed.
+			if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
+				switch sel.Sel.Name {
+				case "Get", "Post", "PostForm", "Head", "Do":
+					sites[rel] = append(sites[rel], fset.Position(call.Pos()).Line)
+				}
+			}
+			// And every route this package names, wherever it is named.
+			for _, arg := range call.Args {
+				if lit, ok := stringLit(arg); ok && strings.HasPrefix(lit, "/api/") {
+					routes[lit] = true
+				}
+			}
+			return true
+		})
+	})
+
+	for rel, lines := range sites {
+		if filepath.Base(rel) != "status.go" {
+			t.Errorf("%s speaks to the control plane on lines %v. This package has one read site, in status.go, "+
+				"and it is a GET: a verb that could ask a route to act would put a self-quit or a "+
+				"self-replacement behind an HTTP surface (spc-2609111812370705)", rel, lines)
+		}
+		if len(lines) > 1 {
+			t.Errorf("status.go speaks to the control plane on %d lines (%v); one call site is what makes the "+
+				"rule checkable by reading the file", len(lines), lines)
+		}
+	}
+	for route := range routes {
+		if readOnlyControlPlaneRoutes[route] == "" {
+			t.Errorf("the lifecycle verbs ask for %q, which is not one of the read-only routes recorded here. "+
+				"If it genuinely reveals only what a world-readable bundle reveals, add it with the reason; "+
+				"if it makes the server DO anything, it does not belong in a terminal verb at all", route)
+		}
+	}
+}
+
+// Nothing on the update's fetch path reads the environment.
+//
+// The bootstrap has an asset-directory seam, refused outside CI, because the
+// release workflow must install artefacts it has just built. A verb a person
+// types has no CI case, and a caller who could set one variable would otherwise
+// substitute the whole integrity control silently: the checksums would be read
+// from the same place as the bundle, and the verification would prove only that
+// a directory is self-consistent.
+func TestTheUpdatePathReadsNoEnvironmentVariable(t *testing.T) {
+	for _, name := range []string{"update.go", "updatefetch.go", "updatereport.go"} {
+		rel := lifecycleDir + "/" + name
+		for i, line := range strings.Split(readRepoFile(t, repoRootDir(t), rel), "\n") {
+			code, _, _ := strings.Cut(line, "//")
+			for _, read := range []string{"os.Getenv", "os.LookupEnv", "os.Environ"} {
+				if strings.Contains(code, read) {
+					t.Errorf("%s:%d reads the environment (%s). The update's origin is fixed in the binary: "+
+						"no variable and no flag may point the download, or the checksums that verify it, "+
+						"at anywhere else", rel, i+1, read)
+				}
+			}
+		}
+	}
+}
+
+// There is exactly ONE staged swap in the package, and update does not add a
+// second. The swap's guarantee — no failure path leaves this Mac without an
+// application — is a property of that one implementation and of its tests.
+func TestTheStagedSwapHasExactlyOneImplementation(t *testing.T) {
+	files := map[string]bool{}
+	forEachLifecycleSourceLine(t, func(rel string, _ int, line string) {
+		code, _, _ := strings.Cut(line, "//")
+		if strings.Contains(code, "stagingPrefix") {
+			files[rel] = true
+		}
+	})
+	if len(files) != 1 {
+		t.Errorf("%d files stage a bundle for the swap (%v); there is one, in swap.go, and every verb that "+
+			"places a bundle reaches it", len(files), files)
+	}
+	for rel := range files {
+		if filepath.Base(rel) != "swap.go" {
+			t.Errorf("%s stages a bundle for the swap; that belongs in swap.go with the argument for its order", rel)
+		}
+	}
+}
+
 // forEachLifecycleFile parses every non-test Go file of the package.
 func forEachLifecycleFile(t *testing.T, fn func(rel string, fset *token.FileSet, file *ast.File)) {
 	t.Helper()
