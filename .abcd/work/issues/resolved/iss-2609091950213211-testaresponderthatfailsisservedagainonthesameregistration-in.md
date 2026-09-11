@@ -9,7 +9,7 @@ found_during: "CI on PR 36, 2026-09-09"
 origin: researcher-authored
 production_mode: hand-written
 found_at: "internal/discovery/lifecycle_test.go"
-resolution: "Rewrote the test in the ordering shape the download-lock test was given: the fake announcer gained a gated serve step, so the assertions about what the lifecycle had done between the second failure and the first successful announcement are taken while the responder is held at the door, and the closing fixed sleep was replaced by Stop, which waits for the refresh goroutine to exit and makes the recorder's contents final. The underlying cause was the loop defect captured as iss-2609111013499513 and fixed with it."
+resolution: "Rewrote the test in the ordering shape the download-lock test was given: the fake announcer gained a gated serve step, so the assertions about what the lifecycle had done between the second failure and the first successful announcement are taken while the responder is held at the door, and the closing fixed sleep was replaced by Stop, which waits for the refresh goroutine to exit and makes the recorder's contents final. The two failing serves cannot be gated — a responder held at the door is one the loop reads as healthy — so the test also pins its own 20 ms tick, long against the time a freshly spawned goroutine takes to reach its first statement. The underlying loop defect was captured as iss-2609111013499513 and fixed with it."
 impact: internal
 ---
 
@@ -17,4 +17,4 @@ TestAResponderThatFailsIsServedAgainOnTheSameRegistration in internal/discovery/
 
 ## Grounds
 
-- pursued: the test's verdict now depends on the order of the lifecycle's steps rather than on how fast this Mac is — 50 runs green under -race and 30 more across -cpu 1,2,4, with the shared 1 ms interval restored once the loop stopped miscounting a dead responder as a recovery. What would show it wrong: a failure on a runner so loaded that a responder goroutine cannot record its outcome within one refresh interval, which no ordering in the test can rule out.
+- pursued: the test's verdict rests on the order of the lifecycle's steps wherever an ordering is available — the gated third serve, and the Stop that makes the recorder's contents final — and, where none is, on a tick long enough that scheduling cannot be mistaken for survival. The two failing serves are the where-none-is: holding one would be read by the loop as a responder that is up, so the retry window can only be widened, not closed. At the shared 1 ms tick the test still failed 4 times in 200 runs under -race -cpu 1 against a 32-way CPU load; at 20 ms, 700 runs under the same load were green. What would show it wrong: a runner on which a freshly spawned goroutine cannot reach its first statement within 20 ms.
