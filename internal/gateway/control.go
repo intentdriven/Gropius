@@ -1418,11 +1418,18 @@ func (c *Control) applySettings(raw []byte) (map[string]any, error) {
 	// all, so there is nothing left in it to repair.
 	c.clearNotices()
 	// Host, the bind mode and the port bind the server; decode concurrency and
-	// idle timeout are pool options — all five are consumed only at startup,
-	// and SetConfig cannot apply them live.
+	// idle timeout are pool options; advertising is decided once, when the
+	// Bonjour advert is started at launch — all six are consumed only at
+	// startup, and SetConfig cannot apply any of them live.
+	//
+	// Advertising was missing from this list while the port was in it, and the
+	// two are the same kind of setting (iss-2609091751184914): a script posting
+	// advertise:false was told "saved" while the advert went on answering the
+	// network, with nothing saying the stored value had not reached anything.
 	restart := incoming.Port != current.Port ||
 		incoming.Host != current.Host ||
 		incoming.BindMode != current.BindMode ||
+		incoming.Advertise != current.Advertise ||
 		incoming.DecodeConcurrency != current.DecodeConcurrency ||
 		incoming.IdleTimeoutSec != current.IdleTimeoutSec
 	out := map[string]any{

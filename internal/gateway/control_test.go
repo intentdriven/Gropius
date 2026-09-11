@@ -1174,3 +1174,52 @@ func TestModelActionsRefuseAnOversizedBody(t *testing.T) {
 			resp.StatusCode, body.Error.Message)
 	}
 }
+
+// Advertising is decided once, when the advert is started at launch, so a save
+// that changes it changes nothing until the next start.
+//
+// It said "saved" and nothing else (iss-2609091751184914). A script posting
+// advertise:false was told the save succeeded while the advert went on
+// answering the network, and the panel had no control for it at all, so the
+// only way to reach the silence was a hand-edited file or a script — the two
+// callers least likely to go and check. The port has always been in this list
+// for the same reason; advertising was left out of it.
+func TestASaveThatChangesAdvertisingAsksForARestart(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		stored  bool
+		posted  string
+		restart bool
+	}{
+		{"switching the advert off", true, "false", true},
+		{"switching the advert on", false, "true", true},
+		// And the other half of the promise: a save that leaves advertising
+		// where it was must not ask for a restart it does not need. A panel
+		// that says "restart" after every save says nothing at all.
+		{"a save that leaves it alone", true, "true", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := config.Default()
+			cfg.Advertise = tc.stored
+			srv := newTestControl(t, cfg)
+
+			body := fmt.Sprintf(`{"host":"0.0.0.0","port":11535,"advertise":%s,"decode_concurrency":4,"idle_timeout_sec":0}`, tc.posted)
+			resp := postJSON(t, srv, "/api/settings", body)
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				b, _ := io.ReadAll(resp.Body)
+				t.Fatalf("status = %d: %s", resp.StatusCode, b)
+			}
+			var out struct {
+				Restart bool `json:"restart"`
+			}
+			if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+				t.Fatal(err)
+			}
+			if out.Restart != tc.restart {
+				t.Errorf("restart = %v, want %v — the advert is started once at launch, so a stored value "+
+					"changes nothing until then", out.Restart, tc.restart)
+			}
+		})
+	}
+}
