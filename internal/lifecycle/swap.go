@@ -5,7 +5,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strings"
 )
 
 // The staged swap, in Go, because the shell cannot express it.
@@ -112,14 +111,15 @@ func placeBundle(src, dest string, rename renameFunc) error {
 	// things to look at and one of them is their application.
 	if fi, err := os.Lstat(dest); err == nil {
 		keep = retired != ""
-		return fmt.Errorf("%s was created by something else while the new bundle was being staged (%s); "+
-			"refusing to replace it%s", dest, describe(fi), retiredNote(retired, dest))
+		return keptWhen(keep, retired, fmt.Errorf(
+			"%s was created by something else while the new bundle was being staged (%s); "+
+				"refusing to replace it%s", dest, describe(fi), retiredNote(retired, dest)))
 	}
 
 	if err := rename(staged, dest); err != nil {
 		put, note := restore(rename, retired, dest)
 		keep = !put && retired != ""
-		return fmt.Errorf("move the new bundle into place: %w%s", err, note)
+		return keptWhen(keep, retired, fmt.Errorf("move the new bundle into place: %w%s", err, note))
 	}
 
 	// And only now is the set-aside copy removed, by the deferred RemoveAll of
@@ -231,20 +231,32 @@ func copyFile(src, dst string, perm os.FileMode) error {
 	return out.Close()
 }
 
-// keptStagingPath reads the placer's own failure for the directory it kept.
+// keptStagingError is the ONE swap failure a person has to act on: the
+// application is not where it belongs, and the only copy of it is sitting under
+// a name nobody would think to look for.
 //
-// PlaceBundle names that path when it is the only remaining copy of the
-// application, and repeating the sentence here would be a second place for it
-// to drift. What is read out is the path itself, so the report can say what to
-// do with it.
-func keptStagingPath(failure string) string {
-	i := strings.Index(failure, stagingPrefix)
-	if i < 0 {
-		return ""
+// It carries that path as a VALUE rather than only inside its sentence, and
+// that is the whole reason it exists. The first version of the update report
+// searched the failure text for the staging name and printed from there on —
+// which drops the directory the staging name sits in, so the report named a
+// relative path nobody could go to, and fired on the failures where the placer
+// had already REMOVED the staging directory. A caller that has to scrape a path
+// out of prose gets it wrong; this is the placer stating it.
+type keptStagingError struct {
+	// Path is the set-aside bundle: the only remaining copy of the application.
+	Path string
+	err  error
+}
+
+func (e *keptStagingError) Error() string { return e.err.Error() }
+func (e *keptStagingError) Unwrap() error { return e.err }
+
+// keptWhen wraps a failure as one that kept the only copy, and leaves every
+// other failure exactly as it was: the failures that keep nothing must not say
+// they kept something.
+func keptWhen(keep bool, retired string, err error) error {
+	if !keep || retired == "" {
+		return err
 	}
-	rest := failure[i:]
-	if j := strings.IndexAny(rest, " ;"); j >= 0 {
-		rest = rest[:j]
-	}
-	return rest
+	return &keptStagingError{Path: retired, err: err}
 }

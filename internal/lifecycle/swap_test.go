@@ -193,6 +193,53 @@ func TestSwapKeepsTheSetAsideBundleWhenItCannotBePutBack(t *testing.T) {
 	if !strings.Contains(err.Error(), retired) {
 		t.Errorf("the failure %q does not say where the only remaining copy of the application is", err)
 	}
+
+	// And it says it as a VALUE, not only inside a sentence. A caller that has
+	// to scrape a path out of prose gets it wrong — and a caller did: the first
+	// version of the update report searched the message for the staging name
+	// and printed what it found from that point on, which drops the directory
+	// the staging name sits in and leaves a relative path a person cannot go
+	// to.
+	var kept *keptStagingError
+	if !errors.As(err, &kept) {
+		t.Fatalf("the failure does not say IN A VALUE that the staging directory was kept: %v", err)
+	}
+	if kept.Path != retired {
+		t.Errorf("keptStagingError.Path = %q, want the absolute path of the only remaining copy (%q)", kept.Path, retired)
+	}
+}
+
+// The failures that keep NOTHING must not say they kept something: the placer
+// removes the staging directory on those paths, and a caller that treated any
+// swap failure as a kept one would send a person to a directory that is gone.
+func TestOnlyTheSwapThatKeepsTheOnlyCopySaysSo(t *testing.T) {
+	dir := t.TempDir()
+	src := bundleAt(t, filepath.Join(dir, "verified", "Gropius.app"), "new")
+	dest := bundleAt(t, filepath.Join(dir, "Applications", "Gropius.app"), "old")
+
+	// Call 1 sets the installed bundle aside, call 2 fails to move the new one
+	// in, and call 3 — the restore — succeeds. The installed bundle is back at
+	// the destination and the staging directory goes.
+	calls := 0
+	rename := func(oldpath, newpath string) error {
+		calls++
+		if calls == 2 {
+			return errors.New("no space left on device")
+		}
+		return os.Rename(oldpath, newpath)
+	}
+
+	err := placeBundle(src, dest, rename)
+	if err == nil {
+		t.Fatal("placeBundle reported success although nothing moved into place")
+	}
+	var kept *keptStagingError
+	if errors.As(err, &kept) {
+		t.Errorf("a swap that put the installed bundle back reports a kept staging directory at %q", kept.Path)
+	}
+	if got := markerAt(t, dest); got != "old" {
+		t.Errorf("the destination holds %q, want the installed bundle put back", got)
+	}
 }
 
 // findRetired returns the set-aside bundle left inside a staging directory, or

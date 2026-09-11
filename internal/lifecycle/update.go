@@ -2,6 +2,7 @@ package lifecycle
 
 import (
 	"encoding/json"
+	"errors"
 	"net"
 	"os"
 	"path/filepath"
@@ -196,10 +197,15 @@ func runUpdate(env Env, args []string, ue UpdateEnv) int {
 	writeLine(env.Err, stagePlace+": "+redact(ue.Dest, ue.Home))
 	if err := ue.Place(staged, ue.Dest); err != nil {
 		r.SwapFailure = redact(err.Error(), ue.Home)
-		r.DestVersion = ue.DestVersion()
-		r.KeptStaging = keptStagingPath(err.Error())
-		if r.KeptStaging != "" {
-			r.DestVersion = ""
+		// Which of the two true things to say is the PLACER's answer, not a
+		// guess made from its message: either it kept the only copy of the
+		// application and says where, or the installed bundle is untouched at
+		// the destination and the version there is what it was.
+		var kept *keptStagingError
+		if errors.As(err, &kept) {
+			r.KeptStaging = kept.Path
+		} else {
+			r.DestVersion = ue.DestVersion()
 		}
 		finishUpdate(ue, &r)
 		renderUpdate(env.Term, r)

@@ -355,6 +355,60 @@ func TestAStoppedSwapReportsWhatIsAtTheDestination(t *testing.T) {
 	}
 }
 
+// The one swap failure that keeps a staging directory names it, and names it as
+// a path a person can actually go to.
+//
+// This is the failure where somebody has to DO something: the application is
+// not where it belongs and the only copy of it is under a name nobody would
+// think to look for. A report that names it relatively, or that names a
+// directory the placer has already removed, is worse than one that says
+// nothing — it sends a person looking for their application in the wrong place.
+func TestAStoppedSwapThatKeptTheOnlyCopyNamesWhereItIs(t *testing.T) {
+	f := newFakeUpdate(t)
+	kept := filepath.Join(filepath.Dir(f.env.Dest), ".gropius-incoming-abcdef12", bundleName+".retired")
+	f.env.Place = func(_, dest string) error {
+		f.calls.placed = append(f.calls.placed, dest)
+		return &keptStagingError{
+			Path: kept,
+			err: errors.New("move the new bundle into place: no space left on device — and the installed bundle " +
+				"could NOT be put back. It is intact at " + kept),
+		}
+	}
+
+	code, out, _ := f.run(t)
+	if code == ExitOK {
+		t.Errorf("exit = %d, want non-zero for a swap that stopped", code)
+	}
+	if !strings.Contains(out, redact(kept, f.env.Home)) {
+		t.Errorf("the report does not name the path the only remaining copy is at:\nwant: %s\n%s",
+			redact(kept, f.env.Home), out)
+	}
+	// And it does NOT claim a version is at the destination, because on this
+	// path there is nothing there at all.
+	if strings.Contains(out, "0.4.0") {
+		t.Errorf("the report claims a version at a destination that is empty:\n%s", out)
+	}
+}
+
+// And a swap that stopped WITHOUT keeping anything says the other true thing:
+// the installed bundle is untouched at the destination. A copy that ran out of
+// space is the ordinary case here, and the placer removes its staging directory
+// on that path — so a report that sent a person to one would be sending them to
+// a directory that does not exist.
+func TestAStoppedSwapThatKeptNothingNamesTheVersionStillInstalled(t *testing.T) {
+	f := newFakeUpdate(t)
+	f.placeErr = errors.New("copy the verified bundle into /Applications: " +
+		"/Applications/.gropius-incoming-abcdef12/Gropius.app/Contents/MacOS/gropius: no space left on device")
+
+	_, out, _ := f.run(t)
+	if !strings.Contains(out, "0.4.0") {
+		t.Errorf("the report does not name the version still at the destination:\n%s", out)
+	}
+	if strings.Contains(out, "only remaining copy") {
+		t.Errorf("the report sends a person to a staging directory the placer has already removed:\n%s", out)
+	}
+}
+
 // The per-user link names a path inside the bundle rather than a build, so a
 // swap does not invalidate it. It is re-asserted only when it is gone.
 func TestThePerUserLinkIsLeftAloneUnlessItIsMissing(t *testing.T) {
