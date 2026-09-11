@@ -225,7 +225,8 @@ measurement is owed, not assumed, and is the first open question below.
 
 ## Audit Notes
 
-_Empty. Populated by intent-auditor when intent moves to shipped/._
+<!-- abcd-review: OWED receipt=rcp-7a4b71f42085 -->
+Fidelity review OWED (receipt rcp-7a4b71f42085).
 
 ## Grounds
 
