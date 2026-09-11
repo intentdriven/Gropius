@@ -8,10 +8,12 @@
 # The default rules stay in force. What is allowed is the two marker strings
 # the log tests plant — an API key and a HuggingFace token shaped like real
 # ones — to prove that neither reaches the server's log. They are fixed,
-# public, and exist to be searched for; nothing real has that shape.
+# public, and exist to be searched for; nothing real has that shape. The
+# second pattern is the pair of digit-run tokens the settings tests post to
+# prove a refusal never says whether a guessed secret was right.
 [extend]
 useDefault = true
 
 [allowlist]
 description = "Marker strings the log tests plant to prove a key never reaches the log"
-regexes = ['''sk-(marker|test)-2f9c4a1e7b3d''']
+regexes = ['''sk-(marker|test)-2f9c4a1e7b3d''', '''(bh|hf)_0123456789abcdef''']

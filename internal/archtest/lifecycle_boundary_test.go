@@ -1,7 +1,9 @@
 package archtest_test
 
 import (
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -148,4 +150,54 @@ func depsOf(t *testing.T, pkg string) []string {
 		t.Fatalf("go list -deps %s: %v\n%s", pkg, err, out)
 	}
 	return strings.Fields(string(out))
+}
+
+// No verb in internal/lifecycle writes the settings file.
+//
+// config.json is single-writer state (iss-2609062045106963): the control plane
+// writes it, and a save there is serialized behind one lock. A terminal verb
+// that wrote it would be a second writer with no lock between them, and the
+// two would race on a file that decides who can reach this server. `gropius
+// config show` therefore reads and answers, which is a decision the record
+// took rather than a stage on the way to a writing verb
+// (itd-2609081259493890) — and this is what keeps the decision from being
+// undone by a diff nobody read closely.
+//
+// A scan for the one function that writes it, which is honest about being one:
+// anything in this package could open the path and write bytes without naming
+// config.Save. What it catches is the ordinary way the second writer arrives —
+// somebody reaching for the save the panel already uses — and it makes adding
+// one a line in a diff somebody reviews.
+func TestNoLifecycleVerbWritesTheSettingsFile(t *testing.T) {
+	root := repoRootDir(t)
+	dir := filepath.Join(root, "internal", "lifecycle")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var seen int
+	for _, entry := range entries {
+		name := entry.Name()
+		if !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		seen++
+		src := readRepoFile(t, root, filepath.Join("internal", "lifecycle", name))
+		// Two spellings of "save a setting". REMOVING the file is not one of
+		// them and is not caught here: uninstall lists it among the things an
+		// installation put on this Mac, which is the whole of what uninstall
+		// does and is a deliberate act with its own criteria. The rule is
+		// about a second writer of settings, not about a verb that takes the
+		// installation away.
+		for _, writer := range []string{"config.Save(", "WriteFile(env.Paths.Config"} {
+			if strings.Contains(src, writer) {
+				t.Errorf("internal/lifecycle/%s names %s, so a verb can write the settings file — the "+
+					"control plane is its only writer, and a second one races it on the file that decides "+
+					"who can reach this server (iss-2609062045106963)", name, writer)
+			}
+		}
+	}
+	if seen == 0 {
+		t.Fatal("no source files found in internal/lifecycle, so this scan is reading the wrong directory")
+	}
 }

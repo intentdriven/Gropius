@@ -867,6 +867,11 @@ function renderSettings() {
   $('setHost').value = bindSelectValue(c);
   $('setPort').value = c.port;
   $('setKey').value  = c.api_key || '';
+  // The stored value, not what is being advertised right now: this is the
+  // control, and the decision the running server took at start is on the
+  // posture page. The two differ exactly while a change is waiting for a
+  // restart, and the hint beside the box is what says so.
+  $('setAdvertise').checked = !!c.advertise;
   $('setIdle').value = c.idle_timeout_sec;
   $('setConc').value = c.decode_concurrency;
   // From the machine object, not from the stored setting: what is enforced is
@@ -1371,6 +1376,7 @@ $('ovApply').addEventListener('click', () => {
 
 $('setStats').addEventListener('change', () => { settingsTouched = true; });
 $('setGrace').addEventListener('change', () => { settingsTouched = true; });
+$('setAdvertise').addEventListener('change', () => { settingsTouched = true; });
 $('setGraceSec').addEventListener('input', updateGraceHint);
 $('setGraceWait').addEventListener('input', updateGraceHint);
 $('setBudget').addEventListener('input', updateBudgetHint);
@@ -1467,14 +1473,18 @@ $('settingsForm').addEventListener('submit', async (e) => {
   // Anything typed in the per-model fields counts, whether or not Set override
   // was pressed.
   foldPendingOverride();
-  // Only the fields this form owns. Anything omitted (advertise, preload) is
-  // preserved server-side — sending advertise:true here used to silently
-  // re-enable LAN advertising on every save.
+  // Only the fields this form owns. Anything omitted — the preload list, the
+  // upstream header timeout — is preserved server-side, which is what keeps a
+  // save from dropping a setting the operator set by hand and never touched
+  // here. Advertising used to be one of those: omitting it preserved it, and
+  // an earlier form that posted advertise:true silently re-enabled the advert
+  // on every save. It is a control now, so it is posted from the box.
   const body = {
     // The bind is two fields — an address and a mode — and the select carries
     // whichever one the operator chose.
     ...bindSelectBody($('setHost').value, state.config.host),
     port:               parseInt($('setPort').value, 10),
+    advertise:          $('setAdvertise').checked,
     api_key:            $('setKey').value,
     idle_timeout_sec:   parseInt($('setIdle').value, 10) || 0,
     decode_concurrency: parseInt($('setConc').value, 10) || 1,

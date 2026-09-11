@@ -22,6 +22,7 @@ by its full path.
 | `gropius version` | Prints which build this is, read from the binary. Contacts nothing. | `0` |
 | `gropius status` | What this installation is doing right now. Reads state that already exists, so polling it is safe. | `0` |
 | `gropius doctor` | The expensive checks, each labelled with how much its answer is worth. | `0` or `1` |
+| `gropius config show` | The settings in force, read from the settings file the way the server reads it. Reads only; the API key and the HuggingFace token are shown as `********` and never as their values. | `0` |
 | `gropius install` | Places the application, grants it through the firewall, provisions the MLX runtime, links the command. Repairs what is missing. | `0` or `1` |
 | `gropius uninstall` | Removes what this installation put on the Mac. Leaves the downloaded models. | `0` or `1` |
 | `gropius update` | Fetches the current release, verifies it against the checksums published beside it, places it with the staged swap, re-makes the firewall grant, and reports the version installed and the version this Mac is serving as two separate facts. | `0` or `1` |
@@ -36,6 +37,7 @@ no server is started. A first argument beginning with `-` is a server flag, so
 | --- | --- | --- |
 | `gropius status` | `--json` | Writes the machine-readable form on standard output. That form is the contract. |
 | `gropius doctor` | `--json` | Writes the machine-readable form, which carries the severity of every finding. |
+| `gropius config` | `--json` | Writes the machine-readable form, which is the contract: an object of settings keyed by the name `config.json` gives each one. |
 | `gropius install` | `--bundle` | Takes a path: the verified bundle to place. The bootstrap passes it; a person repairing an installation does not. |
 | `gropius install` | `--place-only` | Places the bundle and stops: no firewall grant, no provisioning, no launch. This is what the release gate runs, where there is no console to answer an authorisation panel. |
 | `gropius uninstall` | `--purge` | Removes the downloaded models as well. |
@@ -204,6 +206,34 @@ it is not says so and prints the line that adds it.
 Uninstall removes that link only when it is a symbolic link into a Gropius
 bundle. A real file of that name belongs to whoever put it there.
 
+## `gropius config show --json`
+
+An object under `settings`, keyed by the name `config.json` gives each setting.
+A nested setting is keyed by its path, so a per-model figure names the model it
+belongs to. Every setting Gropius holds is in it, including the ones that have
+no control in the panel and the ones whose value is at its default — a setting
+the file leaves out is still in force, and its default is what is reported.
+
+Two settings never carry their value. The API key and the HuggingFace token are
+shown as `********` when one is set and as an empty string when none is, so a
+reader can tell "no key" from "a key you are not being shown" without the value
+travelling into a terminal, a pipe or a bug report.
+
+Two settings are reported as what is in force rather than as what the file
+holds: the log level, whose blank means the sparse default, and the chat rule,
+whose blank means the shipped rule. The memory budget is not: a zero there means
+the default share of this Mac's memory, and no verb works that figure out.
+
+When `config.json` could not be used as written, a `settings_problem` field
+says so and the settings reported are the ones the server would start from —
+the bind locked down to this Mac, announcing off — rather than what the file
+holds. A script that reads an address out of this without checking that field
+will believe a locked-down server is what is running. The field is absent when
+the file loaded cleanly.
+
+What every setting means is on the
+[getting started page](getting-started.md).
+
 ## What no verb does
 
 - **Nothing reads standard input.** Under `curl … | bash` the script's own
@@ -229,6 +259,9 @@ bundle. A real file of that name belongs to whoever put it there.
 - **No verb is reachable from the control panel.** The HTTP surface cannot see
   the package these verbs live in, so no request arriving on this Mac can drive
   a removal, a replacement or an elevation.
+- **No verb writes a setting.** The control panel is the settings file's only
+  writer, so the two cannot race on the file that decides who can reach this
+  server. `gropius config show` reads it and answers.
 
 ## Where to go next
 

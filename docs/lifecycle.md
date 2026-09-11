@@ -318,6 +318,17 @@ For what is true right now rather than what is wrong — serving or not, on whic
 address, which models are in memory — `gropius status` answers from state that
 already exists and is cheap enough to poll.
 
+For what the settings say, without opening the file:
+
+```sh
+gropius config show
+```
+
+It prints every setting in force, spelled the way `config.json` spells it, so a
+figure you want to change by hand can be searched for in the file. It writes
+nothing, and the API key and the HuggingFace token are shown as `********` and
+never as their values. Add `--json` for a script.
+
 ### Pasting the output into a bug report
 
 Doctor's output is written to be pasted. Home directories are abbreviated to

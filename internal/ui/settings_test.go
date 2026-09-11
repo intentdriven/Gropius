@@ -298,3 +298,171 @@ func TestThePanelReadsThePinnedSetThePoolIsEnforcing(t *testing.T) {
 		t.Error("the panel never reads state.machine, so it cannot say what a pinned set leaves of the budget")
 	}
 }
+
+// Advertising is a control, not a line on the posture page.
+//
+// It decides whether this Mac announces itself on the network, which is a
+// "most important setting" by the convention's own words (AGENTS.md, "Three
+// surfaces"). Before this it was reachable only by hand-editing config.json:
+// the form omitted the key so that a save would not silently re-enable the
+// advert, and the posture page's line for it is an account of what is on
+// rather than something anyone can switch (itd-2609081259493890).
+//
+// Asserted against the source and the markup rather than through node,
+// because the submit body is built inside an event listener that no test can
+// lift out without a DOM — the same reason the per-model switches above are
+// asserted this way. That also means this half runs on a machine with no node
+// on it, which is where the client-side wedges have gone unnoticed before.
+func TestTheSettingsFormPostsAdvertise(t *testing.T) {
+	src := readPanelSource(t)
+	if !strings.Contains(src, "advertise:          $('setAdvertise').checked,") {
+		t.Error("the Settings form does not post advertise from the box; a save then leaves the stored " +
+			"value alone and the control changes nothing")
+	}
+	if !strings.Contains(src, "$('setAdvertise').checked = !!c.advertise;") {
+		t.Error("the box is never filled in from the stored settings, so it shows the wrong state until " +
+			"somebody touches it — and then posts what it was showing")
+	}
+
+	markup := readPanelMarkup(t)
+	tag := fieldTag(t, markup, "setAdvertise")
+	if got := attr(tag, "type"); got != "checkbox" {
+		t.Errorf("setAdvertise is a %q, want a checkbox: advertising is on or off", got)
+	}
+	if !strings.Contains(settingsPane(t, markup), tag) {
+		t.Error("the advertising box is not in the Settings pane; a read-only line elsewhere in the panel " +
+			"is an account of what is on, not a control")
+	}
+}
+
+// The advert is started once, at launch, so a stored value changes nothing
+// until the next start. A control that does not say so tells the operator they
+// have switched the advert off when they have not — the silence
+// iss-2609091751184914 records, from the panel's side.
+func TestTheAdvertisingControlSaysAChangeWaitsForTheNextStart(t *testing.T) {
+	pane := settingsPane(t, readPanelMarkup(t))
+	box := strings.Index(pane, `id="setAdvertise"`)
+	if box < 0 {
+		t.Fatal("the Settings pane carries no advertising box")
+	}
+	hint := between(pane[box:], `<p class="hint">`, "</p>")
+	if hint == "" {
+		t.Fatal("the advertising box carries no hint")
+	}
+	flat := strings.Join(strings.Fields(hint), " ")
+	if !strings.Contains(flat, "next starts") {
+		t.Errorf("the advertising hint does not say a change waits for the next start:\n%s", flat)
+	}
+}
+
+// settingsPane is the Settings pane's markup and only it.
+func settingsPane(t *testing.T, markup string) string {
+	t.Helper()
+	start := strings.Index(markup, `<section id="tab-settings"`)
+	if start < 0 {
+		t.Fatal("the control panel has no Settings pane")
+	}
+	end := strings.Index(markup[start:], "</section>")
+	if end < 0 {
+		t.Fatal("the Settings pane is never closed")
+	}
+	return markup[start : start+end]
+}
+
+// Every control accepts a stored value the server accepts — including the ones
+// only a hand edit or another Mac's file produces.
+//
+// This is the value half of the never-refused promise, and it runs the panel's
+// own functions rather than reading the markup: the stored settings are
+// written into the controls the way renderSettings writes them, and read back
+// out the way the submit body reads them. A control that cannot hold a stored
+// value posts something else, and the operator's next save silently changes a
+// setting they never touched — the same wedge as a refusal, from the other
+// side.
+//
+// Zero is the case worth having. A blank sampling field means "pass no flag"
+// and zero means greedy decoding, so a control that rendered zero as blank
+// would turn a saved temperature of 0 into the model server's own default on
+// the next unrelated save.
+//
+// Node-gated, and the Go companion in controls_test.go is what holds the same
+// promise on a machine with no node — which is where two of the three wedge
+// incidents would have gone unnoticed.
+func TestEveryControlAcceptsAStoredValue(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		stored string
+	}{
+		{"zero is a value and not a blank", `{"temperature":0,"top_p":1,"top_k":0,"min_p":0,"max_tokens":1}`},
+		{"the ceilings the server accepts", `{"temperature":2,"top_p":1,"top_k":1024,"min_p":1,"max_tokens":1048576}`},
+		{"a figure with more digits than a box suggests", `{"temperature":0.123456789,"top_p":0.95,"top_k":40,"min_p":0.05,"max_tokens":512}`},
+		// Nothing stored at all: every field blank, and blank read back as
+		// null rather than as zero.
+		{"nothing set", `{"temperature":null,"top_p":null,"top_k":null,"min_p":null,"max_tokens":null}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, which := range []string{"input", "over"} {
+				got := evalPanelControls(t, tc.stored, which)
+				var want map[string]any
+				if err := json.Unmarshal([]byte(tc.stored), &want); err != nil {
+					t.Fatal(err)
+				}
+				if !reflect.DeepEqual(got, want) {
+					t.Errorf("the %q controls turned %s into %v — a stored value the server accepts is not "+
+						"one the panel can hold, so an unrelated save rewrites it", which, tc.stored, got)
+				}
+			}
+		})
+	}
+}
+
+// evalPanelControls writes one set of stored sampling values into the panel's
+// controls and reads back what a save would post, with the panel's element
+// lookup stubbed: these functions touch nothing of a control but its value, so
+// a plain object per id is the whole of the DOM they need.
+func evalPanelControls(t *testing.T, stored, which string) map[string]any {
+	t.Helper()
+	src := readPanelSource(t)
+	var b strings.Builder
+	// The stub coerces on assignment, because that is the one thing about a
+	// real control that matters here: HTMLInputElement.value is a string, so
+	// writing the number 0 into a field and reading it back gives "0" and not
+	// 0. A stub that kept the number would pass a round trip the browser fails.
+	b.WriteString("const els = {};\n" +
+		"const cell = () => { let v = ''; return { get value() { return v; }, set value(x) { v = String(x); } }; };\n" +
+		"const $ = (id) => els[id] || (els[id] = cell());\n")
+	b.WriteString(extractConst(t, src, "SAMPLING_FIELDS"))
+	b.WriteString("\n")
+	for _, name := range []string{"numberOrNull", "writeSampling", "readSampling"} {
+		b.WriteString(extractFunction(t, src, name))
+		b.WriteString("\n")
+	}
+	fmt.Fprintf(&b, "writeSampling(%q, %s);\n", which, stored)
+	fmt.Fprintf(&b, "process.stdout.write(JSON.stringify(readSampling(%q)));", which)
+
+	var out map[string]any
+	if err := json.Unmarshal([]byte(evalJS(t, b.String())), &out); err != nil {
+		t.Fatalf("the panel returned something that is not an object: %v", err)
+	}
+	return out
+}
+
+// extractConst returns the source of a top-level `const NAME = ...;`
+// declaration, to the line that closes it. The tables the panel drives its
+// controls from are data rather than functions, and a test that retyped one
+// here would be asserting against its own copy.
+func extractConst(t *testing.T, src, name string) string {
+	t.Helper()
+	start := strings.Index(src, "const "+name+" = ")
+	if start < 0 {
+		t.Fatalf("the control panel declares no const %s", name)
+	}
+	rest := src[start:]
+	for _, closing := range []string{"\n];", "\n};"} {
+		if end := strings.Index(rest, closing); end >= 0 {
+			return rest[:end+len(closing)]
+		}
+	}
+	t.Fatalf("the declaration of %s is never closed", name)
+	return ""
+}

@@ -223,14 +223,38 @@
       <span>Port</span>
       <input id="setPort" type="number" min="1" max="65535">
     </label>
+    <fieldset class="group">
+      <legend>Announce on the network</legend>
+      <label class="switch">
+        <input id="setAdvertise" type="checkbox">
+        <span>Announce this server on the local network</span>
+      </label>
+      <p class="hint">While it is on, Gropius announces itself over Bonjour, so a client
+        on your network can find it by name instead of being told its address. While it
+        is off, it serves exactly the same requests to anything that already knows where
+        it is: announcing is how a server is found and never what it allows, and the bind
+        address above is what decides who can reach it. The advert is started once, when
+        Gropius starts, so a change here applies when Gropius next starts; until then the
+        Posture tab says what is being announced now.</p>
+    </fieldset>
+
     <label>
       <span>API key <em>(leave blank for no authentication)</em></span>
       <input id="setKey" type="text" placeholder="no key — anyone on the network can use this server">
       <button type="button" id="genKey" class="link">Generate a key</button>
     </label>
+    <!-- No bound at all on the idle timeout: the server does not bound it
+         either, and a bound here that the server does not have is one the
+         browser enforces before the submit listener ever runs — a config.json
+         holding a figure outside it loads, and then the form cannot be
+         submitted at all, over a field nobody touched. The guidance the old
+         min="0" carried is in the label instead, where it advises rather than
+         refuses (itd-2609081259493890). A control keeps exactly the bounds the
+         server enforces, which for the batched-requests field below is a floor
+         of 1 and no ceiling. -->
     <label>
       <span>Unload models after idle (seconds, 0 = never)</span>
-      <input id="setIdle" type="number" min="0">
+      <input id="setIdle" type="number">
     </label>
     <label>
       <span>Memory for loaded models (GB, blank for the default)</span>
@@ -271,8 +295,8 @@
     </fieldset>
 
     <label>
-      <span>Batched requests (decode concurrency)</span>
-      <input id="setConc" type="number" min="1" max="64">
+      <span>Batched requests (decode concurrency, 1 or more)</span>
+      <input id="setConc" type="number" min="1">
     </label>
     <label>
       <span>HuggingFace token <em>(only needed for gated models)</em></span>

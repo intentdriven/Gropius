@@ -1,0 +1,44 @@
+{
+  "settings": {
+    "advertise": true,
+    "api_key": "********",
+    "bind_mode": "",
+    "chat_rule.pipeline_tags": [
+      "text-generation",
+      "image-text-to-text"
+    ],
+    "chat_rule.required_tags": [
+      "conversational"
+    ],
+    "decode_concurrency": 4,
+    "eviction_grace": false,
+    "eviction_grace_sec": 120,
+    "eviction_max_wait_sec": 300,
+    "hf_token": "********",
+    "host": "0.0.0.0",
+    "idle_timeout_sec": 0,
+    "log_level": "sparse",
+    "max_resident_bytes": 0,
+    "models.mlx-community/Qwen3-8B-4bit.merge_system_messages": false,
+    "models.mlx-community/Qwen3-8B-4bit.pinned": true,
+    "models.mlx-community/Qwen3-8B-4bit.sampling.max_tokens": null,
+    "models.mlx-community/Qwen3-8B-4bit.sampling.min_p": null,
+    "models.mlx-community/Qwen3-8B-4bit.sampling.temperature": 0.7,
+    "models.mlx-community/Qwen3-8B-4bit.sampling.top_k": null,
+    "models.mlx-community/Qwen3-8B-4bit.sampling.top_p": null,
+    "models.mlx-community/Qwen3-8B-4bit.served_context": 8192,
+    "port": 11535,
+    "preload": [
+      "mlx-community/Qwen3-8B-4bit"
+    ],
+    "sampling.max_tokens": null,
+    "sampling.min_p": null,
+    "sampling.temperature": null,
+    "sampling.top_k": null,
+    "sampling.top_p": null,
+    "statistics": false,
+    "stats_max_bytes": 209715200,
+    "stats_months": 6,
+    "upstream_header_timeout_sec": 45
+  }
+}
