@@ -44,12 +44,28 @@ const loopbackBind = "127.0.0.1"
 var version = "dev"
 
 func main() {
+	// What this command line asks for, decided before a listener, a log or a
+	// data root exists: the server, a verb, or neither. A verb answers a
+	// question in a terminal and stops; only the server path below goes on to
+	// bind anything.
+	cmd := classifyCommandLine(os.Args[1:])
+	switch cmd.Kind {
+	case kindRefusal:
+		fmt.Fprintln(os.Stderr, cmd.Message)
+		os.Exit(2)
+	case kindVerb:
+		os.Exit(runCommandVerb(cmd))
+	}
+
 	var (
 		headless = flag.Bool("headless", false, "run without the menu bar icon (for launchd)")
 		root     = flag.String("root", "", "override the data directory")
 		showVer  = flag.Bool("version", false, "print the version and exit")
 	)
-	flag.Parse()
+	// cmd.Args rather than os.Args[1:], which is the same list except after
+	// `gropius serve`, where the verb itself is not one of the server's flags.
+	// The set exits the process on a flag it does not know, as flag.Parse does.
+	_ = flag.CommandLine.Parse(cmd.Args)
 
 	// Go's flag package stops at the first non-flag argument and leaves the rest
 	// in flag.Args(), which nothing here used to read — so a positional argument
@@ -58,8 +74,10 @@ func main() {
 	// the configured address, generated and printed an API key, advertised over
 	// Bonjour and never returned, so a typo or a subcommand name guessed against
 	// a build that predates it stood up a LAN-exposed server instead of saying it
-	// did not understand. Refuse before any of that happens.
-	if msg := refuseUnknownArgs(flag.Args()); msg != "" {
+	// did not understand. The classification above catches a verb in the first
+	// position; this catches one that followed a flag, which the flag package
+	// stops at and leaves here. Refuse before any of that happens.
+	if msg := refuseTrailingArgs(flag.Args()); msg != "" {
 		fmt.Fprintln(os.Stderr, msg)
 		os.Exit(2)
 	}
