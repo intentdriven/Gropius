@@ -94,31 +94,50 @@ func TestConfigShowRedactsTheSecrets(t *testing.T) {
 // heuristic on the key's name and says so: it catches the ordinary way a
 // secret arrives — a field called a key, a token, a secret or a password — and
 // it would not catch one called something else.
+//
+// Walked the way the RENDERER walks it, which is the whole point: the report
+// recurses into the nested settings structs and into every per-model entry, so
+// a guard that looked only at config.Config's own fields would be blind to
+// exactly the place a new secret is most likely to arrive — a token on a
+// model's settings, say. The two walks have to cover the same ground, or the
+// list of things to redact is checked against a smaller world than the thing
+// doing the redacting.
 func TestEverySettingThatLooksLikeASecretIsRedacted(t *testing.T) {
 	covered := map[string]bool{}
 	for _, s := range secretSettings {
 		covered[s.Key] = true
 	}
-	rt := reflect.TypeOf(config.Config{})
-	for i := range rt.NumField() {
-		key, _, _ := strings.Cut(rt.Field(i).Tag.Get("json"), ",")
-		if key == "" || key == "-" || covered[key] {
+
+	reported := SettingsInForce(sampleSettings())
+	if len(reported) < 25 {
+		t.Fatalf("the report names %d settings, so this guard is reading the wrong walk", len(reported))
+	}
+	held := map[string]bool{}
+	for key := range reported {
+		leaf := key
+		if i := strings.LastIndex(key, "."); i >= 0 {
+			leaf = key[i+1:]
+		}
+		held[leaf] = true
+		if covered[leaf] {
 			continue
 		}
-		for _, word := range []string{"key", "token", "secret", "password"} {
-			if strings.Contains(key, word) {
-				t.Errorf("config.Config carries %q, which reads like a secret and is not in secretSettings — "+
-					"a terminal verb prints what that list does not redact", key)
+		// Matched on whole snake_case segments rather than as substrings,
+		// because "max_tokens" is a sampling parameter and not a credential.
+		// That is the cost of a heuristic and it runs both ways: a secret
+		// called "auth_tokens" would slip past this, which is why the list
+		// itself is the guard and this only asks for the obvious ones.
+		for _, segment := range strings.Split(leaf, "_") {
+			switch segment {
+			case "key", "token", "secret", "password":
+				t.Errorf("`gropius config show` reports %q, which reads like a secret and is not in "+
+					"secretSettings — the verb prints what that list does not redact, to a terminal and "+
+					"into a bug report", key)
 			}
 		}
 	}
 	// And the other direction: a name in the list that is not a setting any
 	// more redacts nothing.
-	held := map[string]bool{}
-	for i := range rt.NumField() {
-		key, _, _ := strings.Cut(rt.Field(i).Tag.Get("json"), ",")
-		held[key] = true
-	}
 	for _, s := range secretSettings {
 		if !held[s.Key] {
 			t.Errorf("secretSettings names %q, which the configuration no longer holds", s.Key)
@@ -250,5 +269,41 @@ func TestConfigShowStatesASettingsProblemBesideTheAnswer(t *testing.T) {
 	var doc any
 	if err := json.Unmarshal(out.Bytes(), &doc); err != nil {
 		t.Errorf("the problem landed in the middle of the contract: %v\n%s", err, out.String())
+	}
+}
+
+// The machine contract carries the settings problem too.
+//
+// Standard error is not visible to the one caller the contract exists for. A
+// script that runs `gropius config show --json 2>/dev/null` and reads the bind
+// address out of it would be told "127.0.0.1" about a server that may be
+// answering the whole network: when config.json is unusable the settings
+// reported are the fail-closed FALLBACK the server would start from, not what
+// the file holds. The problem has to travel in the document as well.
+func TestConfigShowJSONCarriesTheSettingsProblem(t *testing.T) {
+	env, out, _ := configShowEnv(t, sampleSettings())
+	env.SettingsProblem = "config.json is not a valid configuration — the bind address is locked down"
+	if code := RunConfig(env, []string{"show", "--json"}); code != ExitOK {
+		t.Fatalf("exit = %d", code)
+	}
+	var doc struct {
+		Problem string `json:"settings_problem"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &doc); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(doc.Problem, "locked down") {
+		t.Errorf("the contract does not carry the settings problem, so a caller reading it with standard "+
+			"error closed is told the fallback is the truth: %q", doc.Problem)
+	}
+
+	// And it is absent when there is nothing to say, so its presence means
+	// something rather than being a field every caller has to test.
+	env, clean, _ := configShowEnv(t, sampleSettings())
+	if code := RunConfig(env, []string{"show", "--json"}); code != ExitOK {
+		t.Fatalf("exit = %d", code)
+	}
+	if strings.Contains(clean.String(), "settings_problem") {
+		t.Errorf("a clean read still carries a settings_problem field:\n%s", clean.String())
 	}
 }

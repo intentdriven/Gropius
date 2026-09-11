@@ -202,7 +202,7 @@ func RunConfig(env Env, args []string) int {
 
 	settings := SettingsInForce(env.Config)
 	if *asJSON {
-		if err := writeJSON(env.Out, configDocument{Settings: settings}); err != nil {
+		if err := writeJSON(env.Out, ConfigDocument{Settings: settings, Problem: env.SettingsProblem}); err != nil {
 			writeLine(env.Err, "gropius config show: "+err.Error())
 			return ExitFailed
 		}
@@ -212,11 +212,21 @@ func RunConfig(env Env, args []string) int {
 	return ExitOK
 }
 
-// configDocument is what `gropius config show --json` answers, and it is the
+// ConfigDocument is what `gropius config show --json` answers, and it is the
 // contract: a script reads settings[<key>] by the same name config.json
 // carries. Wrapped in a field of its own rather than written as a bare object
 // so that a later verb can answer with something beside the settings without
 // breaking every caller.
-type configDocument struct {
+type ConfigDocument struct {
 	Settings map[string]json.RawMessage `json:"settings"`
+	// Problem is what reading config.json had to do to make it usable, and it
+	// is in the document rather than on standard error alone because the
+	// document would otherwise lie to the one caller that cannot see standard
+	// error. When the file is unusable the settings reported are the
+	// FALLBACK — the bind locked down to loopback, advertising off — which is
+	// what the server would start from and not what the file holds. A script
+	// reading the host out of this without the problem beside it would be told
+	// "127.0.0.1" with full confidence about a server that may be answering
+	// the whole network. Empty, and omitted, when the file loaded cleanly.
+	Problem string `json:"settings_problem,omitempty"`
 }

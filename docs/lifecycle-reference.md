@@ -180,6 +180,13 @@ holds: the log level, whose blank means the sparse default, and the chat rule,
 whose blank means the shipped rule. The memory budget is not: a zero there means
 the default share of this Mac's memory, and no verb works that figure out.
 
+When `config.json` could not be used as written, a `settings_problem` field
+says so and the settings reported are the ones the server would start from —
+the bind locked down to this Mac, announcing off — rather than what the file
+holds. A script that reads an address out of this without checking that field
+will believe a locked-down server is what is running. The field is absent when
+the file loaded cleanly.
+
 What every setting means is on the
 [getting started page](getting-started.md).
 
