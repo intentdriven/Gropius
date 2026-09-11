@@ -40,6 +40,9 @@ type UninstallEnv struct {
 	// play and they are not symmetric — one bundle in the machine-wide
 	// directory is what every account on the Mac launches.
 	Bundles []string
+	// SystemApplications is that machine-wide directory, so the output can say
+	// when what it removed was everybody's copy rather than this account's.
+	SystemApplications string
 	// Link is this account's own gropius command.
 	Link string
 	// Binary is the path the firewall entry is keyed to.
@@ -104,17 +107,18 @@ func liveUninstallEnv(env Env) (UninstallEnv, error) {
 		}
 	}
 	return UninstallEnv{
-		Paths:      paths,
-		Home:       home,
-		Bundles:    bundles,
-		Link:       filepath.Join(binDir(home), linkFileName),
-		Binary:     binary,
-		SharedRoot: shared,
-		NamedRoot:  os.Getenv("GROPIUS_ROOT"),
-		Uid:        os.Getuid(),
-		Terminal:   isTerminal(os.Stdin),
-		Firewall:   revokeFirewall,
-		OwnerOf:    ownerIn,
+		Paths:              paths,
+		Home:               home,
+		Bundles:            bundles,
+		SystemApplications: systemApplications,
+		Link:               filepath.Join(binDir(home), linkFileName),
+		Binary:             binary,
+		SharedRoot:         shared,
+		NamedRoot:          os.Getenv("GROPIUS_ROOT"),
+		Uid:                os.Getuid(),
+		Terminal:           isTerminal(os.Stdin),
+		Firewall:           revokeFirewall,
+		OwnerOf:            ownerIn,
 	}, nil
 }
 
@@ -164,7 +168,14 @@ func runUninstall(env Env, args []string, ue UninstallEnv) int {
 			failed = true
 			continue
 		}
-		writeLine(env.Out, "removed "+abbreviate(target, ue.Home)+".")
+		line := "removed " + abbreviate(target, ue.Home) + "."
+		if isUnder(target, ue.SystemApplications) {
+			// Said rather than left to be discovered. One bundle there is what
+			// every account on this Mac launches, so this removal was not only
+			// this account's — and nobody else gets a message about it.
+			line += " That was the copy every account on this Mac launches."
+		}
+		writeLine(env.Out, line)
 	}
 
 	if ok := removeLink(ue); ok {
@@ -189,6 +200,12 @@ func runUninstall(env Env, args []string, ue UninstallEnv) int {
 		return ExitFailed
 	}
 	return ExitOK
+}
+
+// isUnder reports whether a path sits directly inside a directory. Empty dir
+// means the question does not apply, which is how a test says "not here".
+func isUnder(path, dir string) bool {
+	return dir != "" && filepath.Dir(path) == filepath.Clean(dir)
 }
 
 // removalTargets is what uninstall removes, in the order it removes it. Every

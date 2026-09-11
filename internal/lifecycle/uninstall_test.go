@@ -164,6 +164,40 @@ func TestUninstallSurvivesARefusedAuthorisation(t *testing.T) {
 	}
 }
 
+// A bundle in the machine-wide applications directory is the copy EVERY account
+// on this Mac launches, and removing it removes it for all of them. The
+// asymmetry is named in the code; the output has to name it too, because the
+// person running uninstall is the only one who will find out otherwise.
+func TestUninstallSaysWhenItRemovedTheCopyEveryAccountLaunches(t *testing.T) {
+	env, ue, out, _ := uninstallFixture(t)
+
+	// A stand-in for the machine-wide directory, so this test never touches the
+	// real one.
+	apps := filepath.Join(t.TempDir(), "Applications")
+	machineWide := bundleAt(t, filepath.Join(apps, "Gropius.app"), "everybody's")
+	ue.SystemApplications = apps
+	ue.Bundles = []string{machineWide}
+
+	if code := runUninstall(env, nil, ue); code != ExitOK {
+		t.Fatalf("exit = %d, want %d", code, ExitOK)
+	}
+	if exists(machineWide) {
+		t.Fatal("the bundle was not removed")
+	}
+	if !strings.Contains(out.String(), "every account") {
+		t.Errorf("removing the copy every account on this Mac launches was reported as an ordinary removal:\n%s", out)
+	}
+
+	// And a per-account bundle is not described that way.
+	env, ue, out, _ = uninstallFixture(t)
+	if code := runUninstall(env, nil, ue); code != ExitOK {
+		t.Fatalf("exit = %d, want %d", code, ExitOK)
+	}
+	if strings.Contains(out.String(), "every account") {
+		t.Errorf("this account's own bundle was reported as everybody's:\n%s", out)
+	}
+}
+
 // Under shared-cache mode this account's own directory goes and the shared root
 // is not touched. The output names what remains there, its size, the accounts
 // it belongs to counted rather than named, and the one deliberate command that
