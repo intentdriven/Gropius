@@ -180,7 +180,8 @@ something, the enumeration half was the wrong half.
 
 ## Audit Notes
 
-_Empty. Populated by intent-auditor when intent moves to shipped/._
+<!-- abcd-review: OWED receipt=rcp-58fdecfa6463 -->
+Fidelity review OWED (receipt rcp-58fdecfa6463).
 
 ## Grounds
 
