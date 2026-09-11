@@ -182,3 +182,24 @@ func TestFinishEndsTheRedrawnLine(t *testing.T) {
 		t.Errorf("Finish wrote %q on a stream that ends every step itself", plain.String()[before:])
 	}
 }
+
+// A stage that reports more work done than it has is still a proportion of a
+// whole: the line says 100% rather than a figure that reads as a bug, and a
+// count below zero says nothing has been done rather than a negative.
+func TestProgressClampsTheProportion(t *testing.T) {
+	for _, tc := range []struct {
+		done, total int
+		want        string
+	}{
+		{done: 7, total: 5, want: "100%"},
+		{done: 5, total: 5, want: "100%"},
+		{done: -1, total: 5, want: "0%"},
+		{done: 1, total: 4, want: "25%"},
+	} {
+		var buf bytes.Buffer
+		Terminal{Out: &buf}.Step("installing MLX", tc.done, tc.total)
+		if !strings.Contains(buf.String(), tc.want) {
+			t.Errorf("Step(%d of %d) = %q, want %q", tc.done, tc.total, buf.String(), tc.want)
+		}
+	}
+}

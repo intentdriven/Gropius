@@ -1,6 +1,7 @@
 package lifecycle
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -9,6 +10,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/intentdriven/Gropius/internal/config"
 	"github.com/intentdriven/Gropius/internal/instance"
@@ -502,6 +504,12 @@ func writableDir(dir string) error {
 	return os.Remove(name)
 }
 
+// firewallQueryTimeout is how long doctor waits for the system firewall to
+// answer. It is a system tool talking to a system daemon, and a daemon that is
+// wedged would otherwise wedge the command somebody ran precisely because
+// something is already wrong.
+const firewallQueryTimeout = 5 * time.Second
+
 // queryFirewall asks the macOS Application Firewall what it says about a path.
 //
 // Read-only, and its answer is reported rather than believed. The exit status
@@ -511,11 +519,22 @@ func queryFirewall(path string) (string, error) {
 	if path == "" {
 		return "", fmt.Errorf("this build's own path is not known")
 	}
-	// Written out in full at the call site rather than through the constant
-	// above: the pinned-subprocess scan reads string literals, so a path that
-	// reaches exec through an identifier passes it in silence. The two
-	// spellings are one line apart and the scan covers the one that matters.
-	out, err := exec.Command("/usr/libexec/ApplicationFirewall/socketfilterfw", "--getappblocked", path).CombinedOutput()
+	// Written out in full here rather than through the constant above: the
+	// pinned-subprocess scan reads string literals, so a path that reaches
+	// exec through an identifier passes it in silence. The two spellings are a
+	// few lines apart and the scan covers the one that matters.
+	return runQuery(firewallQueryTimeout, "/usr/libexec/ApplicationFirewall/socketfilterfw", "--getappblocked", path)
+}
+
+// runQuery runs one read-only system tool and returns what it printed, giving
+// up after timeout rather than waiting on it forever.
+func runQuery(timeout time.Duration, name string, args ...string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, name, args...).CombinedOutput()
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return "", fmt.Errorf("%s did not answer within %s", name, timeout)
+	}
 	if err != nil {
 		return "", err
 	}

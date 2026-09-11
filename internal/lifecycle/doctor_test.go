@@ -8,6 +8,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/intentdriven/Gropius/internal/config"
 	"github.com/intentdriven/Gropius/internal/instance"
@@ -609,11 +610,13 @@ func TestNoObservedLineIsPhrasedAsAConclusion(t *testing.T) {
 // carriesAHedge reports whether a line says, in one of the few ways this
 // package says it, that what it reports was not established.
 func carriesAHedge(line string) bool {
+	// The exact phrases this package hedges with. A bare "cannot" used to
+	// count, which would have passed a line like "the firewall cannot be
+	// reached, so it is blocking you" — a conclusion with a modal verb in it.
 	for _, hedge := range []string{
 		"does not establish",
 		"cannot be determined",
-		"could not",
-		"cannot",
+		"could not be run",
 	} {
 		if strings.Contains(strings.ToLower(line), hedge) {
 			return true
@@ -681,5 +684,33 @@ func TestTheRuntimeFindingReportsInstallationAndNotAStage(t *testing.T) {
 	}
 	if code := Diagnose(env, DefaultChecks()).ExitCode(); code != ExitOK {
 		t.Errorf("exit = %d, want %d: a runtime still being installed is not a failure", code, ExitOK)
+	}
+}
+
+// A query that will not return must not hold the terminal. socketfilterfw is a
+// system tool talking to a system daemon, and a daemon that is wedged would
+// otherwise wedge doctor with it — on the command somebody runs precisely
+// because something is already wrong.
+func TestAQueryThatHangsIsGivenUpOn(t *testing.T) {
+	start := time.Now()
+	// /bin/sleep rather than the firewall itself: the behaviour under test is
+	// the timeout, and a test that needed a wedged daemon could not be written.
+	out, err := runQuery(100*time.Millisecond, "/bin/sleep", "5")
+	if err == nil {
+		t.Fatalf("runQuery returned %q and no error for a command that outlives its timeout", out)
+	}
+	if elapsed := time.Since(start); elapsed > 3*time.Second {
+		t.Errorf("runQuery waited %s; the timeout did not stop it", elapsed)
+	}
+}
+
+// And a query that answers comes back with what it said.
+func TestAQueryThatAnswersIsReported(t *testing.T) {
+	out, err := runQuery(5*time.Second, "/bin/echo", "an answer")
+	if err != nil {
+		t.Fatalf("runQuery: %v", err)
+	}
+	if !strings.Contains(out, "an answer") {
+		t.Errorf("runQuery = %q, want what the command printed", out)
 	}
 }
