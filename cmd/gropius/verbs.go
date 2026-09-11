@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"os"
 
 	"github.com/intentdriven/Gropius/internal/config"
@@ -20,15 +21,26 @@ var lifecycleVerbs = map[string]func(lifecycle.Env, []string) int{
 // runCommandVerb runs one verb and returns the code the process exits with. It
 // starts no server, opens no listener and advertises nothing: a verb is a
 // question asked in a terminal, and it answers and stops.
-func runCommandVerb(cmd commandLine) int {
+//
+// The two streams are arguments rather than os.Stdout and os.Stderr reached for
+// in here, so a test can run the whole path — command line, environment, verb —
+// and read what a person would have seen.
+func runCommandVerb(cmd commandLine, out, errOut io.Writer) int {
 	switch verbs[cmd.Verb] {
 	case verbVersion:
-		fmt.Println("gropius " + version)
+		// Refused like any other verb given a word it has no meaning for.
+		// Quietly printing the version anyway would tell somebody who typed
+		// `gropius version --json` that they had got what they asked for.
+		if len(cmd.Args) > 0 {
+			fmt.Fprintln(errOut, "gropius version: unexpected argument "+quote(cmd.Args[0]))
+			return lifecycle.ExitUsage
+		}
+		fmt.Fprintln(out, "gropius "+version)
 		return 0
 	case verbNotYet:
 		// Named rather than dismissed: the person who read the documentation
 		// and typed this learns that they typed it correctly.
-		fmt.Fprintln(os.Stderr, "gropius "+cmd.Verb+": not in this build yet")
+		fmt.Fprintln(errOut, "gropius "+cmd.Verb+": not in this build yet")
 		return lifecycle.ExitUsage
 	}
 
@@ -36,14 +48,16 @@ func runCommandVerb(cmd commandLine) int {
 	if !ok {
 		// Unreachable while the table test passes, and a refusal rather than a
 		// silent success if it ever stops.
-		fmt.Fprintln(os.Stderr, "gropius "+cmd.Verb+": this build lists the verb and does not run it")
+		fmt.Fprintln(errOut, "gropius "+cmd.Verb+": this build lists the verb and does not run it")
 		return lifecycle.ExitUsage
 	}
 	env, err := verbEnv()
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "gropius "+cmd.Verb+": "+err.Error())
+		fmt.Fprintln(errOut, "gropius "+cmd.Verb+": "+err.Error())
 		return lifecycle.ExitFailed
 	}
+	env.Out, env.Err = out, errOut
+	env.Term.Out, env.Progress.Out = out, errOut
 	return run(env, cmd.Args)
 }
 

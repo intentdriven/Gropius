@@ -1,11 +1,15 @@
 package main
 
 import (
+	"bytes"
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/intentdriven/Gropius/internal/config"
+	"github.com/intentdriven/Gropius/internal/lifecycle"
 )
 
 // writeConfig puts a settings file in a temporary root and points this process
@@ -113,5 +117,103 @@ func TestTheAnswerAndTheProgressLineTakeDifferentStreams(t *testing.T) {
 	}
 	if env.Err != os.Stderr || env.Progress.Out != os.Stderr {
 		t.Error("the progress line does not go to standard error")
+	}
+}
+
+// version prints the build and nothing else, and refuses a stray word like
+// every other verb: a word this build has no meaning for is never quietly
+// ignored, whichever verb it followed.
+func TestVersionPrintsTheBuildAndRefusesAStrayArgument(t *testing.T) {
+	var out, errOut bytes.Buffer
+	if code := runCommandVerb(commandLine{Kind: kindVerb, Verb: "version"}, &out, &errOut); code != 0 {
+		t.Fatalf("exit = %d, want 0", code)
+	}
+	if !strings.Contains(out.String(), version) {
+		t.Errorf("version printed %q, which does not name this build", out.String())
+	}
+
+	out.Reset()
+	errOut.Reset()
+	code := runCommandVerb(commandLine{Kind: kindVerb, Verb: "version", Args: []string{"--json"}}, &out, &errOut)
+	if code != lifecycle.ExitUsage {
+		t.Fatalf("exit = %d, want %d for an argument version does not take", code, lifecycle.ExitUsage)
+	}
+	if !strings.Contains(errOut.String(), "--json") {
+		t.Errorf("refusal %q does not name the argument", errOut.String())
+	}
+	if out.Len() != 0 {
+		t.Errorf("a refused command line still printed %q", out.String())
+	}
+}
+
+// A verb this build knows and does not carry says so by name, and exits 2: the
+// person who read the record and typed it correctly learns that they typed it
+// correctly.
+func TestAVerbThisBuildDoesNotCarryIsRefusedByName(t *testing.T) {
+	for _, verb := range []string{"install", "uninstall", "update"} {
+		var out, errOut bytes.Buffer
+		if code := runCommandVerb(commandLine{Kind: kindVerb, Verb: verb}, &out, &errOut); code != lifecycle.ExitUsage {
+			t.Errorf("%s: exit = %d, want %d", verb, code, lifecycle.ExitUsage)
+		}
+		if !strings.Contains(errOut.String(), verb) || !strings.Contains(errOut.String(), "not in this build yet") {
+			t.Errorf("%s: refusal = %q", verb, errOut.String())
+		}
+	}
+}
+
+// The whole path a person takes, with no server running: the command line, the
+// environment built from this account's root, the probe that creates nothing,
+// and the JSON on standard output.
+func TestStatusRunsEndToEndAgainstNoServer(t *testing.T) {
+	writeConfig(t, "")
+	var out, errOut bytes.Buffer
+	code := runCommandVerb(commandLine{Kind: kindVerb, Verb: "status", Args: []string{"--json"}}, &out, &errOut)
+	if code != lifecycle.ExitOK {
+		t.Fatalf("exit = %d (%s)", code, errOut.String())
+	}
+	var answer struct {
+		Serving bool   `json:"serving"`
+		Reason  string `json:"reason"`
+		Version string `json:"version"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &answer); err != nil {
+		t.Fatalf("status --json did not write JSON: %v\n%s", err, out.String())
+	}
+	if answer.Serving {
+		t.Error("status reports a server against a root nothing is serving from")
+	}
+	if answer.Reason == "" || answer.Version != version {
+		t.Errorf("status = %+v, want a reason and this build's version", answer)
+	}
+}
+
+// And doctor's, which is the path that reads the filesystem and runs the system
+// query. Nothing here is a fault Gropius owns — a temporary root is writable,
+// the settings file is absent, the runtime is not installed and no server is on
+// the port — so it exits zero with every check reported.
+func TestDoctorRunsEndToEndAndExitsZeroOnWarnings(t *testing.T) {
+	writeConfig(t, "")
+	var out, errOut bytes.Buffer
+	code := runCommandVerb(commandLine{Kind: kindVerb, Verb: "doctor", Args: []string{"--json"}}, &out, &errOut)
+	if code != lifecycle.ExitOK {
+		t.Fatalf("exit = %d, want %d; warnings exit zero\n%s\n%s", code, lifecycle.ExitOK, out.String(), errOut.String())
+	}
+	var report struct {
+		Findings []struct {
+			Name     string `json:"name"`
+			Label    string `json:"label"`
+			Severity string `json:"severity"`
+		} `json:"findings"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &report); err != nil {
+		t.Fatalf("doctor --json did not write JSON: %v\n%s", err, out.String())
+	}
+	if len(report.Findings) != len(lifecycle.DefaultChecks()) {
+		t.Fatalf("doctor reported %d findings, want %d", len(report.Findings), len(lifecycle.DefaultChecks()))
+	}
+	for _, f := range report.Findings {
+		if f.Label == "" || f.Severity == "" {
+			t.Errorf("finding %q reached the JSON without a label or a severity", f.Name)
+		}
 	}
 }

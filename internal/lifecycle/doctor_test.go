@@ -2,9 +2,11 @@ package lifecycle
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"syscall"
 	"testing"
@@ -712,5 +714,53 @@ func TestAQueryThatAnswersIsReported(t *testing.T) {
 	}
 	if !strings.Contains(out, "an answer") {
 		t.Errorf("runQuery = %q, want what the command printed", out)
+	}
+}
+
+// goldenEnv is a Mac written down rather than one found: fixed paths, fixed
+// answers, and a home directory that belongs to nobody. It is what makes the
+// report below a fixture a reviewer can read a diff against, the way the status
+// contract has one.
+func goldenEnv() DoctorEnv {
+	home := filepath.Join(string(filepath.Separator), "somewhere", "an-account")
+	return DoctorEnv{
+		Version:      "test",
+		Paths:        config.NewPaths(filepath.Join(home, "Library", "Application Support", "Gropius")),
+		Port:         11535,
+		Binary:       filepath.Join(home, "Applications", "Gropius.app", "Contents", "MacOS", "gropius"),
+		Home:         home,
+		Holder:       func() instance.Holder { return instance.HolderForeign },
+		RuntimeReady: func() bool { return false },
+		Writable:     func(string) error { return nil },
+		Settings:     func() SettingsState { return SettingsState{Present: true} },
+		Firewall: func(path string) (string, error) {
+			return "Incoming connection to " + path + " is permitted.", nil
+		},
+	}
+}
+
+// The report is a contract too: a script reads the labels and the severities,
+// and a person reads the summaries out of a pasted bug report. Compared as a
+// decoded value, so a renamed field or a changed label is a visible diff here
+// rather than a silent break in whatever reads it.
+func TestDoctorJSONMatchesTheGolden(t *testing.T) {
+	got := encodeJSON(t, Diagnose(goldenEnv(), DefaultChecks()))
+	want := decodeFile(t, filepath.Join("testdata", "doctor_report.json"))
+	if !reflect.DeepEqual(got, want) {
+		b, _ := json.MarshalIndent(got, "", "  ")
+		t.Errorf("doctor --json does not match testdata/doctor_report.json:\n%s", b)
+	}
+}
+
+// Nothing in that report names a real place or a real account: it is the
+// fixture a bug report would carry, and it is committed.
+func TestTheGoldenReportCarriesNoAccount(t *testing.T) {
+	b, err := os.ReadFile(filepath.Join("testdata", "doctor_report.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	home, err := os.UserHomeDir()
+	if err == nil && home != "" && strings.Contains(string(b), home) {
+		t.Error("the golden report carries this machine's home directory")
 	}
 }
