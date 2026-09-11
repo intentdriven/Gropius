@@ -180,9 +180,84 @@ something, the enumeration half was the wrong half.
 
 ## Audit Notes
 
-<!-- abcd-review: OWED receipt=rcp-58fdecfa6463 -->
-Fidelity review OWED (receipt rcp-58fdecfa6463).
+<!-- abcd-review: INGESTED receipt=rcp-58fdecfa6463 -->
+Fidelity review — receipt rcp-58fdecfa6463 (verifier intent-auditor claude-sonnet-5).
 
+Provenance: intent-auditor@claude-sonnet-5 · rubric_hash sha256:0bee18e00a36397442ddeefa9bdb8e926f920d10154fd07a78e0b330a40d07c4 · prompt_hash sha256:542ed2cd51ff938717a3f47b2b332e8d47910beec0ca7ecdfd238ae7edf5ced5
+Input attestations: diff:auditor-computed only: rubric_hash is the sha256 of .abcd/.work.local/reviews/rcp-58fdecfa6463.request.md and prompt_hash is the sha256 of /Users/dev/ABCDevelopment/abcd/agents/intent-auditor.md, both computed locally by this auditor, not supplied by the host. Delivered range: main..4f8d475 (merge commit 4f8d4759f9ed4d3834ef9bf29c3460434541e367, PR #46 'feat/three-surfaces-sync', parent1 acc46d163f5dfffb65327f0199b7f1b0c43ba6e2, parent2 22b871b6d42062d37548bdc7c15da320343ae249), diffed as 4f8d475^1..4f8d475 against the worktree at HEAD.@-;
+
+Acceptance rollup: MET 14 · MET_WITH_CONCERNS 0 · NOT_MET 0 · INCONCLUSIVE 0
+
+Per-criterion verdicts:
+- ac-1 — MET: the enumeration test walks config.Config by reflection and fails on any json-tagged path the Settings pane script does not name and that carries no exemption entry with a reason, deciding record and reached-through surface
+  evidence: internal/archtest/settings_surface_test.go:99 — "func TestEverySettingHasAPanelControlOrAnExemption(t *testing.T) {"
+  evidence: internal/archtest/settings_surface_test.go:78 — "var settingsPaneExemptions = map[string]settingExemption{"
+- ac-2 — MET: a separate liveness test fails if an exemption names a path settingPaths() no longer finds, so a renamed field cannot inherit another field's exemption
+  evidence: internal/archtest/settings_surface_test.go:137 — "func TestEveryExemptedSettingStillExists(t *testing.T) {"
+- ac-3 — MET: the reverse-direction test fails when the pane's submit body names a key config.Config does not hold, catching a field removed in Go that leaves a dead control behind
+  evidence: internal/archtest/settings_surface_test.go:184 — "func TestTheSettingsPaneNamesNoSettingTheConfigurationDoesNotHold(t *testing.T) {"
+- ac-4 — MET: the exemption table with its reason/decided-by/reached-through columns lives in the archtest file, not as a comment in internal/config; config.go's field comments for preload and upstream_header_timeout_sec document only behaviour, never why the panel omits a control, and the app.js comment about fields 'preserved server-side' is on the panel script, not the configuration package
+  evidence: internal/archtest/settings_surface_test.go:78 — "settingsPaneExemptions is the whole of the exemption table"
+  evidence: internal/config/config.go:542 — "UpstreamHeaderTimeoutSec int `json:"upstream_header_timeout_sec"`"
+- ac-5 — MET: a table-driven test posts an unedited form built from stored configurations only a hand edit could produce (a bind host the select never offers, an IPv6 loopback, both exempted settings set, sampling values pinned at their bounds, a decode concurrency above the panel's former ceiling) and asserts every row is accepted and the bind does not move
+  evidence: internal/gateway/control_untouched_test.go:145 — "func TestASaveOfAnUneditedFormIsAccepted(t *testing.T) {"
+- ac-6 — MET: a dedicated test stores the two exempted settings (preload, upstream_header_timeout_sec), posts an unrelated save, and asserts both survive unchanged; applySettings decodes into a clone of the current config rather than a zero value so an omitted field keeps its stored value
+  evidence: internal/gateway/control_untouched_test.go:286 — "func TestASettingTheFormDoesNotOwnSurvivesASave(t *testing.T) {"
+  evidence: internal/gateway/control.go:1360 — "func (c *Control) applySettings(raw []byte) (map[string]any, error) {"
+- ac-7 — MET: a Go-only test reads every numeric control's min/max/step out of the markup and asserts config.Validate refuses the value just outside that bound (so no control is narrower than the server), and a node-backed round-trip test writes stored sampling values including zero into the controls and reads them back unchanged; both ran (node present at /opt/homebrew/bin/node) and passed
+  evidence: internal/ui/controls_test.go:39 — "func TestNoSettingsControlIsNarrowerThanValidate(t *testing.T) {"
+  evidence: internal/ui/settings_test.go:391 — "func TestEveryControlAcceptsAStoredValue(t *testing.T) {"
+- ac-8 — MET: refusalNamingWhatChanged computes changedSettings structurally from the two encoded configurations rather than from a per-rule list, so a refusal always names the field(s) this save actually moved; a table test over the bind-widening/grace/idle-timeout cross-field rules asserts the refusal names the changed field and not the unchanged ones the rule's own wording is about
+  evidence: internal/gateway/control.go:1504 — "func changedSettings(before, after config.Config, posted []byte) []string {"
+  evidence: internal/gateway/control_untouched_test.go:31 — "func TestACrossFieldRefusalNamesAChangedField(t *testing.T) {"
+- ac-9 — MET: the Settings pane gains a checkbox control bound to advertise, asserted to live inside the tab-settings section rather than on the posture page
+  evidence: internal/ui/static/index.html:229 — "< input id="setAdvertise" type="checkbox">"
+  evidence: internal/ui/settings_test.go:316 — "func TestTheSettingsFormPostsAdvertise(t *testing.T) {"
+- ac-10 — MET: advertise joins the restart expression in applySettings, and a table test asserts a save that flips advertise reports restart=true while a save that leaves it unchanged reports restart=false; this closes iss-2609091751184914, whose resolved-by commit fe723bd is in this range
+  evidence: internal/gateway/control.go:1433 — "incoming.Advertise != current.Advertise ||"
+  evidence: internal/gateway/control_test.go:1187 — "func TestASaveThatChangesAdvertisingAsksForARestart(t *testing.T) {"
+- ac-11 — MET: RunConfig's show subcommand reads through the ordinary config load path, redacts api_key and hf_token via ConfigInForce, and writes nothing; a test asserts the redaction in both the text and JSON forms, and a separate test asserts nothing is written
+  evidence: internal/lifecycle/config.go:172 — "func RunConfig(env Env, args []string) int {"
+  evidence: internal/lifecycle/config_test.go:56 — "func TestConfigShowRedactsTheSecrets(t *testing.T) {"
+- ac-12 — MET: the --json flag serialises the same SettingsInForce map as ConfigDocument with the same redaction applied upstream by ConfigInForce, and a contract test locks the shape
+  evidence: internal/lifecycle/config.go:216 — "type ConfigDocument struct {"
+  evidence: internal/lifecycle/config_test.go:151 — "func TestConfigShowJSONIsTheContract(t *testing.T) {"
+- ac-13 — MET: an archtest scans every non-test source file in internal/lifecycle for config.Save( or a direct WriteFile onto env.Paths.Config and fails if either appears; RunConfig itself calls neither
+  evidence: internal/archtest/lifecycle_boundary_test.go:171 — "func TestNoLifecycleVerbWritesTheSettingsFile(t *testing.T) {"
+- ac-14 — MET: getting-started.md gains a '10. Settings that live only in config.json' section naming preload and upstream_header_timeout_sec with how to set each by hand, and lifecycle-reference.md's verb table carries gropius config show beside status and doctor exactly as the press release promised
+  evidence: docs/getting-started.md:242 — "## 10. Settings that live only in `config.json` (optional)"
+  evidence: docs/lifecycle-reference.md:25 — "| `gropius config show` | The settings in force, read from the settings file the way the server reads it."
+
+Gap audit:
+- honoured:
+  - a build-time test enumerates every json-tagged setting and fails on a gap in either direction, replacing the habit the intent's own note said was currently holding by luck
+    evidence: internal/archtest/settings_surface_test.go:99 — "func TestEverySettingHasAPanelControlOrAnExemption(t *testing.T) {"
+  - advertise closes iss-2609091751184914's silence: it is now a Settings control, and a save that changes it is answered with restart=true
+    evidence: internal/gateway/control.go:1433 — "incoming.Advertise != current.Advertise ||"
+  - gropius config show reads the settings in force with secrets redacted and writes nothing, sitting beside status and doctor as the press release said
+    evidence: docs/lifecycle-reference.md:25 — "| `gropius config show` | The settings in force, read from the settings file the way the server reads it."
+  - the security review the spec required for this trust-boundary change (AGENTS.md's rule on internal/gateway) actually ran and found a real secret-equality oracle in the refusal path, which was closed before the branch shipped: an early version of refusalNamingWhatChanged compared secret values between the stored and posted configuration, which a loopback caller (any other account on this Mac) could have used to test a guessed api_key or hf_token by posting it beside a value guaranteed to be refused and reading whether the secret was named among the changes; the shipped changedSettings instead reports a secret as changed only when the posted body carries it and it is not the redacted placeholder or empty, never by comparing values
+    evidence: internal/gateway/control.go:1568 — "func postedASecret(body map[string]json.RawMessage, field string) bool {"
+    evidence: .abcd/work/DECISIONS.md (line beginning "2026-09-11 — itd-2609081259493890, after adversarial review: the refusal that names what a save changed must NOT decide the two secrets by comparing them") — "The review returned BLOCK on it, and the finding reproduces: ... a per-candidate equality oracle on two secrets"
+- diverged: (none)
+- missing: (none)
+
+Scope-condition dispositions:
+- cond-2609111941481159 — survived: settingPaths() walks only reflect.TypeOf(config.Config{}) and the structs it nests; the registry, statistics store, PID ledger and Paths are separate types the walk never reaches, so they cannot appear in the enumeration by construction
+  evidence: internal/archtest/settings_surface_test.go:204 — "func settingPaths(t *testing.T) []string {"
+- cond-2609111941480600 — survived: the markup and script scans are checked against the tab-settings section specifically for the advertise test, and the posture page's own read-only advertise line is left untouched rather than counted as a control
+  evidence: internal/ui/settings_test.go:329 — "the advertising box is not in the Settings pane; a read-only line elsewhere in the panel is an account of what is on, not a control"
+- cond-2609111941484746 — survived: the only new lifecycle verb is config show, RunConfig writes nothing, and no config set/get verb was added to cmd/gropius's dispatch table
+  evidence: cmd/gropius/verbs.go:19 — ""config": lifecycle.RunConfig,"
+- cond-2609111941489668 — survived: the delivered diff (4f8d475^1..4f8d475) touches no file under client/; the Swift client is untouched
+  evidence: git diff 4f8d475^1 4f8d475 --stat — "33 files changed, 3286 insertions(+), 76 deletions(-) (none under client/)"
+- cond-2609111941481733 — untested: internal/config's Save/Load path is not in the diff at all and no test in this delivery exercises an older build reading a config.json a newer build wrote; the assumption is neither exercised nor contradicted by this work
+- cond-2609111941486975 — survived: the new save-path work is added inside the existing settingsMu serialization rather than any multi-operator scheme, and the comment beside the lock states the handler remains the only caller of SetConfig, so the single-writer, one-operator assumption is unchanged
+  evidence: internal/gateway/control.go:86 — "This handler is the only caller of SetConfig there is, so serialising it here serialises every settings write."
+- cond-2609111941489272 — survived: the enumeration and its companions are _test.go files run by go test; no runtime check was added to the server's own startup or request path
+  evidence: internal/archtest/settings_surface_test.go:1 — "package archtest_test"
+- cond-2609111941484015 — survived: the exemption table names only preload and upstream_header_timeout_sec; neither 'Generate a key' nor 'Clear records' is a json-tagged field of config.Config, so they are outside the enumeration's reach by construction and never appear in the table
+  evidence: internal/archtest/settings_surface_test.go:78 — "var settingsPaneExemptions = map[string]settingExemption{"
 ## Grounds
 
 - pursued: we expect a reflection-driven sync test over config.Config to keep the Go configuration and the control panel level, because every divergence so far entered field by field in a diff where nobody was thinking about the panel; shown wrong if the divergences that hurt turn out to be mismatched semantics — a control that exists and posts the wrong thing — which field enumeration passes green over — planned autonomously on the maintainer's instruction of 2026-09-10, adopting the brief's recommendations
