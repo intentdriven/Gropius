@@ -223,7 +223,11 @@ func runInstall(env Env, args []string, ie InstallEnv) int {
 // fail reports a stage that did not complete: what failed, why, and the command
 // that retries it.
 func fail(env Env, ie InstallEnv, stage string, err error) int {
-	writeLine(env.Err, "gropius install: "+stage+" failed: "+abbreviate(err.Error(), ie.Home))
+	// abbreviateAll, not abbreviate: an error is prose with a path in the
+	// middle of it ("rename /Users/…: permission denied"), and abbreviate only
+	// rewrites a prefix, so the account name would survive into output the
+	// privacy rule says must be pasteable into a bug report.
+	writeLine(env.Err, "gropius install: "+stage+" failed: "+abbreviateAll(err.Error(), ie.Home))
 	writeLine(env.Err, "Retry with: "+retryInstall)
 	return ExitFailed
 }

@@ -371,12 +371,12 @@ func heredocDelimiters(src string) map[string]bool {
 func joinContinuations(lines []string) []string {
 	out := make([]string, len(lines))
 	for i := 0; i < len(lines); i++ {
-		joined := lines[i]
+		start, joined := i, lines[i]
 		for strings.HasSuffix(joined, "\\") && i+1 < len(lines) {
 			i++
 			joined = strings.TrimSuffix(joined, "\\") + " " + strings.TrimSpace(lines[i])
 		}
-		out[i-strings.Count(joined, "")*0] = joined
+		out[start] = joined
 	}
 	return out
 }

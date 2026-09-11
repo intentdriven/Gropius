@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/bash
 #
 # One-line installer for Gropius.
 #
@@ -18,6 +18,13 @@
 # right-click-to-open dance.
 #
 # The client has no such binary, so its bundle is placed here.
+#
+# THE INTERPRETER TOO. The shebang is /bin/bash rather than /usr/bin/env bash,
+# which is the one program a script naming everything else by absolute path
+# would otherwise still resolve through PATH. It is unreachable through the
+# documented `curl … | bash`, where the shebang is a comment, and reachable the
+# moment somebody makes this file executable and runs it. macOS ships
+# /bin/bash, and nothing here needs a version newer than it.
 #
 # EVERY COMMAND IS NAMED BY ABSOLUTE PATH. `curl | bash` runs with the invoking
 # user's PATH, which routinely puts user-writable directories ahead of /usr/bin,
@@ -225,6 +232,13 @@ if [ "$mode" = "server" ]; then
 	# of an install a single thing rather than a negotiation between a script
 	# from one release and an application from another.
 	VERIFIED_BIN="$tmp/extract/$APP.app/Contents/MacOS/gropius"
+	# `ditto -x -k` restores symbolic links from the archive, and `-x` follows
+	# one — so a link here would send the single exec this whole bootstrap
+	# exists to reach somewhere outside the directory that was verified. Only a
+	# compromised release can plant one, which is what the checksum above is
+	# for; the refusal costs a line and does not depend on that being true.
+	[ ! -L "$VERIFIED_BIN" ] ||
+		die "$ASSET carries a symbolic link where $APP.app/Contents/MacOS/gropius should be — refusing to run it."
 	[ -x "$VERIFIED_BIN" ] ||
 		die "$ASSET carries no executable at $APP.app/Contents/MacOS/gropius — refusing to install it."
 
