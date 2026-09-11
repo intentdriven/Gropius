@@ -59,8 +59,11 @@ type UninstallEnv struct {
 	Terminal bool
 	// Firewall removes the entry, raising the one authorisation panel.
 	Firewall func(binary string) error
-	// OwnerOf reads which account owns a path.
-	OwnerOf func(path string) (int, error)
+	// OwnerOf reads which account owns a name INSIDE an opened root. The root
+	// is part of the question rather than a detail of the answer: a name
+	// resolved twice is a name another account can redirect between the two
+	// resolutions.
+	OwnerOf func(root *os.Root, name string) (int, error)
 }
 
 // RunUninstall is the uninstall verb.
@@ -111,7 +114,7 @@ func liveUninstallEnv(env Env) (UninstallEnv, error) {
 		Uid:        os.Getuid(),
 		Terminal:   isTerminal(os.Stdin),
 		Firewall:   revokeFirewall,
-		OwnerOf:    ownerOf,
+		OwnerOf:    ownerIn,
 	}, nil
 }
 
@@ -306,8 +309,14 @@ func reportSharedRoot(env Env, ue UninstallEnv) {
 // a bug report.
 func otherAccountsUnder(ue UninstallEnv) int {
 	seen := map[int]bool{}
-	for _, f := range filesUnder(ue.Paths.Models) {
-		if uid, err := ue.OwnerOf(f); err == nil && uid != ue.Uid {
+	root, err := os.OpenRoot(ue.Paths.Models)
+	if err != nil {
+		return 0
+	}
+	defer root.Close()
+	files, _ := entriesIn(root)
+	for _, name := range files {
+		if uid, err := ue.OwnerOf(root, name); err == nil && uid != ue.Uid {
 			seen[uid] = true
 		}
 	}
@@ -317,70 +326,114 @@ func otherAccountsUnder(ue UninstallEnv) int {
 // purgeOwned removes the files under dir that uid owns, and reports how much
 // went, how much stayed, and which other accounts the remainder belongs to.
 //
+// EVERY NAME IS RESOLVED ONCE, THROUGH AN os.Root OPENED ON dir. That is the
+// whole of this function's safety, and it is not a refinement: the shared models
+// directory is group-writable by design, so another account owns entries inside
+// it and may rename its own entry at any moment. Read the owner from a path and
+// then unlink the same path, and the name is resolved twice — between the two,
+// that account can put a symbolic link where a directory was, and the link is
+// followed with THIS account's credentials, against a home directory it cannot
+// read for itself. The sticky bit does not stop it: sticky constrains the
+// directory the kernel sees at unlink time, which is exactly what was moved.
+//
+// os.Root refuses a name whose resolution leaves the root, so what survives is
+// a swap that stays INSIDE the models tree — where the sticky bit does hold,
+// because the parent the kernel sees is then one of this tree's own directories
+// and the file is the other account's. internal/config's EnsureDirs already
+// defends the same directory against the same adversary this way; this is that
+// rule, not a new one.
+//
 // Directories left empty are removed afterwards; one that still holds another
-// account's file stays, which is also what the filesystem would insist on under
-// the shared root's sticky bit.
-func purgeOwned(dir string, uid int, ownerOf func(string) (int, error)) (removed, kept int, others map[int]bool) {
+// account's file stays.
+func purgeOwned(dir string, uid int, ownerOf func(*os.Root, string) (int, error)) (removed, kept int, others map[int]bool) {
 	others = map[int]bool{}
-	files := filesUnder(dir)
-	mine, theirs := partitionByOwner(files, uid, ownerOf)
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		// Nothing to purge, or nothing that can be purged safely. A directory
+		// that cannot be opened as a root is not one to fall back to path
+		// operations on.
+		return 0, dirSize(dir), others
+	}
+	defer root.Close()
 
-	for _, f := range mine {
-		size := fileSize(f)
-		if err := os.Remove(f); err != nil {
+	files, dirs := entriesIn(root)
+	mine, theirs := partitionByOwner(root, files, uid, ownerOf)
+
+	for _, name := range mine {
+		size := sizeIn(root, name)
+		if err := root.Remove(name); err != nil {
 			kept += size
 			continue
 		}
 		removed += size
 	}
-	for _, f := range theirs {
-		kept += fileSize(f)
-		if owner, err := ownerOf(f); err == nil && owner != uid {
+	for _, name := range theirs {
+		kept += sizeIn(root, name)
+		if owner, err := ownerOf(root, name); err == nil && owner != uid {
 			others[owner] = true
 		}
 	}
-	pruneEmptyDirs(dir)
+	// Deepest first, so a directory emptied by the removals above goes with
+	// them. One that still holds another account's file stays, and a removal
+	// that is refused is left alone: nothing here elevates to finish a
+	// deletion.
+	for i := len(dirs) - 1; i >= 0; i-- {
+		_ = root.Remove(dirs[i])
+	}
+	_ = os.Remove(dir)
 	return removed, kept, others
 }
 
-// filesUnder is every regular file under dir, deepest last, following no
-// symbolic link.
-func filesUnder(dir string) []string {
-	var files []string
-	_ = filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
-		if err != nil || d.IsDir() || d.Type()&os.ModeSymlink != 0 {
+// entriesIn is every regular file and every directory under a root, as names
+// relative to it, sorted so the deepest come last.
+//
+// The walk is over the root's own file system, which reads directories through
+// the root's descriptor and never follows a symbolic link out of it. Symbolic
+// links are listed as themselves and are not descended into: what a link points
+// at is not what removing the link removes.
+func entriesIn(root *os.Root) (files, dirs []string) {
+	_ = fs.WalkDir(root.FS(), ".", func(name string, d fs.DirEntry, err error) error {
+		if err != nil || name == "." {
 			return nil
 		}
-		files = append(files, p)
+		switch {
+		case d.IsDir():
+			dirs = append(dirs, name)
+		case d.Type()&os.ModeSymlink != 0:
+			// A link is removed like any other entry this account owns, and is
+			// never followed.
+			files = append(files, name)
+		case d.Type().IsRegular():
+			files = append(files, name)
+		}
 		return nil
 	})
 	sort.Strings(files)
-	return files
+	sort.Strings(dirs)
+	return files, dirs
 }
 
-// pruneEmptyDirs removes the directories under dir that hold nothing, deepest
-// first, and then dir itself. A directory that still holds another account's
-// file stays, and a removal that is refused is left alone: nothing here
-// elevates to finish a deletion.
-func pruneEmptyDirs(dir string) {
-	var dirs []string
-	_ = filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
-		if err == nil && d.IsDir() {
-			dirs = append(dirs, p)
-		}
-		return nil
-	})
-	for i := len(dirs) - 1; i >= 0; i-- {
-		_ = os.Remove(dirs[i])
-	}
-}
-
-func fileSize(path string) int {
-	fi, err := os.Lstat(path)
+// sizeIn is how much one entry holds, read through the root.
+func sizeIn(root *os.Root, name string) int {
+	fi, err := root.Lstat(name)
 	if err != nil {
 		return 0
 	}
 	return int(fi.Size())
+}
+
+// ownerIn reads which account owns a name inside a root, following no symbolic
+// link and resolving no component outside it.
+func ownerIn(root *os.Root, name string) (int, error) {
+	fi, err := root.Lstat(name)
+	if err != nil {
+		return 0, err
+	}
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	if !ok {
+		return 0, os.ErrInvalid
+	}
+	return int(st.Uid), nil
 }
 
 // accountsPhrase renders a count of other accounts without naming any of them.
@@ -395,32 +448,20 @@ func accountsPhrase(n int) string {
 	}
 }
 
-// partitionByOwner splits paths into the ones uid owns and the ones it does
-// not. An owner that cannot be read counts as somebody else's: an unreadable
-// owner is not evidence that a path is ours to delete.
-func partitionByOwner(paths []string, uid int, ownerOf func(string) (int, error)) (mine, others []string) {
-	for _, p := range paths {
-		owner, err := ownerOf(p)
+// partitionByOwner splits names into the ones uid owns and the ones it does
+// not, reading each through the root they were found in. An owner that cannot
+// be read counts as somebody else's: an unreadable owner is not evidence that a
+// name is ours to delete.
+func partitionByOwner(root *os.Root, names []string, uid int, ownerOf func(*os.Root, string) (int, error)) (mine, others []string) {
+	for _, name := range names {
+		owner, err := ownerOf(root, name)
 		if err != nil || owner != uid {
-			others = append(others, p)
+			others = append(others, name)
 			continue
 		}
-		mine = append(mine, p)
+		mine = append(mine, name)
 	}
 	return mine, others
-}
-
-// ownerOf reads which account owns a path, following no symbolic link.
-func ownerOf(path string) (int, error) {
-	fi, err := os.Lstat(path)
-	if err != nil {
-		return 0, err
-	}
-	st, ok := fi.Sys().(*syscall.Stat_t)
-	if !ok {
-		return 0, os.ErrInvalid
-	}
-	return int(st.Uid), nil
 }
 
 // dirSize is how much a path holds, following no symbolic link and tolerating

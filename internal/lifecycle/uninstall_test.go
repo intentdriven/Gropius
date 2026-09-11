@@ -49,7 +49,7 @@ func uninstallFixture(t *testing.T) (Env, UninstallEnv, *bytes.Buffer, *bytes.Bu
 		Binary:   binary,
 		Terminal: true,
 		Firewall: func(string) error { return nil },
-		OwnerOf:  func(string) (int, error) { return os.Getuid(), nil },
+		OwnerOf:  func(*os.Root, string) (int, error) { return os.Getuid(), nil },
 		Uid:      os.Getuid(),
 	}, out, errOut
 }
@@ -180,8 +180,8 @@ func TestSharedCacheUninstallLeavesTheSharedRootAlone(t *testing.T) {
 	writeFileAt(t, filepath.Join(ue.Paths.Models, "mlx-community", "a-model", "weights.safetensors"), "ours")
 	other := filepath.Join(ue.Paths.Models, "mlx-community", "another-model", "weights.safetensors")
 	writeFileAt(t, other, "another account's")
-	ue.OwnerOf = func(path string) (int, error) {
-		if strings.Contains(path, "another-model") {
+	ue.OwnerOf = func(_ *os.Root, name string) (int, error) {
+		if strings.Contains(name, "another-model") {
 			return os.Getuid() + 1, nil
 		}
 		return os.Getuid(), nil
@@ -221,8 +221,8 @@ func TestSharedPurgeRemovesOnlyWhatThisAccountOwns(t *testing.T) {
 	theirs := filepath.Join(ue.Paths.Models, "mlx-community", "theirs", "weights.safetensors")
 	writeFileAt(t, ours, "ours")
 	writeFileAt(t, theirs, "theirs")
-	ue.OwnerOf = func(path string) (int, error) {
-		if strings.Contains(path, "theirs") {
+	ue.OwnerOf = func(_ *os.Root, name string) (int, error) {
+		if strings.Contains(name, "theirs") {
 			return os.Getuid() + 1, nil
 		}
 		return os.Getuid(), nil
@@ -292,28 +292,83 @@ func TestTheOwnerReaderReadsTheFilesystem(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "a-model")
 	writeFileAt(t, path, "ours")
 
-	uid, err := ownerOf(path)
+	root, err := os.OpenRoot(filepath.Dir(path))
 	if err != nil {
-		t.Fatalf("ownerOf: %v", err)
-	}
-	if uid != os.Getuid() {
-		t.Errorf("ownerOf a file this account just wrote = %d, want %d", uid, os.Getuid())
-	}
-
-	// A symbolic link is read as ITSELF rather than followed: what a link
-	// points at is not what removing the link removes, and a link another
-	// account planted would otherwise report that account's own file's owner.
-	link := filepath.Join(t.TempDir(), "link")
-	if err := os.Symlink(path, link); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ownerOf(link); err != nil {
-		t.Errorf("ownerOf a symbolic link: %v", err)
+	defer root.Close()
+
+	uid, err := ownerIn(root, "a-model")
+	if err != nil {
+		t.Fatalf("ownerIn: %v", err)
+	}
+	if uid != os.Getuid() {
+		t.Errorf("the owner of a file this account just wrote = %d, want %d", uid, os.Getuid())
 	}
 
-	if _, err := ownerOf(filepath.Join(t.TempDir(), "nothing-here")); err == nil {
-		t.Error("ownerOf reported an owner for a path that does not exist; an unreadable owner must be an error, " +
-			"because the purge treats it as somebody else's")
+	// A name that leaves the root is refused rather than answered: the whole
+	// point of reading the owner through the root is that no component of the
+	// name can send it somewhere else.
+	if _, err := ownerIn(root, "../elsewhere"); err == nil {
+		t.Error("the owner reader answered for a name outside the root")
+	}
+	if _, err := ownerIn(root, "nothing-here"); err == nil {
+		t.Error("the owner reader reported an owner for a name that does not exist; an unreadable owner must be " +
+			"an error, because the purge treats it as somebody else's")
+	}
+}
+
+// The purge cannot be redirected by a component renamed UNDER it.
+//
+// The shared models directory is group-writable by design (3775), so another
+// account owns entries inside it and may rename its own entry at any moment.
+// If the owner is read from a path and the unlink is then issued against the
+// same path, the two resolve the name twice — and between them that account can
+// swap a directory it owns for a symbolic link to somewhere else, which is
+// resolved with THIS account's credentials. The sticky bit does not stop it:
+// sticky constrains the directory the kernel sees at unlink time, which is
+// exactly what has been moved.
+//
+// The window is reproduced deterministically here by doing the swap from the
+// owner seam, which is called between the walk and the removal — the moment the
+// attacker has to win.
+func TestThePurgeCannotBeRedirectedByARenamedComponent(t *testing.T) {
+	env, ue, _, _ := uninstallFixture(t)
+
+	shared := filepath.Join(t.TempDir(), "Shared", "Gropius")
+	ue.SharedRoot = shared
+	ue.Paths.Models = filepath.Join(shared, "models")
+	ue.Paths.HFCache = filepath.Join(shared, "hf", "hub")
+
+	// What another account owns inside the shared models directory.
+	org := filepath.Join(ue.Paths.Models, "an-org")
+	writeFileAt(t, filepath.Join(org, "a-model", "weights.safetensors"), "ours")
+
+	// What must not be touched: this account's own files, outside the tree.
+	victimDir := t.TempDir()
+	victim := filepath.Join(victimDir, "thesis.docx")
+	writeFileAt(t, victim, "not the installer's to delete")
+
+	swapped := false
+	ue.OwnerOf = func(root *os.Root, name string) (int, error) {
+		if !swapped {
+			swapped = true
+			if err := os.RemoveAll(org); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(victimDir, org); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return ownerIn(root, name)
+	}
+
+	if code := runUninstall(env, []string{"--purge", "--yes"}, ue); code != ExitOK {
+		t.Fatalf("exit = %d, want %d", code, ExitOK)
+	}
+	if !exists(victim) {
+		t.Fatal("the purge followed a component another account renamed and deleted a file outside the shared " +
+			"models directory")
 	}
 }
 
@@ -321,15 +376,15 @@ func TestTheOwnerReaderReadsTheFilesystem(t *testing.T) {
 // of the shared purge: given who owns what, which entries may go.
 func TestOnlyEntriesThisAccountOwnsArePurged(t *testing.T) {
 	owners := map[string]int{"ours": 501, "theirs": 502, "also-ours": 501}
-	ownerOf := func(path string) (int, error) {
-		uid, ok := owners[filepath.Base(path)]
+	ownerOf := func(_ *os.Root, name string) (int, error) {
+		uid, ok := owners[filepath.Base(name)]
 		if !ok {
 			return 0, errors.New("no owner")
 		}
 		return uid, nil
 	}
 
-	mine, others := partitionByOwner([]string{"a/ours", "b/theirs", "c/also-ours", "d/unknown"}, 501, ownerOf)
+	mine, others := partitionByOwner(nil, []string{"a/ours", "b/theirs", "c/also-ours", "d/unknown"}, 501, ownerOf)
 	if strings.Join(mine, ",") != "a/ours,c/also-ours" {
 		t.Errorf("this account's own entries are %v", mine)
 	}
