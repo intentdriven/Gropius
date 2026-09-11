@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/intentdriven/Gropius/internal/config"
@@ -34,6 +35,7 @@ func fakeEnv(t *testing.T) DoctorEnv {
 		Runtime:  func() runtime.SetupStatus { return runtime.SetupStatus{Stage: runtime.StageReady, Ready: true} },
 		Writable: func(string) error { return nil },
 		Firewall: func(string) (string, error) { return "is permitted to respond to incoming connections", nil },
+		Settings: func() SettingsState { return SettingsState{Present: true} },
 	}
 }
 
@@ -321,7 +323,16 @@ func TestTheForeignPortHolderIsCountedAndNotNamed(t *testing.T) {
 // this account's home directory: paths are abbreviated to "~".
 func TestOutputIsPasteSafe(t *testing.T) {
 	env := fakeEnv(t)
-	env.Writable = func(string) error { return errors.New("permission denied") }
+	// Both stubs put the path where it actually turns up: inside a sentence
+	// somebody else wrote. A rule that only stripped a prefix would pass a
+	// test whose stubs said "permission denied" and nothing else, and leak in
+	// the two findings an operator pastes.
+	env.Writable = func(dir string) error {
+		return &os.PathError{Op: "open", Path: filepath.Join(dir, "probe.tmp"), Err: syscall.EACCES}
+	}
+	env.Firewall = func(path string) (string, error) {
+		return "Incoming connection to " + path + " is permitted.", nil
+	}
 	r := Diagnose(env, DefaultChecks())
 
 	var buf bytes.Buffer
@@ -345,26 +356,199 @@ func TestOutputIsPasteSafe(t *testing.T) {
 	}
 }
 
-// abbreviate is the whole of that rule, and it is a pure function over a path
-// and a home directory.
-func TestAbbreviateReplacesTheHomeDirectory(t *testing.T) {
+// redact is the whole of that rule, and it is a pure function over a string and
+// a home directory. It replaces EVERY occurrence, not a prefix: the path an
+// operator pastes usually arrives inside somebody else's sentence — an
+// *os.PathError reads "open <path>: permission denied", and the firewall's
+// answer puts the path in the middle of a line — and a prefix rule leaves the
+// account name in both.
+func TestRedactReplacesEveryOccurrenceOfTheHomeDirectory(t *testing.T) {
 	home := filepath.Join(string(filepath.Separator), "somewhere", "an-account")
-	for _, tc := range []struct{ path, want string }{
+	for _, tc := range []struct{ in, want string }{
 		{filepath.Join(home, "Library", "Logs"), "~/Library/Logs"},
 		{home, "~"},
+		{"open " + filepath.Join(home, "Library") + ": permission denied", "open ~/Library: permission denied"},
+		{"Incoming connection to " + home + "/a is permitted.", "Incoming connection to ~/a is permitted."},
+		{home + " and " + home, "~ and ~"},
 		{filepath.Join(string(filepath.Separator), "Users", "Shared", "Gropius"), "/Users/Shared/Gropius"},
-		// A different account's directory that merely starts with the same
-		// letters is not this account's home and is not abbreviated.
-		{home + "-else", home + "-else"},
 		{"", ""},
 	} {
-		if got := abbreviate(tc.path, home); got != tc.want {
-			t.Errorf("abbreviate(%q) = %q, want %q", tc.path, got, tc.want)
+		if got := redact(tc.in, home); got != tc.want {
+			t.Errorf("redact(%q) = %q, want %q", tc.in, got, tc.want)
 		}
 	}
-	// With no home to compare against, a path is left exactly as it is.
-	if got := abbreviate("/tmp/x", ""); got != "/tmp/x" {
-		t.Errorf("abbreviate with no home = %q, want the path unchanged", got)
+	// A sibling directory that merely starts with the same letters is folded
+	// too, and that is the deliberate trade: over-redaction costs a reader one
+	// confusing path, under-redaction costs them their account name in a public
+	// bug report.
+	if got := redact(home+"-else", home); got != "~-else" {
+		t.Errorf("redact(%q) = %q, want the occurrence replaced", home+"-else", got)
+	}
+	// With no home to compare against, a string is left exactly as it is — and
+	// a home of "/" is no home at all, rather than a rule that puts a tilde
+	// between every character.
+	if got := redact("/tmp/x", ""); got != "/tmp/x" {
+		t.Errorf("redact with no home = %q, want the string unchanged", got)
+	}
+	if got := redact("/tmp/x", string(filepath.Separator)); got != "/tmp/x" {
+		t.Errorf("redact with a root home = %q, want the string unchanged", got)
+	}
+}
+
+// The failure an operator actually pastes: the root check asks the filesystem,
+// the filesystem answers with an *os.PathError, and the path sits in the middle
+// of the message. Redaction happens where the report is assembled, so no check
+// can forget it.
+func TestAnErrorCarryingTheHomePathMidMessageIsRedacted(t *testing.T) {
+	env := fakeEnv(t)
+	leaky := &os.PathError{Op: "open", Path: filepath.Join(env.Paths.Root, "probe.tmp"), Err: syscall.EACCES}
+	env.Writable = func(string) error { return leaky }
+
+	f := findingNamed(t, Diagnose(env, DefaultChecks()), rootCheckName)
+	if strings.Contains(f.Summary, env.Home) {
+		t.Errorf("the data-root finding carries this account's home directory: %q", f.Summary)
+	}
+	if !strings.Contains(f.Summary, "permission denied") {
+		t.Errorf("redaction lost what the failure was: %q", f.Summary)
+	}
+}
+
+// The same shape from the other side: the firewall's own answer puts the path
+// mid-line, and what it answers is quoted into the report.
+func TestTheFirewallsAnswerIsRedactedWhereverThePathSits(t *testing.T) {
+	env := fakeEnv(t)
+	env.Firewall = func(path string) (string, error) {
+		return "Incoming connection to " + path + " is permitted.", nil
+	}
+	f := findingNamed(t, Diagnose(env, DefaultChecks()), firewallCheckName)
+	if strings.Contains(f.Summary, env.Home) {
+		t.Errorf("the firewall finding carries this account's home directory: %q", f.Summary)
+	}
+}
+
+// Every command reaching the report is redacted too, not only the summaries: a
+// remedy line carries a path by construction.
+func TestCommandsAreRedactedAsWellAsSummaries(t *testing.T) {
+	env := fakeEnv(t)
+	leaking := []Check{{
+		Name:  "a check that built a command out of a path",
+		Label: Verified,
+		Ask: func(e DoctorEnv) Answer {
+			return Answer{Summary: "fine", Severity: SeverityOK, Commands: []string{"ls " + e.Paths.Root}}
+		},
+	}}
+	for _, f := range Diagnose(env, leaking).Findings {
+		for _, c := range f.Commands {
+			if strings.Contains(c, env.Home) {
+				t.Errorf("command %q carries this account's home directory", c)
+			}
+		}
+	}
+}
+
+// The re-grant commands are printed to be run, so the path in them is rendered
+// the way a shell reads it — a space must not split the argument, a quote must
+// not end it — and it must still carry no account name. A path under this
+// account's home is written as "$HOME/...", which the shell expands on the
+// machine the command is run on; a tilde would not expand there at all, because
+// a shell takes it literally inside quotes.
+func TestTheRegrantArgumentIsRunnableAndCarriesNoAccountName(t *testing.T) {
+	home := filepath.Join(string(filepath.Separator), "somewhere", "an-account")
+	for _, tc := range []struct{ in, want string }{
+		{"/Applications/Gropius.app/Contents/MacOS/gropius", "'/Applications/Gropius.app/Contents/MacOS/gropius'"},
+		{"/tmp/an app/gropius", "'/tmp/an app/gropius'"},
+		{"/tmp/it's here/gropius", `'/tmp/it'\''s here/gropius'`},
+		{home + "/Applications/an app/gropius", `"$HOME/Applications/an app/gropius"`},
+		{home, `"$HOME"`},
+		// The four characters a double-quoted shell string still reads: a
+		// backtick would run a command, a dollar would expand another
+		// variable, a backslash escapes, and a quote would end the string.
+		{home + "/a`b$c\\d\"e", "\"$HOME/a\\`b\\$c\\\\d\\\"e\""},
+		{"", "''"},
+	} {
+		if got := shellArg(tc.in, home); got != tc.want {
+			t.Errorf("shellArg(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+// And the commands the firewall check actually prints carry it: quoted for a
+// bundle whose path has a space in it, and expanded rather than abbreviated for
+// one inside this account's home.
+func TestTheFirewallCommandsAreRunnable(t *testing.T) {
+	env := fakeEnv(t)
+	env.Binary = "/Applications/Gropius beta.app/Contents/MacOS/gropius"
+	f := findingNamed(t, Diagnose(env, DefaultChecks()), firewallCheckName)
+	for _, c := range f.Commands {
+		if !strings.Contains(c, "'/Applications/Gropius beta.app/Contents/MacOS/gropius'") {
+			t.Errorf("command %q does not quote the bundle path", c)
+		}
+	}
+
+	env = fakeEnv(t) // Binary is under the fake home
+	f = findingNamed(t, Diagnose(env, DefaultChecks()), firewallCheckName)
+	for _, c := range f.Commands {
+		if strings.Contains(c, env.Home) {
+			t.Errorf("command %q carries this account's home directory", c)
+		}
+		if !strings.Contains(c, `"$HOME/Applications/Gropius.app/Contents/MacOS/gropius"`) {
+			t.Errorf("command %q does not name a path a shell would resolve", c)
+		}
+		if strings.Contains(c, "~") {
+			t.Errorf("command %q carries a tilde, which a shell does not expand inside quotes", c)
+		}
+	}
+}
+
+// The settings file is state Gropius owns, so it is a verified check: it loads,
+// it loads with something repaired or dropped, it is not there at all, or it
+// cannot be used as written.
+func TestTheSettingsFileIsChecked(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		state SettingsState
+		want  Severity
+		says  string
+	}{
+		{
+			name:  "no file yet is not a fault",
+			state: SettingsState{},
+			want:  SeverityOK,
+			says:  "defaults",
+		},
+		{
+			name:  "a file that loads cleanly",
+			state: SettingsState{Present: true},
+			want:  SeverityOK,
+			says:  "loads",
+		},
+		{
+			name:  "a file with settings repaired or dropped",
+			state: SettingsState{Present: true, Notices: config.Notices{Repaired: []string{"grace"}, Ignored: []string{"old_key"}}},
+			want:  SeverityWarning,
+			says:  "2",
+		},
+		{
+			name:  "a file that cannot be used as written",
+			state: SettingsState{Present: true, Err: errors.New("unexpected end of JSON input")},
+			want:  SeverityFailed,
+			says:  "unexpected end of JSON input",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env := fakeEnv(t)
+			env.Settings = func() SettingsState { return tc.state }
+			f := findingNamed(t, Diagnose(env, DefaultChecks()), settingsCheckName)
+			if f.Label != Verified {
+				t.Errorf("label = %q, want %q: the settings file is state Gropius owns", f.Label, Verified)
+			}
+			if f.Severity != tc.want {
+				t.Errorf("severity = %q, want %q (%q)", f.Severity, tc.want, f.Summary)
+			}
+			if !strings.Contains(f.Summary, tc.says) {
+				t.Errorf("summary = %q, which does not say %q", f.Summary, tc.says)
+			}
+		})
 	}
 }
 

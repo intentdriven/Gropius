@@ -1,7 +1,9 @@
 package lifecycle
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -26,6 +28,7 @@ const socketfilterfw = "/usr/libexec/ApplicationFirewall/socketfilterfw"
 const (
 	runtimeCheckName      = "MLX runtime"
 	rootCheckName         = "data root"
+	settingsCheckName     = "settings file"
 	versionCheckName      = "this build"
 	portCheckName         = "server port"
 	firewallCheckName     = "firewall entry"
@@ -116,7 +119,7 @@ type DoctorEnv struct {
 	// entry would be keyed to.
 	Binary string
 	// Home is this account's home directory, and the only reason it is here is
-	// paste safety: it is what paths are abbreviated against.
+	// paste safety: it is what every string in the report is redacted against.
 	Home string
 	// Holder classifies the process on the server port through the instance
 	// challenge.
@@ -127,9 +130,27 @@ type DoctorEnv struct {
 	Runtime func() runtime.SetupStatus
 	// Writable says whether a directory can be written to, and why not.
 	Writable func(dir string) error
+	// Settings is what this account's settings file did when it was read.
+	Settings func() SettingsState
 	// Firewall runs the system's firewall query for a path and returns what it
 	// said. Its answer is reported and is never allowed to decide anything.
 	Firewall func(path string) (string, error)
+}
+
+// SettingsState is what this account's settings file did when it was read. It
+// is a value rather than three return values so a test can put any of the four
+// states in without a file.
+type SettingsState struct {
+	// Present is false when there is no file at all, which is the state of
+	// every install until somebody saves. It is not a fault: the shipping
+	// defaults are in force and the server runs on them.
+	Present bool
+	// Notices is what Load had to change to make the file usable: settings in
+	// force in a changed form, and settings not in force at all.
+	Notices config.Notices
+	// Err is a file that could not be read or parsed. The defaults are in
+	// force and the operator's settings are not, which is a fault.
+	Err error
 }
 
 // DefaultChecks is the set a real run asks, in the order it prints them: what
@@ -138,6 +159,7 @@ func DefaultChecks() []Check {
 	return []Check{
 		{Name: runtimeCheckName, Label: Verified, Ask: checkRuntime},
 		{Name: rootCheckName, Label: Verified, Ask: checkRoot},
+		{Name: settingsCheckName, Label: Verified, Ask: checkSettings},
 		{Name: versionCheckName, Label: Verified, Ask: checkVersion},
 		{Name: portCheckName, Label: Verified, Ask: checkPort},
 		{Name: firewallCheckName, Label: Observed, Ask: checkFirewall},
@@ -161,12 +183,25 @@ func Diagnose(env DoctorEnv, checks []Check) Report {
 		if c.Label != Verified {
 			severity = SeverityUndetermined
 		}
+		// Redaction happens here, over every string that reaches the report,
+		// and not at the call sites. A check builds its summary out of paths
+		// and out of errors other people wrote — an *os.PathError reads "open
+		// <path>: permission denied", and the firewall answers with the path
+		// in the middle of a sentence — so a rule applied per check is a rule
+		// the next check forgets, in the output an operator pastes in public.
+		commands := make([]string, 0, len(a.Commands))
+		for _, cmd := range a.Commands {
+			commands = append(commands, redact(cmd, env.Home))
+		}
+		if len(commands) == 0 {
+			commands = nil
+		}
 		r.Findings = append(r.Findings, Finding{
 			Name:     c.Name,
 			Label:    c.Label,
 			Severity: severity,
-			Summary:  a.Summary,
-			Commands: a.Commands,
+			Summary:  redact(a.Summary, env.Home),
+			Commands: commands,
 		})
 	}
 	return r
@@ -200,14 +235,41 @@ func checkRuntime(env DoctorEnv) Answer {
 }
 
 func checkRoot(env DoctorEnv) Answer {
-	root := abbreviate(env.Paths.Root, env.Home)
 	if err := env.Writable(env.Paths.Root); err != nil {
 		return Answer{
-			Summary:  root + " cannot be written: " + abbreviate(err.Error(), env.Home),
+			Summary:  env.Paths.Root + " cannot be written: " + err.Error(),
 			Severity: SeverityFailed,
 		}
 	}
-	return Answer{Summary: root + " is writable", Severity: SeverityOK}
+	return Answer{Summary: env.Paths.Root + " is writable", Severity: SeverityOK}
+}
+
+// checkSettings reports what config.json did when it was read. It is verified
+// rather than observed: the file is this account's own, Gropius reads it, and a
+// severity on it means what it says.
+//
+// A file that is not there is not a fault. Every install has none until
+// somebody saves, and the shipping defaults are what the server runs on.
+func checkSettings(env DoctorEnv) Answer {
+	s := env.Settings()
+	switch {
+	case s.Err != nil:
+		return Answer{
+			Summary:  "cannot be used as written, so the shipping defaults are in force: " + s.Err.Error(),
+			Severity: SeverityFailed,
+			Commands: []string{"gropius status"},
+		}
+	case !s.Present:
+		return Answer{Summary: "not written yet, so the shipping defaults are in force", Severity: SeverityOK}
+	case !s.Notices.Empty():
+		return Answer{
+			Summary: "loads, with " + strconv.Itoa(len(s.Notices.All())) + " setting(s) this build could not use as written; " +
+				"the control panel names them, and a save rewrites the file from what is in force",
+			Severity: SeverityWarning,
+		}
+	default:
+		return Answer{Summary: "loads", Severity: SeverityOK}
+	}
 }
 
 // checkVersion reads this binary and contacts nothing. Whether this build is
@@ -249,11 +311,18 @@ func checkPort(env DoctorEnv) Answer {
 // says it does not establish that the grant still covers this build, and prints
 // the two commands that re-grant it (adr-2609111126115848 conditions 1 and 2).
 func checkFirewall(env DoctorEnv) Answer {
-	binary := abbreviate(env.Binary, env.Home)
+	// Two renderings of one path, because the prose and the command are read
+	// by different things. The prose is for a person, so the path is
+	// abbreviated there by Diagnose like every other string in the report. The
+	// command is for a shell, so it is rendered by shellArg: quoted against a
+	// space or a quote in the path, and written "$HOME/…" rather than "~/…" so
+	// that it still carries no account name and still runs.
+	binary := redact(env.Binary, env.Home)
+	arg := shellArg(env.Binary, env.Home)
 	answer := Answer{
 		Commands: []string{
-			"sudo " + socketfilterfw + " --add '" + binary + "'",
-			"sudo " + socketfilterfw + " --unblockapp '" + binary + "'",
+			"sudo " + socketfilterfw + " --add " + arg,
+			"sudo " + socketfilterfw + " --unblockapp " + arg,
 		},
 	}
 	out, err := env.Firewall(env.Binary)
@@ -261,7 +330,7 @@ func checkFirewall(env DoctorEnv) Answer {
 		answer.Summary = "the firewall query could not be run, so nothing was observed about the entry for " + binary
 		return answer
 	}
-	answer.Summary = "the firewall query answered " + quote(strings.TrimSpace(abbreviate(out, env.Home))) +
+	answer.Summary = "the firewall query answered " + quote(strings.TrimSpace(out)) +
 		" for " + binary + "; that does not establish that a grant covers this build, because the query answers " +
 		"the same way for a path it has no entry for, and this build's code identity changes with every build"
 	return answer
@@ -321,20 +390,70 @@ func padTo(s string, width int) string {
 	return s
 }
 
-// abbreviate replaces this account's home directory with "~" so a report can be
-// pasted into a bug report without carrying an account name. A path that merely
-// starts with the same letters is a different directory and is left alone.
-func abbreviate(path, home string) string {
-	if home == "" || path == "" {
-		return path
+// redact replaces every occurrence of this account's home directory with "~",
+// so that what doctor prints can be pasted into a bug report without carrying
+// an account name.
+//
+// Every occurrence, and not a prefix. The path usually arrives inside a
+// sentence somebody else wrote: an *os.PathError reads "open <path>: permission
+// denied", and the firewall answers "Incoming connection to <path> is
+// permitted." A prefix rule matches neither, and leaves the account name in
+// both — in the output an operator pastes in public.
+//
+// The cost is that a sibling directory whose name merely starts with the same
+// letters is folded too. That is the deliberate trade: over-redaction costs a
+// reader one confusing path, under-redaction costs them their account name. A
+// home of "/" is treated as no home at all rather than as a rule that would put
+// a tilde between every character of every string.
+func redact(s, home string) string {
+	home = strings.TrimRight(home, string(filepath.Separator))
+	if home == "" || s == "" {
+		return s
 	}
-	if path == home {
-		return "~"
+	s = strings.ReplaceAll(s, home+string(filepath.Separator), "~"+string(filepath.Separator))
+	return strings.ReplaceAll(s, home, "~")
+}
+
+// shellArg renders a path as one shell argument that is both runnable and safe
+// to paste in public.
+//
+// A path inside this account's home is written as "$HOME/…" in double quotes:
+// the shell expands $HOME on the machine the command is run on, and the account
+// name never reaches the page. Abbreviating it to "~" instead would satisfy
+// neither half — a tilde inside quotes is a literal character, so the command
+// would name a directory that does not exist.
+//
+// Everything else is single-quoted, with an embedded single quote closing the
+// quoting, escaping itself and reopening it: the only escape a single-quoted
+// shell string has.
+func shellArg(path, home string) string {
+	home = strings.TrimRight(home, string(filepath.Separator))
+	if home != "" {
+		if path == home {
+			return `"$HOME"`
+		}
+		if rest, ok := strings.CutPrefix(path, home+string(filepath.Separator)); ok {
+			return `"$HOME/` + escapeInDoubleQuotes(rest) + `"`
+		}
 	}
-	if strings.HasPrefix(path, home+string(filepath.Separator)) {
-		return "~" + path[len(home):]
+	return "'" + strings.ReplaceAll(path, "'", `'\''`) + "'"
+}
+
+// escapeInDoubleQuotes escapes the four characters a double-quoted shell string
+// still reads: the backtick that would run a command, the dollar that would
+// expand another variable, the backslash that escapes, and the quote that would
+// end the string. $HOME is written outside this, so it is the one expansion
+// left in the argument.
+func escapeInDoubleQuotes(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		switch r {
+		case '\\', '"', '$', '`':
+			b.WriteByte('\\')
+		}
+		b.WriteRune(r)
 	}
-	return path
+	return b.String()
 }
 
 // liveDoctorEnv is the environment a real run asks its questions of.
@@ -353,6 +472,7 @@ func liveDoctorEnv(env Env) DoctorEnv {
 		Holder:   func() instance.Holder { return instance.Probe(env.Paths, env.Port) },
 		Runtime:  func() runtime.SetupStatus { return runtime.NewProvisioner(env.Paths).Status() },
 		Writable: writableDir,
+		Settings: func() SettingsState { return loadSettings(env.Paths.Config) },
 		Firewall: queryFirewall,
 	}
 }
@@ -388,4 +508,16 @@ func queryFirewall(path string) (string, error) {
 		return "", err
 	}
 	return string(out), nil
+}
+
+// loadSettings reads this account's settings the way the server reads them, and
+// reports what happened rather than what they say. Nothing here is printed but
+// the outcome: the file holds an API key and a HuggingFace token, and doctor's
+// output is written to be pasted in public.
+func loadSettings(path string) SettingsState {
+	if _, err := os.Stat(path); errors.Is(err, fs.ErrNotExist) {
+		return SettingsState{}
+	}
+	_, notices, err := config.Load(path)
+	return SettingsState{Present: true, Notices: notices, Err: err}
 }
