@@ -16,6 +16,7 @@ import (
 var lifecycleVerbs = map[string]func(lifecycle.Env, []string) int{
 	"status":    lifecycle.RunStatus,
 	"doctor":    lifecycle.RunDoctor,
+	"config":    lifecycle.RunConfig,
 	"install":   lifecycle.RunInstall,
 	"uninstall": lifecycle.RunUninstall,
 }
@@ -104,6 +105,7 @@ func verbEnv() (lifecycle.Env, error) {
 		Version:         version,
 		Paths:           paths,
 		Port:            start.Config.Port,
+		Config:          start.Config,
 		Out:             os.Stdout,
 		Err:             os.Stderr,
 		Term:            lifecycle.Detect(os.Stdout, os.LookupEnv),

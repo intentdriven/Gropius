@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -154,4 +155,32 @@ func liveVerb(verb string) func(lifecycle.Env, []string) int {
 		return lifecycle.RunUninstall
 	}
 	return nil
+}
+
+// The reading verbs need no fake, and that is the point of them being
+// reading verbs: `gropius config show` answers from the environment it is
+// handed and touches nothing on this Mac. It is dispatched through the same
+// runner as the writing ones, so this asserts the dispatch and the silence
+// together — an answer on standard output, and an untouched home directory.
+func TestConfigShowIsDispatchedAndWritesNothing(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	var out, errOut bytes.Buffer
+	cmd := commandLine{Kind: kindVerb, Verb: "config", Args: []string{"show", "--json"}}
+	if code := runCommandVerb(cmd, &out, &errOut); code != lifecycle.ExitOK {
+		t.Fatalf("config show: exit = %d (%s)", code, errOut.String())
+	}
+	var doc struct {
+		Settings map[string]any `json:"settings"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &doc); err != nil {
+		t.Fatalf("config show --json did not answer with the contract: %v\n%s", err, out.String())
+	}
+	if _, named := doc.Settings["port"]; !named {
+		t.Errorf("the answer names no settings:\n%s", out.String())
+	}
+	if entries, err := os.ReadDir(home); err != nil || len(entries) != 0 {
+		t.Errorf("a reading verb wrote %v into the home directory", entries)
+	}
 }
