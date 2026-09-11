@@ -220,6 +220,126 @@ func findRetired(t *testing.T, dir string) string {
 	return ""
 }
 
+// The one race this file exists to refuse must not be ATTEMPTED with the old
+// bundle instead.
+//
+// If something appears at the destination between the Lstat that found it empty
+// and the one that checks again, the swap refuses — but it used to refuse by
+// calling restore, which renames the retired bundle onto whatever appeared.
+// The message then said "refusing to replace it" about a call that had just
+// tried to replace it.
+//
+// WHAT SAVED IT, MEASURED RATHER THAN ASSUMED, and why it is still wrong.
+// Renaming a DIRECTORY onto a non-directory is ENOTDIR, and onto an existing
+// empty directory macOS answers EEXIST (verified on APFS: "file exists" for an
+// empty directory, "not a directory" for a symbolic link). The retired bundle
+// is always a directory, so on this platform the attempt fails and the old
+// bundle stays put. The behaviour is therefore correct today by the
+// filesystem's grace and not by anything this file does — POSIX permits
+// replacing an empty directory, and Linux does — which is exactly the kind of
+// invariant that stops being true somewhere else.
+//
+// So what is asserted here is the property that does not depend on any of that:
+// no rename is issued ONTO the destination once something has appeared there.
+// Nothing that appeared is touched, the set-aside copy stays where it is, and
+// the failure names both paths, because a person now has two things to look at.
+func TestSwapRefusesToClobberWhatAppearedAtTheDestination(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		reappear func(t *testing.T, dest string)
+		check    func(t *testing.T, dest string)
+	}{
+		{
+			name: "an empty directory",
+			reappear: func(t *testing.T, dest string) {
+				if err := os.Mkdir(dest, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			},
+			check: func(t *testing.T, dest string) {
+				entries, err := os.ReadDir(dest)
+				if err != nil {
+					t.Fatalf("what appeared at the destination is gone: %v", err)
+				}
+				if len(entries) != 0 {
+					t.Errorf("what appeared at the destination now holds %d entries; it was empty", len(entries))
+				}
+			},
+		},
+		{
+			name: "a symbolic link",
+			reappear: func(t *testing.T, dest string) {
+				if err := os.Symlink(filepath.Join(t.TempDir(), "somewhere"), dest); err != nil {
+					t.Fatal(err)
+				}
+			},
+			check: func(t *testing.T, dest string) {
+				fi, err := os.Lstat(dest)
+				if err != nil {
+					t.Fatalf("what appeared at the destination is gone: %v", err)
+				}
+				if fi.Mode()&os.ModeSymlink == 0 {
+					t.Error("the symbolic link that appeared was replaced; rename(2) does that silently, which is " +
+						"the whole reason this branch exists")
+				}
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			src := bundleAt(t, filepath.Join(dir, "verified", "Gropius.app"), "new")
+			dest := bundleAt(t, filepath.Join(dir, "Applications", "Gropius.app"), "old")
+
+			// The window: something takes the destination's name in the instant
+			// after the installed bundle is renamed aside. Every rename is
+			// recorded, because the assertion is about a call that must not be
+			// made rather than about what the filesystem did with it.
+			first := true
+			var onto []string
+			rename := func(oldpath, newpath string) error {
+				if !first {
+					onto = append(onto, newpath)
+				}
+				if err := os.Rename(oldpath, newpath); err != nil {
+					return err
+				}
+				if first {
+					first = false
+					tc.reappear(t, dest)
+				}
+				return nil
+			}
+
+			err := placeBundle(src, dest, rename)
+			for _, target := range onto {
+				if target == dest {
+					t.Errorf("the swap issued a rename onto %s after something had appeared there; whether that "+
+						"call succeeds is the filesystem's business, and on another one it replaces what it found",
+						dest)
+				}
+			}
+			if err == nil {
+				t.Fatal("placeBundle reported success although it refused the destination")
+			}
+			tc.check(t, dest)
+
+			retired := findRetired(t, filepath.Dir(dest))
+			if retired == "" {
+				t.Fatal("the set-aside bundle is gone; it is the only copy of the application there is")
+			}
+			if got := markerAt(t, retired); got != "old" {
+				t.Errorf("what was set aside holds %q, want the installed bundle", got)
+			}
+			if !strings.Contains(err.Error(), retired) {
+				t.Errorf("the failure %q does not say where the installed bundle is", err)
+			}
+			if !strings.Contains(err.Error(), dest) {
+				t.Errorf("the failure %q does not name the destination it refused", err)
+			}
+		})
+	}
+}
+
 // The staging name is unguessable. A predictable name — the pid, the bundle's
 // own name — hands anyone watching the destination directory a reliable signal
 // for when to act on it, and on a Mac where /Applications is group-writable by

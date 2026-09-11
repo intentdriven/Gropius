@@ -96,14 +96,23 @@ func placeBundle(src, dest string, rename renameFunc) error {
 	}
 
 	// Nothing may be at the destination now. Something that is, is a name
-	// another process created in the window since the rename above, and
-	// renaming over it would either fail obscurely or — for an empty directory,
-	// which rename(2) does replace — succeed silently on somebody else's
-	// behalf.
-	if _, err := os.Lstat(dest); err == nil {
-		put, note := restore(rename, retired, dest)
-		keep = !put && retired != ""
-		return fmt.Errorf("%s was created while the new bundle was being staged; refusing to replace it%s", dest, note)
+	// another process created in the window since the rename above, and it is
+	// not this installer's to replace — with the new bundle OR with the old
+	// one.
+	//
+	// So the set-aside copy is NOT put back here, which is the difference
+	// between refusing a clobber and performing it with a different bundle: a
+	// restore is a rename onto that same name, and whether it lands is the
+	// filesystem's business rather than this file's (macOS answers EEXIST for
+	// an empty directory and ENOTDIR for a symbolic link; POSIX permits
+	// replacing an empty directory, and Linux does). The installed bundle stays
+	// where it was set aside, the staging directory that holds it is kept, and
+	// the failure names both it and what appeared, because a person now has two
+	// things to look at and one of them is their application.
+	if fi, err := os.Lstat(dest); err == nil {
+		keep = retired != ""
+		return fmt.Errorf("%s was created by something else while the new bundle was being staged (%s); "+
+			"refusing to replace it%s", dest, describe(fi), retiredNote(retired, dest))
 	}
 
 	if err := rename(staged, dest); err != nil {
@@ -115,6 +124,30 @@ func placeBundle(src, dest string, rename renameFunc) error {
 	// And only now is the set-aside copy removed, by the deferred RemoveAll of
 	// the staging directory it sits in.
 	return nil
+}
+
+// describe says what kind of thing took a name, for a message a person has to
+// act on: a symbolic link, a directory and a file each mean something different
+// about who put it there.
+func describe(fi os.FileInfo) string {
+	switch {
+	case fi.Mode()&os.ModeSymlink != 0:
+		return "a symbolic link"
+	case fi.IsDir():
+		return "a directory"
+	default:
+		return "a file"
+	}
+}
+
+// retiredNote says where the installed bundle is when it has been set aside and
+// is not going back on its own.
+func retiredNote(retired, dest string) string {
+	if retired == "" {
+		return " (nothing was installed there before, and nothing was removed)"
+	}
+	return ". The installed bundle was already set aside and is intact at " + retired +
+		"; move it back to " + dest + " once you have dealt with what is there."
 }
 
 // restore puts a set-aside bundle back, so a failure is a no-op rather than an
