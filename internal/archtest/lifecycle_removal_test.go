@@ -184,12 +184,18 @@ func TestTheLifecycleVerbsOnlyEverREADTheControlPlane(t *testing.T) {
 				return true
 			}
 			// A verb that asked the server to DO something would spell it as
-			// one of these. Get is counted too, so the single read site is
-			// visible rather than merely allowed.
+			// one of these on an HTTP client. Get is counted too, so the single
+			// read site is visible rather than merely allowed. The method name
+			// alone is not enough: a struct accessor or reflect's Tag.Get is
+			// spelled the same way, so the call has to look like HTTP as well —
+			// the receiver is the http package or something called a client,
+			// or an argument is a URL or a route.
 			if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
 				switch sel.Sel.Name {
 				case "Get", "Post", "PostForm", "Head", "Do":
-					sites[rel] = append(sites[rel], fset.Position(call.Pos()).Line)
+					if looksLikeHTTP(sel, call) {
+						sites[rel] = append(sites[rel], fset.Position(call.Pos()).Line)
+					}
 				}
 			}
 			// And every route this package names, wherever it is named.
@@ -327,4 +333,30 @@ func forEachLifecycleSourceLine(t *testing.T, fn func(rel string, lineNo int, li
 		}
 		return nil
 	})
+}
+
+// looksLikeHTTP reports whether a Get/Post/Head/Do call is one an HTTP client
+// would make: its receiver is the http package or is named as a client, or one
+// of its arguments spells a URL or a control-plane route. A struct's Get or
+// reflect's Tag.Get has none of those.
+func looksLikeHTTP(sel *ast.SelectorExpr, call *ast.CallExpr) bool {
+	if id, ok := sel.X.(*ast.Ident); ok {
+		if id.Name == "http" || strings.Contains(strings.ToLower(id.Name), "client") {
+			return true
+		}
+	}
+	if inner, ok := sel.X.(*ast.SelectorExpr); ok && strings.Contains(strings.ToLower(inner.Sel.Name), "client") {
+		return true
+	}
+	for _, arg := range call.Args {
+		if lit, ok := stringLit(arg); ok && (strings.HasPrefix(lit, "http") || strings.HasPrefix(lit, "/api/")) {
+			return true
+		}
+		if bin, ok := arg.(*ast.BinaryExpr); ok {
+			if lit, ok := stringLit(bin.X); ok && strings.HasPrefix(lit, "http") {
+				return true
+			}
+		}
+	}
+	return false
 }
