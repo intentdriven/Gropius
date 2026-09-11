@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -1412,7 +1413,7 @@ func (c *Control) applySettings(raw []byte) (map[string]any, error) {
 	}
 
 	if err := c.App.SetConfig(incoming); err != nil {
-		return nil, err
+		return nil, refusalNamingWhatChanged(err, current, incoming)
 	}
 	// The file has just been written from the settings in force, repairs and
 	// all, so there is nothing left in it to repair.
@@ -1444,6 +1445,76 @@ func (c *Control) applySettings(raw []byte) (map[string]any, error) {
 		out["warning"] = warn
 	}
 	return out, nil
+}
+
+// refusalNamingWhatChanged adds the settings this save would have changed to a
+// refusal.
+//
+// A cross-field rule is refused in the words the RULE is about, and those are
+// not the words the operator touched. Switching the bind from this Mac to the
+// whole network, with the eviction grace already on and no API key stored, is
+// refused with "eviction grace needs an API key on a LAN-exposed server": a
+// sentence about two settings that did not move, silent about the one that
+// did, and it sends the operator to look at the grace. AGENTS.md records that
+// a save refused over a setting nobody touched is a wedge this repository has
+// built three times.
+//
+// The list is computed from the two configurations rather than written beside
+// each rule, so it cannot go stale as the rules change and a rule added later
+// is covered the day it is added. It holds the promise structurally: a refusal
+// always names a field this save changed, or says the save changed nothing —
+// which is the thing most worth knowing, because a save that changed nothing
+// and was refused anyway is the wedge itself.
+func refusalNamingWhatChanged(err error, before, after config.Config) error {
+	changed := changedSettings(before, after)
+	if len(changed) == 0 {
+		return fmt.Errorf("%w (this save changed no setting)", err)
+	}
+	return fmt.Errorf("%w (this save changed %s)", err, strings.Join(changed, ", "))
+}
+
+// changedSettings is the config.json keys whose stored value this save would
+// change, spelled as the file spells them.
+//
+// Compared as encoded values rather than field by field: the keys are what the
+// operator sees in config.json and what the panel posts, and encoding both
+// configurations means a nested settings struct added later is compared
+// without this function being taught about it. A whole nested object is named
+// by its own key — "sampling" rather than "sampling.top_p" — which is as
+// precise as a refusal needs to be about where to look.
+func changedSettings(before, after config.Config) []string {
+	was, now := encodedSettings(before), encodedSettings(after)
+	keys := map[string]bool{}
+	for key := range was {
+		keys[key] = true
+	}
+	for key := range now {
+		keys[key] = true
+	}
+	out := []string{}
+	for key := range keys {
+		if !bytes.Equal(was[key], now[key]) {
+			out = append(out, key)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// encodedSettings is one configuration as the keys config.json would carry,
+// each still encoded. An unencodable configuration yields nothing, which makes
+// every key read as unchanged: this runs on a refusal that has already been
+// decided, and it must never turn a refusal into something else.
+func encodedSettings(c config.Config) map[string]json.RawMessage {
+	b, err := json.Marshal(c)
+	if err != nil {
+		return nil
+	}
+	var out map[string]json.RawMessage
+	if err := json.Unmarshal(b, &out); err != nil {
+		return nil
+	}
+	return out
 }
 
 // namesModels reports whether the posted body carries a models field at all,
