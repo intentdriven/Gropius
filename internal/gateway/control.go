@@ -1466,13 +1466,14 @@ func (c *Control) applySettings(raw []byte) (map[string]any, error) {
 // which is the thing most worth knowing, because a save that changed nothing
 // and was refused anyway is the wedge itself.
 //
-// It costs two marshals and one unmarshal of a configuration on the REFUSED
-// path, under settingsMu, which every save queues behind. That is accepted
-// rather than overlooked: the body is already capped at MaxConfigBytes, the
-// work is bounded by the configuration's own size, and a caller who can reach
-// this endpoint can already make a save do more work than this by posting a
-// full settings body. Moving it off the lock would mean restructuring the
-// write path around a function that only runs when a save has already failed.
+// It costs two marshals of a configuration and one unmarshal of the body on
+// the REFUSED path, under settingsMu, which every save queues behind. That is
+// accepted rather than overlooked: the body is already capped at
+// MaxConfigBytes, the work is bounded by the configuration's own size, and a
+// caller who can reach this endpoint can already make a save do more work than
+// this by posting a full settings body. Moving it off the lock would mean
+// restructuring the write path around a function that only runs when a save
+// has already failed.
 func refusalNamingWhatChanged(err error, before, after config.Config, posted []byte) error {
 	changed := changedSettings(before, after, posted)
 	if len(changed) == 0 {
@@ -1502,6 +1503,13 @@ func refusalNamingWhatChanged(err error, before, after config.Config, posted []b
 // what they themselves sent.
 func changedSettings(before, after config.Config, posted []byte) []string {
 	was, now := encodedSettings(before), encodedSettings(after)
+	// Decoded once, not once per secret: both secrets are always present in
+	// the encoded maps above (neither carries omitempty), so a decode inside
+	// the loop was a decode of the whole body for each of them.
+	var body map[string]json.RawMessage
+	if err := json.Unmarshal(posted, &body); err != nil {
+		body = nil
+	}
 	keys := map[string]bool{}
 	for key := range was {
 		keys[key] = true
@@ -1512,7 +1520,7 @@ func changedSettings(before, after config.Config, posted []byte) []string {
 	out := []string{}
 	for key := range keys {
 		if secretSettingKeys[key] {
-			if postedASecret(posted, key) {
+			if postedASecret(body, key) {
 				out = append(out, key)
 			}
 			continue
@@ -1534,23 +1542,40 @@ var secretSettingKeys = map[string]bool{"api_key": true, "hf_token": true}
 // postedASecret reports whether this body asks to change the named secret: it
 // carries the key, and what it carries is not the placeholder the panel echoes
 // back for a secret it is leaving alone.
-func postedASecret(body []byte, field string) bool {
-	var named map[string]json.RawMessage
-	if err := json.Unmarshal(body, &named); err != nil {
-		return false
-	}
-	for key, raw := range named {
+//
+// EVERY spelling of the field is looked at, and the answer is "yes" if any of
+// them asks for something other than the placeholder. A body carrying both
+// "api_key" and "API_KEY" is one encoding/json folds into a single struct
+// field by a rule of its own, and an earlier version of this returned whichever
+// spelling a map range reached first — so the sentence describing what the save
+// would do changed from request to request while the save itself did not. This
+// over-reports on a body that contradicts itself, which is the safe direction:
+// it can only ever name a field the caller did write, and it never reads what
+// is stored.
+//
+// A null is not a request to store anything. The struct decode leaves the
+// secret exactly as it was, so naming it would describe a change that is not
+// happening.
+func postedASecret(body map[string]json.RawMessage, field string) bool {
+	asks := false
+	for key, raw := range body {
 		// Folded, the way encoding/json matched it into the struct.
 		if !strings.EqualFold(key, field) {
 			continue
 		}
+		if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+			continue
+		}
 		var value string
 		if err := json.Unmarshal(raw, &value); err != nil {
-			return true // not a string at all, so not the placeholder
+			asks = true // not a string at all, so not the placeholder
+			continue
 		}
-		return value != redacted
+		if value != redacted {
+			asks = true
+		}
 	}
-	return false
+	return asks
 }
 
 // encodedSettings is one configuration as the keys config.json would carry,

@@ -307,3 +307,50 @@ func TestConfigShowJSONCarriesTheSettingsProblem(t *testing.T) {
 		t.Errorf("a clean read still carries a settings_problem field:\n%s", clean.String())
 	}
 }
+
+// The guard above walks a VALUE, so it can only see the fields that value
+// populates — and indirectValue stops at a nil pointer rather than recursing
+// into the type behind it. A pointer-to-struct field left nil in the fixture
+// would therefore emit one null key, its inner fields never reaching the
+// secret check, while an operator who set it would have those fields printed.
+//
+// No such field exists in config.Config today, so rather than build a
+// type-driven second walk for a shape nothing has, this fails the day one
+// arrives — with the reason, and pointing at the guard that would go quiet.
+func TestNoSettingHidesItsFieldsBehindAPointer(t *testing.T) {
+	var walk func(rt reflect.Type, path string, depth int)
+	walk = func(rt reflect.Type, path string, depth int) {
+		if depth > 8 {
+			return
+		}
+		for i := range rt.NumField() {
+			f := rt.Field(i)
+			if f.PkgPath != "" {
+				continue
+			}
+			name, _, _ := strings.Cut(f.Tag.Get("json"), ",")
+			if name == "" || name == "-" {
+				continue
+			}
+			here := path + name
+			if f.Type.Kind() == reflect.Pointer && f.Type.Elem().Kind() == reflect.Struct {
+				t.Errorf("config.Config reaches %q through a pointer to a struct. SettingsInForce reports a "+
+					"nil one as a single null and never walks inside it, so TestEverySettingThatLooksLikeASecret"+
+					"IsRedacted would stop seeing its fields — give the walk a type-driven half before adding "+
+					"this shape", here)
+				continue
+			}
+			ft := f.Type
+			for ft.Kind() == reflect.Pointer {
+				ft = ft.Elem()
+			}
+			switch {
+			case ft.Kind() == reflect.Map && ft.Elem().Kind() == reflect.Struct:
+				walk(ft.Elem(), here+".*.", depth+1)
+			case ft.Kind() == reflect.Struct:
+				walk(ft, here+".", depth+1)
+			}
+		}
+	}
+	walk(reflect.TypeOf(config.Config{}), "", 0)
+}

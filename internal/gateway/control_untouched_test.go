@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -438,5 +439,128 @@ func TestARefusalDoesNotSayWhetherAGuessedSecretWasRight(t *testing.T) {
 	// A body that does not name a secret at all never names it either.
 	if msg := probe(t, `{`+refused+`}`); strings.Contains(msg, "api_key") || strings.Contains(msg, "hf_token") {
 		t.Errorf("a save that never named a secret reported one as changed:\n%s", msg)
+	}
+}
+
+// The answer about a secret is the same answer every time.
+//
+// postedASecret ranges a map, and Go randomises map iteration, so a body
+// carrying two spellings of one field — "api_key" and "API_KEY", which
+// encoding/json folds into the same struct field — got whichever the range
+// reached first. The save's real effect is decided by encoding/json's own
+// rule and does not vary; the sentence describing it did, on a refusal whose
+// whole job is to say what the save would have done. Measured over 200 runs
+// before this: 24 true, 176 false for one ordering, and the ordering where the
+// key really would have changed was the one that said it had not.
+//
+// The rule now: any spelling that asks for something other than the
+// placeholder is a request to change the secret. It over-reports on a body
+// that contradicts itself, which is deterministic and safe — it can only name
+// a field the caller did write, never reveal one they did not.
+func TestTheAnswerAboutASecretDoesNotDependOnMapOrder(t *testing.T) {
+	stored := config.Default()
+	stored.APIKey = "bh_the-real-key"
+
+	const refused = `"stats_months":0,"host":"0.0.0.0","bind_mode":"","port":11535,"decode_concurrency":4`
+	for _, tc := range []struct {
+		name string
+		body string
+		want bool
+	}{
+		{"the placeholder first", `{` + refused + `,"api_key":"` + redacted + `","API_KEY":"guess"}`, true},
+		{"the guess first", `{` + refused + `,"API_KEY":"guess","api_key":"` + redacted + `"}`, true},
+		// A null is not a value the caller is asking to store: the struct
+		// decode leaves the stored secret exactly where it was, so naming it
+		// would describe a change that is not happening.
+		{"a null", `{` + refused + `,"api_key":null}`, false},
+		{"the placeholder alone", `{` + refused + `,"api_key":"` + redacted + `"}`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// Repeated, because the fault this covers is a coin flip: one run
+			// of the broken code passes most of the time.
+			for i := range 50 {
+				srv := newTestControl(t, stored)
+				resp := postJSON(t, srv, "/api/settings", tc.body)
+				msg := refusalText(t, resp)
+				resp.Body.Close()
+				if got := strings.Contains(msg, "api_key"); got != tc.want {
+					t.Fatalf("run %d: names api_key = %v, want %v — the same body must get the same "+
+						"answer every time:\n%s", i, got, tc.want, msg)
+				}
+			}
+		})
+	}
+}
+
+// A secret added to the configuration is never value-compared by accident.
+//
+// secretSettingKeys is a hand-maintained list, and the day a third credential
+// lands in config.Config without a line in it, changedSettings compares it
+// like any other setting and the oracle is back — with nothing failing. This
+// is the same guard internal/lifecycle keeps over its own redaction list, for
+// the same reason and by the same heuristic: whole snake_case segments, so
+// "max_tokens" is a sampling parameter and not a credential.
+//
+// It walks the NESTED settings too. changedSettings compares a nested object
+// as one encoded value, so a secret inside config.Sampling or inside a model's
+// settings would be compared as part of its parent — the parent's key is what
+// the refusal names, and the comparison is an oracle on the secret inside it
+// just the same.
+func TestEverySecretSettingIsExcludedFromTheComparison(t *testing.T) {
+	var walk func(rt reflect.Type, prefix string, depth int)
+	seen := 0
+	walk = func(rt reflect.Type, prefix string, depth int) {
+		if depth > 8 {
+			return
+		}
+		for i := range rt.NumField() {
+			f := rt.Field(i)
+			if f.PkgPath != "" {
+				continue
+			}
+			name, _, _ := strings.Cut(f.Tag.Get("json"), ",")
+			if name == "" || name == "-" {
+				continue
+			}
+			seen++
+			ft := f.Type
+			for ft.Kind() == reflect.Pointer {
+				ft = ft.Elem()
+			}
+			if ft.Kind() == reflect.Map && ft.Elem().Kind() == reflect.Struct {
+				walk(ft.Elem(), prefix+name+".*.", depth+1)
+				continue
+			}
+			if ft.Kind() == reflect.Struct {
+				walk(ft, prefix+name+".", depth+1)
+				continue
+			}
+			if prefix == "" && secretSettingKeys[name] {
+				continue
+			}
+			for _, segment := range strings.Split(name, "_") {
+				switch segment {
+				case "key", "token", "secret", "password":
+					t.Errorf("config.Config holds %q, which reads like a credential and is not excluded "+
+						"from the value comparison in changedSettings — a refused save then tells a caller "+
+						"on this Mac whether they guessed it. Add it to secretSettingKeys (a nested one "+
+						"needs the comparison taught about it, because its parent object is compared whole)",
+						prefix+name)
+				}
+			}
+		}
+	}
+	walk(reflect.TypeOf(config.Config{}), "", 0)
+	if seen < 25 {
+		t.Fatalf("the walk saw %d settings, so it is reading the wrong type", seen)
+	}
+
+	// And the other direction: a key in the list that is not a setting any
+	// more excludes nothing.
+	held := encodedSettings(config.Default())
+	for key := range secretSettingKeys {
+		if _, ok := held[key]; !ok {
+			t.Errorf("secretSettingKeys names %q, which the configuration no longer holds", key)
+		}
 	}
 }
