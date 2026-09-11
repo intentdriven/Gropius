@@ -1,8 +1,8 @@
 ---
 id: itd-2609081259493890
 slug: every-setting-gropius-has-is-reachable-from-the-go-app-and-t
-spec_id: null
-kind: null
+spec_id: spc-2609111941481833
+kind: standalone
 suggested_kind: null
 reclassification_history: []
 builds_on: []
@@ -73,27 +73,27 @@ something, the enumeration half was the wrong half.
 
 ## Scope Conditions
 
-- The settings this holds are the json-tagged fields of `internal/config`'s
+- The settings this holds are the json-tagged fields of `internal/config`'s <!-- cond: cond-2609111941481159 -->
   `Config` and the structs it nests — `Sampling`, `ChatRule` and
   `ModelSettings` — machine-wide and per-model. State that is not a setting —
   the registry, the statistics store, the PID ledger, `Paths` — is out.
-- The panel means the Settings pane. A read-only view elsewhere in the panel —
+- The panel means the Settings pane. A read-only view elsewhere in the panel — <!-- cond: cond-2609111941480600 -->
   the posture page's line for `advertise`, or the one the self-test lane adds
   for `self_test` — is an account of what is on, not a control, and does not
   satisfy the obligation.
-- The terminal surface this record adds is read-only: one `gropius config show`
+- The terminal surface this record adds is read-only: one `gropius config show` <!-- cond: cond-2609111941484746 -->
   verb beside the lifecycle verbs. A verb that writes a setting is deliberately
   deferred, so `config.json` keeps one writer.
-- The Swift client is out. Swift is the client and only the client, and
+- The Swift client is out. Swift is the client and only the client, and <!-- cond: cond-2609111941489668 -->
   somebody using the chat application never sees the server side.
-- Pre-1.0 file semantics are unchanged: a `config.json` written by a newer
+- Pre-1.0 file semantics are unchanged: a `config.json` written by a newer <!-- cond: cond-2609111941481733 -->
   build still loses unknown fields when an older build saves over it.
-- A loopback-only control plane with one operator at a time. The overlapping
+- A loopback-only control plane with one operator at a time. The overlapping <!-- cond: cond-2609111941486975 -->
   saves of iss-2609062045106963, where the last writer wins, are out of scope.
-- A build-time architecture test, not a runtime check. It proves a control
+- A build-time architecture test, not a runtime check. It proves a control <!-- cond: cond-2609111941489272 -->
   exists and is wired to the key; it never proves the control is usable, well
   labelled, or in the right pane.
-- Actions are not settings. "Generate a key" and "Clear records" are things the
+- Actions are not settings. "Generate a key" and "Clear records" are things the <!-- cond: cond-2609111941484015 -->
   panel does rather than values it holds, neither is a field of `Config`, and
   neither is in scope here.
 
@@ -181,3 +181,7 @@ something, the enumeration half was the wrong half.
 ## Audit Notes
 
 _Empty. Populated by intent-auditor when intent moves to shipped/._
+
+## Grounds
+
+- pursued: we expect a reflection-driven sync test over config.Config to keep the Go configuration and the control panel level, because every divergence so far entered field by field in a diff where nobody was thinking about the panel; shown wrong if the divergences that hurt turn out to be mismatched semantics — a control that exists and posts the wrong thing — which field enumeration passes green over — planned autonomously on the maintainer's instruction of 2026-09-10, adopting the brief's recommendations
