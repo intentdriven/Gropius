@@ -7,8 +7,10 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/intentdriven/Gropius/internal/config"
+	"github.com/intentdriven/Gropius/internal/registry"
 )
 
 // A cross-field refusal names a field that changed in this save.
@@ -436,6 +438,23 @@ func TestARefusalDoesNotSayWhetherAGuessedSecretWasRight(t *testing.T) {
 	if msg := probe(t, `{`+refused+`,"api_key":"`+redacted+`"}`); strings.Contains(msg, "api_key") {
 		t.Errorf("posting the redacted placeholder was reported as changing the key:\n%s", msg)
 	}
+	// And the empty value is answered the same way whether a key is stored or
+	// not, which is what keeps it from being the oracle by another route.
+	keyless := config.Default()
+	withKey := config.Default()
+	withKey.APIKey = "bh_the-real-key"
+	answers := map[string]string{}
+	for name, cfg := range map[string]config.Config{"keyless": keyless, "with a key": withKey} {
+		srv := newTestControl(t, cfg)
+		resp := postJSON(t, srv, "/api/settings", `{`+refused+`,"api_key":""}`)
+		answers[name] = refusalText(t, resp)
+		resp.Body.Close()
+	}
+	if answers["keyless"] != answers["with a key"] {
+		t.Errorf("posting an empty key is answered differently depending on whether one is stored:\n"+
+			"  keyless:    %s\n  with a key: %s", answers["keyless"], answers["with a key"])
+	}
+
 	// A body that does not name a secret at all never names it either.
 	if msg := probe(t, `{`+refused+`}`); strings.Contains(msg, "api_key") || strings.Contains(msg, "hf_token") {
 		t.Errorf("a save that never named a secret reported one as changed:\n%s", msg)
@@ -474,6 +493,10 @@ func TestTheAnswerAboutASecretDoesNotDependOnMapOrder(t *testing.T) {
 		// would describe a change that is not happening.
 		{"a null", `{` + refused + `,"api_key":null}`, false},
 		{"the placeholder alone", `{` + refused + `,"api_key":"` + redacted + `"}`, false},
+		// What the panel posts on an install with no key. Saying it changed
+		// the key on every refused save would be untrue in the noisiest
+		// possible place.
+		{"an empty value", `{` + refused + `,"api_key":""}`, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			// Repeated, because the fault this covers is a coin flip: one run
@@ -562,5 +585,65 @@ func TestEverySecretSettingIsExcludedFromTheComparison(t *testing.T) {
 		if _, ok := held[key]; !ok {
 			t.Errorf("secretSettingKeys names %q, which the configuration no longer holds", key)
 		}
+	}
+}
+
+// The third cross-field rule: a pin that does not fit the memory budget.
+//
+// It is a rule about two settings at once — the pinned set and the budget —
+// and it lives in internal/app rather than in Validate, so it is refused by a
+// different path from the two rules above. The promise is the same one: a save
+// that adds a pin too large to hold is refused in terms of what the operator
+// just did, and never in terms of the budget alone, which they did not touch
+// and which was fine until the pin arrived.
+//
+// This is the rule that already carries the other half of the wedge defence:
+// checkPinnedFit refuses only a save that ADDS a pin or lowers a budget under
+// a set that fitted, so a pinned set that stopped fitting because a model grew
+// is a warning and not a refusal — an unedited save is never refused over it.
+// The case below is the refusing one, which is the half this criterion is about.
+func TestACrossFieldRefusalNamesAChangedFieldWhenAPinDoesNotFit(t *testing.T) {
+	const (
+		modelID   = "org/too-big-to-pin"
+		modelSize = 64 << 20
+	)
+	stored := config.Default()
+	// A budget far too small for the model above, charged at LoadCost. The
+	// operator does not touch it in the save below.
+	stored.MaxResidentBytes = 8 << 20
+	if err := stored.Validate(); err != nil {
+		t.Fatalf("the stored configuration is not one the load path accepts: %v", err)
+	}
+
+	srv, a := newTestControlApp(t, stored)
+	if err := a.Registry.Put(registry.Model{
+		RepoID:  modelID,
+		Path:    t.TempDir(),
+		Bytes:   modelSize,
+		State:   registry.StateReady,
+		AddedAt: time.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// The only edit is the pin.
+	body := strings.Replace(uneditedFormBody(t, stored),
+		`"models":{}`, `"models":{"`+modelID+`":{"pinned":true}}`, 1)
+	if !strings.Contains(body, modelID) {
+		t.Fatalf("the pin was not written into the posted body:\n%s", body)
+	}
+
+	resp := postJSON(t, srv, "/api/settings", body)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400: a pin that cannot be held is refused", resp.StatusCode)
+	}
+	msg := refusalText(t, resp)
+	if !strings.Contains(msg, "pinned models need") {
+		t.Fatalf("the save was refused by some other rule than the pin fit:\n%s", msg)
+	}
+	if !strings.Contains(msg, "models") {
+		t.Errorf("the refusal names no field this save changed — the pinned set is what moved, and the "+
+			"budget it is measured against is a setting the operator never touched:\n%s", msg)
 	}
 }

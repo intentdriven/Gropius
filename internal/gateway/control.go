@@ -1556,6 +1556,15 @@ var secretSettingKeys = map[string]bool{"api_key": true, "hf_token": true}
 // A null is not a request to store anything. The struct decode leaves the
 // secret exactly as it was, so naming it would describe a change that is not
 // happening.
+//
+// Neither is an empty string, which is what the panel posts for an install
+// that has no key: without this, every refused save on a keyless server said
+// it had changed the API key and the HuggingFace token, which is both untrue
+// and the noisiest possible place to be untrue. The cost is the narrow case of
+// CLEARING a key that was set — a real change this will not name — and the
+// refusal still names everything else the save moved. It is not a comparison:
+// an empty value answers the same way whatever is stored, which is what keeps
+// the oracle shut.
 func postedASecret(body map[string]json.RawMessage, field string) bool {
 	asks := false
 	for key, raw := range body {
@@ -1571,7 +1580,7 @@ func postedASecret(body map[string]json.RawMessage, field string) bool {
 			asks = true // not a string at all, so not the placeholder
 			continue
 		}
-		if value != redacted {
+		if value != redacted && value != "" {
 			asks = true
 		}
 	}
