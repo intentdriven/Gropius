@@ -203,15 +203,16 @@ collects by watching them.
 - Given `GROPIUS_ROOT` or `-root` names a data root, when uninstall runs, then
   that root is never a deletion path: the removal acts only on the fixed
   locations this account's install actually uses, and the output names the root
-  it did not remove and what is still in it. This follows from the criterion
-  above rather than qualifying it, and is written out because a reader would
+  it did not remove and what is still in it. This follows from the never-derive
+  criterion above rather than qualifying it, and is written out because a reader would
   otherwise expect the variable to be honoured.
 - Given the firewall entry is machine-wide state that no per-account route can
   remove, when uninstall removes it, then it raises exactly one system
   authorisation panel, states there why it is asking, and a refusal leaves
   everything else removed and reports the entry as the one thing that remains
   with the command that removes it. That panel is the single exception to the
-  criterion above, which governs deletion paths on this Mac's filesystem; no
+  never-elevate criterion above, which governs deletion paths on this Mac's
+  filesystem; no
   other step of any lifecycle verb elevates.
 
 **Holding the boundary**
