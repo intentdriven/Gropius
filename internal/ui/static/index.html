@@ -223,6 +223,21 @@
       <span>Port</span>
       <input id="setPort" type="number" min="1" max="65535">
     </label>
+    <fieldset class="group">
+      <legend>Announce on the network</legend>
+      <label class="switch">
+        <input id="setAdvertise" type="checkbox">
+        <span>Announce this server on the local network</span>
+      </label>
+      <p class="hint">While it is on, Gropius announces itself over Bonjour, so a client
+        on your network can find it by name instead of being told its address. While it
+        is off, it serves exactly the same requests to anything that already knows where
+        it is: announcing is how a server is found and never what it allows, and the bind
+        address above is what decides who can reach it. The advert is started once, when
+        Gropius starts, so a change here applies when Gropius next starts; until then the
+        Posture tab says what is being announced now.</p>
+    </fieldset>
+
     <label>
       <span>API key <em>(leave blank for no authentication)</em></span>
       <input id="setKey" type="text" placeholder="no key — anyone on the network can use this server">

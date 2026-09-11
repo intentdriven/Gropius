@@ -298,3 +298,73 @@ func TestThePanelReadsThePinnedSetThePoolIsEnforcing(t *testing.T) {
 		t.Error("the panel never reads state.machine, so it cannot say what a pinned set leaves of the budget")
 	}
 }
+
+// Advertising is a control, not a line on the posture page.
+//
+// It decides whether this Mac announces itself on the network, which is a
+// "most important setting" by the convention's own words (AGENTS.md, "Three
+// surfaces"). Before this it was reachable only by hand-editing config.json:
+// the form omitted the key so that a save would not silently re-enable the
+// advert, and the posture page's line for it is an account of what is on
+// rather than something anyone can switch (itd-2609081259493890).
+//
+// Asserted against the source and the markup rather than through node,
+// because the submit body is built inside an event listener that no test can
+// lift out without a DOM — the same reason the per-model switches above are
+// asserted this way. That also means this half runs on a machine with no node
+// on it, which is where the client-side wedges have gone unnoticed before.
+func TestTheSettingsFormPostsAdvertise(t *testing.T) {
+	src := readPanelSource(t)
+	if !strings.Contains(src, "advertise:          $('setAdvertise').checked,") {
+		t.Error("the Settings form does not post advertise from the box; a save then leaves the stored " +
+			"value alone and the control changes nothing")
+	}
+	if !strings.Contains(src, "$('setAdvertise').checked = !!c.advertise;") {
+		t.Error("the box is never filled in from the stored settings, so it shows the wrong state until " +
+			"somebody touches it — and then posts what it was showing")
+	}
+
+	markup := readPanelMarkup(t)
+	tag := fieldTag(t, markup, "setAdvertise")
+	if got := attr(tag, "type"); got != "checkbox" {
+		t.Errorf("setAdvertise is a %q, want a checkbox: advertising is on or off", got)
+	}
+	if !strings.Contains(settingsPane(t, markup), tag) {
+		t.Error("the advertising box is not in the Settings pane; a read-only line elsewhere in the panel " +
+			"is an account of what is on, not a control")
+	}
+}
+
+// The advert is started once, at launch, so a stored value changes nothing
+// until the next start. A control that does not say so tells the operator they
+// have switched the advert off when they have not — the silence
+// iss-2609091751184914 records, from the panel's side.
+func TestTheAdvertisingControlSaysAChangeWaitsForTheNextStart(t *testing.T) {
+	pane := settingsPane(t, readPanelMarkup(t))
+	box := strings.Index(pane, `id="setAdvertise"`)
+	if box < 0 {
+		t.Fatal("the Settings pane carries no advertising box")
+	}
+	hint := between(pane[box:], `<p class="hint">`, "</p>")
+	if hint == "" {
+		t.Fatal("the advertising box carries no hint")
+	}
+	flat := strings.Join(strings.Fields(hint), " ")
+	if !strings.Contains(flat, "next starts") {
+		t.Errorf("the advertising hint does not say a change waits for the next start:\n%s", flat)
+	}
+}
+
+// settingsPane is the Settings pane's markup and only it.
+func settingsPane(t *testing.T, markup string) string {
+	t.Helper()
+	start := strings.Index(markup, `<section id="tab-settings"`)
+	if start < 0 {
+		t.Fatal("the control panel has no Settings pane")
+	}
+	end := strings.Index(markup[start:], "</section>")
+	if end < 0 {
+		t.Fatal("the Settings pane is never closed")
+	}
+	return markup[start : start+end]
+}
