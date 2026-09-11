@@ -337,9 +337,14 @@ func TestAServerThatWillNotDieIsReportedAsStuck(t *testing.T) {
 		r := p.Residency()
 		return r.StuckServers == 1 && r.ExitingBytes == capability.LoadCost(100)
 	})
-	if got := logged.String(); !strings.Contains(got, "has not exited") {
-		t.Errorf("nothing was logged about a server that would not die: %q", got)
-	}
+	// The counter is published under the pool's lock and the warning is
+	// written after the unlock, so the two are not one event: a reader that
+	// has seen the snapshot may still be ahead of the log line. Wait for the
+	// line the same way, rather than assert it at the instant the counter
+	// moved (iss-2609091709537421).
+	waitFor(t, "the stuck server to be logged", func() bool {
+		return strings.Contains(logged.String(), "has not exited")
+	})
 
 	// No load waits on it any more — nothing further can be done to it — but
 	// the watch does not end: a process the kernel reaps late still closes
