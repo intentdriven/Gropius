@@ -210,6 +210,13 @@ func runInstall(env Env, args []string, ie InstallEnv) int {
 		// finish what this run could not.
 		writeLine(env.Out, "Gropius was opened; it was not answering yet when this command returned. Run gropius status to see.")
 	}
+	// What the bootstrap used to print at the end of its own run. It is said
+	// here because this is what finishes an install now, and a person who has
+	// just watched a runtime install should not have to go and find the
+	// documentation to learn where the application went.
+	writeLine(env.Out, "")
+	writeLine(env.Out, "Gropius is in the menu bar. Click its icon to open the control panel, download a model,")
+	writeLine(env.Out, "and copy the address other machines should point at.")
 	return ExitOK
 }
 

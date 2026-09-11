@@ -310,6 +310,22 @@ func TestInstallPlaceOnlyStopsAfterTheSwapAndSaysSo(t *testing.T) {
 	}
 }
 
+// The closing lines the bootstrap used to print are still printed, now by the
+// verb that finishes the install: where the app is, and what to do next.
+func TestInstallSaysWhatToDoNext(t *testing.T) {
+	env, ie, out, _ := installFixture(t)
+
+	if code := runInstall(env, nil, ie); code != ExitOK {
+		t.Fatalf("exit = %d, want %d", code, ExitOK)
+	}
+	got := out.String()
+	for _, want := range []string{"menu bar", "control panel"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("the finished install does not say where Gropius is or what to do next (%q missing):\n%s", want, got)
+		}
+	}
+}
+
 // installFixture is an install with every seam answered from a temporary
 // directory: no panel, no network, no Mac.
 func installFixture(t *testing.T) (Env, InstallEnv, *bytes.Buffer, *bytes.Buffer) {
