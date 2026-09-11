@@ -298,6 +298,118 @@ func TestTheLifecyclePagesAreLinked(t *testing.T) {
 	}
 }
 
+// Neither page calls a release signed, notarised or trusted.
+//
+// A build-provenance attestation is not a signature and neither is a checksum:
+// the bundles are ad-hoc signed, not notarised, and neither control is visible
+// to Gatekeeper. A reader who takes any of those three words for Gatekeeper's
+// verdict has been told something no control here can support, and these are
+// the pages that describe a download being fetched and placed.
+//
+// ONE EXEMPTION, and it is the honest statement rather than a claim: "ad-hoc
+// signed" is WHY the authorisation panel appears on every update, and the
+// sentence that says so is the reason a person needs. It is allowed by exact
+// phrase, so "signed" on its own is still a finding.
+func TestTheLifecyclePagesNeverCallAReleaseSignedOrNotarised(t *testing.T) {
+	const honestPhrase = "ad-hoc signed"
+	for _, name := range []string{lifecycleHowTo, lifecycleReference} {
+		flat := strings.ToLower(strings.Join(strings.Fields(readDoc(t, name)), " "))
+		stripped := strings.ReplaceAll(flat, honestPhrase, "")
+		for _, banned := range []string{"signed", "notarised", "notarized", "trusted"} {
+			if strings.Contains(stripped, banned) {
+				t.Errorf("docs/%s says %q about a release. Say what is true — verified against the checksums "+
+					"published with the release — or say nothing", name, banned)
+			}
+		}
+		// And the sentence that IS true has to be there, on both pages, or the
+		// rule above is only a prohibition.
+		if !containsAll(readDoc(t, name), "checksums published with the release") {
+			t.Errorf("docs/%s does not say the download is verified against the checksums published with the release", name)
+		}
+	}
+}
+
+// The report `gropius update` ends on is documented line by line, and the lines
+// are read out of the code rather than retyped here.
+//
+// A reference that describes a different report than the one a person reads is
+// worse than none: the whole point of this verb is that the two versions it
+// prints are separate facts, and a page that paraphrases them loses exactly the
+// distinction it exists to carry.
+func TestTheUpdateReportsLinesAreDocumented(t *testing.T) {
+	page := readDoc(t, lifecycleReference)
+	sentences := updateReportSentences(t)
+	if len(sentences) < 8 {
+		t.Fatalf("this scan read %d sentences out of the report, so it is reading the wrong file", len(sentences))
+	}
+	for name, sentence := range sentences {
+		if !containsAll(page, sentence) {
+			t.Errorf("the reference does not carry the report's %s:\n  %s", name, sentence)
+		}
+	}
+}
+
+// updateReportSentences reads the report's own strings out of the package: the
+// three ways a serving version goes unknown, and the sentences the five facts
+// are made of.
+func updateReportSentences(t *testing.T) map[string]string {
+	t.Helper()
+	wanted := map[string]bool{
+		"checksumSentence":        true,
+		"grantReasonSentence":     true,
+		"previousReleaseSentence": true,
+		"didNotInstallSentence":   true,
+		"logOutSentence":          true,
+		"cannotQuitSentence":      true,
+		"servingReasonNoField":    true,
+		"servingReasonUnanswered": true,
+		"servingReasonSilent":     true,
+		"servingReasonIdle":       true,
+	}
+	file := parseRepoGoFile(t, filepath.Join("internal", "lifecycle", "updatereport.go"))
+	out := map[string]string{}
+	for _, decl := range file.Decls {
+		gen, ok := decl.(*ast.GenDecl)
+		if !ok || gen.Tok != token.CONST {
+			continue
+		}
+		for _, spec := range gen.Specs {
+			value, ok := spec.(*ast.ValueSpec)
+			if !ok || len(value.Names) != 1 || len(value.Values) != 1 {
+				continue
+			}
+			name := value.Names[0].Name
+			if !wanted[name] {
+				continue
+			}
+			if text, ok := concatenatedStringLit(value.Values[0]); ok {
+				out[name] = text
+			}
+		}
+	}
+	for name := range wanted {
+		if out[name] == "" {
+			t.Errorf("internal/lifecycle/updatereport.go declares no %s this scan can read; the reference is "+
+				"held to the report's own words, so a constant renamed here must be renamed here too", name)
+		}
+	}
+	return out
+}
+
+// concatenatedStringLit reads a constant written as several string literals
+// joined by +, which is how a sentence long enough to matter is spelled in Go.
+func concatenatedStringLit(expr ast.Expr) (string, bool) {
+	switch e := expr.(type) {
+	case *ast.BasicLit:
+		return stringLit(e)
+	case *ast.BinaryExpr:
+		left, okL := concatenatedStringLit(e.X)
+		right, okR := concatenatedStringLit(e.Y)
+		return left + right, okL && okR
+	}
+	return "", false
+}
+
 // The verb table in cmd/gropius, read out of the source rather than repeated
 // here: package main cannot be imported, and a list copied into this file
 // would be the thing that goes stale.

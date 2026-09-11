@@ -149,18 +149,37 @@ func TestVersionPrintsTheBuildAndRefusesAStrayArgument(t *testing.T) {
 // A verb this build knows and does not carry says so by name, and exits 2: the
 // person who read the record and typed it correctly learns that they typed it
 // correctly.
-func TestAVerbThisBuildDoesNotCarryIsRefusedByName(t *testing.T) {
-	// update is itd-2609081420471761 and is not in this build. install and
-	// uninstall ARE in it, and are not listed here because they are not
-	// refused by name any more — they are dispatched, to the fakes TestMain
-	// puts in their place (see verbfakes_test.go, and the reason there).
-	for _, verb := range []string{"update"} {
-		var out, errOut bytes.Buffer
-		if code := runCommandVerb(commandLine{Kind: kindVerb, Verb: verb}, &out, &errOut); code != lifecycle.ExitUsage {
-			t.Errorf("%s: exit = %d, want %d", verb, code, lifecycle.ExitUsage)
-		}
-		if !strings.Contains(errOut.String(), verb) || !strings.Contains(errOut.String(), "not in this build yet") {
-			t.Errorf("%s: refusal = %q", verb, errOut.String())
+//
+// NO VERB IS IN THAT STATE TODAY. install, uninstall and update have all
+// landed, and update was the last word this test could name — so it registers
+// one of its own rather than going away. The mechanism is what is worth
+// keeping: it is what the next planned verb gets the day its record is written
+// and before its code is, and a rule that only exists while something happens
+// to be unbuilt is a rule that quietly stops being checked.
+func TestAVerbThisBuildKnowsAndDoesNotCarryIsRefusedByName(t *testing.T) {
+	const planned = "teleport"
+	verbs[planned] = verbNotYet
+	t.Cleanup(func() { delete(verbs, planned) })
+
+	var out, errOut bytes.Buffer
+	if code := runCommandVerb(commandLine{Kind: kindVerb, Verb: planned}, &out, &errOut); code != lifecycle.ExitUsage {
+		t.Errorf("exit = %d, want %d", code, lifecycle.ExitUsage)
+	}
+	if !strings.Contains(errOut.String(), planned) || !strings.Contains(errOut.String(), "not in this build yet") {
+		t.Errorf("refusal = %q, want it to name the verb and say it is not here yet", errOut.String())
+	}
+	if out.Len() != 0 {
+		t.Errorf("a refused verb still wrote %q to standard output", out.String())
+	}
+}
+
+// And the other half of the same rule: every verb the record names IS carried
+// now, so none of them is refused by name.
+func TestEveryVerbTheRecordNamesIsCarried(t *testing.T) {
+	for name, kind := range verbs {
+		if kind == verbNotYet {
+			t.Errorf("%q is listed as a verb this build does not carry; all of them have landed, so this is "+
+				"either a verb whose wiring was forgotten or a record that needs writing", name)
 		}
 	}
 }

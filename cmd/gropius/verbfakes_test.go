@@ -36,7 +36,7 @@ import (
 
 // installCalls and uninstallCalls record what the fakes were asked to do, so a
 // test can assert a verb was dispatched without anything happening.
-var installCalls, uninstallCalls []string
+var installCalls, uninstallCalls, updateCalls []string
 
 // fakeVerbEnv is the environment every verb in this test binary runs in: a
 // temporary root that no part of this account's installation shares.
@@ -64,6 +64,13 @@ func TestMain(m *testing.M) {
 		uninstallCalls = append(uninstallCalls, strings.Join(args, " "))
 		return lifecycle.ExitOK
 	}
+	// update is the one a missing fake would hurt most: the live verb
+	// downloads a release, quits the running copy, raises the authorisation
+	// panel and replaces the application this suite is running from.
+	lifecycleVerbs["update"] = func(_ lifecycle.Env, args []string) int {
+		updateCalls = append(updateCalls, strings.Join(args, " "))
+		return lifecycle.ExitOK
+	}
 	os.Exit(m.Run())
 }
 
@@ -75,7 +82,7 @@ func TestTheTestBinaryCannotReachTheLiveVerbPath(t *testing.T) {
 		t.Error("verbEnvFor is the LIVE environment builder in a test binary: a verb dispatched here would read " +
 			"this account's own root and act on this Mac")
 	}
-	for _, verb := range []string{"install", "uninstall"} {
+	for _, verb := range writingVerbs {
 		if same(lifecycleVerbs[verb], liveVerb(verb)) {
 			t.Errorf("%q is wired to the live verb in a test binary; TestMain must replace it with a fake", verb)
 		}
@@ -92,6 +99,7 @@ func TestTheLiveVerbsRefuseToRunInsideATest(t *testing.T) {
 	}{
 		{"install", lifecycle.RunInstall},
 		{"uninstall", lifecycle.RunUninstall},
+		{"update", lifecycle.RunUpdate},
 	} {
 		t.Run(tc.verb, func(t *testing.T) {
 			var out, errOut bytes.Buffer
@@ -114,7 +122,7 @@ func TestTheLiveVerbsRefuseToRunInsideATest(t *testing.T) {
 // A writing verb dispatched through the runner reaches the fake, with its
 // arguments, and writes nothing anywhere.
 func TestAWritingVerbIsDispatchedToTheFake(t *testing.T) {
-	installCalls, uninstallCalls = nil, nil
+	installCalls, uninstallCalls, updateCalls = nil, nil, nil
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 
@@ -125,12 +133,18 @@ func TestAWritingVerbIsDispatchedToTheFake(t *testing.T) {
 	if code := runCommandVerb(commandLine{Kind: kindVerb, Verb: "uninstall", Args: nil}, &out, &errOut); code != lifecycle.ExitOK {
 		t.Fatalf("uninstall: exit = %d (%s)", code, errOut.String())
 	}
+	if code := runCommandVerb(commandLine{Kind: kindVerb, Verb: "update", Args: nil}, &out, &errOut); code != lifecycle.ExitOK {
+		t.Fatalf("update: exit = %d (%s)", code, errOut.String())
+	}
 
 	if len(installCalls) != 1 || installCalls[0] != "--place-only" {
 		t.Errorf("install was dispatched as %v, want its arguments carried through once", installCalls)
 	}
 	if len(uninstallCalls) != 1 {
 		t.Errorf("uninstall was dispatched %d times, want once", len(uninstallCalls))
+	}
+	if len(updateCalls) != 1 {
+		t.Errorf("update was dispatched %d times, want once", len(updateCalls))
 	}
 	// And the fake did what a fake does: nothing on the filesystem.
 	if entries, err := os.ReadDir(home); err != nil || len(entries) != 0 {
@@ -153,6 +167,8 @@ func liveVerb(verb string) func(lifecycle.Env, []string) int {
 		return lifecycle.RunInstall
 	case "uninstall":
 		return lifecycle.RunUninstall
+	case "update":
+		return lifecycle.RunUpdate
 	}
 	return nil
 }
@@ -182,5 +198,29 @@ func TestConfigShowIsDispatchedAndWritesNothing(t *testing.T) {
 	}
 	if entries, err := os.ReadDir(home); err != nil || len(entries) != 0 {
 		t.Errorf("a reading verb wrote %v into the home directory", entries)
+	}
+}
+
+// writingVerbs is every verb that acts on this Mac. A verb added to
+// lifecycleVerbs and not to this list is one the guard above stops covering,
+// so the list is checked against the table rather than kept by hand.
+var writingVerbs = []string{"install", "uninstall", "update"}
+
+// The guard's own coverage: every verb this build carries is either a reading
+// verb, which a test may dispatch freely, or on the writing list above, which
+// TestMain replaces with a fake.
+func TestEveryWritingVerbHasAFake(t *testing.T) {
+	readingVerbs := map[string]bool{"status": true, "doctor": true, "config": true}
+	writing := map[string]bool{}
+	for _, verb := range writingVerbs {
+		writing[verb] = true
+	}
+	for verb := range lifecycleVerbs {
+		if readingVerbs[verb] || writing[verb] {
+			continue
+		}
+		t.Errorf("%q is a verb this build carries and is on neither list: a reading verb a test may dispatch, "+
+			"or a writing verb TestMain must replace with a fake. Decide which it is — a writing verb with no "+
+			"fake is a test one call away from acting on this Mac (iss-2609111240578491)", verb)
 	}
 }

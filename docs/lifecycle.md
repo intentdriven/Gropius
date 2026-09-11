@@ -127,6 +127,97 @@ revisited. Gropius checks its own runtime whenever it starts, so a provisioning
 run that failed in the terminal may well be finished by the app itself on the
 next launch — the control panel is where that shows.
 
+## Update it
+
+```sh
+gropius update
+```
+
+It fetches the current release, checks it against the checksums published
+beside it, and puts it in place with the same staged swap the install uses.
+Then it tells you two things rather than one:
+
+```
+installed: 0.5.0, at /Applications/Gropius.app
+serving:   cannot be determined — the running server does not publish its version
+```
+
+Those are separate facts, and on some Macs they differ.
+
+**The serving line reads "cannot be determined" on every Mac today**, because
+the running server does not yet publish which build it is. That is the honest
+answer rather than a missing feature: the version just installed is never
+printed in its place, so the command does not tell you your Mac is serving
+something it may not be.
+
+The command reports five things every time:
+
+1. **The version it installed** — read by asking the downloaded build what it
+   is, not by trusting the release it came from.
+2. **The version this Mac is serving**, or that it cannot be determined. It is
+   never the version just installed standing in for an answer.
+3. **That the download was verified against the checksums published with the
+   release.** That is the whole of the check. The bundles carry no Developer ID
+   and Gatekeeper sees nothing.
+4. **That the firewall grant was re-made, and why it has to be.** The
+   administrator panel appears on every update — see below.
+5. **That there is no way back.** Only the current release is published, so the
+   previous release cannot be fetched.
+
+### When someone else is logged in
+
+On a Mac with fast user switching, the server port belongs to whichever session
+started Gropius first. If that is not yours, the update still replaces the
+bundle — and then says so plainly rather than reporting success:
+
+```
+This Mac is serving a version this command did not install.
+The bundle just placed takes effect when that session logs out, or when
+Gropius is restarted there.
+Quitting it is not something this command can do: a quit request reaches only
+this login session.
+```
+
+It does not quit the other session's server. It cannot — a quit request reaches
+only the session that sent it — and it says so rather than trying. Other
+accounts are counted, never named, so the output is safe to paste into a
+message.
+
+Where your copy is in `~/Applications` rather than `/Applications`, the report
+separates the two: your own copy was updated, and the copy this Mac serves from
+is somebody else's.
+
+### When something unidentified holds the port
+
+If the process on the server port answers Gropius's identity challenge and
+answers it wrongly, the update stops before it downloads anything. It names the
+port, says what it found, and leaves the installed application exactly as it
+was. A Mac with an impostor on the server port is not a Mac to install software
+on.
+
+That is the one ending where nothing is written. Something that holds the port
+and answers nothing at all is a different case: under per-account data roots
+that is what another account's Gropius looks like from here, so the update goes
+ahead and the serving version is reported as unknown.
+
+### The panel, again
+
+The administrator panel appears on every single update, for the firewall grant
+and nothing else. These builds are ad-hoc signed, so the code identity the
+firewall keys its entry to changes with each build, and the entry that covered
+the previous build does not cover this one.
+
+Declining it does not fail the run. The new bundle stays in place, the report
+says the grant was not made, and it prints the two commands that make it by
+hand along with the symptom to expect until they are run: other machines see an
+empty response while this Mac works.
+
+### There is no way back
+
+One release is published at a time, so there is no earlier release to fetch and
+`gropius update` takes no version. The tag of a previous version survives and
+can be rebuilt from source, which is a different job to doing at a terminal.
+
 ## Remove it
 
 ```sh

@@ -27,6 +27,12 @@ const (
 	// carry. It is refused by name, which is a different thing to say than
 	// "no such verb": the person who read the documentation and typed it
 	// learns that they typed it correctly and that it is not here yet.
+	//
+	// No verb carries this kind today — install, uninstall and update have all
+	// landed. It is kept because it is the shape the NEXT planned verb takes
+	// the day its record is written and before its code is, and the refusal it
+	// produces is held by a test that registers a word under it rather than by
+	// a verb that happens to be unbuilt.
 	verbNotYet
 )
 
@@ -44,7 +50,7 @@ var verbs = map[string]verbKind{
 	"config":    verbLifecycle,
 	"install":   verbLifecycle,
 	"uninstall": verbLifecycle,
-	"update":    verbNotYet,
+	"update":    verbLifecycle,
 }
 
 // knownVerbs is the verb set in a stable order, for the refusal to print.

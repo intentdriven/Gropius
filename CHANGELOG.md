@@ -34,6 +34,24 @@ GitHub release notes.
 
 ### Added
 
+- **Gropius updates itself from the terminal, and says which version is
+  serving.** `gropius update` fetches the current release, verifies it against
+  the checksums published beside it, and places it with the same staged swap
+  the installer uses. Then it tells you two things rather than one: the version
+  it installed, and the version this Mac is serving. On a Mac where another
+  account is logged in with the server running, those are different facts, and
+  the command says so instead of reporting success — the new bundle is in
+  place, the Mac is still serving the old version, and it names what finishes
+  the job. It never quits another account's server: a quit request reaches only
+  the session that sent it, and the report says so rather than trying. Other
+  accounts are counted, never named. The firewall grant is re-made on every
+  update — the panel is expected, and the report says why — and a declined
+  panel is not a failed run. Where the server port is held by a process that
+  answers the identity challenge wrongly, the command refuses before it
+  downloads anything. There is no way back: one release is published at a time,
+  so the previous release cannot be fetched, and the verb takes no version.
+  Until the running server publishes its own version, the serving line reads
+  "cannot be determined" rather than repeating what was just installed.
 - **Gropius installs, repairs, removes and diagnoses itself, from the
   terminal.** The binary answers to four verbs. `gropius install` is the second
   half of the one-line bootstrap: it places the application with a staged swap

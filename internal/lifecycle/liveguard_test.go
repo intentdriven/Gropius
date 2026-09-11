@@ -21,6 +21,13 @@ func TestTheLiveEnvironmentsRefuseToBeBuiltInATest(t *testing.T) {
 	if _, err := liveUninstallEnv(env); err == nil {
 		t.Error("liveUninstallEnv built the world a real uninstall acts on, inside a test")
 	}
+	// Update is the one where reaching the live path in a test would download
+	// a release and replace the application the suite is running from.
+	if _, err := liveUpdateEnv(env); err == nil {
+		t.Error("liveUpdateEnv built the world a real update acts on, inside a test")
+	} else if !strings.Contains(err.Error(), "runUpdate") {
+		t.Errorf("the refusal does not name the seam a test should be using instead: %v", err)
+	}
 }
 
 // And the one way past it is deliberate, named, and lasts for one test.

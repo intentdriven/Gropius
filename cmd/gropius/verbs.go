@@ -19,6 +19,7 @@ var lifecycleVerbs = map[string]func(lifecycle.Env, []string) int{
 	"config":    lifecycle.RunConfig,
 	"install":   lifecycle.RunInstall,
 	"uninstall": lifecycle.RunUninstall,
+	"update":    lifecycle.RunUpdate,
 }
 
 // verbEnvFor is how the runner gets the world a verb runs in.
