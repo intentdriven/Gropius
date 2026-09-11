@@ -29,15 +29,28 @@ import (
 // configuration holds, so a field removed in Go cannot leave a dead control
 // behind.
 //
-// WHAT THIS CANNOT DO, stated so a green run is not over-read. The panel half
-// is a string search over the pane's markup and the panel's script. It proves
-// the key is NAMED there — that nobody forgot the panel while adding a field —
-// and it proves nothing about whether the control works, is well labelled, or
-// posts the right value. The round-trip tests in internal/ui and the save-path
-// tests in internal/gateway are what prove the wiring; this proves nobody
-// forgot. The intent says as much in its own mechanism claim: if the
-// enumeration half never fails while the round-trip half catches something, the
-// enumeration half was the wrong half.
+// THE TWO HALVES ARE CHECKED SEPARATELY, and that is not a detail. They were
+// once searched as one concatenated blob, which meant either surface alone
+// could satisfy the rule: deleting a control's markup while its key survived
+// in the script's submit body left the test green, and the setting was then
+// posted by a form that no longer had a box for it. So the script must name
+// the key, AND every control the script binds to that key must still exist in
+// the markup.
+//
+// WHAT THIS CANNOT DO, stated so a green run is not over-read. Both halves are
+// string searches. They prove the key is NAMED in the script and that the
+// control ids the script reaches for are present in the document — that nobody
+// forgot the panel while adding a field, and that nobody deleted the control
+// while leaving the script posting it. They prove nothing about whether the
+// control works, is well labelled, or posts the right value, and the markup
+// half reaches only the settings whose control id shares a source line with
+// their key: a sampling parameter, reached through a table, and a per-model
+// setting, reached through a generated row, are checked in the script alone.
+// The round-trip tests in internal/ui and the save-path tests in
+// internal/gateway are what prove the wiring; this proves nobody forgot. The
+// intent says as much in its own mechanism claim: if the enumeration half never
+// fails while the round-trip half catches something, the enumeration half was
+// the wrong half.
 
 // settingExemption is one setting deliberately left without a panel control.
 //
@@ -84,7 +97,7 @@ var settingsPaneExemptions = map[string]settingExemption{
 
 // Every setting has a control the Settings pane posts, or an exemption.
 func TestEverySettingHasAPanelControlOrAnExemption(t *testing.T) {
-	pane := settingsPaneText(t)
+	markup, script := settingsPaneMarkupAndScript(t)
 
 	paths := settingPaths(t)
 	if len(paths) < 25 {
@@ -95,13 +108,24 @@ func TestEverySettingHasAPanelControlOrAnExemption(t *testing.T) {
 			continue
 		}
 		for _, segment := range pathSegments(path) {
-			if namedBy(pane, segment) {
+			if !namedBy(script, segment) {
+				t.Errorf("the Settings pane's script names no %q, so the setting %q is in the Go "+
+					"configuration and nowhere an operator using the panel can reach it. Give it a control "+
+					"the form posts, or add it to settingsPaneExemptions with the reason, the record that "+
+					"decided it, and the surface it is reached through instead (AGENTS.md, "+
+					"\"Three surfaces\")", segment, path)
 				continue
 			}
-			t.Errorf("the Settings pane names no %q, so the setting %q is in the Go configuration and "+
-				"nowhere an operator using the panel can reach it. Give it a control the form posts, or "+
-				"add it to settingsPaneExemptions with the reason, the record that decided it, and the "+
-				"surface it is reached through instead (AGENTS.md, \"Three surfaces\")", segment, path)
+			// The other half of the pane. A key the script posts whose control
+			// is no longer in the document is a form posting a box nobody can
+			// see — which is what a single search over both surfaces at once
+			// could not tell from a working control.
+			for _, id := range controlIDsBoundTo(script, segment) {
+				if !strings.Contains(markup, `id="`+id+`"`) {
+					t.Errorf("the panel's script reads %q for the setting %q, and the markup carries no "+
+						"control with that id — the form posts a setting whose box is gone", id, path)
+				}
+			}
 		}
 	}
 }
@@ -252,21 +276,57 @@ func pathSegments(path string) []string {
 
 // ── the panel side ───────────────────────────────────────
 
-// settingsPaneText is what the Settings pane is allowed to name a setting in:
-// the pane's own markup, and the panel's script with its comments removed.
+// settingsPaneMarkupAndScript is the pane's two surfaces, kept apart so that
+// neither can satisfy a rule about the other.
 //
-// The comments are removed because they are prose about the panel rather than
-// the panel. app.js carries a comment naming the two settings the form does
-// NOT own — it is the comment explaining why they are preserved server-side —
+// The markup is the WHOLE document rather than the Settings section: a control
+// id the script reaches for has to exist somewhere a browser can find it, and
+// scoping this to one section would fail on the ids that settings code shares
+// with the views beside it. What keeps a read-only line elsewhere from passing
+// as a control is the other half — the script has to post the key — and the
+// scope condition that says so (itd-2609081259493890).
+//
+// The script's comments are removed because they are prose about the panel
+// rather than the panel. app.js carries a comment naming the settings the form
+// does NOT own — the comment explaining why they are preserved server-side —
 // and a search that read it would report those settings as reached from the
 // panel on the strength of a sentence saying that they are not.
-func settingsPaneText(t *testing.T) string {
+func settingsPaneMarkupAndScript(t *testing.T) (markup, script string) {
 	t.Helper()
 	root := repoRootDir(t)
-	markup := readRepoFile(t, root, filepath.Join("internal", "ui", "static", "index.html"))
-	script := readRepoFile(t, root, filepath.Join("internal", "ui", "static", "app.js"))
-	return settingsPaneMarkup(t, markup) + "\n" + stripJSComments(script)
+	return readRepoFile(t, root, filepath.Join("internal", "ui", "static", "index.html")),
+		stripJSComments(readRepoFile(t, root, filepath.Join("internal", "ui", "static", "app.js")))
 }
+
+// controlIDsBoundTo is the element ids the script reaches for on a line that
+// also names this setting — which is how the panel binds a key to its control:
+// "advertise: $('setAdvertise').checked" going one way and
+// "$('setAdvertise').checked = !!c.advertise" coming back.
+//
+// Line-scoped, so it finds the bindings written as one expression and none of
+// the bindings that travel through a table or a generated row. That is the
+// limit stated at the top of this file: it is a check that catches the
+// ordinary way a control is lost, not a proof that every key has one.
+func controlIDsBoundTo(script, key string) []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, line := range strings.Split(script, "\n") {
+		if !namedBy(line, key) {
+			continue
+		}
+		for _, m := range panelControlIDRE.FindAllStringSubmatch(line, -1) {
+			if !seen[m[1]] {
+				seen[m[1]] = true
+				out = append(out, m[1])
+			}
+		}
+	}
+	return out
+}
+
+// panelControlIDRE matches the panel's element lookup, $('someId'), and only
+// the literal form: an id the script computes is not one this can check.
+var panelControlIDRE = regexp.MustCompile(`\$\('([A-Za-z0-9_]+)'\)`)
 
 // settingsPaneMarkup is the Settings pane's section of the panel's markup, and
 // only it. Another tab's markup is not the Settings pane, and a setting named
