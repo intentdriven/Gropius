@@ -25,6 +25,11 @@ grant, installs the MLX runtime in the foreground and links the `gropius`
 command into `~/.local/bin`. See
 [Install, repair and remove Gropius](lifecycle.md).
 
+To move to a later release afterwards, run `gropius update`: it does the same
+work and then reports the version it installed and the version this Mac is
+serving as two separate facts — see
+[Update it](lifecycle.md#update-it).
+
 ```sh
 git clone <this repo> && cd Gropius
 make install        # builds Gropius.app, copies it to /Applications, launches it — needs your password, for the firewall

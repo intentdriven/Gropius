@@ -61,6 +61,8 @@ func verbNoun(verb string) string {
 		return "Install"
 	case "uninstall":
 		return "Uninstall"
+	case "update":
+		return "Update"
 	}
 	return verb
 }

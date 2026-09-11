@@ -159,22 +159,42 @@ func liveStatusEnv(version string, paths config.Paths, port int) StatusEnv {
 	}
 }
 
-// fetchState reads the snapshot the control panel polls. Loopback by
-// construction: the control plane answers nothing else, and status has no
-// business asking any other machine what this one is doing.
+// fetchState reads the snapshot the control panel polls.
 func fetchState(port int) (ServerState, error) {
-	c := &http.Client{Timeout: 2 * time.Second}
-	resp, err := c.Get("http://127.0.0.1:" + strconv.Itoa(port) + "/api/state")
+	body, err := controlPlaneGet(port, "/api/state")
 	if err != nil {
 		return ServerState{}, err
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return ServerState{}, fmt.Errorf("the control plane answered %s", resp.Status)
-	}
 	var state ServerState
-	if err := json.NewDecoder(io.LimitReader(resp.Body, maxStateBytes)).Decode(&state); err != nil {
+	if err := json.Unmarshal(body, &state); err != nil {
 		return ServerState{}, err
 	}
 	return state, nil
+}
+
+// controlPlaneGet is the ONE place this package reads the running server, and
+// it is a read in the strong sense: a GET of a route that reveals what a
+// world-readable bundle already reveals.
+//
+// One call site rather than one per caller, so the rule can be checked by
+// looking at this file: no lifecycle verb may ask the control plane to DO
+// anything. A route that could drive a quit, an update or an elevation is
+// exactly what the boundary the parent drew forbids, and it would hand every
+// local account a cross-account stop button on a plane with no bearer check.
+//
+// Loopback by construction: the control plane answers nothing else, and a verb
+// has no business asking any other machine what this one is doing. The read is
+// capped, so a wedged or hostile responder on the port cannot make a terminal
+// command read forever.
+func controlPlaneGet(port int, path string) ([]byte, error) {
+	c := &http.Client{Timeout: 2 * time.Second}
+	resp, err := c.Get("http://127.0.0.1:" + strconv.Itoa(port) + path)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("the control plane answered %s", resp.Status)
+	}
+	return io.ReadAll(io.LimitReader(resp.Body, maxStateBytes))
 }

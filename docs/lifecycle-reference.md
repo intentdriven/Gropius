@@ -24,7 +24,7 @@ by its full path.
 | `gropius doctor` | The expensive checks, each labelled with how much its answer is worth. | `0` or `1` |
 | `gropius install` | Places the application, grants it through the firewall, provisions the MLX runtime, links the command. Repairs what is missing. | `0` or `1` |
 | `gropius uninstall` | Removes what this installation put on the Mac. Leaves the downloaded models. | `0` or `1` |
-| `gropius update` | Named, and not in this build yet. | `2` |
+| `gropius update` | Fetches the current release, verifies it against the checksums published beside it, places it with the staged swap, re-makes the firewall grant, and reports the version installed and the version this Mac is serving as two separate facts. | `0` or `1` |
 
 A first argument that is not one of these words is refused, with exit `2`, and
 no server is started. A first argument beginning with `-` is a server flag, so
@@ -55,6 +55,50 @@ A flag a verb does not carry is refused with exit `2`, and nothing else runs.
 report and never in the exit code, so a fresh Mac whose runtime is still
 installing does not fail a script that runs the doctor. A script that wants
 more than pass or fail reads the severities out of `--json`.
+
+## What `gropius update` reports
+
+The report is text, not a contract: there is no `--json` form, and `update`
+takes no flags and no version. Every run carries five facts.
+
+| Fact | The line it is on | What it means |
+| --- | --- | --- |
+| The version installed | `installed:` | The version the downloaded build reports about itself, and where it was placed. `cannot be determined` when that build would not answer its own `version` verb. |
+| The version serving | `serving:` | The version this Mac is answering with. It is a different fact from the one above and is never substituted by it. |
+| The download was checked | The download was verified against the checksums published with the release. | The whole of the check. Present wherever a bundle was placed. |
+| The grant was re-made | The firewall grant is re-made on every update: the build's code identity changes with every build, so the entry that covered the previous build does not cover this one. | Followed by whether it was made, or by the commands that make it by hand. |
+| There is no way back | There is no way back: only the current release is published, so the previous release cannot be fetched. | Every run. Typing a version is refused with the same sentence, and exit `2`. |
+
+The serving line can take any of these values. **On this build it is always one
+of the last four**: the running server does not publish which build it is, so
+the first row is what the line will say once it does, and until then the
+command says it cannot tell rather than repeating what it just installed.
+
+| Value | What was found |
+| --- | --- |
+| a version, and the port | This account's Gropius answered the identity challenge and published its version. No build publishes it yet. |
+| the running server does not publish its version | It answered the challenge and is a build with no version to give. |
+| the server did not answer the control plane | It answered the challenge and then did not answer the snapshot read. |
+| something holds the port and answered no identity challenge | Something is accepting connections and would not identify itself. Under per-account data roots that is what another account's Gropius looks like from here. |
+| nothing is serving on this Mac | Nothing is accepting connections on the port. |
+
+Where the version serving is not the version installed — or where the holder
+would not identify itself — the report adds the cross-account ending:
+
+```
+This Mac is serving a version this command did not install.
+The bundle just placed takes effect when that session logs out, or when
+Gropius is restarted there.
+port 11535 is held by 1 process that did not identify itself; it is counted
+here and not named.
+Quitting it is not something this command can do: a quit request reaches only
+this login session.
+```
+
+Exit `1` is a download, a verification or a swap that stopped, and a port held
+by a process that could not prove it is this account's Gropius — which refuses
+before anything is downloaded. A declined authorisation panel is exit `0`: the
+swap stands, and the grant is reported as not made.
 
 ## `gropius status --json`
 
@@ -174,9 +218,14 @@ bundle. A real file of that name belongs to whoever put it there.
   Uninstall acts on the fixed locations this account's install uses.
   `GROPIUS_ROOT` is read only so the output can name the root it did not
   remove.
-- **No verb contacts the network.** Which build this is comes from the binary
-  itself. Whether it is the current one is a different question, and it is not
-  this build's to ask.
+- **Only `gropius update` contacts the network, and only when it is typed.**
+  Every other verb answers from state that is already on this Mac: which build
+  this is comes from the binary itself. Nothing runs on a timer, nothing checks
+  for a release at launch, and Gropius never learns that a Mac is behind.
+- **Nothing else reaches the forge, and the origin cannot be moved.** The
+  release `update` fetches from is fixed in the binary: no environment variable
+  and no flag can point the download, or the checksums that verify it, at
+  anywhere else.
 - **No verb is reachable from the control panel.** The HTTP surface cannot see
   the package these verbs live in, so no request arriving on this Mac can drive
   a removal, a replacement or an elevation.
