@@ -251,9 +251,148 @@ collects by watching them.
 
 ## Audit Notes
 
-<!-- abcd-review: OWED receipt=rcp-d73a16c4b607 -->
-Fidelity review OWED (receipt rcp-d73a16c4b607).
+<!-- abcd-review: INGESTED receipt=rcp-d73a16c4b607 -->
+Fidelity review — receipt rcp-d73a16c4b607 (verifier intent-auditor claude-sonnet-5).
 
+Provenance: intent-auditor@claude-sonnet-5 · rubric_hash sha256:d7fc71b29aaf52d0a961de933d2179a2fb650b6a0ace4af219fa51658abdc769 · prompt_hash sha256:542ed2cd51ff938717a3f47b2b332e8d47910beec0ca7ecdfd238ae7edf5ced5
+Input attestations: diff:PR #43 merge commit 59106e7c17ddaf87e4142db137e68e6bc19e7d9c (parents 6960f82, f7bc91a), diffed as 59106e7^1..59106e7, ancestor of HEAD d33dbc7 in worktree .claude/worktrees/next. policy.rubric_hash and policy.prompt_hash were not supplied by the host for this run and are auditor-computed: rubric_hash is the sha256 of .abcd/.work.local/reviews/rcp-d73a16c4b607.request.md as read from the worktree; prompt_hash is the sha256 of the intent-auditor agent definition at /Users/dev/.claude/plugins/marketplaces/abcd-marketplace/agents/intent-auditor.md@sha256:09298b44cf5acef62282240d71293704e846197c50e8e780cb4f67707edd7a7d;
+
+Acceptance rollup: MET 22 · MET_WITH_CONCERNS 2 · NOT_MET 0 · INCONCLUSIVE 1
+
+Per-criterion verdicts:
+- ac-1 — INCONCLUSIVE: the spec itself says this compound end-to-end criterion has no automated test and is armed only by a written manual procedure; that procedure's results table is empty and its own text says the criterion rests on nothing but code review until a run is recorded
+  evidence: .abcd/development/procedures/installer-authorisation-panel.md:83-85 — "| _not yet run_ | | | | | | | | | | | |"
+  evidence: .abcd/development/procedures/installer-authorisation-panel.md:93-95 — "a release that has never been checked this way is a release whose headline installing criterion rests on nothing but the code review"
+  evidence: internal/lifecycle/elevate.go:56-58 — "Gropius needs administrator rights to allow itself through the macOS firewall, so other machines on your network can reach it"
+  evidence: internal/lifecycle/term.go:93-115 — "Step() renders a percentage, not a spinner"
+- ac-2 — MET: install.sh executes the binary from the verified extraction directory, never the installed destination, and a test asserts the recorded exec path is the staging tree
+  evidence: install.sh:234-243 — "VERIFIED_BIN="$tmp/extract/$APP.app/Contents/MacOS/gropius""
+  evidence: internal/archtest/installer_handover_test.go:123-149 — "TestTheBootstrapHandsOverToTheBinaryItVerified fails if the executed path starts with /Applications/Gropius.app or $HOME/Applications"
+- ac-3 — MET: install.sh dies naming the mismatch on an exit-2 handover and prints that nothing was launched, exercised by a stub binary
+  evidence: install.sh:263-269 — "does not carry the lifecycle verbs: its binary refused `install` with exit 2 ... Nothing was launched."
+  evidence: internal/archtest/installer_handover_test.go:177-193 — "TestTheBootstrapRefusesAnOldBinarysHandover asserts the network-reached sentinel was never touched"
+- ac-4 — MET: no os.Stdin read exists anywhere in internal/lifecycle or install.sh (the only stdin touch is a TTY Stat check), and a scan test enforces it; uninstall's --purge path refuses and names the flag when consent cannot be obtained
+  evidence: internal/archtest/lifecycle_removal_test.go:139-153 — "TestNoLifecycleVerbReadsStandardInput scans every lifecycle source line, whitelisting only isTerminal(os.Stdin)"
+  evidence: internal/lifecycle/uninstall.go:143-146 — "Pass --yes to confirm it without a terminal: gropius uninstall --purge --yes"
+- ac-5 — MET: linkCommand touches only home-derived paths via os.MkdirAll/Symlink/Rename with no exec.Command or elevation call anywhere in the file
+  evidence: internal/lifecycle/binlink.go:43-59 — "linkCommand creates the per-user bin link with no subprocess or elevation call"
+  evidence: internal/lifecycle/elevate.go:83-85 — "elevateFirewall is the ONLY place in this package that asks for administrator rights"
+- ac-6 — MET: onSearchPath compares PATH entries by resolved identity and pathAdvice returns the exact export line to add, wired into the install verb and asserted by a table test
+  evidence: internal/lifecycle/binlink.go:82-99 — "onSearchPath compares PATH entries via os.SameFile"
+  evidence: internal/lifecycle/install_test.go:269-289 — "TestInstallSaysWhenTheCommandWillNotResolve asserts the advice line appears when PATH lacks the dir"
+- ac-7 — MET: missingRuntimeParts is computed before provisioning and the outcome is reported as repaired-vs-nothing-to-do, backed by Ensure's idempotent early returns and a table test covering both branches
+  evidence: internal/lifecycle/install.go:222-230 — "was already complete; nothing was reinstalled. / installed what was missing (< list>)."
+  evidence: internal/lifecycle/install_test.go:136-168 — "TestInstallSaysWhetherItRepairedOrFoundNothingToDo covers both branches"
+- ac-8 — MET: fail() writes the stage, the redacted cause and the retry command and returns ExitFailed; install.go states explicitly that nothing after a failed stage runs, and injected-failure tests confirm zero further panels/launches
+  evidence: internal/lifecycle/install.go:296-303 — "gropius install: "+stage+" failed: ... Retry with: "+retryInstall"
+  evidence: internal/lifecycle/install_test.go:419-477 — "TestInstallStopsAtTheStageThatFailed confirms zero launches on a link-stage failure"
+- ac-9 — MET: StatusOf calls only the holder probe and, when the holder is ours, one loopback state read — no filesystem walk, no provisioning check — asserted by a call-count test
+  evidence: internal/lifecycle/status.go:91-130 — "StatusOf calls env.Holder() and, only if HolderOurs, env.State()"
+  evidence: internal/lifecycle/status_test.go:100-129 — "TestStatusAsksTheTwoCheapQuestionsAndNoOthers asserts State is called zero times on a non-ours holder"
+- ac-10 — MET: status --json is a golden-JSON test comparing decoded values against committed fixtures, with the JSON struct documented as the contract and RenderStatus as a separate rendering of the same value
+  evidence: internal/lifecycle/status_test.go:32-77 — "TestStatusJSONIsTheContract decodes both the marshalled Status and testdata/status_serving.json and compares via reflect.DeepEqual"
+  evidence: internal/lifecycle/status.go:26-42 — "the JSON is the contract... the human rendering is a rendering of this same value"
+- ac-11 — MET: the three-label scheme exists exactly as specified; checkFirewall is labelled Observed, issues no verdict, and Diagnose structurally overrides severity to undetermined for any non-Verified finding, adversarially tested
+  evidence: internal/lifecycle/doctor.go:44-57 — "Verified / Observed / Undeterminable labels"
+  evidence: internal/lifecycle/doctor.go:190-193 — "Diagnose forcibly overrides severity to SeverityUndetermined for any non-Verified finding"
+  evidence: internal/lifecycle/doctor_test.go:174-196 — "TestAnObservedFindingCannotReportAFault uses an overreaching fake check to prove the override is real"
+- ac-12 — MET: checkLocalNetwork is unconditional and always present with the undeterminable label and a stated remedy, and a test confirms it survives into the human-text rendering
+  evidence: internal/lifecycle/doctor.go:350-358 — "cannot be determined from here — macOS offers no way to read this grant"
+  evidence: internal/lifecycle/doctor_test.go:153-167 — "TestLocalNetworkPrivacyIsReportedAsUndeterminable"
+- ac-13 — MET: checkPort's foreign branch reports the holder is not named and that the reported version is this build's own; a test asserts the count-not-name wording
+  evidence: internal/lifecycle/doctor.go:292-313 — "it is not named here, and the build reported above is this one's own and not necessarily the build being served"
+  evidence: internal/lifecycle/doctor_test.go:334-348 — "TestTheForeignPortHolderIsCountedAndNotNamed"
+- ac-14 — MET: redact() replaces every occurrence of the home directory centrally over every summary and command, and other-account counting reuses the same not-named mechanism as ac-13, both covered by multiple tests including one against the committed golden fixture
+  evidence: internal/lifecycle/doctor.go:413-420 — "redact replaces every occurrence of the account's home directory with ~"
+  evidence: internal/lifecycle/doctor_test.go:781-790 — "TestTheGoldenReportCarriesNoAccount checks testdata/doctor_report.json against this machine's home dir"
+- ac-15 — MET: ExitCode returns non-zero only for a Verified+Failed finding, so every Observed/Undeterminable and every Verified-Warning finding exits zero, with severity carried in Finding's JSON field
+  evidence: internal/lifecycle/doctor.go:220-227 — "ExitCode() returns non-zero only when Label == Verified && Severity == SeverityFailed"
+  evidence: internal/lifecycle/doctor_test.go:201-247 — "TestExitCodeFollowsTheVerifiedChecksAlone table-tests all four cases"
+- ac-16 — MET: removalTargets excludes Models/HFCache by construction, the firewall entry and per-user link are removed, and reportModels states the size and the --purge flag
+  evidence: internal/lifecycle/uninstall.go:218-232 — "The data root itself is NOT on the list... because the models live inside it"
+  evidence: internal/lifecycle/uninstall.go:263-265 — "The downloaded models are still there: ... Remove them too with: gropius uninstall --purge"
+  evidence: internal/lifecycle/uninstall_test.go:75-100 — "TestUninstallRemovesTheApplicationAndLeavesTheModels"
+- ac-17 — MET: the terminal/--yes gate is the first statement in runUninstall, before any removal, and names the flag on refusal
+  evidence: internal/lifecycle/uninstall.go:143-148 — "Pass --yes to confirm it without a terminal: gropius uninstall --purge --yes"
+  evidence: internal/lifecycle/uninstall_test.go:105-139 — "TestPurgeRefusesWithoutATerminalUnlessToldYes asserts models and bundle survive"
+- ac-18 — MET: the account/shared-root split is real in config.go, reportSharedRoot names what remains, its size, an account count (never names) and the removal command, and a test with a separate account directory confirms the shared root and other account's file survive
+  evidence: internal/config/config.go:203-236 — "accountDir / NewPaths split: models and HFCache resolve through root, everything account-owned through accountDir(root)"
+  evidence: internal/lifecycle/uninstall.go:317-324 — "This Mac uses a shared model cache at ..., which uninstall never touches."
+  evidence: internal/lifecycle/uninstall_test.go:205-242 — "TestSharedCacheUninstallLeavesTheSharedRootAlone asserts the other account's model name is not in the output"
+- ac-19 — MET_WITH_CONCERNS: ownership-based purge filtering (purgeOwned/partitionByOwner) is real and the sticky-3775 backstop is a verified Makefile mode, but the spec's described test shape ('skips cleanly where it cannot create the fixture') does not exist in the code: there is no t.Skip anywhere in uninstall_test.go, and the multi-owner case is instead armed only through dependency-injected fake OwnerOf maps rather than a real multi-uid filesystem fixture with a skip escape hatch
+  evidence: internal/lifecycle/uninstall.go:368-405 — "purgeOwned walks via os.Root and partitionByOwner splits mine/theirs"
+  evidence: internal/lifecycle/uninstall_test.go:326-330 — "A fixture with two owners cannot be built without root — a test cannot give a file away — so the two halves are tested separately"
+  evidence: internal/lifecycle/uninstall_test.go:247-280 — "TestSharedPurgeRemovesOnlyWhatThisAccountOwns injects a fake ue.OwnerOf rather than creating real multi-uid files"
+- ac-20 — MET: uninstall.go imports no os/exec, every removal is in-process (os.RemoveAll/os.Remove/root.Remove), and symlink targets are refused rather than followed, armed by allowlist and stdin-scan tests plus a redirect-attack test
+  evidence: internal/lifecycle/uninstall.go:237-250 — "removeLink checks fi.Mode()&os.ModeSymlink == 0 before removing"
+  evidence: internal/lifecycle/uninstall_test.go:375-413 — "TestThePurgeCannotBeRedirectedByARenamedComponent swaps a directory for a symlink mid-walk and asserts the victim survives"
+  evidence: internal/archtest/lifecycle_removal_test.go:48-95 — "TestTheLifecycleVerbsStartOnlyTheToolsTheyDeclare allowlist contains no removal tool"
+- ac-21 — MET: InstalledRoot explicitly ignores GROPIUS_ROOT, which is captured only for reporting, and -root is not even wired to the uninstall verb's flag set; a test sets GROPIUS_ROOT to a decoy with a witness file and confirms it survives
+  evidence: internal/config/config.go:99-107 — "It exists for the one caller that must not honour GROPIUS_ROOT — gropius uninstall"
+  evidence: internal/lifecycle/uninstall.go:197-201 — "Uninstall never derives a deletion path from the environment, so nothing there was removed."
+  evidence: internal/lifecycle/uninstall_test.go:286-324 — "TestGropiusRootIsNeverADeletionPath asserts the witness file survives"
+- ac-22 — MET: elevateFirewall is documented and scanned as the sole elevation site, its prompt states the reason, and a refused panel still lets the rest of removal proceed while reporting the entry as remaining with the recovery command
+  evidence: internal/lifecycle/elevate.go:60-62 — "Gropius needs administrator rights to remove its own entry from the macOS firewall. This is the last step of uninstalling it."
+  evidence: internal/archtest/lifecycle_removal_test.go:103-130 — "TestTheLifecycleVerbsElevateInExactlyOnePlace greps for 'administrator privileges' outside elevate.go"
+  evidence: internal/lifecycle/uninstall_test.go:144-165 — "TestUninstallSurvivesARefusedAuthorisation asserts ExitOK and the bundle still removed"
+- ac-23 — MET: the Go side is covered repo-wide by the pinned-subprocess scan and every internal/lifecycle exec.Command call is already absolute-pathed; the shell side's widened test scans every command position in install.sh and the nine named bare commands are now all absolute-pathed
+  evidence: internal/lifecycle/elevate.go:95,149,159 — "exec.Command("/usr/bin/osascript", ...) / exec.CommandContext(ctx, "/usr/bin/open", bundle)"
+  evidence: internal/archtest/privileged_shell_test.go:120 — "TestInstallerPinsEveryCommandItRuns scans every command position in install.sh, exempting only shell builtins/keywords"
+  evidence: install.sh:97 — "/usr/bin/sw_vers -productVersion"
+- ac-24 — MET_WITH_CONCERNS: the rename-aside-then-in ordering, unguessable staging name, and delayed cleanup all match the promise and are covered by the three required behavioural cases, but a same-day open issue records that the file's own claim ('no failure path leaves the Mac with no application') is overstated against a co-resident admin-group actor who can delete the unbounded-wait staging directory, at no new privilege boundary but a real residual exposure the fix left unclosed
+  evidence: internal/lifecycle/swap.go:91-96,118 — "installed bundle renamed aside first (Lstat then rename(dest, retired)); new bundle renamed in (rename(staged, dest))"
+  evidence: internal/lifecycle/swap_test.go:67,88,124 — "TestSwapReplacesAnInstalledBundleRatherThanNestingInsideIt / TestSwapReplacesASymlinkRatherThanFollowingIt / TestSwapLeavesTheInstalledBundleWhenTheSecondRenameFails"
+  evidence: .abcd/work/issues/open/iss-2609111755330533-internal-lifecycle-swap-go-claims-no-failure-path-leaves-the.md — "a co-resident admin-group account can delete the staging directory and leave no application for as long as the wait lasts... the file's claim is not strictly true against that actor"
+- ac-25 — MET: a dependency-closure test proves neither internal/gateway nor internal/ui reach internal/lifecycle (and the reverse), and a completeness test forces every module package onto one side of the boundary or the other
+  evidence: internal/archtest/lifecycle_boundary_test.go:69-79 — "TestTheControlPlaneCannotSeeTheLifecycleVerbs walks go list -deps on internal/gateway and internal/ui"
+  evidence: internal/archtest/lifecycle_boundary_test.go:98-140 — "TestEveryPackageIsJudgedByTheBoundary fails loudly on any unjudged package"
+
+Gap audit:
+- honoured:
+  - the lifecycle verbs (install/uninstall/status/doctor) replace the old shell-only flow and are unreachable from the control plane
+    evidence: internal/archtest/lifecycle_boundary_test.go:69-140 — "TestTheControlPlaneCannotSeeTheLifecycleVerbs / TestEveryPackageIsJudgedByTheBoundary"
+  - doctor reports observed/undeterminable state for the firewall and Local Network Privacy without ever issuing a verdict, per adr-2609111126115848's carve-out
+    evidence: internal/lifecycle/doctor.go:190-193 — "Diagnose forcibly overrides severity to SeverityUndetermined for any non-Verified finding"
+    evidence: internal/lifecycle/doctor_test.go:588-634 — "TestNoObservedLineIsPhrasedAsAConclusion"
+  - uninstall removes the application and firewall entry but leaves the models, stating their size and the purge flag
+    evidence: internal/lifecycle/uninstall.go:218-232,263-265 — "models excluded from removalTargets; size and --purge stated"
+  - the two build-time defects (repair-path-skips-placement-check, live-verb-runner-reachable-from-tests) found during the merge were fixed rather than left open
+    evidence: internal/lifecycle/install.go:171-178 — "there is nothing to repair at ... refuses before quit/panel/provisioning/launch"
+    evidence: cmd/gropius/verbfakes_test.go:56-111 — "TestMain rewires verbEnvFor and lifecycleVerbs to fakes; TestTheLiveVerbsRefuseToRunInsideATest"
+  - install.sh is shrunk to bootstrap-only work and the staged swap moves entirely into Go, closing iss-2609081310071028 and iss-2609081310119313
+    evidence: internal/lifecycle/swap.go:91-118 — "os.Rename-based rename-aside-then-in sequence"
+    evidence: internal/archtest/privileged_shell_test.go:120 — "TestInstallerPinsEveryCommandItRuns"
+- diverged:
+  - the spec's own prose for criterion 19's test says it 'skips cleanly where it cannot create the fixture'; the shipped test instead splits into a real single-owner filesystem read plus a pure-function test over injected fake ownership, with no t.Skip anywhere in the file
+    evidence: internal/lifecycle/uninstall_test.go:326-330 — "A fixture with two owners cannot be built without root ... so the two halves are tested separately"
+  - swap.go's own commentary states plainly that no failure path leaves the Mac with no application; a same-day open issue narrows that to a claim that is overstated against a co-resident admin-group actor during the unbounded staging-directory wait
+    evidence: internal/lifecycle/swap.go:25-26 — "So no failure path leaves the Mac with no application"
+    evidence: .abcd/work/issues/open/iss-2609111755330533-internal-lifecycle-swap-go-claims-no-failure-path-leaves-the.md — "the fix made the window unbounded"
+  - the shell-side absolute-path test the spec names as TestInstallerPinsTheCommandsItTrusts shipped under the name TestInstallerPinsEveryCommandItRuns, with the same widened behaviour
+    evidence: internal/archtest/privileged_shell_test.go:120 — "TestInstallerPinsEveryCommandItRuns"
+- missing:
+  - the headline installing criterion's designated evidence — a completed run of the manual authorisation-panel procedure on a real Mac, across an administrator and a standard account — has not been produced; the results table carries no row
+    evidence: .abcd/development/procedures/installer-authorisation-panel.md:83-85 — "| _not yet run_ | | | | | | | | | | | |"
+
+Scope-condition dispositions:
+- cond-2609111029317707 — survived: the delivered install.sh still refuses below macOS 26 before any other work happens, matching the assumed floor
+  evidence: install.sh:91-100 — "MIN_MACOS_MAJOR=26 ... die "$APP requires macOS $MIN_MACOS_MAJOR""
+- cond-2609111029319670 — survived: install.sh still refuses a server install on non-Apple-Silicon hardware, checking both uname -m and the Rosetta-safe sysctl fallback, and does not touch the client's universal build
+  evidence: install.sh:102-107 — "the Gropius server needs Apple Silicon (this Mac is $(/usr/bin/uname -m)). The GropiusChat client is universal"
+- cond-2609111029317790 — survived: the delivered doctor/elevate machinery is built entirely around the ad-hoc-signed, un-notarised assumption: the observed/undeterminable labelling scheme and the firewall authorisation panel both exist because no Developer ID membership is assumed
+  evidence: internal/lifecycle/doctor.go:48-52 — "an ad-hoc signature's designated requirement is its code-directory hash, so whatever was observed may already be about a bundle that is gone"
+- cond-2609111029314175 — survived: the delivered criteria (handover, verified-binary execution, version-mismatch refusal) are all built around and exercised through the documented bootstrap path (install.sh); no alternate placement route is tested or claimed
+  evidence: install.sh:234-245 — "VERIFIED_BIN=... handover executed against it"
+- cond-2609111029312031 — survived: the delivered code still treats /Applications and $HOME/Applications as asymmetric destinations, choosing the per-user fallback only when the machine-wide directory is not writable
+  evidence: install.sh:208-213 — "if [ -w /Applications ]; then DEST="/Applications" ... else DEST="$HOME/Applications""
+- cond-2609111029311470 — survived: the delivered instance package still classifies a second account's attempt as HolderForeign rather than starting a competing server, and status/doctor both report against that classification
+  evidence: internal/instance/instance.go:39-42 — "HolderForeign: something else owns the port and could not prove it is this"
+  evidence: internal/lifecycle/status.go:98-105 — "case instance.HolderForeign"
+- cond-2609111029315634 — untested: install.sh still resolves only releases/latest with no rollback mechanism, consistent with the assumption, but nothing in this delivery exercises or contradicts the one-release-at-a-time assumption directly — it is unaffected background state rather than something this PR's tests touch
+- cond-2609111029317614 — survived: the verbs are reached exclusively through the per-user bin link created by binlink.go, and the delivered code itself reports when that directory is not on PATH rather than assuming it always is
+  evidence: internal/lifecycle/binlink.go:107-115 — "pathAdvice returns the export line, home-relativized"
+- cond-2609111029317056 — survived: config.go's accountDir/NewPaths split matches the condition exactly: models and the HF cache stay in the shared root, while configuration, registry, runtime, logs and statistics resolve through the account directory
+  evidence: internal/config/config.go:203-236 — "accountDir(root) ... What is shared and what is this account's own is the whole of the split"
 ## Grounds
 
 - pursued: visible foreground provisioning fixes abandonment because the reported failure is opacity rather than duration — today's banner names no proportion, no size and no retry, so nobody can tell working from stuck; wrong if the installs Alice, Bob and Carol report as stuck come at the same stage and frequency once the progress line names a proportion, a report collected by asking rather than by instrumenting, since adr-2609061503319212 forbids the telemetry that would yield a rate — planned autonomously on the maintainer's instruction of 2026-09-10, adopting the brief's recommendations
