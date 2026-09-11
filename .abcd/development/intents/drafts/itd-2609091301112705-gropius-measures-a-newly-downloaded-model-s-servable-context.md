@@ -144,3 +144,7 @@ named bound rather than the architecture's limit.
 ## Audit Notes
 
 _Empty. Populated by intent-auditor when intent moves to shipped/._
+
+## Grounds
+
+- pursued: an automated sweep-and-bisect recovers the same servable window a person recovered by hand, because the campaign's method is mechanical and every input it needs — the declared cap, what is resident and idle, a prefill deadline derived from prompt size — is already in the process; shown wrong if a repeat probe on the same Mac, models and runtime returns a materially different window, or if what it finds is the gateway's bound rather than the model's, in which case the figure belongs to Gropius's configuration and moves whenever upstream_header_timeout_sec does — planned autonomously on the maintainer's instruction of 2026-09-10, adopting the brief's recommendations
