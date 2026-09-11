@@ -18,7 +18,7 @@ func servingState() ServerState {
 	var s ServerState
 	s.Config.Host = "0.0.0.0"
 	s.Config.Port = 11535
-	s.Resident = []ResidentModel{{RepoID: "example-org/example-model-4bit", State: "ready"}}
+	s.Resident = []ResidentModel{{RepoID: "example-org/example-model-4bit", State: "loaded"}}
 	return s
 }
 

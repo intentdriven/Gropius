@@ -6,7 +6,7 @@
   "resident": [
     {
       "repo_id": "example-org/example-model-4bit",
-      "state": "ready"
+      "state": "loaded"
     }
   ]
 }
