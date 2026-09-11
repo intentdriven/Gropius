@@ -1,8 +1,8 @@
 ---
 id: itd-2609091301112705
 slug: gropius-measures-a-newly-downloaded-model-s-servable-context
-spec_id: null
-kind: null
+spec_id: spc-2609112108142027
+kind: standalone
 suggested_kind: null
 reclassification_history: []
 builds_on: [itd-2609061431481936, itd-2609061431463108]
@@ -70,13 +70,13 @@ the bound that stopped it, never as the model's limit.
 
 ## Scope Conditions
 
-- Apple Silicon Macs with unified memory; the probe's memory guard is arithmetic over one shared pool, not over a discrete GPU's.
-- The pinned runtime, mlx-lm 0.31.3 today. The prefill rate, the retained prompt cache and the per-token cost are properties of the runtime as much as of the model, so a figure measured under one runtime is not a figure under another.
-- One serving process per Mac. The singleton election means the probe competes with every account's requests, not only with its own.
-- Models the registry holds as ready, with a declared context length read from their own `config.json`. A model that declares no window has nothing to bisect between.
-- Text models. The campaign's recall check assumes a prompt of text filler.
-- A Mac that stays awake for the duration. A probe does not survive sleep.
-- The probe reaches the model the way a client does, over this Mac's own OpenAI endpoint, so what it measures is the window a client can actually get. A step that the gateway's prefill deadline or its served-window check stopped bounds Gropius's configuration, not the model, and is recorded as such.
+- Apple Silicon Macs with unified memory; the probe's memory guard is arithmetic over one shared pool, not over a discrete GPU's. <!-- cond: cond-2609112108142038 -->
+- The pinned runtime, mlx-lm 0.31.3 today. The prefill rate, the retained prompt cache and the per-token cost are properties of the runtime as much as of the model, so a figure measured under one runtime is not a figure under another. <!-- cond: cond-2609112108146425 -->
+- One serving process per Mac. The singleton election means the probe competes with every account's requests, not only with its own. <!-- cond: cond-2609112108146321 -->
+- Models the registry holds as ready, with a declared context length read from their own `config.json`. A model that declares no window has nothing to bisect between. <!-- cond: cond-2609112108149020 -->
+- Text models. The campaign's recall check assumes a prompt of text filler. <!-- cond: cond-2609112108143953 -->
+- A Mac that stays awake for the duration. A probe does not survive sleep. <!-- cond: cond-2609112108142632 -->
+- The probe reaches the model the way a client does, over this Mac's own OpenAI endpoint, so what it measures is the window a client can actually get. A step that the gateway's prefill deadline or its served-window check stopped bounds Gropius's configuration, not the model, and is recorded as such. <!-- cond: cond-2609112108146949 -->
 
 ## Acceptance Criteria
 
