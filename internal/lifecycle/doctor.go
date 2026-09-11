@@ -261,7 +261,7 @@ func checkFirewall(env DoctorEnv) Answer {
 		answer.Summary = "the firewall query could not be run, so nothing was observed about the entry for " + binary
 		return answer
 	}
-	answer.Summary = "the firewall query answered " + quote(strings.TrimSpace(abbreviate(out, env.Home))) +
+	answer.Summary = "the firewall query answered " + quote(strings.TrimSpace(abbreviateAll(out, env.Home))) +
 		" for " + binary + "; that does not establish that a grant covers this build, because the query answers " +
 		"the same way for a path it has no entry for, and this build's code identity changes with every build"
 	return answer
@@ -335,6 +335,20 @@ func abbreviate(path, home string) string {
 		return "~" + path[len(home):]
 	}
 	return path
+}
+
+// abbreviateAll replaces EVERY occurrence of this account's home directory
+// inside free text, which abbreviate cannot do: a path is a whole value and is
+// abbreviated at its start, but the firewall's answer is a sentence with the
+// path in the middle of it ("Incoming connection to <path> is permitted."). A
+// report written to be pasted into a bug report cannot carry an account name in
+// either shape.
+func abbreviateAll(text, home string) string {
+	if home == "" || text == "" {
+		return text
+	}
+	sep := string(filepath.Separator)
+	return strings.ReplaceAll(text, home+sep, "~"+sep)
 }
 
 // liveDoctorEnv is the environment a real run asks its questions of.

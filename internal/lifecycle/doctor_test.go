@@ -118,6 +118,30 @@ func TestAFirewallQueryThatFailedIsStillNotAVerdict(t *testing.T) {
 	}
 }
 
+// The firewall query answers with the binary's path INSIDE a sentence, and
+// doctor's output is written to be pasted into a bug report — so the account
+// name has to go from the quoted answer too, not only from the path doctor
+// prints beside it.
+//
+// The real tool answers "Incoming connection to <path> is permitted."; a fake
+// that answered without a path is why this went unnoticed.
+func TestTheQuotedFirewallAnswerCarriesNoHomeDirectory(t *testing.T) {
+	env := fakeEnv(t)
+	env.Firewall = func(path string) (string, error) {
+		return "Incoming connection to " + path + " is permitted.\n", nil
+	}
+
+	f := findingNamed(t, Diagnose(env, DefaultChecks()), firewallCheckName)
+	if strings.Contains(f.Summary, env.Home) {
+		t.Errorf("the firewall finding spells this account's home directory out, which is what a person pastes "+
+			"into a bug report:\n%s", f.Summary)
+	}
+	if !strings.Contains(f.Summary, "~/Applications/Gropius.app") {
+		t.Errorf("the abbreviated path is gone from the answer altogether, so the finding no longer says which "+
+			"binary was asked about:\n%s", f.Summary)
+	}
+}
+
 // Local Network Privacy has no query interface of any kind. The check is
 // reported, never omitted and never guessed — in the JSON and in the text
 // alike, because a check that is missing from the page a person reads is a
