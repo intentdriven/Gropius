@@ -98,14 +98,30 @@ func elevateFirewall(script, binary string) error {
 // the report to print when the panel was declined or could not be raised.
 func firewallGrantCommands(binary string) []string {
 	return []string{
-		"sudo " + socketfilterfw + " --add '" + binary + "'",
-		"sudo " + socketfilterfw + " --unblockapp '" + binary + "'",
+		"sudo " + socketfilterfw + " --add " + shellQuote(binary),
+		"sudo " + socketfilterfw + " --unblockapp " + shellQuote(binary),
 	}
 }
 
 // firewallRemoveCommand is the command that removes the entry by hand.
 func firewallRemoveCommand(binary string) string {
-	return "sudo " + socketfilterfw + " --remove '" + binary + "'"
+	return "sudo " + socketfilterfw + " --remove " + shellQuote(binary)
+}
+
+// shellQuote wraps a value so a shell reads it as one word, whatever is in it.
+//
+// These lines are printed under an instruction to run them as root, so they are
+// a root command line this product composed — and the path in them is derived
+// from $HOME, which the person running the verb controls. Hand-written single
+// quotes are not enough: a single quote inside the value closes the quoting and
+// the rest is read as commands. A standard account could otherwise produce, out
+// of a declined panel, a line that an administrator has been told to paste into
+// a root shell.
+//
+// The AppleScript path has had this right all along, through `quoted form of`;
+// this is the same rule for the copy a person pastes.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 // quitRunningCopy asks a running Gropius to quit, so the swap replaces a bundle

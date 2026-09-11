@@ -250,12 +250,11 @@ func checkPort(env DoctorEnv) Answer {
 // the two commands that re-grant it (adr-2609111126115848 conditions 1 and 2).
 func checkFirewall(env DoctorEnv) Answer {
 	binary := abbreviate(env.Binary, env.Home)
-	answer := Answer{
-		Commands: []string{
-			"sudo " + socketfilterfw + " --add '" + binary + "'",
-			"sudo " + socketfilterfw + " --unblockapp '" + binary + "'",
-		},
-	}
+	// The same two commands the install prints when the panel is declined, and
+	// quoted by the same rule: these lines are printed under an instruction to
+	// run them as root, and the path in them comes from a directory the person
+	// running the verb controls.
+	answer := Answer{Commands: firewallGrantCommands(binary)}
 	out, err := env.Firewall(env.Binary)
 	if err != nil {
 		answer.Summary = "the firewall query could not be run, so nothing was observed about the entry for " + binary
