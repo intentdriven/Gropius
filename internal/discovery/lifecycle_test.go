@@ -43,9 +43,14 @@ type fakeAnnouncer struct {
 	serveGate    chan struct{} // released by the test
 
 	// outcomes counts the Respond attempts that have recorded what became of
-	// them. serves counts the ones that have started, so the two being equal
-	// says no responder is mid-flight — the one thing a test cannot read off
-	// the event log, and the thing the refresh loop's own evidence turns on.
+	// them — failed or announced, both of which settle.
+	//
+	// It is deliberately not compared against serves. serves is incremented by
+	// Respond itself, so it does not count an attempt the loop has spawned
+	// that has yet to reach its first statement, which is precisely the
+	// interval a test watching for a settled responder cares about. A test
+	// that wants that ordering counts the serves it knows the loop issued and
+	// waits for that many outcomes.
 	outcomes int
 }
 
@@ -80,11 +85,12 @@ func (f *fakeAnnouncer) settle() {
 	f.outcomes++
 }
 
-// settled reports whether every Respond attempt so far has reached its outcome.
-func (f *fakeAnnouncer) settled() bool {
+// outcomesSoFar reports how many Respond attempts have recorded what became of
+// them.
+func (f *fakeAnnouncer) outcomesSoFar() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return f.serves == f.outcomes
+	return f.outcomes
 }
 
 func (f *fakeAnnouncer) liveCount() int {
@@ -559,10 +565,20 @@ func TestAResponderThatFailsIsServedAgainOnTheSameRegistration(t *testing.T) {
 	f.serveBlockAt = 2
 	var h hints
 	a, rec := testAdvertiser(f, &h)
+	// The two failing serves are not held, and nothing can hold them: a
+	// responder the loop believes is up looks exactly like one that has not
+	// got round to failing yet. So the tick has to be long against the time
+	// it takes a freshly spawned goroutine to reach its first statement — at
+	// the shared 1 ms, a tick beats the responder to it often enough to fail
+	// roughly one run in fifty under load, because ad.stopped() is still
+	// false when the loop looks.
+	a.interval = 20 * time.Millisecond
 
 	if err := a.Start(context.Background()); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
+	// LIFO, and it matters: release() must run before Stop(), or Stop blocks
+	// in withdraw's <-ad.done waiting for a responder still parked at the gate.
 	defer a.Stop()
 
 	var freed sync.Once
@@ -601,8 +617,12 @@ func TestAResponderThatFailsIsServedAgainOnTheSameRegistration(t *testing.T) {
 		t.Errorf("live responders = %d after recovery, want 1", got)
 	}
 
-	// Recovery is announced only once the responder has survived an interval,
-	// so wait for it rather than reading the log the moment serving starts.
+	// Recovery is announced once the responder has been in flight across a
+	// tick, which for the held serve above means while it was still standing
+	// at the gate: to the loop, a responder inside Respond is a responder that
+	// is up, and it has nothing finer to go on. So this line may already have
+	// been said before the release, and waiting for it is waiting for a report
+	// the loop had made, not for the announcement it describes.
 	waitUntil(t, "the recovery to be reported", func() bool {
 		return rec.saidAbout("republished") >= 1
 	})
@@ -655,20 +675,27 @@ func TestAResponderThatHasAlreadyGivenUpIsNotReportedAsRecovered(t *testing.T) {
 		return int(models.Load())
 	}
 
+	var hooks atomic.Int64
 	rec.hold(func(msg string) {
 		if !strings.Contains(msg, "updated network advertisement") {
 			return
 		}
-		// Wait for the responder just started to have finished failing. The
-		// bound matters: the serve that finally succeeds never settles, since
-		// it stays inside Respond until the advertisement is withdrawn.
-		deadline := time.Now().Add(2 * time.Second)
-		for time.Now().Before(deadline) && !f.settled() {
+		// This line is the loop's last act after starting a responder, so the
+		// kth time it is said, the loop has issued serve attempts 0 through k
+		// — attempt 0 from Start, which says nothing, and one per line since.
+		// Waiting for k+1 outcomes is therefore waiting for every responder
+		// issued so far to have recorded what became of it, the ordering this
+		// test needs rather than a guess at how long that takes.
+		k := hooks.Add(1)
+		deadline := time.Now().Add(2 * time.Second) // a hang is a failed test, not a wedged one
+		for time.Now().Before(deadline) && int64(f.outcomesSoFar()) < k+1 {
 			time.Sleep(50 * time.Microsecond)
 		}
-		// Slack for the responder goroutine's own exit — it has recorded the
-		// failure and has only to close the channel the loop is watching —
-		// and for the tick to come round while the loop is still held here.
+		// The sleep is the mechanism, not slack: it is what leaves a tick
+		// waiting on the ticker's channel by the time the loop reaches its
+		// select. Both cases are then ready — the responder's death and the
+		// tick — and select's random choice between them is the coin toss
+		// this test needs the loop to face, over and over.
 		time.Sleep(5 * time.Millisecond)
 	})
 
