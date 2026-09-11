@@ -132,10 +132,26 @@ func runUpdate(env Env, args []string, ue UpdateEnv) int {
 	// answered the challenge wrongly, or a data root no proof could be written
 	// into, ends the run here — nothing downloaded, nothing placed.
 	if classifyPort(ue) == portUnproven {
-		writeLine(env.Err, "gropius update: port "+strconv.Itoa(ue.Port)+
-			" is held by a process that could not prove it is this account's Gropius.")
-		writeLine(env.Err, "Nothing was downloaded and nothing was replaced. A Mac with something unidentified on "+
-			"the server port is not one to install software on; run gropius doctor to see what is there.")
+		// WHICH of the two things it found, because instance reports them the
+		// same way and they are not the same thing to a person. The challenge
+		// is a file written into this account's data root and read back over
+		// the port: a root that cannot be written makes identity unprovable
+		// with NOTHING on the port at all, and a refusal that said a process
+		// was holding it would be asserting something nobody observed.
+		//
+		// The bit that tells them apart is the one this verb already asks for:
+		// whether anything is accepting connections.
+		if ue.PortBusy() {
+			writeLine(env.Err, "gropius update: port "+strconv.Itoa(ue.Port)+
+				" "+heldByUnproven)
+			writeLine(env.Err, "Nothing was downloaded and nothing was replaced. A Mac with something on the "+
+				"server port claiming to be Gropius and failing to prove it is not one to install software on.")
+		} else {
+			writeLine(env.Err, "gropius update: no proof of identity could be written into this account's data "+
+				"root, so nothing can be checked against port "+strconv.Itoa(ue.Port)+".")
+			writeLine(env.Err, "Nothing was downloaded and nothing was replaced. Run gropius doctor: the data "+
+				"root is the check that will say what stopped the write.")
+		}
 		return ExitFailed
 	}
 

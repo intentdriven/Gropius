@@ -72,6 +72,23 @@ const (
 		"restarted there."
 	cannotQuitSentence = "Quitting it is not something this command can do: a quit request reaches only this " +
 		"login session."
+	// countedNotNamed is how every holder is reported. Which account a process
+	// belongs to is that account's business, and this output is written to be
+	// pasted into a message to a colleague.
+	//
+	// What is counted is PROCESSES. One process holds one port, and that is the
+	// thing this command looked at; whether it is a login session, an account
+	// or a script is not something anything here can see, so it is not
+	// something the report says.
+	countedNotNamed = "it is counted here and not named"
+	heldBySilent    = "is held by 1 process that did not identify itself; " + countedNotNamed + "."
+	heldByPeer      = "is held by 1 Gropius that shares this account's data root and is serving a different " +
+		"build; " + countedNotNamed + "."
+	// heldByUnproven is the ending that is NOT a cross-account story. Something
+	// answered the challenge and answered it wrongly, and telling a person to
+	// wait for it to log out would be advice about a machine they do not have.
+	heldByUnproven = "is held by 1 process that answered this account's identity challenge wrongly; " +
+		countedNotNamed + ". Run gropius doctor to see what is there."
 	perAccountSentence = "This account's own copy was updated; the copy this Mac serves from is not this " +
 		"account's."
 )
@@ -152,10 +169,22 @@ type updateReport struct {
 // under a per-account data root, is exactly what another account's Gropius
 // looks like from here.
 func (r updateReport) servedByAnother() bool {
-	if r.Holder == portSilent || r.Holder == portUnproven {
+	if r.Holder == portSilent {
 		return true
 	}
 	return r.Serving != "" && r.Installed != "" && r.Serving != r.Installed
+}
+
+// holderLine says what is on the port, counted rather than named, and says it
+// as the two cases genuinely differ: something that would not identify itself
+// at all, and a Gropius that proved it shares this account's data root and is
+// serving a different build.
+func (r updateReport) holderLine() string {
+	held := heldBySilent
+	if r.Holder == portOurs {
+		held = heldByPeer
+	}
+	return "port " + strconv.Itoa(r.Port) + " " + held
 }
 
 // perAccountInstall reports whether the destination is inside this account's
@@ -179,12 +208,13 @@ func updateLines(r updateReport) []string {
 		out = append(out, r.swapFailureLines()...)
 	}
 	if r.servedByAnother() {
-		out = append(out, didNotInstallSentence, logOutSentence,
-			"1 other login session on this Mac holds the port; it is counted here and not named.",
-			cannotQuitSentence)
+		out = append(out, didNotInstallSentence, logOutSentence, r.holderLine(), cannotQuitSentence)
 		if r.perAccountInstall() {
 			out = append(out, perAccountSentence)
 		}
+	}
+	if r.Holder == portUnproven {
+		out = append(out, "port "+strconv.Itoa(r.Port)+" "+heldByUnproven)
 	}
 	if r.Placed {
 		out = append(out, checksumSentence)

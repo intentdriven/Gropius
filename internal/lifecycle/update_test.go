@@ -173,6 +173,10 @@ func (f *fakeUpdate) run(t *testing.T, args ...string) (code int, out, errOut st
 func TestTheUpdateRefusesBeforeAnythingIsWrittenWhenThePortCannotProveItself(t *testing.T) {
 	f := newFakeUpdate(t)
 	f.holders = []instance.Holder{instance.HolderForeign}
+	// Something IS on the port, and it answered wrongly. The other way this
+	// classification arises — a data root no proof can be written into — is the
+	// table below.
+	f.busy = true
 
 	code, out, errOut := f.run(t)
 
@@ -199,8 +203,62 @@ func TestTheUpdateRefusesBeforeAnythingIsWrittenWhenThePortCannotProveItself(t *
 	if !strings.Contains(text, strconv.Itoa(f.env.Port)) {
 		t.Errorf("the refusal does not name the port:\n%s", text)
 	}
-	if !strings.Contains(text, "could not prove") {
+	if !strings.Contains(text, "answered this account's identity challenge wrongly") {
 		t.Errorf("the refusal does not say what it found:\n%s", text)
+	}
+}
+
+// The same classification covers a second thing, and the refusal must not
+// confuse them: instance reports a data root no proof can be written into the
+// same way it reports a wrong answer, because in neither case can identity be
+// established. But in the first case there may be NOTHING on the port at all,
+// and a refusal that says a process is holding it has asserted something it did
+// not observe.
+//
+// What tells them apart is the one bit instance folds away, which this verb
+// already asks for: whether anything is accepting connections.
+func TestTheRefusalSaysWhichOfTheTwoThingsItFound(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		busy     bool
+		wantSaid string
+		notSaid  string
+	}{
+		{
+			name:     "something answered the challenge wrongly",
+			busy:     true,
+			wantSaid: "answered this account's identity challenge wrongly",
+		},
+		{
+			name:     "no proof could be written into the data root",
+			busy:     false,
+			wantSaid: "no proof of identity could be written",
+			// There may be nothing on that port at all, so the refusal must
+			// not say a process is holding it.
+			notSaid: "is held by",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFakeUpdate(t)
+			f.holders = []instance.Holder{instance.HolderForeign}
+			f.busy = tc.busy
+
+			code, out, errOut := f.run(t)
+			text := out + errOut
+
+			if code == ExitOK {
+				t.Errorf("exit = %d, want non-zero", code)
+			}
+			if len(f.calls.fetched) != 0 || len(f.calls.placed) != 0 {
+				t.Error("something was downloaded or placed after the refusal")
+			}
+			if !strings.Contains(text, tc.wantSaid) {
+				t.Errorf("the refusal does not say %q:\n%s", tc.wantSaid, text)
+			}
+			if tc.notSaid != "" && strings.Contains(text, tc.notSaid) {
+				t.Errorf("the refusal asserts %q, which it did not observe:\n%s", tc.notSaid, text)
+			}
+		})
 	}
 }
 

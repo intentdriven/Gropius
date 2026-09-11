@@ -296,8 +296,20 @@ func TestTheReportSaysWhenThisMacIsServingSomethingItDidNotInstall(t *testing.T)
 			if !strings.Contains(text, cannotQuitSentence) {
 				t.Errorf("the report does not say that quitting it is not something this command can do:\n%s", text)
 			}
-			if !strings.Contains(text, "1 other") {
-				t.Errorf("the report does not COUNT the other session:\n%s", text)
+			// Counted, and counted as something that was actually observed:
+			// one process holds a port, which is a fact about the port. What
+			// it is a process OF is not, so the count is of processes.
+			if !strings.Contains(text, countedNotNamed) {
+				t.Errorf("the report does not count the holder rather than naming it:\n%s", text)
+			}
+			// What is counted is PROCESSES, because one process holds one
+			// port and that is the thing this command looked at. Counting
+			// login sessions or accounts would be counting something nothing
+			// here can see.
+			for _, invented := range []string{"1 other login session", "1 other account", "1 account"} {
+				if strings.Contains(text, invented) {
+					t.Errorf("the report counts %q, which nothing here observed:\n%s", invented, text)
+				}
 			}
 		})
 	}
