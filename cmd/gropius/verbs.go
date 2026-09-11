@@ -13,8 +13,10 @@ import (
 // says which of them have something behind them, and a test holds the two
 // together.
 var lifecycleVerbs = map[string]func(lifecycle.Env, []string) int{
-	"status": lifecycle.RunStatus,
-	"doctor": lifecycle.RunDoctor,
+	"status":    lifecycle.RunStatus,
+	"doctor":    lifecycle.RunDoctor,
+	"install":   lifecycle.RunInstall,
+	"uninstall": lifecycle.RunUninstall,
 }
 
 // runCommandVerb runs one verb and returns the code the process exits with. It
