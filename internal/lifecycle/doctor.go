@@ -472,12 +472,16 @@ func liveDoctorEnv(env Env) DoctorEnv {
 		binary = ""
 	}
 	return DoctorEnv{
-		Version:      env.Version,
-		Paths:        env.Paths,
-		Port:         env.Port,
-		Binary:       binary,
-		Home:         home,
-		Holder:       func() instance.Holder { return instance.Probe(env.Paths, env.Port) },
+		Version: env.Version,
+		Paths:   env.Paths,
+		Port:    env.Port,
+		Binary:  binary,
+		Home:    home,
+		// The probe that creates nothing, here as in status: a diagnostic that
+		// created the data root it was asked about would be reporting on its
+		// own work, and the root check beside it is what says the root is
+		// missing.
+		Holder:       func() instance.Holder { return instance.ProbeExisting(env.Paths, env.Port) },
 		RuntimeReady: func() bool { return runtime.NewProvisioner(env.Paths).Status().Ready },
 		Writable:     writableDir,
 		Settings:     func() SettingsState { return loadSettings(env.Paths.Config) },

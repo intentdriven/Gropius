@@ -220,3 +220,53 @@ func portOf(t *testing.T, ln net.Listener) int {
 	}
 	return n
 }
+
+// A poll must not change the Mac it is asking about.
+//
+// Probe creates the data root on the way past, which is right for the server —
+// it is about to use it either way — and wrong for `gropius status`, which a
+// person and the menu bar run repeatedly and which answers a question about
+// state that already exists. ProbeExisting is the same question asked without
+// creating anything: a root that is not there is not a root this account is
+// serving from.
+func TestProbeExistingCreatesNothing(t *testing.T) {
+	absent := filepath.Join(t.TempDir(), "not-a-root")
+	paths := config.NewPaths(absent)
+	ln := mustListenLoopback(t)
+	port := portOf(t, ln)
+	ln.Close()
+
+	if got := ProbeExisting(paths, port); got != HolderNone {
+		t.Errorf("ProbeExisting on a root that is not there = %v, want %v", got, HolderNone)
+	}
+	if _, err := os.Stat(absent); !os.IsNotExist(err) {
+		t.Errorf("ProbeExisting created %q; a read-only question must leave the filesystem as it found it", absent)
+	}
+}
+
+// The difference is deliberate and is written down here as well as in the
+// comment: the server's probe does create the root.
+func TestProbeCreatesTheRootTheServerIsAboutToUse(t *testing.T) {
+	absent := filepath.Join(t.TempDir(), "not-a-root-yet")
+	paths := config.NewPaths(absent)
+	ln := mustListenLoopback(t)
+	port := portOf(t, ln)
+	ln.Close()
+
+	Probe(paths, port)
+	if _, err := os.Stat(absent); err != nil {
+		t.Errorf("Probe did not create the root the server is about to use: %v", err)
+	}
+}
+
+// A root that is a file, or a symlink to somewhere else, is not a root either.
+func TestProbeExistingRefusesARootThatIsNotADirectory(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, "a-file")
+	if err := os.WriteFile(file, []byte("not a root"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := ProbeExisting(config.NewPaths(file), 11535); got != HolderNone {
+		t.Errorf("ProbeExisting on a file = %v, want %v", got, HolderNone)
+	}
+}

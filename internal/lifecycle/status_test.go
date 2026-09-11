@@ -4,12 +4,15 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"net"
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 
+	"github.com/intentdriven/Gropius/internal/config"
 	"github.com/intentdriven/Gropius/internal/instance"
 )
 
@@ -205,4 +208,27 @@ func decodeFile(t *testing.T, path string) any {
 		t.Fatalf("fixture %s: %v", path, err)
 	}
 	return decoded
+}
+
+// The live environment asks the same read-only question: a status against a
+// root that is not there answers "not serving" and creates nothing. This is the
+// one seam in status that touches the filesystem at all, and it is the one a
+// person polls.
+func TestALiveStatusAgainstAnAbsentRootChangesNothing(t *testing.T) {
+	absent := filepath.Join(t.TempDir(), "no-root-here")
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, portText, _ := net.SplitHostPort(ln.Addr().String())
+	port, _ := strconv.Atoi(portText)
+	ln.Close() // nothing is listening on it now
+
+	got := StatusOf(liveStatusEnv("test", config.NewPaths(absent), port))
+	if got.Serving {
+		t.Errorf("status = %+v, want not serving against a root that does not exist", got)
+	}
+	if _, err := os.Stat(absent); !os.IsNotExist(err) {
+		t.Errorf("status created %q; polling it must leave the filesystem as it found it", absent)
+	}
 }

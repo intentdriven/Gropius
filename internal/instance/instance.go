@@ -67,6 +67,28 @@ func Probe(paths config.Paths, port int) Holder {
 	return HolderForeign
 }
 
+// ProbeExisting is Probe for a caller that must not change the Mac it is asking
+// about.
+//
+// Probe creates the data root if it is missing, which is right for the server:
+// it is about to write the root either way, and a challenge needs somewhere to
+// live. It is wrong for a poll. `gropius status` is run repeatedly, by a person
+// and by the menu bar, and a read-only question that creates a directory tree
+// as a side effect is a question nobody can ask safely — the more so under
+// GROPIUS_ROOT, where the tree would be created wherever the variable happens
+// to point.
+//
+// A root that is not there, or is not a directory, is not a root this account
+// is serving from, which is HolderNone rather than an error: nothing is
+// serving, which is exactly what the caller asked.
+func ProbeExisting(paths config.Paths, port int) Holder {
+	fi, err := os.Stat(paths.Root)
+	if err != nil || !fi.IsDir() {
+		return HolderNone
+	}
+	return Probe(paths, port)
+}
+
 // writeChallenge drops a single-use nonce file in the data root and returns its
 // name and the answer a holder must echo back.
 //

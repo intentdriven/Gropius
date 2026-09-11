@@ -154,7 +154,7 @@ func liveStatusEnv(version string, paths config.Paths, port int) StatusEnv {
 	return StatusEnv{
 		Version: version,
 		Port:    port,
-		Holder:  func() instance.Holder { return instance.Probe(paths, port) },
+		Holder:  func() instance.Holder { return instance.ProbeExisting(paths, port) },
 		State:   func() (ServerState, error) { return fetchState(port) },
 	}
 }
