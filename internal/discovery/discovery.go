@@ -246,6 +246,17 @@ func (a *Advertiser) serve(ctx context.Context, ad *advertisement) {
 	}()
 }
 
+// stopped reports whether the responder has already returned, without waiting
+// for one that has not.
+func (ad *advertisement) stopped() bool {
+	select {
+	case <-ad.done:
+		return true
+	default:
+		return false
+	}
+}
+
 // withdraw cancels the responder and waits for it to actually exit, so its
 // goodbye is on the wire before anything else touches the same name. It is safe
 // on a responder that has already stopped by itself.
@@ -328,7 +339,16 @@ func (a *Advertiser) refresh(ctx context.Context, cfg dnssd.Config, ad *advertis
 			// because serving is asynchronous: the responder that has just been
 			// started may fail the same way the last one did. Having survived a
 			// whole interval is the first evidence there is.
-			if down && serving {
+			//
+			// Survival means the responder is still up now, not merely that it
+			// was started an interval ago. This case and the one above can be
+			// ready at the same time — the responder has already given up and
+			// the tick has already fired — and select picks between ready cases
+			// at random, so a death already sitting unread in ad.done can lose
+			// the toss. Announcing recovery on that tick says the service is
+			// back while it is on no browser's list, and costs a second outage
+			// report on the pass that finally reads the death.
+			if down && serving && !ad.stopped() {
 				down = false
 				a.Log.Info("network advertisement republished",
 					"auth", last["auth"], "models", last["models"])

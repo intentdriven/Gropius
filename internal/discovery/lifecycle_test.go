@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -31,14 +32,32 @@ type fakeAnnouncer struct {
 
 	serveFailAt map[int]bool // 0-based Respond attempts that fail immediately
 	serves      int
+
+	// serveBlockAt is the 0-based Respond attempt that announces itself on
+	// serveEntered and then waits on serveGate (-1: none). Holding a responder
+	// at the door is how a test turns "what state was the lifecycle in between
+	// these two steps" into an assertion it can take at leisure, instead of a
+	// count read at whatever instant the step happened to complete.
+	serveBlockAt int
+	serveEntered chan struct{} // closed when that attempt is entered
+	serveGate    chan struct{} // released by the test
+
+	// outcomes counts the Respond attempts that have recorded what became of
+	// them. serves counts the ones that have started, so the two being equal
+	// says no responder is mid-flight — the one thing a test cannot read off
+	// the event log, and the thing the refresh loop's own evidence turns on.
+	outcomes int
 }
 
 func newFakeAnnouncer() *fakeAnnouncer {
 	return &fakeAnnouncer{
-		failAt:      map[int]bool{},
-		serveFailAt: map[int]bool{},
-		blockAt:     -1,
-		gate:        make(chan struct{}),
+		failAt:       map[int]bool{},
+		serveFailAt:  map[int]bool{},
+		blockAt:      -1,
+		gate:         make(chan struct{}),
+		serveBlockAt: -1,
+		serveEntered: make(chan struct{}),
+		serveGate:    make(chan struct{}),
 	}
 }
 
@@ -52,6 +71,20 @@ func (f *fakeAnnouncer) log() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]string(nil), f.events...)
+}
+
+// settle marks the current Respond attempt as having reached its outcome.
+func (f *fakeAnnouncer) settle() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.outcomes++
+}
+
+// settled reports whether every Respond attempt so far has reached its outcome.
+func (f *fakeAnnouncer) settled() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.serves == f.outcomes
 }
 
 func (f *fakeAnnouncer) liveCount() int {
@@ -104,12 +137,21 @@ func (r *fakeRegistration) Respond(ctx context.Context) error {
 	n := r.f.serves
 	r.f.serves++
 	fail := r.f.serveFailAt[n]
+	block := n == r.f.serveBlockAt
 	r.f.mu.Unlock()
+
+	// Held before anything is recorded, so a test that waits on serveEntered
+	// knows every earlier step is in the log and no part of this one is.
+	if block {
+		close(r.f.serveEntered)
+		<-r.f.serveGate
+	}
 
 	// dnssd probes and announces inside Respond, not in Add, so a registration
 	// that was accepted can still fail the moment it is served.
 	if fail {
 		r.f.record("serve-failed#" + strconv.Itoa(r.id))
+		r.f.settle()
 		return errors.New("mDNS probe failed")
 	}
 
@@ -117,6 +159,7 @@ func (r *fakeRegistration) Respond(ctx context.Context) error {
 	r.f.live++
 	r.f.mu.Unlock()
 	r.f.record("respond#" + strconv.Itoa(r.id))
+	r.f.settle()
 
 	<-ctx.Done()
 
@@ -155,11 +198,33 @@ func (h *hints) bump(n int) {
 type logRecorder struct {
 	mu   sync.Mutex
 	said []string // "LEVEL message"
+
+	// before, if set, runs in the logging goroutine before the line is
+	// recorded. The refresh loop logs from its own goroutine, so this is the
+	// one seam a test has INSIDE that loop — and the only one that falls
+	// between the moment a responder is started and the moment the loop looks
+	// at it again, which is exactly where the recovery report's evidence is
+	// decided.
+	before func(msg string)
 }
 
 func (l *logRecorder) Enabled(context.Context, slog.Level) bool { return true }
 
+// hold installs fn, which runs on the logging goroutine before each line.
+func (l *logRecorder) hold(fn func(msg string)) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.before = fn
+}
+
 func (l *logRecorder) Handle(_ context.Context, r slog.Record) error {
+	l.mu.Lock()
+	before := l.before
+	l.mu.Unlock()
+	if before != nil {
+		before(r.Message)
+	}
+
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.said = append(l.said, r.Level.String()+" "+r.Message)
@@ -485,6 +550,13 @@ func TestAResponderThatFailsIsServedAgainOnTheSameRegistration(t *testing.T) {
 	f := newFakeAnnouncer()
 	f.serveFailAt[0] = true // the network is down when the service is first served
 	f.serveFailAt[1] = true // and still down on the first retry
+	// The third serve is the one that works, and it is held at the door. Every
+	// property this test is about is an ORDERING — what the lifecycle had done
+	// by the time the service went back on the network, and what it had not —
+	// so the assertions are taken against that boundary while the fake stands
+	// still, never against a count read at the instant a step completed or
+	// against a sleep, neither of which proves anything on a loaded runner.
+	f.serveBlockAt = 2
 	var h hints
 	a, rec := testAdvertiser(f, &h)
 
@@ -493,10 +565,20 @@ func TestAResponderThatFailsIsServedAgainOnTheSameRegistration(t *testing.T) {
 	}
 	defer a.Stop()
 
-	waitFor(t, f, "the advertisement to be serving after the outage", func(ev []string) bool {
-		return count(ev, "respond#") == 1
-	})
+	var freed sync.Once
+	release := func() { freed.Do(func() { close(f.serveGate) }) }
+	defer release()
 
+	select {
+	case <-f.serveEntered:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("the registration was never served again after the outage; events were %v", f.log())
+	}
+
+	// Held between the second failure and the first successful announcement.
+	if got := count(f.log(), "respond#"); got != 0 {
+		t.Errorf("%d responders announced before the retry was released, want 0: %v", got, f.log())
+	}
 	if got := count(f.log(), "serve-failed#"); got != 2 {
 		t.Errorf("%d failed serves recorded, want 2: %v", got, f.log())
 	}
@@ -504,23 +586,117 @@ func TestAResponderThatFailsIsServedAgainOnTheSameRegistration(t *testing.T) {
 		t.Errorf("%d registrations across two failed serves, want 1 — each extra one "+
 			"opens a socket pair that dnssd will never close: %v", got, f.log())
 	}
-	if got := f.liveCount(); got != 1 {
-		t.Errorf("live responders = %d after recovery, want 1", got)
-	}
-
 	// An outage that persists fails the same way every tick. It is reported on
-	// the way in and on the way out, not once per tick in between. Recovery is
-	// announced only once the responder has survived an interval, so wait for
-	// it rather than reading the log the moment it starts.
-	waitUntil(t, "the recovery to be reported", func() bool {
-		return rec.saidAbout("republished") == 1
-	})
+	// the way in and on the way out, not once per tick in between — and the
+	// way out has not happened yet, so one report is all there can be.
 	if got := rec.saidAbout("has stopped"); got != 1 {
 		t.Errorf("reported the outage %d times over two failed serves, want once: %v", got, rec.lines())
 	}
 
-	// And it stays quiet once it is back.
-	time.Sleep(30 * time.Millisecond)
+	release()
+	waitFor(t, f, "the advertisement to be serving after the outage", func(ev []string) bool {
+		return count(ev, "respond#") == 1
+	})
+	if got := f.liveCount(); got != 1 {
+		t.Errorf("live responders = %d after recovery, want 1", got)
+	}
+
+	// Recovery is announced only once the responder has survived an interval,
+	// so wait for it rather than reading the log the moment serving starts.
+	waitUntil(t, "the recovery to be reported", func() bool {
+		return rec.saidAbout("republished") >= 1
+	})
+
+	// And it stays quiet once it is back. Stop waits for the refresh goroutine
+	// to exit, so what the recorder holds afterwards is the whole of what this
+	// lifecycle ever said — a boundary a sleep can only guess at.
+	a.Stop()
+	if got := rec.saidAbout("republished"); got != 1 {
+		t.Errorf("reported the recovery %d times, want once: %v", got, rec.lines())
+	}
+	if got := rec.saidAbout("has stopped"); got != 1 {
+		t.Errorf("reported the outage %d times in all, want once: %v", got, rec.lines())
+	}
+}
+
+// A responder that has already given up is not a recovery.
+//
+// The refresh loop watches the responder and the refresh tick in one select,
+// and select picks at random between cases that are both ready. So a responder
+// can be dead — its death sitting unread in ad.done — and the tick be chosen
+// anyway. Reporting recovery on that tick announces the outage as over while
+// the Mac is on no browser's list, and buys a second outage report on the pass
+// that finally reads the death (iss-2609111013499513).
+//
+// Forcing that coincidence is what the hold is for. The loop's last act after
+// starting a responder is to log, so holding it there until the responder it
+// just started has finished failing leaves both select cases ready when it
+// comes back. Each retry is then a coin toss, and twenty of them make the
+// wrong call a near-certainty for as long as the loop is willing to make it.
+func TestAResponderThatHasAlreadyGivenUpIsNotReportedAsRecovered(t *testing.T) {
+	const retries = 20
+
+	f := newFakeAnnouncer()
+	for i := 0; i < retries; i++ {
+		f.serveFailAt[i] = true // one long outage, and then it comes back
+	}
+	var h hints
+	a, rec := testAdvertiser(f, &h)
+
+	// Every tick must reach the log, and only a changed TXT record does, so
+	// the model count moves under the loop until the outage is over.
+	var churn atomic.Bool
+	var models atomic.Int64
+	churn.Store(true)
+	a.Models = func() int {
+		if churn.Load() {
+			return int(models.Add(1))
+		}
+		return int(models.Load())
+	}
+
+	rec.hold(func(msg string) {
+		if !strings.Contains(msg, "updated network advertisement") {
+			return
+		}
+		// Wait for the responder just started to have finished failing. The
+		// bound matters: the serve that finally succeeds never settles, since
+		// it stays inside Respond until the advertisement is withdrawn.
+		deadline := time.Now().Add(2 * time.Second)
+		for time.Now().Before(deadline) && !f.settled() {
+			time.Sleep(50 * time.Microsecond)
+		}
+		// Slack for the responder goroutine's own exit — it has recorded the
+		// failure and has only to close the channel the loop is watching —
+		// and for the tick to come round while the loop is still held here.
+		time.Sleep(5 * time.Millisecond)
+	})
+
+	if err := a.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer a.Stop()
+
+	// Wait for the outage itself to end — the serve that finally works — not
+	// for the recovery to be reported. A loop that miscounts a dead responder
+	// as a recovery says so early and often, and stopping at the first such
+	// line would end the test before the outage it belongs to was over.
+	waitFor(t, f, "the advertisement to come back after the outage", func(ev []string) bool {
+		return count(ev, "respond#") >= 1
+	})
+	churn.Store(false)
+	waitUntil(t, "the recovery to be reported", func() bool {
+		return rec.saidAbout("republished") >= 1
+	})
+
+	// Stop waits for the refresh goroutine to exit, so what the recorder holds
+	// afterwards is the whole of what this lifecycle ever said.
+	a.Stop()
+	if got := rec.saidAbout("has stopped"); got != 1 {
+		t.Errorf("reported the outage %d times across %d failed serves, want once — "+
+			"a responder already known to be dead was counted as a recovery: %v",
+			got, retries, rec.lines())
+	}
 	if got := rec.saidAbout("republished"); got != 1 {
 		t.Errorf("reported the recovery %d times, want once: %v", got, rec.lines())
 	}
