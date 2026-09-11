@@ -5,6 +5,7 @@ import (
 	"go/parser"
 	"go/token"
 	"io/fs"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -229,9 +230,16 @@ func TestTheLifecycleVerbsOnlyEverREADTheControlPlane(t *testing.T) {
 // substitute the whole integrity control silently: the checksums would be read
 // from the same place as the bundle, and the verification would prove only that
 // a directory is self-consistent.
+// It is scoped to the update's own files rather than the package, because
+// other verbs read the environment legitimately — uninstall reads GROPIUS_ROOT
+// so its output can name the root it did NOT remove. The names are checked to
+// exist first, so a file renamed does not silently empty the scan.
 func TestTheUpdatePathReadsNoEnvironmentVariable(t *testing.T) {
 	for _, name := range []string{"update.go", "updatefetch.go", "updatereport.go"} {
 		rel := lifecycleDir + "/" + name
+		if _, err := os.Stat(filepath.Join(repoRootDir(t), rel)); err != nil {
+			t.Fatalf("%s is not there any more, so this scan is reading nothing: %v", rel, err)
+		}
 		for i, line := range strings.Split(readRepoFile(t, repoRootDir(t), rel), "\n") {
 			code, _, _ := strings.Cut(line, "//")
 			for _, read := range []string{"os.Getenv", "os.LookupEnv", "os.Environ"} {
