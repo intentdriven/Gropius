@@ -34,6 +34,16 @@ var lifecycleTools = map[string]string{
 	"/usr/bin/osascript": "draws the system authorisation panel, and quits a running copy",
 	"/usr/bin/open":      "launches the installed bundle",
 	"/usr/libexec/ApplicationFirewall/socketfilterfw": "reads the firewall's answer for the doctor's observed line",
+
+	// The four the update verb adds. Each is the tool the BOOTSTRAP already
+	// uses for the same step, and that is the argument for every one of them:
+	// the script and the verb must agree on what a verified download is, so
+	// there is one fetch path and one verification path rather than two that
+	// can drift.
+	"/usr/bin/curl":   "downloads the current release's archive and the checksums published beside it",
+	"/usr/bin/shasum": "IS the verification — the only integrity control in the update path, and the same invocation the bootstrap is verified against",
+	"/usr/bin/ditto":  "unpacks the verified archive. It extracts, it does not remove",
+	"/usr/bin/xattr":  "clears the quarantine attribute on a bundle that has already been verified",
 }
 
 // Every subprocess the lifecycle verbs start is one of the three named above.
@@ -83,7 +93,7 @@ func TestTheLifecycleVerbsStartOnlyTheToolsTheyDeclare(t *testing.T) {
 				return true
 			}
 			if _, allowed := lifecycleTools[spelled]; !allowed {
-				t.Errorf("%s:%d starts %q. The lifecycle verbs start three system tools and no others: "+
+				t.Errorf("%s:%d starts %q. The lifecycle verbs start the tools they declare above and no others: "+
 					"every removal is in process, with this account's own rights. If this is a new tool the "+
 					"verbs genuinely need, add it to lifecycleTools with the reason; if it removes files, it "+
 					"does not belong here at all",
