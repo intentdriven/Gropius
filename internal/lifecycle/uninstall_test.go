@@ -82,12 +82,12 @@ func TestUninstallRemovesTheApplicationAndLeavesTheModels(t *testing.T) {
 	for _, gone := range []string{ue.Bundles[0], ue.Paths.Venv, ue.Paths.Python, ue.Paths.Bin,
 		ue.Paths.Config, ue.Paths.State, ue.Paths.Logs, ue.Paths.Stats, ue.Link} {
 		if exists(gone) {
-			t.Errorf("%s is still there", abbreviate(gone, ue.Home))
+			t.Errorf("%s is still there", redact(gone, ue.Home))
 		}
 	}
 	for _, kept := range []string{ue.Paths.Models, ue.Paths.HFCache} {
 		if !exists(kept) {
-			t.Errorf("%s was removed; the downloaded models are what uninstall leaves", abbreviate(kept, ue.Home))
+			t.Errorf("%s was removed; the downloaded models are what uninstall leaves", redact(kept, ue.Home))
 		}
 	}
 	got := out.String()

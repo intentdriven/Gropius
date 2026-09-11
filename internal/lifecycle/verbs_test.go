@@ -88,3 +88,22 @@ func TestStatusRefusesAStrayArgument(t *testing.T) {
 
 // decodeInto is the test's decoder, kept here so no verb has to export one.
 func decodeInto(b []byte, v any) error { return json.Unmarshal(b, v) }
+
+// A settings file the server could not use as written changes what status is
+// looking at — the port among other things — so status says so. On standard
+// error, because the JSON on standard output is a contract and a warning is not
+// part of it.
+func TestStatusStatesASettingsProblemWithoutSpoilingTheJSON(t *testing.T) {
+	env, out, errOut := testEnv()
+	env.SettingsProblem = "config.json is not a valid configuration — the bind address is locked down to loopback only"
+	if code := runStatus(env, []string{"--json"}, servingStatusEnv()); code != ExitOK {
+		t.Fatalf("exit = %d, want %d", code, ExitOK)
+	}
+	if !strings.Contains(errOut.String(), "locked down to loopback") {
+		t.Errorf("standard error = %q, which does not state the settings problem", errOut)
+	}
+	var decoded Status
+	if err := decodeInto(out.Bytes(), &decoded); err != nil {
+		t.Fatalf("the JSON no longer decodes: %v\n%s", err, out)
+	}
+}

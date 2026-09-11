@@ -39,8 +39,22 @@ type Env struct {
 	// Err carries progress and refusals, so a progress line never lands in the
 	// middle of the JSON on Out.
 	Err io.Writer
-	// Term is what Out will bear: colour, and a line that can be redrawn.
+	// Term is what Out will bear: colour for the answer.
 	Term Terminal
+	// Progress is what Err will bear. It is a Terminal of its own rather than
+	// Term because the two streams are not the same stream: `status --json`
+	// pipes Out into a decoder while Err is still the operator's terminal, and
+	// a progress line drawn on Out would be in the middle of the JSON.
+	Progress Terminal
+	// SettingsProblem is what reading config.json had to do to make it usable,
+	// in the words the server logs at startup, and empty when it loaded
+	// cleanly. A verb states it on Err rather than in its answer: it is the
+	// reason a figure below might not be the one the operator wrote, and it is
+	// not part of any verb's contract.
+	//
+	// doctor does not repeat it — it has a check of its own that reports the
+	// settings file, in the report where a severity belongs.
+	SettingsProblem string
 }
 
 // Exit codes. Zero is the answer, whatever the answer says: doctor's warnings
@@ -79,6 +93,13 @@ func runStatus(env Env, args []string, st StatusEnv) int {
 	if fs.NArg() > 0 {
 		writeLine(env.Err, "gropius status: unexpected argument "+quote(fs.Arg(0)))
 		return ExitUsage
+	}
+
+	// On Err, and before the answer: what follows may be about a port the
+	// operator did not choose, and a caller piping Out into a decoder must not
+	// have to parse around a warning.
+	if env.SettingsProblem != "" {
+		writeLine(env.Err, "gropius status: "+env.SettingsProblem)
 	}
 
 	s := StatusOf(st)

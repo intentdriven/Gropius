@@ -150,8 +150,8 @@ func runUninstall(env Env, args []string, ue UninstallEnv) int {
 	// The firewall entry first, while the binary it is keyed to still exists.
 	if err := ue.Firewall(ue.Binary); err != nil {
 		remaining = append(remaining,
-			"the firewall entry for "+abbreviate(ue.Binary, ue.Home)+" ("+err.Error()+")\n"+
-				"    remove it with: "+firewallRemoveCommand(ue.Binary))
+			"the firewall entry for "+redact(ue.Binary, ue.Home)+" ("+err.Error()+")\n"+
+				"    remove it with: "+firewallRemoveCommand(ue.Binary, ue.Home))
 	} else {
 		writeLine(env.Out, "removed the firewall entry.")
 	}
@@ -164,11 +164,11 @@ func runUninstall(env Env, args []string, ue UninstallEnv) int {
 			// Never elevated for, and never handed to an external removal
 			// command: a path this account cannot delete is reported as what it
 			// is.
-			remaining = append(remaining, abbreviate(target, ue.Home)+" ("+err.Error()+")")
+			remaining = append(remaining, redact(target, ue.Home)+" ("+err.Error()+")")
 			failed = true
 			continue
 		}
-		line := "removed " + abbreviate(target, ue.Home) + "."
+		line := "removed " + redact(target, ue.Home) + "."
 		if isUnder(target, ue.SystemApplications) {
 			// Said rather than left to be discovered. One bundle there is what
 			// every account on this Mac launches, so this removal was not only
@@ -193,7 +193,7 @@ func runUninstall(env Env, args []string, ue UninstallEnv) int {
 	}
 	if ue.NamedRoot != "" {
 		writeLine(env.Out, "")
-		writeLine(env.Out, "GROPIUS_ROOT names "+abbreviate(ue.NamedRoot, ue.Home)+
+		writeLine(env.Out, "GROPIUS_ROOT names "+redact(ue.NamedRoot, ue.Home)+
 			". Uninstall never derives a deletion path from the environment, so nothing there was removed.")
 	}
 	if failed {
@@ -273,7 +273,7 @@ func reportModels(env Env, ue UninstallEnv, purge bool, failed *bool) {
 			// A per-user root holds this account's models and nothing else.
 			size := dirSize(d)
 			if err := os.RemoveAll(d); err != nil {
-				writeLine(env.Err, "warning: "+abbreviate(d, ue.Home)+" could not be removed ("+err.Error()+")")
+				writeLine(env.Err, "warning: "+redact(d, ue.Home)+" could not be removed ("+err.Error()+")")
 				*failed = true
 				kept += size
 				continue

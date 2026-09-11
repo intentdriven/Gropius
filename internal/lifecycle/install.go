@@ -150,14 +150,14 @@ func runInstall(env Env, args []string, ie InstallEnv) int {
 				writeLine(env.Err, "warning: a running copy could not be asked to quit ("+err.Error()+")")
 			}
 		}
-		writeLine(env.Err, stagePlace+": "+abbreviate(ie.Dest, ie.Home))
+		writeLine(env.Err, stagePlace+": "+redact(ie.Dest, ie.Home))
 		if err := ie.Place(ie.Bundle, ie.Dest); err != nil {
 			return fail(env, ie, stagePlace, err)
 		}
 	}
 
 	if *placeOnly {
-		writeLine(env.Out, "placed "+abbreviate(ie.Dest, ie.Home)+".")
+		writeLine(env.Out, "placed "+redact(ie.Dest, ie.Home)+".")
 		writeLine(env.Out, "The firewall grant, the MLX runtime and the "+linkFileName+
 			" command are not done: run "+retryInstall+" to finish.")
 		return ExitOK
@@ -170,7 +170,7 @@ func runInstall(env Env, args []string, ie InstallEnv) int {
 	if err := ie.Firewall(binary); err != nil {
 		writeLine(env.Err, "warning: "+stageFirewall+" was not made ("+err.Error()+").")
 		writeLine(env.Err, "Other machines may see an empty response until an administrator runs:")
-		for _, c := range firewallGrantCommands(binary) {
+		for _, c := range firewallGrantCommands(binary, ie.Home) {
 			writeLine(env.Err, "  "+c)
 		}
 	}
@@ -193,13 +193,13 @@ func runInstall(env Env, args []string, ie InstallEnv) int {
 	if err != nil {
 		return fail(env, ie, stageLink, err)
 	}
-	writeLine(env.Out, "the "+linkFileName+" command is at "+abbreviate(link, ie.Home)+".")
+	writeLine(env.Out, "the "+linkFileName+" command is at "+redact(link, ie.Home)+".")
 	if dir := binDir(ie.Home); !onSearchPath(dir, ie.PathEnv) {
 		writeLine(env.Out, pathAdvice(dir, ie.Home))
 	}
 
 	if err := ie.Launch(ie.Dest); err != nil {
-		writeLine(env.Err, "warning: "+abbreviate(ie.Dest, ie.Home)+" could not be opened ("+err.Error()+")")
+		writeLine(env.Err, "warning: "+redact(ie.Dest, ie.Home)+" could not be opened ("+err.Error()+")")
 		return ExitOK
 	}
 	if waitUntil(ie.Serving, ie.Poll, 30*time.Second) {
@@ -227,7 +227,7 @@ func fail(env Env, ie InstallEnv, stage string, err error) int {
 	// middle of it ("rename /Users/…: permission denied"), and abbreviate only
 	// rewrites a prefix, so the account name would survive into output the
 	// privacy rule says must be pasteable into a bug report.
-	writeLine(env.Err, "gropius install: "+stage+" failed: "+abbreviateAll(err.Error(), ie.Home))
+	writeLine(env.Err, "gropius install: "+stage+" failed: "+redact(err.Error(), ie.Home))
 	writeLine(env.Err, "Retry with: "+retryInstall)
 	return ExitFailed
 }

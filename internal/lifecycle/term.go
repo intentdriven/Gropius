@@ -93,7 +93,17 @@ func (t Terminal) Paint(c Color, s string) string {
 func (t Terminal) Step(stage string, done, total int) {
 	line := stage
 	if total > 0 {
-		line += "  " + strconv.Itoa(done*100/total) + "%"
+		// Clamped, because a caller that counts in bytes or in files can
+		// overrun its own estimate, and a progress line reading 140% tells the
+		// person watching it that the thing they are waiting on is broken.
+		percent := done * 100 / total
+		if percent > 100 {
+			percent = 100
+		}
+		if percent < 0 {
+			percent = 0
+		}
+		line += "  " + strconv.Itoa(percent) + "%"
 	}
 	if t.Redraw {
 		// Carriage return to the margin, then clear what the last, possibly

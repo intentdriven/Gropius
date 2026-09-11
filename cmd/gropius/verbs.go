@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"os"
 
 	"github.com/intentdriven/Gropius/internal/config"
@@ -22,15 +23,26 @@ var lifecycleVerbs = map[string]func(lifecycle.Env, []string) int{
 // runCommandVerb runs one verb and returns the code the process exits with. It
 // starts no server, opens no listener and advertises nothing: a verb is a
 // question asked in a terminal, and it answers and stops.
-func runCommandVerb(cmd commandLine) int {
+//
+// The two streams are arguments rather than os.Stdout and os.Stderr reached for
+// in here, so a test can run the whole path — command line, environment, verb —
+// and read what a person would have seen.
+func runCommandVerb(cmd commandLine, out, errOut io.Writer) int {
 	switch verbs[cmd.Verb] {
 	case verbVersion:
-		fmt.Println("gropius " + version)
+		// Refused like any other verb given a word it has no meaning for.
+		// Quietly printing the version anyway would tell somebody who typed
+		// `gropius version --json` that they had got what they asked for.
+		if len(cmd.Args) > 0 {
+			fmt.Fprintln(errOut, "gropius version: unexpected argument "+quote(cmd.Args[0]))
+			return lifecycle.ExitUsage
+		}
+		fmt.Fprintln(out, "gropius "+version)
 		return 0
 	case verbNotYet:
 		// Named rather than dismissed: the person who read the documentation
 		// and typed this learns that they typed it correctly.
-		fmt.Fprintln(os.Stderr, "gropius "+cmd.Verb+": not in this build yet")
+		fmt.Fprintln(errOut, "gropius "+cmd.Verb+": not in this build yet")
 		return lifecycle.ExitUsage
 	}
 
@@ -38,37 +50,49 @@ func runCommandVerb(cmd commandLine) int {
 	if !ok {
 		// Unreachable while the table test passes, and a refusal rather than a
 		// silent success if it ever stops.
-		fmt.Fprintln(os.Stderr, "gropius "+cmd.Verb+": this build lists the verb and does not run it")
+		fmt.Fprintln(errOut, "gropius "+cmd.Verb+": this build lists the verb and does not run it")
 		return lifecycle.ExitUsage
 	}
 	env, err := verbEnv()
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "gropius "+cmd.Verb+": "+err.Error())
+		fmt.Fprintln(errOut, "gropius "+cmd.Verb+": "+err.Error())
 		return lifecycle.ExitFailed
 	}
+	env.Out, env.Err = out, errOut
+	env.Term.Out, env.Progress.Out = out, errOut
 	return run(env, cmd.Args)
 }
 
 // verbEnv is the world the verbs run in: this account's data root, the port the
-// settings name, and the two streams.
+// server would bind, and the two streams.
 //
-// The settings are read rather than validated — a verb that refused to answer
-// because config.json has a bad value would be useless at exactly the moment
-// somebody is trying to find out what is wrong — so a file that will not parse
-// leaves the shipping defaults in force here, as it does everywhere else.
+// The settings are read through loadStartupConfig, which is what the server
+// itself starts from, and that is the point rather than a convenience. A file
+// that parses and then fails validation is not thrown away: the server keeps
+// the configuration it parsed — the bind locked down to loopback, the rest of
+// the operator's settings, the port included — so a verb that took the default
+// port instead would probe a port nothing is on and report "nothing is serving"
+// about a server that is serving.
+//
+// A verb never refuses to answer over a settings problem. Somebody running one
+// is usually trying to find out what is wrong, and a diagnostic that will not
+// speak until the thing it diagnoses is fixed is no diagnostic. The problem
+// travels on the environment instead, and is stated on standard error.
 func verbEnv() (lifecycle.Env, error) {
 	root, err := config.DefaultRoot()
 	if err != nil {
 		return lifecycle.Env{}, err
 	}
 	paths := config.NewPaths(root)
-	cfg, _, _ := config.Load(paths.Config)
+	start := loadStartupConfig(paths.Config)
 	return lifecycle.Env{
-		Version: version,
-		Paths:   paths,
-		Port:    cfg.Port,
-		Out:     os.Stdout,
-		Err:     os.Stderr,
-		Term:    lifecycle.Detect(os.Stdout, os.LookupEnv),
+		Version:         version,
+		Paths:           paths,
+		Port:            start.Config.Port,
+		Out:             os.Stdout,
+		Err:             os.Stderr,
+		Term:            lifecycle.Detect(os.Stdout, os.LookupEnv),
+		Progress:        lifecycle.Detect(os.Stderr, os.LookupEnv),
+		SettingsProblem: start.Problem,
 	}, nil
 }

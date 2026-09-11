@@ -21,7 +21,7 @@ func TestThePrintedRootCommandsQuoteThePathTheyCarry(t *testing.T) {
 	// word, and run nothing of it.
 	hostile := "/tmp/x'; touch " + t.TempDir() + "/pwned; '"
 
-	for _, cmd := range append(firewallGrantCommands(hostile), firewallRemoveCommand(hostile)) {
+	for _, cmd := range append(firewallGrantCommands(hostile, ""), firewallRemoveCommand(hostile, "")) {
 		// The path is checked by asking a shell what the command line parses
 		// to, with the tool replaced by `echo` so nothing privileged runs and
 		// nothing is executed but the parse itself.

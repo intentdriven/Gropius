@@ -54,7 +54,7 @@ func main() {
 		fmt.Fprintln(os.Stderr, cmd.Message)
 		os.Exit(2)
 	case kindVerb:
-		os.Exit(runCommandVerb(cmd))
+		os.Exit(runCommandVerb(cmd, os.Stdout, os.Stderr))
 	}
 
 	var (
