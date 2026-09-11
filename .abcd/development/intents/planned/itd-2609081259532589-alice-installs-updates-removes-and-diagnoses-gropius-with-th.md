@@ -98,16 +98,15 @@ collects by watching them.
   fetch the version currently installed.
 - The verbs are reached through a per-user link, so they are as available as <!-- cond: cond-2609111029317614 -->
   that account's own bin directory is — which is not a given on every Mac.
-- Shared-cache mode splits the data root in two, and the split is not where the <!-- cond: cond-2609111029317056 -->
-  planning brief assumed. `config.DefaultRoot` does return the shared directory
-  once an administrator has created it, but `config.accountDir` sends
-  everything belonging to one account back to that account's own Application
-  Support directory: the configuration file, the registry, the private Python
+- Shared-cache mode splits the data root in two, and not where a reader would <!-- cond: cond-2609111029317056 -->
+  guess. `config.DefaultRoot` does return the shared directory once an
+  administrator has created it, but `config.accountDir` sends everything
+  belonging to one account back to that account's own Application Support
+  directory: the configuration file, the registry, the private Python
   runtime, the logs and the statistics store. What lives in the shared root is
   the models and the download cache they arrive through — the expensive thing,
   and the thing this intent's criteria already leave in place. Three of the
-  removing criteria turn on that split, and they are written against the code
-  rather than against the assumption.
+  removing criteria turn on that split, and they are written against the code.
 
 ## Acceptance Criteria
 
