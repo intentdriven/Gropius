@@ -107,3 +107,34 @@ func writeLine(w io.Writer, s string) { fmt.Fprintln(w, s) }
 // quote wraps a value for display and keeps it readable when it is empty or
 // carries spaces.
 func quote(s string) string { return "\"" + s + "\"" }
+
+// RunDoctor is the doctor verb: the expensive checks, and an honest account of
+// the two states nobody can settle from here.
+func RunDoctor(env Env, args []string) int {
+	return runDoctor(env, args, liveDoctorEnv(env), DefaultChecks())
+}
+
+func runDoctor(env Env, args []string, d DoctorEnv, checks []Check) int {
+	fs := flags("doctor", env.Err)
+	asJSON := fs.Bool("json", false, "write the machine-readable form, which carries the severities")
+	if err := fs.Parse(args); err != nil {
+		return ExitUsage
+	}
+	if fs.NArg() > 0 {
+		writeLine(env.Err, "gropius doctor: unexpected argument "+quote(fs.Arg(0)))
+		return ExitUsage
+	}
+
+	r := Diagnose(d, checks)
+	if *asJSON {
+		if err := writeJSON(env.Out, r); err != nil {
+			writeLine(env.Err, "gropius doctor: "+err.Error())
+			return ExitFailed
+		}
+	} else {
+		RenderDoctor(env.Term, r)
+	}
+	// The severity is carried in the report; the code says only whether
+	// something Gropius verified is wrong.
+	return r.ExitCode()
+}

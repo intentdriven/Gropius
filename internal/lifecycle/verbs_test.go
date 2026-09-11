@@ -85,3 +85,6 @@ func TestStatusRefusesAStrayArgument(t *testing.T) {
 		t.Errorf("refusal %q does not name the argument that was not understood", errOut)
 	}
 }
+
+// decodeInto is the test's decoder, kept here so no verb has to export one.
+func decodeInto(b []byte, v any) error { return json.Unmarshal(b, v) }
