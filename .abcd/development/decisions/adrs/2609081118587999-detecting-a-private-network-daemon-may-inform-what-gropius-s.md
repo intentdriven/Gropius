@@ -1,10 +1,10 @@
 ---
 id: adr-2609081118587999
 slug: detecting-a-private-network-daemon-may-inform-what-gropius-s
-status: accepted
+status: superseded in part by adr-2609111126115848, on the diagnostic carve-out
 date: 2026-09-08
 supersedes: null
-superseded_by: null
+superseded_by: adr-2609111126115848
 related_intents: [itd-2609081015545349]
 related_rfcs: []
 related_adrs: [adr-2609061503319212]
