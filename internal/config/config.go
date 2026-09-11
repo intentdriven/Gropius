@@ -84,11 +84,29 @@ func DefaultRoot() (string, error) {
 	if env := os.Getenv("GROPIUS_ROOT"); env != "" {
 		return env, nil
 	}
+	return InstalledRoot()
+}
+
+// InstalledRoot is DefaultRoot without the environment: the shared directory
+// when an administrator created one this account can write, and this account's
+// own Application Support directory otherwise.
+//
+// It exists for the one caller that must not honour GROPIUS_ROOT — `gropius
+// uninstall`, which derives every deletion path from the fixed locations this
+// account's install actually uses. A directory that any local account can
+// pre-create, and name through an environment variable, would otherwise choose
+// what is deleted.
+func InstalledRoot() (string, error) {
 	if sharedRootShape(sharedRoot) == nil && writableDir(sharedRoot) {
 		return sharedRoot, nil
 	}
 	return userSupportDir()
 }
+
+// IsSharedRoot reports whether a root is the machine-wide shared directory,
+// where the models belong to every account on the Mac and this account's own
+// state lives somewhere else entirely (see accountDir).
+func IsSharedRoot(root string) bool { return sameDir(root, sharedRoot) }
 
 // sharedRootShape reports whether dir is a shared root an administrator
 // created, i.e. what `make install-shared` produces: a real directory (not a

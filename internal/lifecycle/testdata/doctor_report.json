@@ -1,0 +1,60 @@
+{
+  "version": "test",
+  "findings": [
+    {
+      "name": "MLX runtime",
+      "label": "verified",
+      "severity": "warning",
+      "summary": "not installed yet, so no model can be loaded until it is",
+      "commands": [
+        "gropius"
+      ]
+    },
+    {
+      "name": "data root",
+      "label": "verified",
+      "severity": "ok",
+      "summary": "~/Library/Application Support/Gropius is writable"
+    },
+    {
+      "name": "settings file",
+      "label": "verified",
+      "severity": "ok",
+      "summary": "loads"
+    },
+    {
+      "name": "this build",
+      "label": "verified",
+      "severity": "ok",
+      "summary": "test"
+    },
+    {
+      "name": "server port",
+      "label": "verified",
+      "severity": "warning",
+      "summary": "port 11535 is held by 1 process that is not this account's Gropius; it is not named here, and the build reported above is this one's own and not necessarily the build being served",
+      "commands": [
+        "gropius status"
+      ]
+    },
+    {
+      "name": "firewall entry",
+      "label": "observed",
+      "severity": "undetermined",
+      "summary": "the firewall query answered \"Incoming connection to ~/Applications/Gropius.app/Contents/MacOS/gropius is permitted.\" for ~/Applications/Gropius.app/Contents/MacOS/gropius; that does not establish that a grant covers this build, because the query answers the same way for a path it has no entry for, and this build's code identity changes with every build",
+      "commands": [
+        "sudo /usr/libexec/ApplicationFirewall/socketfilterfw --add \"$HOME/Applications/Gropius.app/Contents/MacOS/gropius\"",
+        "sudo /usr/libexec/ApplicationFirewall/socketfilterfw --unblockapp \"$HOME/Applications/Gropius.app/Contents/MacOS/gropius\""
+      ]
+    },
+    {
+      "name": "Local Network Privacy",
+      "label": "undeterminable",
+      "severity": "undetermined",
+      "summary": "cannot be determined from here — macOS offers no way to read this grant, and it is lost on every build of an ad-hoc-signed app",
+      "commands": [
+        "open 'x-apple.systempreferences:com.apple.preference.security?Privacy_LocalNetwork'"
+      ]
+    }
+  ]
+}

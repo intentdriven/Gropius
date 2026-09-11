@@ -17,6 +17,14 @@ You do **not** need Python installed — Gropius installs its own.
 
 ## 2. Build and launch
 
+Building from source is what this page walks through. If you are installing a
+release instead, the one-line command in the README is the whole of it: it
+verifies the download against the checksums published beside it and hands over
+to `gropius install`, which places the application, asks once for the firewall
+grant, installs the MLX runtime in the foreground and links the `gropius`
+command into `~/.local/bin`. See
+[Install, repair and remove Gropius](lifecycle.md).
+
 ```sh
 git clone <this repo> && cd Gropius
 make install        # builds Gropius.app, copies it to /Applications, launches it — needs your password, for the firewall
@@ -230,7 +238,9 @@ and each account falls back to its own data directory.
 ## Troubleshooting
 
 - **Another machine gets `ERR_EMPTY_RESPONSE` / "didn't send any data", but
-  `localhost` works on the Mac itself.** The macOS Application Firewall is
+  `localhost` works on the Mac itself.** `gropius doctor` reports what it can
+  see of this, including the two commands that make the firewall grant again —
+  see [Install, repair and remove Gropius](lifecycle.md). The macOS Application Firewall is
   blocking incoming connections to Gropius. A locally-built app is not signed by
   a Developer-ID certificate, so the firewall accepts the connection and then
   drops it — loopback is exempt, which is why same-machine access still works.
@@ -284,18 +294,32 @@ and each account falls back to its own data directory.
 
 ## Uninstalling
 
-Quit from the menu, drag `Gropius.app` to the Trash, and remove its data:
+One command:
 
 ```sh
-rm -rf ~/Library/Application\ Support/Gropius
+gropius uninstall
 ```
 
-That directory holds the private Python runtime, your downloaded models and
-any request statistics you recorded — deleting it removes every trace. If you
-set up the shared cache (step 9), the models live in `/Users/Shared/Gropius`
-instead, while your settings and model list stay in the folder above; remove
-the shared one too, once every account has finished with it:
+It removes the application, the private Python runtime, your settings, your
+model list, the logs, the request statistics, the `gropius` command itself and
+the firewall entry — which is the step every hand-written instruction forgets.
+It leaves the models you downloaded, states how much room they take, and names
+the flag that removes them too:
 
 ```sh
-sudo rm -rf /Users/Shared/Gropius
+gropius uninstall --purge
 ```
+
+With the shared cache from step 9, your own account's directory is what goes.
+The shared folder holds every account's models, so uninstall never touches it;
+the output says how much it holds and how many other accounts it belongs to.
+Once everybody on this Mac has finished with Gropius, one deliberate command
+removes it:
+
+```sh
+sudo /bin/rm -rf /Users/Shared/Gropius
+```
+
+What each verb removes, what `--purge` does under a shared cache, and what a
+declined authorisation panel leaves behind are on
+[Install, repair and remove Gropius](lifecycle.md).

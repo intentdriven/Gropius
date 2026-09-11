@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/bash
 #
 # One-line installer for Gropius.
 #
@@ -8,10 +8,38 @@
 #   Client (GropiusChat, universal):
 #     curl -fsSL https://raw.githubusercontent.com/intentdriven/Gropius/main/install.sh | bash -s -- client
 #
-# It downloads the latest release, installs the .app into /Applications (or into
-# ~/Applications when this account cannot write /Applications), and (for
-# the server) allows it through the macOS firewall and launches it. A binary
-# fetched by curl is not Gatekeeper-quarantined, so no right-click-to-open dance.
+# This is a BOOTSTRAP, and only a bootstrap: it does what has to happen before a
+# Gropius binary exists on this Mac. It downloads the latest release, verifies
+# it against the checksums published beside it, clears the quarantine attribute,
+# and then — for the server — hands over to `gropius install` inside the bundle
+# it just verified. Everything after that is the binary's own work: the staged
+# swap, the firewall grant, the MLX runtime, the per-user command and the
+# launch. A binary fetched by curl is not Gatekeeper-quarantined, so no
+# right-click-to-open dance.
+#
+# The client has no such binary, so its bundle is placed here.
+#
+# THE INTERPRETER TOO. The shebang is /bin/bash rather than /usr/bin/env bash,
+# which is the one program a script naming everything else by absolute path
+# would otherwise still resolve through PATH. It is unreachable through the
+# documented `curl … | bash`, where the shebang is a comment, and reachable the
+# moment somebody makes this file executable and runs it. macOS ships
+# /bin/bash, and nothing here needs a version newer than it.
+#
+# EVERY COMMAND IS NAMED BY ABSOLUTE PATH. `curl | bash` runs with the invoking
+# user's PATH, which routinely puts user-writable directories ahead of /usr/bin,
+# and on a Mac several accounts share that is an account-to-account boundary
+# (iss-2609081435387952). It is also a defence against ambiguity with no
+# attacker in it at all: a release step once resolved a name to a tool that was
+# not the tool meant, invisibly (iss-9). The rule is held by
+# TestInstallerPinsEveryCommandItRuns, which refuses any command here that is
+# not written as a path.
+#
+# NOTHING READS STANDARD INPUT. Under `curl … | bash` the remaining text of this
+# script IS standard input, so a read would consume the rest of the installer.
+# The one step that needs consent — the firewall grant — is asked for by the
+# binary, through the system authorisation panel, which is also the only way a
+# standard account can answer it at all.
 set -euo pipefail
 
 REPO="intentdriven/Gropius"
@@ -53,20 +81,20 @@ die() {
 	exit 1
 }
 
-[ "$(uname -s)" = "Darwin" ] || die "Gropius is macOS only."
+[ "$(/usr/bin/uname -s)" = "Darwin" ] || die "Gropius is macOS only."
 
 # Both bundles declare macOS 26 as their minimum, so Launch Services refuses
-# them on anything older. Refuse here instead — before the download, before the
-# authorization panel, and before /Applications and the firewall are touched — so an
-# unsupported Mac is turned away rather than half-installed. The major lives in
-# this one variable; build/Info.plist is the value it must match.
+# them on anything older. Refuse here instead — before the download and before
+# anything is written — so an unsupported Mac is turned away rather than
+# half-installed. The major lives in this one variable; build/Info.plist is the
+# value it must match.
 MIN_MACOS_MAJOR=26
 # `|| macos_version=""` is load-bearing: under `set -e` a bare assignment takes
 # the command substitution's status, so a missing sw_vers would abort the script
 # with no message at all instead of reaching the refusal below. An unreadable or
 # non-numeric version leaves the major empty or unusable, and `[` refuses then
 # too.
-macos_version="$(sw_vers -productVersion 2>/dev/null)" || macos_version=""
+macos_version="$(/usr/bin/sw_vers -productVersion 2>/dev/null)" || macos_version=""
 macos_major="${macos_version%%.*}"
 [ "${macos_major:-0}" -ge "$MIN_MACOS_MAJOR" ] ||
 	die "$APP requires macOS $MIN_MACOS_MAJOR (this Mac runs ${macos_version:-an unreadable version})."
@@ -74,99 +102,13 @@ macos_major="${macos_version%%.*}"
 # The server needs Apple Silicon (MLX runs on Metal). The client is universal.
 # `uname -m` reports x86_64 in a Rosetta-translated shell (common with x86_64
 # Homebrew), so also ask the kernel whether the hardware is Apple Silicon.
-if [ "$mode" = "server" ] && [ "$(uname -m)" != "arm64" ] &&
-	[ "$(sysctl -n hw.optional.arm64 2>/dev/null)" != "1" ]; then
-	die "the Gropius server needs Apple Silicon (this Mac is $(uname -m)). The GropiusChat client is universal: rerun with 'client'."
-fi
-
-# Elevation, for the firewall grant the server needs (applied at the end of this
-# script). Both helpers below raise the native macOS authentication panel rather
-# than prompting on the terminal, and the difference is not cosmetic: sudo can
-# only ever accept the invoking user's own password, and a standard account is
-# not in the sudoers set at all, so the old terminal prompt was unsatisfiable on
-# exactly the accounts that most need this. The authentication panel asks for an
-# administrator's name AND password, so a standard user can have an
-# administrator enter theirs.
-#
-# Neither helper builds its root command by string interpolation. Every -e
-# argument is single-quoted, so bash expands nothing into the AppleScript; the
-# binary path travels as an osascript argument and is escaped for the root shell
-# by `quoted form of`. Interpolating a path into a command that runs as root
-# would be a local privilege-escalation surface in the one script users are told
-# to pipe into bash.
-#
-# Nothing here reads standard input, which under `curl | bash` is the remaining
-# text of this script.
-#
-# osascript is invoked by absolute path, and that is load-bearing rather than
-# tidiness. `curl | bash` runs with the invoking user's PATH, which routinely
-# puts user-writable directories ahead of /usr/bin — a plain `~/.local/bin` needs
-# no privileges to write at all. Unprivileged code already running as the user
-# could otherwise drop an `osascript` shim there, and this script would hand it
-# the elevation: the shim draws its own authentication panel and harvests the
-# administrator password.
-#
-# That risk is created by this block, not inherited. A counterfeit terminal
-# password prompt is something a wary user might distrust; asking through the
-# system authentication panel teaches them that a panel is the expected,
-# legitimate part of installing, which makes a fake one more convincing. Pinning
-# the interpreter is the cost of that trade. `quoted form of` escapes the
-# argument; it cannot help when the interpreter itself is attacker-supplied.
-
-# admin_authorize: raise the authentication panel and do nothing with the result.
-# Used as a gate: it proves an administrator is present before any work starts.
-admin_authorize() {
-	/usr/bin/osascript -e 'do shell script "/usr/bin/true" with administrator privileges' >/dev/null 2>&1
-}
-
-# firewall_grant BINARY: allow BINARY through the macOS Application Firewall.
-# Both socketfilterfw calls share one `do shell script`, so this is one panel and
-# not two.
-firewall_grant() {
-	/usr/bin/osascript \
-		-e 'on run argv' \
-		-e 'set fw to "/usr/libexec/ApplicationFirewall/socketfilterfw"' \
-		-e 'set p to quoted form of (item 1 of argv)' \
-		-e 'do shell script fw & " --add " & p & " && " & fw & " --unblockapp " & p with administrator privileges' \
-		-e 'end run' \
-		-- "$1" >/dev/null 2>&1
-}
-
-# Ask for that authorization HERE — before the download, before /Applications is
-# touched, before anything is written. Failing at this point costs the user
-# nothing; failing at the end (where the prompt used to live) left the app
-# installed and quietly unable to serve the LAN, which is the bug this fixes.
-#
-# The panel is raised whenever the server is being installed, without first
-# reading the firewall's state to decide. A grant can be recorded while the
-# firewall is switched off and survives the user switching it on later, so
-# inspecting the state would only buy a skipped prompt today at the cost of a
-# silently missing grant tomorrow.
-#
-# CI never has a console to answer the panel, and the release gate installs the
-# server to check the script still works. Skip the gate there: the grant at the
-# end already tolerates failure, and a runner has no firewall to grant through.
-if [ "$mode" = "server" ]; then
-	if [ "${GITHUB_ACTIONS:-}" = "true" ]; then
-		# Say so, loudly, rather than passing silently. The release gate runs
-		# this script to prove the installer works against the artefacts just
-		# built; with both privileged steps skipped it proves the installer
-		# works APART FROM the two steps that need privilege — which are the
-		# steps that broke, that are keyed to a code identity changing on every
-		# build, and that this script has most recently rewritten. A green run
-		# that does not say what it did not look at is a false green.
-		echo "warning: skipping the administrator authorization gate and the firewall grant — CI has no console to answer an authentication panel." >&2
-		echo "warning: a green result from this run therefore says NOTHING about either privileged step. They are exercised only by a real install on a Mac." >&2
-	else
-		echo "$APP needs administrator rights to allow itself through the macOS firewall."
-		echo "If this account is not an administrator, one can enter their name and password."
-		admin_authorize ||
-			die "administrator authorization was declined or failed. Nothing has been downloaded or installed. Re-run this command with an administrator's credentials to hand."
-	fi
+if [ "$mode" = "server" ] && [ "$(/usr/bin/uname -m)" != "arm64" ] &&
+	[ "$(/usr/sbin/sysctl -n hw.optional.arm64 2>/dev/null)" != "1" ]; then
+	die "the Gropius server needs Apple Silicon (this Mac is $(/usr/bin/uname -m)). The GropiusChat client is universal: rerun with 'client'."
 fi
 
 tmp="$(/usr/bin/mktemp -d)"
-trap 'rm -rf "$tmp"' EXIT
+trap '/bin/rm -rf "$tmp"' EXIT
 zip="$tmp/$ASSET"
 
 # Where the release assets come from. Normally the latest published Release;
@@ -196,8 +138,15 @@ if [ -n "$ASSET_DIR" ]; then
 	echo "warning: the checksums are read from that same directory, so the \"Checksum OK.\" below proves only that the directory is self-consistent. It proves NOTHING about the origin of what is being installed, and no attestation is checked." >&2
 fi
 
-# fetch <asset-name> <dest>: download a release asset, trying the public URL
-# first and falling back to gh (transient errors, or a private fork).
+# fetch <asset-name> <dest>: download a release asset.
+#
+# The GitHub CLI fallback this function used to carry is gone. `gh` is a
+# third-party tool with no fixed location — it cannot be named by absolute path
+# on a machine nobody here controls — so keeping it meant one PATH-resolved
+# binary in the middle of the only download path there is, for a fallback that
+# helped a private fork and a transient error. Building from source and `make
+# install` cover both, and neither is a script the README tells people to pipe
+# into bash.
 fetch() {
 	local name="$1" dest="$2"
 	if [ -n "$ASSET_DIR" ]; then
@@ -209,23 +158,17 @@ fetch() {
 	# URL still reads github.com; --proto pins HTTPS end to end, redirects
 	# included. The asset and the checksums that verify it come from this same
 	# origin, so the transport is the thing to pin.
-	if curl -q --proto =https --proto-redir =https -fsSL -o "$dest" "https://github.com/$REPO/releases/latest/download/$name" 2>/dev/null; then
-		return 0
-	elif command -v gh >/dev/null 2>&1; then
-		echo "Direct download of $name failed — retrying via gh…"
-		gh release download -R "$REPO" --pattern "$name" --dir "$(dirname "$dest")" --clobber
-	else
-		die "could not download $name from the latest release. Check your network, or install the GitHub CLI (brew install gh) and retry."
-	fi
+	/usr/bin/curl -q --proto =https --proto-redir =https -fsSL -o "$dest" "https://github.com/$REPO/releases/latest/download/$name" ||
+		die "could not download $name from the latest release. Check your network and retry, or build from source (see the README)."
 }
 
 echo "Downloading ${APP}…"
 fetch "$ASSET" "$zip"
 
 # Verify the download is exactly what the release workflow built, BEFORE
-# unpacking it, clearing its quarantine, or copying it into /Applications. The
-# checksums file comes from the same Release as the asset; --ignore-missing
-# skips the other app's line.
+# unpacking it, clearing its quarantine, or placing it. The checksums file comes
+# from the same Release as the asset; --ignore-missing skips the other app's
+# line.
 echo "Verifying checksum…"
 fetch "SHA256SUMS.txt" "$tmp/SHA256SUMS.txt"
 # /usr/bin/shasum, not shasum: this line is the only integrity control in the
@@ -247,47 +190,103 @@ if ! checksum_output="$( cd "$tmp" && /usr/bin/shasum -a 256 -c --ignore-missing
 fi
 echo "Checksum OK."
 
-# Choose where the bundle goes. /Applications is root:admin and group-writable,
-# so a standard (non-admin) account cannot write it — and on a Mac several
-# people share, the account that most needs the chat client is exactly the one
-# without admin rights. ~/Applications is the per-user location macOS already
-# understands: Spotlight and Launchpad index it, and it needs no privileges.
+# The client is placed by this script, because there is no GropiusChat binary
+# that could place itself. Choose where it goes before unpacking, so the line
+# that says where it is going is printed before the work starts.
 #
-# Chosen over elevating on purpose, and the firewall grant above is not a
-# precedent for doing so here. That grant is a system-wide setting with no
-# per-user equivalent, so it has to be made as an administrator. A destination
-# does have a per-user equivalent, and elevating to write /Applications would
-# install the app for every account when only one asked for it.
-if [ -w /Applications ]; then
-	DEST="/Applications"
+# /Applications is root:admin and group-writable, so a standard (non-admin)
+# account cannot write it — and on a Mac several people share, the account that
+# most needs the chat client is exactly the one without admin rights.
+# ~/Applications is the per-user location macOS already understands: Spotlight
+# and Launchpad index it, and it needs no privileges.
+#
+# Chosen over elevating on purpose. A destination has a per-user equivalent, and
+# elevating to write /Applications would install the app for every account when
+# only one asked for it. The server's own copy of this rule lives in
+# internal/lifecycle, which is what places the server bundle.
+if [ "$mode" = "client" ]; then
+	if [ -w /Applications ]; then
+		DEST="/Applications"
+	else
+		DEST="$HOME/Applications"
+		/bin/mkdir -p "$DEST" || die "no write access to /Applications, and $DEST could not be created."
+		echo "No write access to /Applications (this account is not an administrator) — installing to $DEST instead."
+	fi
+	echo "Installing ${APP}.app to ${DEST}…"
 else
-	DEST="$HOME/Applications"
-	mkdir -p "$DEST" || die "no write access to /Applications, and $DEST could not be created."
-	echo "No write access to /Applications (this account is not an administrator) — installing to $DEST instead."
+	echo "Unpacking ${APP}…"
 fi
 
-echo "Installing ${APP}.app to ${DEST}…"
 /usr/bin/ditto -x -k "$zip" "$tmp/extract" || die "could not unpack $ASSET."
 [ -d "$tmp/extract/$APP.app" ] || die "$ASSET did not contain $APP.app."
-# Safe to clear the quarantine now: we have cryptographically verified this .app
-# is the exact artifact the release workflow built and signed. (curl downloads
-# are usually not quarantined anyway, but a proxy or prior run might have tagged
-# it, which would otherwise block launch.)
+# Safe to clear the quarantine now: we have verified this .app is the exact
+# artifact the release workflow built. (curl downloads are usually not
+# quarantined anyway, but a proxy or prior run might have tagged it, which would
+# otherwise block launch.)
 /usr/bin/xattr -dr com.apple.quarantine "$tmp/extract/$APP.app" 2>/dev/null || true
-# Quit a running copy first. LaunchServices' `open` activates an already-running
-# process instead of launching the new binary, so an upgrade over a live app
-# would report success while the old version keeps running.
+
+if [ "$mode" = "server" ]; then
+	# HAND OVER TO THE BINARY THIS SCRIPT VERIFIED — the one inside the bundle
+	# in $tmp, never the one already installed. The bootstrap and the binary it
+	# calls are then always the same build, which is what makes the two halves
+	# of an install a single thing rather than a negotiation between a script
+	# from one release and an application from another.
+	VERIFIED_BIN="$tmp/extract/$APP.app/Contents/MacOS/gropius"
+	# `ditto -x -k` restores symbolic links from the archive, and `-x` follows
+	# one — so a link here would send the single exec this whole bootstrap
+	# exists to reach somewhere outside the directory that was verified. Only a
+	# compromised release can plant one, which is what the checksum above is
+	# for; the refusal costs a line and does not depend on that being true.
+	[ ! -L "$VERIFIED_BIN" ] ||
+		die "$ASSET carries a symbolic link where $APP.app/Contents/MacOS/gropius should be — refusing to run it."
+	[ -x "$VERIFIED_BIN" ] ||
+		die "$ASSET carries no executable at $APP.app/Contents/MacOS/gropius — refusing to install it."
+
+	handover=("$VERIFIED_BIN" install --bundle "$tmp/extract/$APP.app")
+	if [ "${GITHUB_ACTIONS:-}" = "true" ]; then
+		# Say so, loudly, rather than passing silently. The release gate runs
+		# this script to prove the installer works against the artefacts just
+		# built; a runner has no console to answer an authentication panel and
+		# no business downloading an MLX runtime, so the handover places the
+		# bundle and stops there. A green run that does not say what it did not
+		# look at is a false green.
+		echo "warning: passing --place-only — CI has no console for an authentication panel and no business provisioning a runtime." >&2
+		echo "warning: a green result from this run therefore says NOTHING about the firewall grant, the MLX provisioning or the launch. They are exercised only by a real install on a Mac." >&2
+		handover+=(--place-only)
+	fi
+
+	# The exit status is read rather than left to `set -e`, because ONE of its
+	# values means something specific: a bundle whose binary predates the
+	# lifecycle verbs refuses an argument it does not know with exit 2, and that
+	# refusal is a version mismatch rather than a failed install. In no case
+	# does this script start a server — the binary does that, or nothing does.
+	status=0
+	"${handover[@]}" || status=$?
+	if [ "$status" -eq 2 ]; then
+		die "the downloaded $APP does not carry the lifecycle verbs: its binary refused \`install\` with exit 2, which is how a build older than this bootstrap refuses an argument it has never heard of. The script and the bundle are different builds. Nothing was launched."
+	elif [ "$status" -ne 0 ]; then
+		die "gropius install stopped (exit $status) — the message above says at which stage. Nothing was launched."
+	fi
+	exit 0
+fi
+
+# From here it is the client, which this script places itself.
+#
+# Quit a running copy first. LaunchServices' `open` activates an
+# already-running process instead of launching the new binary, so an upgrade
+# over a live app would report success while the old version keeps running.
 if /usr/bin/pgrep -qf "$DEST/$APP.app/Contents/MacOS/" 2>/dev/null; then
 	echo "Quitting the running ${APP}…"
 	/usr/bin/osascript -e "quit app \"$APP\"" >/dev/null 2>&1 || true
-	for _ in $(seq 1 20); do
+	for _ in $(/usr/bin/seq 1 20); do
 		/usr/bin/pgrep -qf "$DEST/$APP.app/Contents/MacOS/" || break
-		sleep 0.5
+		/bin/sleep 0.5
 	done
 	if /usr/bin/pgrep -qf "$DEST/$APP.app/Contents/MacOS/" 2>/dev/null; then
 		echo "warning: $APP is still running; quit it and relaunch to finish the upgrade." >&2
 	fi
 fi
+
 # Stage the new bundle beside the old one, then swap. Copying straight over the
 # installed app means deleting it BEFORE knowing the replacement can be written:
 # a copy that then fails — a full disk, a locked file, a revoked permission —
@@ -298,6 +297,15 @@ fi
 # The staging name comes from mktemp, not from the pid. `.$APP.app.incoming.$$`
 # is predictable, which hands anyone watching the directory a reliable signal
 # for when to act on it.
+#
+# What this does NOT fix, stated plainly so nobody reads it as settled: `mv`
+# nests into a destination that already exists as a directory and follows one
+# that is a symlink, exiting 0 in both cases. It has no dependable "fail if the
+# destination exists" mode, and any test-then-move is a race by construction.
+# Closing that needs os.Rename semantics — Go, not shell — which is where the
+# SERVER's swap now lives (internal/lifecycle/swap.go, with the behavioural
+# tests beside it). The client has no binary of its own to do the same, so this
+# path keeps the best a shell can do and says what that is worth.
 staged="$(/usr/bin/mktemp -d "$DEST/.$APP.incoming.XXXXXXXX")" ||
 	die "could not create a staging directory in $DEST."
 /bin/cp -R "$tmp/extract/$APP.app" "$staged/$APP.app" || {
@@ -312,75 +320,35 @@ staged="$(/usr/bin/mktemp -d "$DEST/.$APP.incoming.XXXXXXXX")" ||
 # the outcome the paragraph above says staging exists to prevent. It needed no
 # attacker and no unusual filesystem: one failing rename was enough. Every
 # failure path below now ends with a working bundle at the destination.
-#
-# What this does NOT fix, stated plainly so nobody reads it as settled: `mv`
-# nests into a destination that already exists as a directory and follows one
-# that is a symlink, exiting 0 in both cases. It has no dependable "fail if the
-# destination exists" mode, and any test-then-move is a race by construction, so
-# an attacker who wins the window between the two renames below is not stopped
-# here. Closing that needs os.Rename semantics — Go, not shell.
 retired=""
 if [ -e "$DEST/$APP.app" ] || [ -L "$DEST/$APP.app" ]; then
 	retired="$staged/$APP.app.retired"
-	mv "$DEST/$APP.app" "$retired" || {
+	/bin/mv "$DEST/$APP.app" "$retired" || {
 		/bin/rm -rf "$staged"
 		die "could not set the installed $APP.app aside in $DEST — it is untouched."
 	}
 fi
-mv "$staged/$APP.app" "$DEST/$APP.app" || {
+/bin/mv "$staged/$APP.app" "$DEST/$APP.app" || {
 	# Put the old bundle back before giving up, so a failure here is a no-op
 	# rather than an uninstall.
-	[ -n "$retired" ] && mv "$retired" "$DEST/$APP.app" 2>/dev/null
+	[ -n "$retired" ] && /bin/mv "$retired" "$DEST/$APP.app" 2>/dev/null
 	/bin/rm -rf "$staged"
 	die "could not move $APP.app into place in $DEST — the previous copy is left as it was."
 }
 /bin/rm -rf "$staged"
+echo "placed $DEST/$APP.app."
 
-if [ "$mode" = "client" ]; then
-	echo "Installed $DEST/$APP.app."
-	echo "Open it, then point it at your Gropius server: the address from the server's Connect tab"
-	echo "without the trailing /v1 (GropiusChat adds the path itself)."
-	open "$DEST/$APP.app"
-	exit 0
-fi
-
-# Server: allow it through the macOS Application Firewall so other machines on the
-# LAN can reach it. Without this the firewall accepts the handshake but drops the
-# data — loopback works, the LAN sees an empty response. This needs administrator
-# rights, which were already authorized at the top of this script.
-#
-# macOS caches that authorization for about five minutes, so this second panel is
-# usually collapsed into the first and the user sees no prompt here. A slow
-# download can outlive the cache, in which case the panel appears once more —
-# hence the line below, so a returning prompt is expected rather than alarming.
-#
-# The grant is keyed to the binary's code identity, and the bundle is ad-hoc
-# signed, so its identity changes with every build. Re-running this script for an
-# update therefore has to make the grant again; it is not a one-off.
-#
-# Skipped in CI along with the gate above: a runner has no console to answer a
-# panel, and an authentication prompt with nobody to answer it would hang the
-# release gate rather than fail it.
-BIN="$DEST/$APP.app/Contents/MacOS/gropius"
+# CI has no desktop to launch into, and a chat client left running on a runner
+# outlives the job. Everywhere else this is the last thing the script does, so
+# the line above is what proves a run reached the end.
 if [ "${GITHUB_ACTIONS:-}" = "true" ]; then
-	echo "warning: firewall grant NOT attempted (CI) — this run does not exercise firewall_grant." >&2
-elif firewall_grant "$BIN"; then
-	echo "Firewall configured."
+	echo "warning: not launching $DEST/$APP.app (CI) — this run does not exercise the launch." >&2
 else
-	echo "warning: could not configure the firewall automatically." >&2
-	echo "Other machines may see an empty response until an administrator runs:" >&2
-	echo "  sudo /usr/libexec/ApplicationFirewall/socketfilterfw --add '$BIN'" >&2
-	echo "  sudo /usr/libexec/ApplicationFirewall/socketfilterfw --unblockapp '$BIN'" >&2
+	/usr/bin/open "$DEST/$APP.app"
 fi
+/bin/cat <<'DONE'
 
-open "$DEST/$APP.app"
-cat <<'DONE'
-
-Gropius is running in the menu bar. Click its icon to open the control panel,
-download a model, and copy the address other machines should point at.
-
-Optional:
-  • Chat client:   curl -fsSL https://raw.githubusercontent.com/intentdriven/Gropius/main/install.sh | bash -s -- client
-  • Shared cache:  every account on this Mac can share one copy of each model —
-                   see 'make install-shared' in the repo.
+Open GropiusChat, then point it at your Gropius server: the address from the
+server's Connect tab without the trailing /v1 (GropiusChat adds the path
+itself).
 DONE

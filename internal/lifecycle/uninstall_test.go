@@ -1,0 +1,436 @@
+package lifecycle
+
+import (
+	"bytes"
+	"errors"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/intentdriven/Gropius/internal/config"
+)
+
+// uninstallFixture lays down an installation in a temporary directory: a
+// bundle, the private runtime, the settings, the registry, the logs, the
+// statistics, the per-user link, and a model that must survive all of it.
+func uninstallFixture(t *testing.T) (Env, UninstallEnv, *bytes.Buffer, *bytes.Buffer) {
+	t.Helper()
+	env, out, errOut := testEnv()
+
+	dir := t.TempDir()
+	home := filepath.Join(dir, "home")
+	root := filepath.Join(home, "Library", "Application Support", "Gropius")
+	paths := config.NewPaths(root)
+	if err := paths.EnsureDirs(); err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range []string{paths.Config, paths.State, paths.UV(), paths.VenvPython(),
+		filepath.Join(paths.Logs, "gropius.log"), filepath.Join(paths.Stats, "2026-09.json"),
+		filepath.Join(paths.Python, "cpython-3.12", "bin", "python3"),
+		filepath.Join(paths.Models, "mlx-community", "a-model", "weights.safetensors"),
+		filepath.Join(paths.HFCache, "blob"),
+	} {
+		writeFileAt(t, f, "x")
+	}
+
+	bundle := bundleAt(t, filepath.Join(home, "Applications", "Gropius.app"), "installed")
+	binary := filepath.Join(bundle, binaryInBundle)
+	link, err := linkCommand(home, binary)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	return env, UninstallEnv{
+		Paths:    paths,
+		Home:     home,
+		Bundles:  []string{bundle},
+		Link:     link,
+		Binary:   binary,
+		Terminal: true,
+		Firewall: func(string) error { return nil },
+		OwnerOf:  func(*os.Root, string) (int, error) { return os.Getuid(), nil },
+		Uid:      os.Getuid(),
+	}, out, errOut
+}
+
+func writeFileAt(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func exists(path string) bool {
+	_, err := os.Lstat(path)
+	return err == nil
+}
+
+// Uninstall removes the application, the runtime, the settings, the registry,
+// the logs and the link — and leaves the models, which are the expensive
+// thing, saying how much space they take and what removes them.
+func TestUninstallRemovesTheApplicationAndLeavesTheModels(t *testing.T) {
+	env, ue, out, _ := uninstallFixture(t)
+
+	if code := runUninstall(env, nil, ue); code != ExitOK {
+		t.Fatalf("exit = %d, want %d\n%s", code, ExitOK, out)
+	}
+
+	for _, gone := range []string{ue.Bundles[0], ue.Paths.Venv, ue.Paths.Python, ue.Paths.Bin,
+		ue.Paths.Config, ue.Paths.State, ue.Paths.Logs, ue.Paths.Stats, ue.Link} {
+		if exists(gone) {
+			t.Errorf("%s is still there", redact(gone, ue.Home))
+		}
+	}
+	for _, kept := range []string{ue.Paths.Models, ue.Paths.HFCache} {
+		if !exists(kept) {
+			t.Errorf("%s was removed; the downloaded models are what uninstall leaves", redact(kept, ue.Home))
+		}
+	}
+	got := out.String()
+	if !strings.Contains(got, "--purge") {
+		t.Errorf("the output does not name the flag that removes the models:\n%s", got)
+	}
+	if !strings.Contains(got, "B") {
+		t.Errorf("the output does not state the size of what it left:\n%s", got)
+	}
+}
+
+// --purge without a terminal and without --yes deletes NOTHING and names the
+// flag. Under a piped bootstrap standard input is the rest of the installer, so
+// there is nobody to ask and nothing to read.
+func TestPurgeRefusesWithoutATerminalUnlessToldYes(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		terminal bool
+		args     []string
+		deletes  bool
+	}{
+		{"no terminal, no --yes", false, []string{"--purge"}, false},
+		{"no terminal, --yes", false, []string{"--purge", "--yes"}, true},
+		{"a terminal", true, []string{"--purge"}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env, ue, out, errOut := uninstallFixture(t)
+			ue.Terminal = tc.terminal
+
+			code := runUninstall(env, tc.args, ue)
+			modelsGone := !exists(ue.Paths.Models)
+			if modelsGone != tc.deletes {
+				t.Errorf("models removed = %v, want %v", modelsGone, tc.deletes)
+			}
+			if tc.deletes {
+				return
+			}
+			if code == ExitOK {
+				t.Errorf("a refused purge exited %d, which reads as having done the work", code)
+			}
+			if exists(ue.Bundles[0]) == false {
+				t.Error("a refused purge removed the application; it must delete nothing at all")
+			}
+			if !strings.Contains(errOut.String(), "--yes") {
+				t.Errorf("the refusal does not name the flag that would answer it:\n%s%s", out, errOut)
+			}
+		})
+	}
+}
+
+// The firewall entry is machine-wide state with no per-account route, so its
+// removal is the one authorisation panel. A refusal leaves everything else
+// removed and reports the entry as the one thing remaining, with the command.
+func TestUninstallSurvivesARefusedAuthorisation(t *testing.T) {
+	env, ue, out, _ := uninstallFixture(t)
+	asked := 0
+	ue.Firewall = func(string) error {
+		asked++
+		return errors.New("the authorisation was declined")
+	}
+
+	if code := runUninstall(env, nil, ue); code != ExitOK {
+		t.Fatalf("exit = %d, want %d: a declined panel is not a failed uninstall", code, ExitOK)
+	}
+	if asked != 1 {
+		t.Errorf("the panel was raised %d times, want exactly 1", asked)
+	}
+	if exists(ue.Bundles[0]) {
+		t.Error("a refused authorisation stopped the rest of the removal")
+	}
+	got := out.String()
+	if !strings.Contains(got, "--remove") {
+		t.Errorf("the output does not name the command that removes the firewall entry:\n%s", got)
+	}
+}
+
+// A bundle in the machine-wide applications directory is the copy EVERY account
+// on this Mac launches, and removing it removes it for all of them. The
+// asymmetry is named in the code; the output has to name it too, because the
+// person running uninstall is the only one who will find out otherwise.
+func TestUninstallSaysWhenItRemovedTheCopyEveryAccountLaunches(t *testing.T) {
+	env, ue, out, _ := uninstallFixture(t)
+
+	// A stand-in for the machine-wide directory, so this test never touches the
+	// real one.
+	apps := filepath.Join(t.TempDir(), "Applications")
+	machineWide := bundleAt(t, filepath.Join(apps, "Gropius.app"), "everybody's")
+	ue.SystemApplications = apps
+	ue.Bundles = []string{machineWide}
+
+	if code := runUninstall(env, nil, ue); code != ExitOK {
+		t.Fatalf("exit = %d, want %d", code, ExitOK)
+	}
+	if exists(machineWide) {
+		t.Fatal("the bundle was not removed")
+	}
+	if !strings.Contains(out.String(), "every account") {
+		t.Errorf("removing the copy every account on this Mac launches was reported as an ordinary removal:\n%s", out)
+	}
+
+	// And a per-account bundle is not described that way.
+	env, ue, out, _ = uninstallFixture(t)
+	if code := runUninstall(env, nil, ue); code != ExitOK {
+		t.Fatalf("exit = %d, want %d", code, ExitOK)
+	}
+	if strings.Contains(out.String(), "every account") {
+		t.Errorf("this account's own bundle was reported as everybody's:\n%s", out)
+	}
+}
+
+// Under shared-cache mode this account's own directory goes and the shared root
+// is not touched. The output names what remains there, its size, the accounts
+// it belongs to counted rather than named, and the one deliberate command that
+// removes it.
+func TestSharedCacheUninstallLeavesTheSharedRootAlone(t *testing.T) {
+	env, ue, out, _ := uninstallFixture(t)
+
+	// The shared layout: models in the shared root, everything of this
+	// account's own in its own directory.
+	shared := filepath.Join(t.TempDir(), "Shared", "Gropius")
+	ue.SharedRoot = shared
+	ue.Paths.Models = filepath.Join(shared, "models")
+	ue.Paths.HFCache = filepath.Join(shared, "hf", "hub")
+	writeFileAt(t, filepath.Join(ue.Paths.Models, "mlx-community", "a-model", "weights.safetensors"), "ours")
+	other := filepath.Join(ue.Paths.Models, "mlx-community", "another-model", "weights.safetensors")
+	writeFileAt(t, other, "another account's")
+	ue.OwnerOf = func(_ *os.Root, name string) (int, error) {
+		if strings.Contains(name, "another-model") {
+			return os.Getuid() + 1, nil
+		}
+		return os.Getuid(), nil
+	}
+
+	if code := runUninstall(env, nil, ue); code != ExitOK {
+		t.Fatalf("exit = %d, want %d", code, ExitOK)
+	}
+	if !exists(shared) || !exists(other) {
+		t.Error("the shared root was touched; it holds every account's models")
+	}
+	if exists(ue.Paths.Config) {
+		t.Error("this account's own directory was left in place")
+	}
+	got := out.String()
+	for _, want := range []string{"shared", "1 other account", "rm -rf"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("the output does not carry %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "another-model") {
+		t.Errorf("the output names another account's models rather than counting the accounts:\n%s", got)
+	}
+}
+
+// --purge under shared-cache mode removes only what this account owns, which
+// the sticky bit on the shared directory's 3775 mode makes the only removal the
+// filesystem permits anyway. The output separates deleted from retained.
+func TestSharedPurgeRemovesOnlyWhatThisAccountOwns(t *testing.T) {
+	env, ue, out, _ := uninstallFixture(t)
+
+	shared := filepath.Join(t.TempDir(), "Shared", "Gropius")
+	ue.SharedRoot = shared
+	ue.Paths.Models = filepath.Join(shared, "models")
+	ue.Paths.HFCache = filepath.Join(shared, "hf", "hub")
+	ours := filepath.Join(ue.Paths.Models, "mlx-community", "ours", "weights.safetensors")
+	theirs := filepath.Join(ue.Paths.Models, "mlx-community", "theirs", "weights.safetensors")
+	writeFileAt(t, ours, "ours")
+	writeFileAt(t, theirs, "theirs")
+	ue.OwnerOf = func(_ *os.Root, name string) (int, error) {
+		if strings.Contains(name, "theirs") {
+			return os.Getuid() + 1, nil
+		}
+		return os.Getuid(), nil
+	}
+
+	if code := runUninstall(env, []string{"--purge", "--yes"}, ue); code != ExitOK {
+		t.Fatalf("exit = %d, want %d", code, ExitOK)
+	}
+	if exists(ours) {
+		t.Error("this account's own model survived --purge")
+	}
+	if !exists(theirs) {
+		t.Error("another account's model was removed; only what this account owns may go")
+	}
+	got := out.String()
+	for _, want := range []string{"removed", "1 other account"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("the output does not separate what was deleted from what was not (%q missing):\n%s", want, got)
+		}
+	}
+}
+
+// GROPIUS_ROOT is never a deletion path. A directory any local account can
+// pre-create as a symlink would otherwise choose what is deleted, so the
+// removal acts on the fixed locations this account's install uses — and says so
+// rather than leaving a reader to expect the variable to be honoured.
+func TestGropiusRootIsNeverADeletionPath(t *testing.T) {
+	decoy := t.TempDir()
+	witness := filepath.Join(decoy, "models", "someone-elses-data")
+	writeFileAt(t, witness, "not ours to delete")
+
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("GROPIUS_ROOT", decoy)
+
+	// The live resolution is what this case is about — which root uninstall
+	// picks when the environment names another one — so the guard that keeps
+	// every other test off this path is opened deliberately, for this test
+	// only.
+	allowLiveEnvInTest(t)
+
+	env, _, _ := testEnv()
+	ue, err := liveUninstallEnv(env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The bundle locations and the panel are the two things a test may not
+	// exercise for real; everything the case is about — which root is resolved,
+	// and what is said about the one that was not — is left live.
+	ue.Bundles = nil
+	ue.Firewall = func(string) error { return nil }
+	ue.Terminal = false
+
+	out := &bytes.Buffer{}
+	env.Out = out
+	if code := runUninstall(env, nil, ue); code != ExitOK {
+		t.Fatalf("exit = %d, want %d", code, ExitOK)
+	}
+	if !exists(witness) {
+		t.Fatal("uninstall deleted what GROPIUS_ROOT named")
+	}
+	if !strings.Contains(out.String(), "GROPIUS_ROOT") {
+		t.Errorf("the output does not name the root it did not remove:\n%s", out)
+	}
+}
+
+// Ownership is read from the filesystem, which is what the decision above rests
+// on. A fixture with two owners cannot be built without root — a test cannot
+// give a file away — so the two halves are tested separately: this one proves
+// the reader reports the truth for a file this account owns, and the pure
+// function below decides what to do with whatever it reports.
+func TestTheOwnerReaderReadsTheFilesystem(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "a-model")
+	writeFileAt(t, path, "ours")
+
+	root, err := os.OpenRoot(filepath.Dir(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+
+	uid, err := ownerIn(root, "a-model")
+	if err != nil {
+		t.Fatalf("ownerIn: %v", err)
+	}
+	if uid != os.Getuid() {
+		t.Errorf("the owner of a file this account just wrote = %d, want %d", uid, os.Getuid())
+	}
+
+	// A name that leaves the root is refused rather than answered: the whole
+	// point of reading the owner through the root is that no component of the
+	// name can send it somewhere else.
+	if _, err := ownerIn(root, "../elsewhere"); err == nil {
+		t.Error("the owner reader answered for a name outside the root")
+	}
+	if _, err := ownerIn(root, "nothing-here"); err == nil {
+		t.Error("the owner reader reported an owner for a name that does not exist; an unreadable owner must be " +
+			"an error, because the purge treats it as somebody else's")
+	}
+}
+
+// The purge cannot be redirected by a component renamed UNDER it.
+//
+// The shared models directory is group-writable by design (3775), so another
+// account owns entries inside it and may rename its own entry at any moment.
+// If the owner is read from a path and the unlink is then issued against the
+// same path, the two resolve the name twice — and between them that account can
+// swap a directory it owns for a symbolic link to somewhere else, which is
+// resolved with THIS account's credentials. The sticky bit does not stop it:
+// sticky constrains the directory the kernel sees at unlink time, which is
+// exactly what has been moved.
+//
+// The window is reproduced deterministically here by doing the swap from the
+// owner seam, which is called between the walk and the removal — the moment the
+// attacker has to win.
+func TestThePurgeCannotBeRedirectedByARenamedComponent(t *testing.T) {
+	env, ue, _, _ := uninstallFixture(t)
+
+	shared := filepath.Join(t.TempDir(), "Shared", "Gropius")
+	ue.SharedRoot = shared
+	ue.Paths.Models = filepath.Join(shared, "models")
+	ue.Paths.HFCache = filepath.Join(shared, "hf", "hub")
+
+	// What another account owns inside the shared models directory.
+	org := filepath.Join(ue.Paths.Models, "an-org")
+	writeFileAt(t, filepath.Join(org, "a-model", "weights.safetensors"), "ours")
+
+	// What must not be touched: this account's own files, outside the tree.
+	victimDir := t.TempDir()
+	victim := filepath.Join(victimDir, "thesis.docx")
+	writeFileAt(t, victim, "not the installer's to delete")
+
+	swapped := false
+	ue.OwnerOf = func(root *os.Root, name string) (int, error) {
+		if !swapped {
+			swapped = true
+			if err := os.RemoveAll(org); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(victimDir, org); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return ownerIn(root, name)
+	}
+
+	if code := runUninstall(env, []string{"--purge", "--yes"}, ue); code != ExitOK {
+		t.Fatalf("exit = %d, want %d", code, ExitOK)
+	}
+	if !exists(victim) {
+		t.Fatal("the purge followed a component another account renamed and deleted a file outside the shared " +
+			"models directory")
+	}
+}
+
+// The removal is in-process and acts on fixed locations. This is the pure half
+// of the shared purge: given who owns what, which entries may go.
+func TestOnlyEntriesThisAccountOwnsArePurged(t *testing.T) {
+	owners := map[string]int{"ours": 501, "theirs": 502, "also-ours": 501}
+	ownerOf := func(_ *os.Root, name string) (int, error) {
+		uid, ok := owners[filepath.Base(name)]
+		if !ok {
+			return 0, errors.New("no owner")
+		}
+		return uid, nil
+	}
+
+	mine, others := partitionByOwner(nil, []string{"a/ours", "b/theirs", "c/also-ours", "d/unknown"}, 501, ownerOf)
+	if strings.Join(mine, ",") != "a/ours,c/also-ours" {
+		t.Errorf("this account's own entries are %v", mine)
+	}
+	// An entry whose owner cannot be read is left alone: an unreadable owner is
+	// not evidence that it is ours.
+	if strings.Join(others, ",") != "b/theirs,d/unknown" {
+		t.Errorf("the entries left alone are %v", others)
+	}
+}

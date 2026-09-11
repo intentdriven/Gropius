@@ -1,0 +1,7 @@
+{
+  "version": "test",
+  "serving": false,
+  "port": 11535,
+  "reason": "nothing is serving on port 11535",
+  "resident": []
+}

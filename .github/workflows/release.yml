@@ -226,10 +226,18 @@ jobs:
       # nothing about WHICH artefacts were installed, so the assertions below
       # bind the installed executables to the ones this job built.
       #
-      # `open` is stubbed on PATH: the gate installs both apps but must not
-      # leave a menu-bar server and a chat client running on the runner. The
-      # stub doubles as the probe that the script reached its last step, which
-      # is what makes a truncated or silently-short run visible.
+      # NOTHING IS LAUNCHED AND NOTHING IS PROVISIONED. install.sh names every
+      # tool it runs by absolute path, so a PATH stub can no longer stand in
+      # for `open` — and under GITHUB_ACTIONS the script does not launch at
+      # all, and hands the server's placement over with --place-only: a runner
+      # has no console for an authentication panel and no business downloading
+      # an MLX runtime. Both facts are announced by the script in warnings.
+      #
+      # The probe that a run reached its LAST step is therefore the line each
+      # invocation prints at the end — `placed <bundle>.` — captured from two
+      # extra runs whose output is redirected to a log. That is what makes a
+      # truncated or silently-short run visible; a script that stopped early
+      # exits 0 having printed nothing of the kind.
       #
       # PERMISSIONS. This step executes a script out of the checked-out tree
       # inside a job holding contents: write, id-token: write and
@@ -274,16 +282,8 @@ jobs:
           # — that is the point of gating here.
           export GROPIUS_ASSET_DIR="$PWD"
 
-          gate_bin="$RUNNER_TEMP/installer-gate-bin"
-          launched="$RUNNER_TEMP/installer-gate-launched.txt"
-          mkdir -p "$gate_bin"
-          : > "$launched"
-          cat > "$gate_bin/open" <<EOF
-          #!/usr/bin/env bash
-          printf '%s\n' "\$@" >> "$launched"
-          EOF
-          chmod +x "$gate_bin/open"
-          export PATH="$gate_bin:$PATH"
+          log="$RUNNER_TEMP/installer-gate.log"
+          : > "$log"
 
           # Both documented invocations. `< ./install.sh` is a REDIRECT, not a
           # pipe, and the two are not equivalent: bash reads a seekable stdin
@@ -305,6 +305,14 @@ jobs:
           # bash that read an empty script and exited 0.
           # shellcheck disable=SC2002
           cat ./install.sh | bash -s --
+
+          # And once more of each, with the output captured, so the loop below
+          # can assert every invocation reached its own final line rather than
+          # stopping silently part way. install.sh is idempotent — it replaces
+          # what it placed a moment ago — so running it twice costs a swap and
+          # proves the run was complete.
+          bash -s -- < ./install.sh >> "$log" 2>&1
+          bash -s -- client < ./install.sh >> "$log" 2>&1
 
           # Each bundle is installed where the script chose to put it, its
           # Contents/MacOS executable is byte-for-byte the one THIS job built,
@@ -377,8 +385,10 @@ jobs:
               echo "install.sh installed something other than the tagged artefacts — most likely by falling through to the previously published Release" >&2
               exit 1
             fi
-            if ! grep -Fqx "$dest" "$launched"; then
-              echo "install.sh never reached its launch step for ${app} — it stopped early" >&2
+            if ! grep -Fq "placed $dest." "$log"; then
+              echo "install.sh never reached its final step for ${app} — it stopped early" >&2
+              echo "the log of the captured runs follows:" >&2
+              cat "$log" >&2
               exit 1
             fi
             # Says exactly what was compared. The digest covers ONE file —
@@ -388,7 +398,7 @@ jobs:
             # they were. What this line proves is that the executable came from
             # this job's own dist/, which is the fall-through it exists to
             # catch.
-            echo "installed this job's own $exe and launched it: $dest (Contents/MacOS/$exe sha256 $installed_sum; the rest of the bundle is not digested)"
+            echo "installed this job's own $exe: $dest (Contents/MacOS/$exe sha256 $installed_sum; the rest of the bundle is not digested; nothing was launched, and the firewall grant and the MLX provisioning were not exercised)"
           done
 
           # BIND THE EXERCISED BYTES TO THE PUBLISHED BYTES. Everything above

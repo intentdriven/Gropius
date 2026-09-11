@@ -11,6 +11,58 @@ GitHub release notes.
 
 ## [Unreleased]
 
+### Changed
+
+- **The one-line installer hands over to the binary it just verified, and does
+  less itself.** `install.sh` is a bootstrap and only a bootstrap: it downloads
+  the release, verifies it against the checksums published beside it, clears
+  the quarantine attribute, and then executes `gropius install` **inside the
+  bundle it verified** — never the copy already on this Mac — so the script and
+  the binary it calls are always the same build. The staged swap, the firewall
+  grant, the runtime provisioning, the per-user command and the launch all move
+  into Go, where they can be tested and where a rename can refuse a destination
+  instead of nesting inside it. A downloaded bundle whose binary predates the
+  verbs refuses the handover with exit 2, and the script reports the version
+  mismatch rather than starting anything. The command you type does not change.
+
+### Added
+
+- **Gropius installs, repairs, removes and diagnoses itself, from the
+  terminal.** The binary answers to four verbs. `gropius install` is the second
+  half of the one-line bootstrap: it places the application with a staged swap
+  that cannot leave this Mac without one, asks once — through the system
+  authorisation panel, with the reason on the panel — for the firewall grant a
+  standard account cannot make for itself, installs the private Python and MLX
+  runtime in the foreground naming the stage and how many of the three are
+  done, and links a `gropius` command into `~/.local/bin`, printing the line
+  that adds that directory when it is not on the search path. Run it again and
+  it repairs what is missing rather than reinstalling what is not, and says
+  which of the two it did; a stage that fails names itself, says why, and names
+  the command that retries it. `gropius uninstall` removes the application, the
+  runtime, the settings, the model list, the logs, the statistics, the command
+  itself and **the firewall entry every hand-written instruction forgets** —
+  and leaves the models you downloaded, with their total size and the flag that
+  removes them too. That flag, `--purge`, deletes nothing where there is no
+  terminal to confirm with unless `--yes` answers for you. Under a shared model
+  cache your own account's directory is what goes: the shared root is untouched,
+  and the output names what remains in it, its size, how many other accounts it
+  belongs to counted rather than named, and the one deliberate command that
+  removes it. `gropius status` answers what is true right now — serving or not,
+  on which address, which models are in memory — from state that already
+  exists, so polling it is safe, and `--json` is the contract rather than the
+  human text. `gropius doctor` runs the expensive checks and labels every one:
+  **verified** for state Gropius owns, **observed** for the firewall entry,
+  which is never a verdict in either direction because the system query answers
+  "permitted" for a path it has no entry for and for a path that does not
+  exist, and **cannot be determined from here** for Local Network Privacy,
+  which macOS offers no way to read at all. Warnings exit zero and the
+  severities travel in `--json`. Every verb's output is written to be pasted
+  into a bug report: home directories abbreviated, other accounts counted
+  rather than named. No verb reads standard input, none contacts the network,
+  none derives a deletion path from the environment, and none elevates but for
+  that one firewall panel. ([how to](docs/lifecycle.md),
+  [reference](docs/lifecycle-reference.md))
+
 ## [0.5.0] - 2026-09-11
 
 ### Changed

@@ -138,6 +138,11 @@ var enforcementPath = []string{
 	"github.com/intentdriven/Gropius/internal/registry",
 	"github.com/intentdriven/Gropius/internal/discovery",
 	"github.com/intentdriven/Gropius/internal/stats",
+	// The port holder's classification: it decides whether this process defers
+	// to the process already on the port as its client, or refuses to route
+	// this account's model traffic to it. That is an admission decision, and
+	// it must not start reading which network anything is on to make it.
+	"github.com/intentdriven/Gropius/internal/instance",
 }
 
 // notEnforcement is every other package in the module, each with the reason it
@@ -147,15 +152,16 @@ var enforcementPath = []string{
 // added next year is uncovered by default and the rule quietly stops applying
 // to it.
 var notEnforcement = map[string]string{
-	"github.com/intentdriven/Gropius/internal/gateway":  "holds the endpoint list, so it must see the classifier; covered by the source-scoped rule below instead",
-	"github.com/intentdriven/Gropius/cmd/gropius":       "reaches the endpoint list through the gateway, so no import rule can cover it; covered by its own source-scoped rule below",
-	"github.com/intentdriven/Gropius/internal/netshape": "is the classifier",
-	"github.com/intentdriven/Gropius/internal/ui":       "serves the control panel's assets and decides nothing about who may reach the server; presentation is what rule 1 allows. It imports nothing of ours and so could import the gateway, while cmd/gropius already imports it — a helper here reading Endpoint.Network is a route into the enforcement path, which is why TestThePanelPackageDoesNotReadTheDetectionEither scans it with nothing allowlisted",
-	"github.com/intentdriven/Gropius/internal/applog":   "builds the process's own log — a file, a level and a rotation. It decides nothing about who may reach the server or what it will do for them, and it imports nothing of ours, so there is no address in it to enforce on. What it must never gain is a reason to look at one: a log that reported which network a client came from would put the detection on the path of every served request",
-	"github.com/intentdriven/Gropius/internal/archtest": "is these rules",
-	"github.com/intentdriven/Gropius/internal/mlxtest":  "test helpers; nothing ships in the binary",
-	"github.com/intentdriven/Gropius/internal/sitetest": "test helpers for the landing-page renderer",
-	"github.com/intentdriven/Gropius/cmd/gropius-site":  "renders the landing page offline and serves nothing",
+	"github.com/intentdriven/Gropius/internal/gateway":   "holds the endpoint list, so it must see the classifier; covered by the source-scoped rule below instead",
+	"github.com/intentdriven/Gropius/cmd/gropius":        "reaches the endpoint list through the gateway, so no import rule can cover it; covered by its own source-scoped rule below",
+	"github.com/intentdriven/Gropius/internal/netshape":  "is the classifier",
+	"github.com/intentdriven/Gropius/internal/ui":        "serves the control panel's assets and decides nothing about who may reach the server; presentation is what rule 1 allows. It imports nothing of ours and so could import the gateway, while cmd/gropius already imports it — a helper here reading Endpoint.Network is a route into the enforcement path, which is why TestThePanelPackageDoesNotReadTheDetectionEither scans it with nothing allowlisted",
+	"github.com/intentdriven/Gropius/internal/applog":    "builds the process's own log — a file, a level and a rotation. It decides nothing about who may reach the server or what it will do for them, and it imports nothing of ours, so there is no address in it to enforce on. What it must never gain is a reason to look at one: a log that reported which network a client came from would put the detection on the path of every served request",
+	"github.com/intentdriven/Gropius/internal/lifecycle": "holds the verbs a person types — status and doctor today, the installing and removing ones to come. It reports and it changes this installation; it decides nothing about who may reach this server or what it will do for them, and nothing on the control plane's path may import it at all (adr-2609111126115848 condition 3, armed in lifecycle_boundary_test.go). Doctor reads the firewall's state, which is exactly the class of signal rule 2 governs — so what keeps it on this side of the rule is that its report gates nothing, which that closure is what holds",
+	"github.com/intentdriven/Gropius/internal/archtest":  "is these rules",
+	"github.com/intentdriven/Gropius/internal/mlxtest":   "test helpers; nothing ships in the binary",
+	"github.com/intentdriven/Gropius/internal/sitetest":  "test helpers for the landing-page renderer",
+	"github.com/intentdriven/Gropius/cmd/gropius-site":   "renders the landing page offline and serves nothing",
 }
 
 // carveOut is the amendment, written down. It is deliberately not part of

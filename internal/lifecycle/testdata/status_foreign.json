@@ -1,0 +1,7 @@
+{
+  "version": "test",
+  "serving": false,
+  "port": 11535,
+  "reason": "port 11535 is held by a process that could not prove it is this account's Gropius",
+  "resident": []
+}
