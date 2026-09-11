@@ -105,11 +105,6 @@ const (
 	installedReasonNoVersion = "the downloaded build did not answer its own version verb"
 )
 
-// installedReasonNoVersionVerb is the spelling the report uses for a build that
-// would not say what it is. Named separately from the constant above so the
-// table in the tests reads as prose.
-const installedReasonNoVersionVerb = installedReasonNoVersion
-
 // bannedTrustWords are the words no line of this report may carry. A download
 // checked against published checksums is VERIFIED; it is not signed, notarised
 // or trusted, and a reader takes any of those three as Gatekeeper's verdict,
@@ -248,11 +243,11 @@ func (r updateReport) servingText() string {
 	if r.Serving != "" {
 		return r.Serving + ", on port " + strconv.Itoa(r.Port)
 	}
-	reason := r.ServingReason
-	if reason == "" {
-		reason = servingReasonNotServing
-	}
-	return cannotBeDetermined + " — " + reason
+	// Every caller of this report fills in a reason: finishUpdate assigns one
+	// in all four arms of its switch. An empty one would be a caller that
+	// forgot, and a report that said only "cannot be determined" with no
+	// account of why is the kind of line this verb exists to remove.
+	return cannotBeDetermined + " — " + r.ServingReason
 }
 
 // swapFailureLines say what stopped the swap and what this Mac has now. The

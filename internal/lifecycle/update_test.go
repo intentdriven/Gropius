@@ -323,8 +323,24 @@ func TestTheQuitReachesOnlyThisSessionAndIsSentOnce(t *testing.T) {
 	if _, out, _ := f.run(t); !strings.Contains(out, cannotQuitSentence) {
 		t.Errorf("the report does not say that quitting it is not something this command can do:\n%s", out)
 	}
-	if f.calls.quit > 1 {
-		t.Errorf("the quit was sent %d times, want at most once", f.calls.quit)
+	// Exactly once — not "at most once". A run that never sent it would pass a
+	// bound and prove nothing: the quit is what stops Launch Services
+	// activating the old process instead of starting the new binary, so a swap
+	// with no quit before it reports success while the old version goes on
+	// serving.
+	if f.calls.quit != 1 {
+		t.Errorf("the quit was sent %d times, want exactly once", f.calls.quit)
+	}
+
+	// And it is sent only where there is an installed bundle to replace. On a
+	// Mac with nothing at the destination there is nothing running from it, and
+	// a warning about a quit that failed would be the first thing read.
+	empty := newFakeUpdate(t)
+	if err := os.RemoveAll(empty.env.Dest); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, errOut := empty.run(t); empty.calls.quit != 0 {
+		t.Errorf("a quit was sent with no bundle at the destination (%s)", errOut)
 	}
 }
 
@@ -593,6 +609,14 @@ func TestTheUpdateFailsClosedOnEveryBadDownload(t *testing.T) {
 // already polls, never by importing the gateway's type. A build with no version
 // field is a build that cannot say, and that is unknown rather than the version
 // just installed.
+//
+// WHAT THIS PROVES AND WHAT IT DOES NOT, so a green run is not over-read.
+// NOTHING IN THE PRODUCT EMITS THE FIRST BODY: the version field is a
+// coordinated change in the lane that owns internal/gateway and it has not
+// landed (iss-2609111942567418). So the first row is a promise about the decode
+// rather than a test of a running server, and it is here for the day the field
+// arrives. The second row is the one that describes every Mac today, and it is
+// the row the report actually depends on.
 func TestTheServingVersionIsDecodedFromTheSnapshot(t *testing.T) {
 	for _, tc := range []struct {
 		name string

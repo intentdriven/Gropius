@@ -81,7 +81,7 @@ func updateReportCases() map[string]updateReport {
 
 	noVersion := base
 	noVersion.Installed = ""
-	noVersion.InstalledReason = installedReasonNoVersionVerb
+	noVersion.InstalledReason = installedReasonNoVersion
 	cases["the downloaded build would not say what it is"] = noVersion
 
 	failed := updateReport{

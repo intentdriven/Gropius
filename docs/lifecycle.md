@@ -139,11 +139,18 @@ Then it tells you two things rather than one:
 
 ```
 installed: 0.5.0, at /Applications/Gropius.app
-serving:   0.5.0, on port 11535
+serving:   cannot be determined — the running server does not publish its version
 ```
 
-Those are separate facts, and on some Macs they differ. The command reports
-five things every time:
+Those are separate facts, and on some Macs they differ.
+
+**The serving line reads "cannot be determined" on every Mac today**, because
+the running server does not yet publish which build it is. That is the honest
+answer rather than a missing feature: the version just installed is never
+printed in its place, so the command does not tell you your Mac is serving
+something it may not be.
+
+The command reports five things every time:
 
 1. **The version it installed** — read by asking the downloaded build what it
    is, not by trusting the release it came from.

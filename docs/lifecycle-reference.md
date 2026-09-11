@@ -69,11 +69,14 @@ takes no flags and no version. Every run carries five facts.
 | The grant was re-made | The firewall grant is re-made on every update: the build's code identity changes with every build, so the entry that covered the previous build does not cover this one. | Followed by whether it was made, or by the commands that make it by hand. |
 | There is no way back | There is no way back: only the current release is published, so the previous release cannot be fetched. | Every run. Typing a version is refused with the same sentence, and exit `2`. |
 
-The serving line can take any of these values:
+The serving line can take any of these values. **On this build it is always one
+of the last four**: the running server does not publish which build it is, so
+the first row is what the line will say once it does, and until then the
+command says it cannot tell rather than repeating what it just installed.
 
 | Value | What was found |
 | --- | --- |
-| a version, and the port | This account's Gropius answered the identity challenge and published its version. |
+| a version, and the port | This account's Gropius answered the identity challenge and published its version. No build publishes it yet. |
 | the running server does not publish its version | It answered the challenge and is a build with no version to give. |
 | the server did not answer the control plane | It answered the challenge and then did not answer the snapshot read. |
 | something holds the port and answered no identity challenge | Something is accepting connections and would not identify itself. Under per-account data roots that is what another account's Gropius looks like from here. |
@@ -86,8 +89,8 @@ would not identify itself — the report adds the cross-account ending:
 This Mac is serving a version this command did not install.
 The bundle just placed takes effect when that session logs out, or when
 Gropius is restarted there.
-1 other login session on this Mac holds the port; it is counted here and not
-named.
+port 11535 is held by 1 process that did not identify itself; it is counted
+here and not named.
 Quitting it is not something this command can do: a quit request reaches only
 this login session.
 ```

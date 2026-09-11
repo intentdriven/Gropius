@@ -281,6 +281,42 @@ func TestAStagedBundleWhoseProgramIsASymbolicLinkIsRefused(t *testing.T) {
 	}
 }
 
+// And a link ABOVE the program is refused too. os.Lstat refuses to follow only
+// the last component, so a bundle whose `Contents` is a symbolic link resolves
+// through it and looks perfectly ordinary — which would send the one exec in
+// this path outside the directory that was verified, by the door the check was
+// written to close.
+func TestAStagedBundleWithASymbolicLinkAboveItsProgramIsRefused(t *testing.T) {
+	dir := t.TempDir()
+
+	// A real tree somewhere else, with a real program in it. This is what the
+	// link would resolve to.
+	elsewhere := filepath.Join(dir, "elsewhere")
+	if err := os.MkdirAll(filepath.Join(elsewhere, "MacOS"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(elsewhere, "MacOS", "gropius"), []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	bundle := filepath.Join(dir, bundleName)
+	if err := os.MkdirAll(bundle, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(elsewhere, filepath.Join(bundle, "Contents")); err != nil {
+		t.Fatal(err)
+	}
+
+	// The program is reachable and is a regular file, by every question that
+	// follows the link.
+	if fi, err := os.Lstat(filepath.Join(bundle, binaryInBundle)); err != nil || !fi.Mode().IsRegular() {
+		t.Fatalf("this test is not set up the way it claims: %v", err)
+	}
+	if err := checkStagedBundle(bundle); err == nil {
+		t.Error("a bundle whose Contents is a symbolic link was accepted; the exec would leave the verified directory")
+	}
+}
+
 // The version installed is the one that BUILD reports about itself, read by
 // running the staged program's own version verb inside the directory that was
 // just verified — never the bundle already on the Mac, and never a guess.

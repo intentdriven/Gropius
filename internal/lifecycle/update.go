@@ -11,7 +11,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/intentdriven/Gropius/internal/config"
 	"github.com/intentdriven/Gropius/internal/instance"
 )
 
@@ -38,8 +37,7 @@ const retryUpdate = "gropius update"
 // reached for — the shape InstallEnv already has, for the same reason: every
 // ending below is then a test with no Mac, no panel and no network.
 type UpdateEnv struct {
-	Paths config.Paths
-	Home  string
+	Home string
 	// Dest is where the bundle belongs, derived from the fixed locations this
 	// account's install uses and never from the command line.
 	Dest string
@@ -368,7 +366,6 @@ func liveUpdateEnv(env Env) (UpdateEnv, error) {
 	}
 	dest := installDest(home)
 	return UpdateEnv{
-		Paths:          env.Paths,
 		Home:           home,
 		Dest:           dest,
 		Port:           env.Port,

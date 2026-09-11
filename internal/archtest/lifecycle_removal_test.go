@@ -208,8 +208,8 @@ func TestTheLifecycleVerbsOnlyEverREADTheControlPlane(t *testing.T) {
 				"self-replacement behind an HTTP surface (spc-2609111812370705)", rel, lines)
 		}
 		if len(lines) > 1 {
-			t.Errorf("status.go speaks to the control plane on %d lines (%v); one call site is what makes the "+
-				"rule checkable by reading the file", len(lines), lines)
+			t.Errorf("%s speaks to the control plane on %d lines (%v); one call site is what makes the "+
+				"rule checkable by reading the file", rel, len(lines), lines)
 		}
 	}
 	for route := range routes {
@@ -245,10 +245,21 @@ func TestTheUpdatePathReadsNoEnvironmentVariable(t *testing.T) {
 	}
 }
 
-// There is exactly ONE staged swap in the package, and update does not add a
-// second. The swap's guarantee — no failure path leaves this Mac without an
-// application — is a property of that one implementation and of its tests.
-func TestTheStagedSwapHasExactlyOneImplementation(t *testing.T) {
+// The swap's staging name is declared in one file and used from one file.
+//
+// WHAT THIS CATCHES: a verb that stages a bundle for itself rather than
+// reaching PlaceBundle, which is the copy-paste a reviewer waves through. The
+// swap's guarantee — no failure path leaves this Mac without an application —
+// is a property of that one implementation and of the behavioural tests beside
+// it, and a second one would carry neither.
+//
+// WHAT IT CANNOT DO, so a green run is not over-read: it reads the identifier
+// stagingPrefix, so a second staging implementation that declared a prefix of
+// its own would pass. It refuses the accident, not the determined rewrite —
+// which is what every rule in this directory does. The rule that actually binds
+// update to the one placer is the function-pointer assertion in
+// TestTheUpdateUsesTheSwapTheInstallerAlreadyPerforms.
+func TestTheStagingNameIsDeclaredAndUsedInOneFile(t *testing.T) {
 	files := map[string]bool{}
 	forEachLifecycleSourceLine(t, func(rel string, _ int, line string) {
 		code, _, _ := strings.Cut(line, "//")

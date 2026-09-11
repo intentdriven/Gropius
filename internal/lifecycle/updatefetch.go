@@ -3,6 +3,7 @@ package lifecycle
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -59,6 +60,22 @@ const (
 	causeNamesNothing   = "the checksums file names no file that was downloaded"
 )
 
+// maxChecksumsBytes caps what is read back from the checksums file. The real
+// one is a few hundred bytes; this read happens only after shasum has already
+// refused, and what it is looking at came off the network, so a file that is
+// not what it should be must not be read whole into memory to be described.
+const maxChecksumsBytes = 1 << 20
+
+// readCapped reads at most limit bytes of a file.
+func readCapped(path string, limit int64) ([]byte, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	return io.ReadAll(io.LimitReader(f, limit))
+}
+
 // The two bounded tools this file starts. Neither waits on a person.
 const (
 	fetchTimeout   = 5 * time.Minute
@@ -91,8 +108,12 @@ func curlArgs(name, dest string) []string {
 func fetchAsset(name, dest string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), fetchTimeout)
 	defer cancel()
+	// The program comes from the same value the argument test asserts on, so
+	// that test is about the process this actually starts rather than about a
+	// second literal beside it. The absolute path is spelled once, in curlArgs,
+	// where the pinning scans read it.
 	args := curlArgs(name, dest)
-	cmd := exec.CommandContext(ctx, "/usr/bin/curl", args[1:]...)
+	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
 	// Nothing reads standard input, here or anywhere in this package.
 	cmd.Stdin = nil
 	out, err := cmd.CombinedOutput()
@@ -129,7 +150,7 @@ func verifyChecksums(dir string) error {
 	if err == nil {
 		return nil
 	}
-	return fmt.Errorf("%s (%s)", checksumFailureCause(string(out), sums), strings.TrimSpace(redactNewlines(string(out))))
+	return fmt.Errorf("%s (%s)", checksumFailureCause(string(out), sums), flattenOutput(string(out)))
 }
 
 // checksumFailureCause names which of the causes fired, from what shasum said
@@ -143,7 +164,7 @@ func checksumFailureCause(output, sums string) string {
 	case strings.Contains(output, ": FAILED"), strings.Contains(output, "did NOT match"):
 		return causeMismatch
 	case strings.Contains(output, "no properly formatted"):
-		if body, err := os.ReadFile(sums); err == nil && strings.TrimSpace(string(body)) == "" {
+		if body, err := readCapped(sums, maxChecksumsBytes); err == nil && strings.TrimSpace(string(body)) == "" {
 			return causeEmptyChecksums
 		}
 		return causeNotChecksums
@@ -154,10 +175,14 @@ func checksumFailureCause(output, sums string) string {
 	}
 }
 
-// redactNewlines folds a tool's several lines into one, so a failure is one
+// flattenOutput folds a tool's several lines into one, so a failure is one
 // sentence rather than a block with a message wrapped around it.
-func redactNewlines(s string) string {
-	return strings.Join(strings.Fields(strings.ReplaceAll(s, "\n", " ")), " ")
+//
+// It is NOT redaction, and it is named so it cannot be read as any. What the
+// account name is stripped from is the whole report, once, where it is
+// assembled — the rule doctor's own redaction sets, for the reason it set it.
+func flattenOutput(s string) string {
+	return strings.Join(strings.Fields(s), " ")
 }
 
 // unpackArchive extracts the verified archive and clears the quarantine
@@ -196,11 +221,26 @@ func clearQuarantine(bundle string) {
 // somewhere outside the directory that was verified. Only a compromised release
 // can plant one — which is what the checksums are for — and the refusal costs a
 // line and does not depend on that being true.
+// Opened through an os.Root on the bundle, so EVERY component is checked and
+// not only the last one. os.Lstat refuses to follow the final component and
+// follows every one above it, so a bundle carrying `Contents` as a symbolic
+// link would resolve through it and pass — sending the exec exactly where this
+// function says it does not. os.Root is the defence internal/config already
+// uses against the same shape of mistake.
 func checkStagedBundle(bundle string) error {
-	program := filepath.Join(bundle, binaryInBundle)
-	fi, err := os.Lstat(program)
+	root, err := os.OpenRoot(bundle)
 	if err != nil {
-		return fmt.Errorf("the downloaded bundle carries no %s", binaryInBundle)
+		return fmt.Errorf("the downloaded bundle could not be read (%w)", err)
+	}
+	defer root.Close()
+
+	fi, err := root.Lstat(binaryInBundle)
+	if err != nil {
+		// os.Root answers this way for a component that is a symbolic link as
+		// well as for one that is absent, so the two are reported together:
+		// either way there is no program at that path inside this bundle.
+		return fmt.Errorf("the downloaded bundle carries no %s that stays inside it "+
+			"(a missing program, or a symbolic link on the way to it)", binaryInBundle)
 	}
 	if fi.Mode()&os.ModeSymlink != 0 {
 		return fmt.Errorf("the downloaded bundle carries a symbolic link where %s should be", binaryInBundle)
