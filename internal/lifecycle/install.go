@@ -137,13 +137,18 @@ func runInstall(env Env, args []string, ie InstallEnv) int {
 	binary := filepath.Join(ie.Dest, binaryInBundle)
 
 	if ie.Bundle != "" {
-		// A running copy is asked to quit first. Launch Services activates an
+		// A running copy is asked to quit first, and only when there is an
+		// installed bundle to replace. Launch Services activates an
 		// already-running process instead of starting the new binary, so an
 		// upgrade over a live app would report success while the old version
-		// went on serving. A copy that will not quit is a warning: the swap
-		// below replaces the bundle either way.
-		if err := ie.Quit(); err != nil {
-			writeLine(env.Err, "warning: a running copy could not be asked to quit ("+err.Error()+")")
+		// went on serving — but on a first install there is nothing running,
+		// and a warning about a quit that failed would be the first thing a new
+		// user read. A copy that will not quit is a warning either way: the
+		// swap below replaces the bundle regardless.
+		if _, err := os.Lstat(ie.Dest); err == nil {
+			if err := ie.Quit(); err != nil {
+				writeLine(env.Err, "warning: a running copy could not be asked to quit ("+err.Error()+")")
+			}
 		}
 		writeLine(env.Err, stagePlace+": "+abbreviate(ie.Dest, ie.Home))
 		if err := ie.Place(ie.Bundle, ie.Dest); err != nil {

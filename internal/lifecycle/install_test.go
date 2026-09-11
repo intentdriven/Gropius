@@ -167,6 +167,37 @@ func TestInstallSaysWhetherItRepairedOrFoundNothingToDo(t *testing.T) {
 	})
 }
 
+// A running copy is asked to quit only when there is an installed bundle to
+// replace. On a first install there is nothing running to quit, and a warning
+// about a quit that failed would be the first thing a new user read.
+func TestInstallQuitsOnlyWhatItIsAboutToReplace(t *testing.T) {
+	env, ie, _, errOut := installFixture(t)
+	quits := 0
+	ie.Quit = func() error { quits++; return errors.New("Gropius is not running") }
+
+	if code := runInstall(env, nil, ie); code != ExitOK {
+		t.Fatalf("exit = %d, want %d", code, ExitOK)
+	}
+	if quits != 0 {
+		t.Error("a first install asked a copy that is not there to quit")
+	}
+	if strings.Contains(errOut.String(), "could not be asked to quit") {
+		t.Errorf("a first install warned about quitting nothing:\n%s", errOut)
+	}
+
+	// An upgrade over an installed bundle does ask, because Launch Services
+	// activates a running process instead of starting the new binary.
+	env, ie, _, _ = installFixture(t)
+	bundleAt(t, ie.Dest, "installed")
+	ie.Quit = func() error { quits++; return nil }
+	if code := runInstall(env, nil, ie); code != ExitOK {
+		t.Fatalf("exit = %d, want %d", code, ExitOK)
+	}
+	if quits != 1 {
+		t.Errorf("an upgrade asked %d times to quit the running copy, want 1", quits)
+	}
+}
+
 // A partial failure exits non-zero, names the stage and the cause, and names
 // the command that retries it.
 func TestInstallNamesTheStageThatFailedAndHowToRetry(t *testing.T) {
