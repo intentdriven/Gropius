@@ -189,6 +189,12 @@ func TestTheStatusContractIsDocumentedFieldByField(t *testing.T) {
 			t.Errorf("the reference does not name %q, which `gropius status --json` emits", field)
 		}
 	}
+	for _, field := range jsonFieldsOf(lifecycle.ConfigDocument{}) {
+		known[field] = true
+		if !documented[field] {
+			t.Errorf("the reference does not name %q, which `gropius config show --json` emits", field)
+		}
+	}
 	for _, field := range jsonFieldsOf(lifecycle.Report{}, lifecycle.Finding{}) {
 		known[field] = true
 		if !documented[field] {

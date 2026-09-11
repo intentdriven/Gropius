@@ -47,6 +47,7 @@ var verbs = map[string]verbKind{
 	"version":   verbVersion,
 	"status":    verbLifecycle,
 	"doctor":    verbLifecycle,
+	"config":    verbLifecycle,
 	"install":   verbLifecycle,
 	"uninstall": verbLifecycle,
 	"update":    verbLifecycle,

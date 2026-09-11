@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -1412,17 +1413,24 @@ func (c *Control) applySettings(raw []byte) (map[string]any, error) {
 	}
 
 	if err := c.App.SetConfig(incoming); err != nil {
-		return nil, err
+		return nil, refusalNamingWhatChanged(err, current, incoming, raw)
 	}
 	// The file has just been written from the settings in force, repairs and
 	// all, so there is nothing left in it to repair.
 	c.clearNotices()
 	// Host, the bind mode and the port bind the server; decode concurrency and
-	// idle timeout are pool options — all five are consumed only at startup,
-	// and SetConfig cannot apply them live.
+	// idle timeout are pool options; advertising is decided once, when the
+	// Bonjour advert is started at launch — all six are consumed only at
+	// startup, and SetConfig cannot apply any of them live.
+	//
+	// Advertising was missing from this list while the port was in it, and the
+	// two are the same kind of setting (iss-2609091751184914): a script posting
+	// advertise:false was told "saved" while the advert went on answering the
+	// network, with nothing saying the stored value had not reached anything.
 	restart := incoming.Port != current.Port ||
 		incoming.Host != current.Host ||
 		incoming.BindMode != current.BindMode ||
+		incoming.Advertise != current.Advertise ||
 		incoming.DecodeConcurrency != current.DecodeConcurrency ||
 		incoming.IdleTimeoutSec != current.IdleTimeoutSec
 	out := map[string]any{
@@ -1437,6 +1445,162 @@ func (c *Control) applySettings(raw []byte) (map[string]any, error) {
 		out["warning"] = warn
 	}
 	return out, nil
+}
+
+// refusalNamingWhatChanged adds the settings this save would have changed to a
+// refusal.
+//
+// A cross-field rule is refused in the words the RULE is about, and those are
+// not the words the operator touched. Switching the bind from this Mac to the
+// whole network, with the eviction grace already on and no API key stored, is
+// refused with "eviction grace needs an API key on a LAN-exposed server": a
+// sentence about two settings that did not move, silent about the one that
+// did, and it sends the operator to look at the grace. AGENTS.md records that
+// a save refused over a setting nobody touched is a wedge this repository has
+// built three times.
+//
+// The list is computed from the two configurations rather than written beside
+// each rule, so it cannot go stale as the rules change and a rule added later
+// is covered the day it is added. It holds the promise structurally: a refusal
+// always names a field this save changed, or says the save changed nothing —
+// which is the thing most worth knowing, because a save that changed nothing
+// and was refused anyway is the wedge itself.
+//
+// It costs two marshals of a configuration and one unmarshal of the body on
+// the REFUSED path, under settingsMu, which every save queues behind. That is
+// accepted rather than overlooked: the body is already capped at
+// MaxConfigBytes, the work is bounded by the configuration's own size, and a
+// caller who can reach this endpoint can already make a save do more work than
+// this by posting a full settings body. Moving it off the lock would mean
+// restructuring the write path around a function that only runs when a save
+// has already failed.
+func refusalNamingWhatChanged(err error, before, after config.Config, posted []byte) error {
+	changed := changedSettings(before, after, posted)
+	if len(changed) == 0 {
+		return fmt.Errorf("%w (this save changed no setting)", err)
+	}
+	return fmt.Errorf("%w (this save changed %s)", err, strings.Join(changed, ", "))
+}
+
+// changedSettings is the config.json keys whose stored value this save would
+// change, spelled as the file spells them.
+//
+// Compared as encoded values rather than field by field: the keys are what the
+// operator sees in config.json and what the panel posts, and encoding both
+// configurations means a nested settings struct added later is compared
+// without this function being taught about it. A whole nested object is named
+// by its own key — "sampling" rather than "sampling.top_p" — which is as
+// precise as a refusal needs to be about where to look.
+//
+// THE TWO SECRETS ARE NOT COMPARED, and that is the whole of why this function
+// takes the posted body. Comparing them would publish an equality oracle: the
+// control plane is loopback-only and asks nobody for a password, and loopback
+// includes every other account on this Mac, so a caller could post a guessed
+// key beside a value certain to be refused and read the answer — the key named
+// among the changes means the guess was wrong, the key absent means it was
+// right. A secret is therefore reported as changed when the BODY carries it
+// and the caller did not post the redacted placeholder, which tells them only
+// what they themselves sent.
+func changedSettings(before, after config.Config, posted []byte) []string {
+	was, now := encodedSettings(before), encodedSettings(after)
+	// Decoded once, not once per secret: both secrets are always present in
+	// the encoded maps above (neither carries omitempty), so a decode inside
+	// the loop was a decode of the whole body for each of them.
+	var body map[string]json.RawMessage
+	if err := json.Unmarshal(posted, &body); err != nil {
+		body = nil
+	}
+	keys := map[string]bool{}
+	for key := range was {
+		keys[key] = true
+	}
+	for key := range now {
+		keys[key] = true
+	}
+	out := []string{}
+	for key := range keys {
+		if secretSettingKeys[key] {
+			if postedASecret(body, key) {
+				out = append(out, key)
+			}
+			continue
+		}
+		if !bytes.Equal(was[key], now[key]) {
+			out = append(out, key)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// secretSettingKeys are the settings whose value may never be compared with a
+// guess, because the comparison's result is published in a refusal. They are
+// the two redactConfig blanks, and a third secret added to the configuration
+// belongs here the day it is added.
+var secretSettingKeys = map[string]bool{"api_key": true, "hf_token": true}
+
+// postedASecret reports whether this body asks to change the named secret: it
+// carries the key, and what it carries is not the placeholder the panel echoes
+// back for a secret it is leaving alone.
+//
+// EVERY spelling of the field is looked at, and the answer is "yes" if any of
+// them asks for something other than the placeholder. A body carrying both
+// "api_key" and "API_KEY" is one encoding/json folds into a single struct
+// field by a rule of its own, and an earlier version of this returned whichever
+// spelling a map range reached first — so the sentence describing what the save
+// would do changed from request to request while the save itself did not. This
+// over-reports on a body that contradicts itself, which is the safe direction:
+// it can only ever name a field the caller did write, and it never reads what
+// is stored.
+//
+// A null is not a request to store anything. The struct decode leaves the
+// secret exactly as it was, so naming it would describe a change that is not
+// happening.
+//
+// Neither is an empty string, which is what the panel posts for an install
+// that has no key: without this, every refused save on a keyless server said
+// it had changed the API key and the HuggingFace token, which is both untrue
+// and the noisiest possible place to be untrue. The cost is the narrow case of
+// CLEARING a key that was set — a real change this will not name — and the
+// refusal still names everything else the save moved. It is not a comparison:
+// an empty value answers the same way whatever is stored, which is what keeps
+// the oracle shut.
+func postedASecret(body map[string]json.RawMessage, field string) bool {
+	asks := false
+	for key, raw := range body {
+		// Folded, the way encoding/json matched it into the struct.
+		if !strings.EqualFold(key, field) {
+			continue
+		}
+		if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+			continue
+		}
+		var value string
+		if err := json.Unmarshal(raw, &value); err != nil {
+			asks = true // not a string at all, so not the placeholder
+			continue
+		}
+		if value != redacted && value != "" {
+			asks = true
+		}
+	}
+	return asks
+}
+
+// encodedSettings is one configuration as the keys config.json would carry,
+// each still encoded. An unencodable configuration yields nothing, which makes
+// every key read as unchanged: this runs on a refusal that has already been
+// decided, and it must never turn a refusal into something else.
+func encodedSettings(c config.Config) map[string]json.RawMessage {
+	b, err := json.Marshal(c)
+	if err != nil {
+		return nil
+	}
+	var out map[string]json.RawMessage
+	if err := json.Unmarshal(b, &out); err != nil {
+		return nil
+	}
+	return out
 }
 
 // namesModels reports whether the posted body carries a models field at all,

@@ -24,6 +24,13 @@ GitHub release notes.
   instead of nesting inside it. A downloaded bundle whose binary predates the
   verbs refuses the handover with exit 2, and the script reports the version
   mismatch rather than starting anything. The command you type does not change.
+- **Every setting Gropius holds now has a control in the panel or a written
+  exemption, and the build fails on a setting with neither.** The rule is
+  checked in both directions, so a setting removed in Go cannot leave a control
+  behind either. Two settings are exempted deliberately — the `preload` list
+  and `upstream_header_timeout_sec` — and the
+  [getting started page](docs/getting-started.md) now says what each does and
+  how to set it by hand.
 
 ### Added
 
@@ -80,6 +87,40 @@ GitHub release notes.
   none derives a deletion path from the environment, and none elevates but for
   that one firewall panel. ([how to](docs/lifecycle.md),
   [reference](docs/lifecycle-reference.md))
+- **A control for announcing this server on the local network, in Settings.**
+  Whether Gropius announces itself over Bonjour was a setting the panel could
+  only report, on the Posture tab, and only a hand edit of `config.json` could
+  change. It is a switch now, with the notice the save owes it: the advert is
+  started once when Gropius starts, so a change applies at the next start, and
+  the save says so. ([bind address](docs/bind-address.md))
+- **`gropius config show` — the settings in force, read from a terminal.**
+  Every setting Gropius holds, spelled the way `config.json` spells it, so a
+  figure you want to change by hand can be searched for in the file. Settings
+  the file leaves out are reported at their defaults rather than omitted, and
+  the two that carry a default behind a blank are reported as what is in force.
+  Reading only: nothing is written, and the API key and the HuggingFace token
+  are shown as `********` and never as their values. `--json` for a script.
+  ([reference](docs/lifecycle-reference.md))
+
+### Fixed
+
+- **A save that changes whether this server is announced now says a restart is
+  needed.** The Bonjour advert is started once, at launch, so changing the
+  setting changed nothing until the next start — and the save answered
+  "saved" and nothing else. A script switching the announcement off was told it
+  had, while the server went on announcing itself. The port has always said
+  this; announcing now says it too.
+- **A refused save says which settings it would have changed.** A rule that
+  spans two settings is refused in the words of the settings the rule is
+  about, which are not always the ones you touched: widening the bind address
+  with the eviction grace already on and no API key set was refused with a
+  sentence about the grace and the key, and no mention of the bind. Every
+  refusal now names what the save would have changed.
+- **Two Settings fields refused figures the server accepts.** The idle timeout
+  would not take a negative and the batched-requests figure would not go above
+  64, while `config.json` accepted both — so a file holding either could be
+  loaded and then the Settings page could not be saved at all, over a field
+  nobody had touched. Both limits are gone; the guidance is in the labels.
 
 ## [0.5.0] - 2026-09-11
 

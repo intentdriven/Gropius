@@ -34,6 +34,11 @@ type Env struct {
 	Version string
 	Paths   config.Paths
 	Port    int
+	// Config is the settings the server would start from, read the way the
+	// server reads them, so a file that parses and fails validation is
+	// reported rather than refused. SettingsProblem below says what reading it
+	// had to do.
+	Config config.Config
 	// Out carries the verb's answer — the text, or the JSON a caller parses.
 	Out io.Writer
 	// Err carries progress and refusals, so a progress line never lands in the

@@ -240,6 +240,58 @@ directory must be owned by the administrator account (`root`), which is what
 `make install-shared` produces. A folder someone made by hand there is ignored
 and each account falls back to its own data directory.
 
+## 10. Settings that live only in `config.json` (optional)
+
+Almost everything Gropius holds has a control in **Settings**, and a build that
+grows a setting without one fails its own tests. Two are deliberately not
+there. Both are power-tool settings, both are set by hand in `config.json`, and
+both survive every save the panel makes — the panel never writes a setting it
+does not show.
+
+The file is at `~/Library/Application Support/Gropius/config.json`. Edit it
+with Gropius stopped, because the panel writes the whole file when you save and
+the last writer wins. To read what is in force without opening it — the
+secrets are shown as `********` and never as their values:
+
+```sh
+gropius config show
+```
+
+### `preload` — models loaded at startup
+
+A list of model ids loaded as the server starts, so the first request after a
+restart is fast. Best effort: a model that cannot be loaded is skipped and the
+server starts anyway.
+
+```json
+{
+  "preload": ["mlx-community/Qwen3-8B-4bit"]
+}
+```
+
+Preloading is not pinning. A preloaded model is loaded at startup and may still
+be unloaded to make room; a pinned model is protected from the moment something
+loads it. Pinning has a control, under **Settings → Pinned models**.
+
+### `upstream_header_timeout_sec` — how long to wait for a model's first header
+
+How long Gropius waits for a model server to send its first response header
+before giving up, in seconds. Zero — the default — means Gropius works the
+figure out itself from what the model is and what this Mac can do, which is the
+right answer almost always.
+
+```json
+{
+  "upstream_header_timeout_sec": 0
+}
+```
+
+A positive value replaces that derivation for every model. It has no control
+because nobody has established a safe range for it: a box with a number in it
+invites a number being typed, and a figure below what a large model needs to
+warm up turns every first request into a timeout. Set it only if the derived
+wait is wrong for your Mac, and put it back to zero when it is not.
+
 ## Troubleshooting
 
 - **Another machine gets `ERR_EMPTY_RESPONSE` / "didn't send any data", but
@@ -294,8 +346,9 @@ and each account falls back to its own data directory.
   from **My Models → Load**. With the default settings a loaded model stays
   resident forever; an idle timeout in **Settings** unloads it after that many
   seconds without requests, so keep the timeout at 0 (= never unload) if you
-  want it to stay loaded. The `preload` list in `config.json` loads models at
-  startup, so the first request after a restart is fast too.
+  want it to stay loaded. The [`preload` list in
+  `config.json`](#preload--models-loaded-at-startup) loads models at startup,
+  so the first request after a restart is fast too.
 
 ## Uninstalling
 

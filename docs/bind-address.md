@@ -78,8 +78,10 @@ carries this Mac's name rather than the bound address, so a client that resolves
 the name to one of this Mac's other addresses is refused; point such a client at
 the bound address.
 
-Advertising is decided at startup, like the bind. Changing the choice does not
-stop an advert that is already running.
+**Settings → Announce on the network** switches advertising off and on.
+Advertising is decided at startup, like the bind, so a change there applies when
+Gropius next starts and the save says so; it does not stop an advert that is
+already running. The **Posture** tab says what is being announced right now.
 
 ## What `config.json` carries
 

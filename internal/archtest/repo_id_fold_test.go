@@ -37,6 +37,7 @@ var repoIDFoldAllowList = map[string]string{
 	`if gropiusHeaders[strings.ToLower(k)] {`:                                           "an HTTP header name too — the two headers Gropius writes itself, which an upstream may not add a second value to",
 	`if strings.EqualFold(m.Name(), requested) {`:                                       "resolveModel's short-name convenience match, which is a lookup and not a key: the identity path is registry.Get, and this only decides whether a bare model name is unambiguous",
 	`if strings.EqualFold(k, field) {`:                                                  "a settings JSON field name (models) matched the way encoding/json matches struct fields; not a repo id",
+	`if !strings.EqualFold(key, field) {`:                                               "a settings JSON field name (api_key, hf_token) matched the same way, so a refused save can say whether the body asked to change a secret without comparing it with the stored one; not a repo id",
 }
 
 // Every part that keys anything by a repo id must fold it through
