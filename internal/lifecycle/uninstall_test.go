@@ -283,6 +283,40 @@ func TestGropiusRootIsNeverADeletionPath(t *testing.T) {
 	}
 }
 
+// Ownership is read from the filesystem, which is what the decision above rests
+// on. A fixture with two owners cannot be built without root — a test cannot
+// give a file away — so the two halves are tested separately: this one proves
+// the reader reports the truth for a file this account owns, and the pure
+// function below decides what to do with whatever it reports.
+func TestTheOwnerReaderReadsTheFilesystem(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "a-model")
+	writeFileAt(t, path, "ours")
+
+	uid, err := ownerOf(path)
+	if err != nil {
+		t.Fatalf("ownerOf: %v", err)
+	}
+	if uid != os.Getuid() {
+		t.Errorf("ownerOf a file this account just wrote = %d, want %d", uid, os.Getuid())
+	}
+
+	// A symbolic link is read as ITSELF rather than followed: what a link
+	// points at is not what removing the link removes, and a link another
+	// account planted would otherwise report that account's own file's owner.
+	link := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(path, link); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ownerOf(link); err != nil {
+		t.Errorf("ownerOf a symbolic link: %v", err)
+	}
+
+	if _, err := ownerOf(filepath.Join(t.TempDir(), "nothing-here")); err == nil {
+		t.Error("ownerOf reported an owner for a path that does not exist; an unreadable owner must be an error, " +
+			"because the purge treats it as somebody else's")
+	}
+}
+
 // The removal is in-process and acts on fixed locations. This is the pure half
 // of the shared purge: given who owns what, which entries may go.
 func TestOnlyEntriesThisAccountOwnsArePurged(t *testing.T) {
