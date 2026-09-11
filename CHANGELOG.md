@@ -104,7 +104,6 @@ GitHub release notes.
   loaded and then the Settings page could not be saved at all, over a field
   nobody had touched. Both limits are gone; the guidance is in the labels.
 
-
 ## [0.5.0] - 2026-09-11
 
 ### Changed
