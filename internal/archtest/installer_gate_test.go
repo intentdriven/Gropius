@@ -863,6 +863,9 @@ func applicationsListing(t *testing.T) []string {
 	var names []string
 	if entries, err := os.ReadDir("/Applications"); err == nil {
 		for _, e := range entries {
+			if isWritabilityProbe(e.Name()) {
+				continue
+			}
 			names = append(names, e.Name())
 		}
 		sort.Strings(names)
@@ -871,6 +874,40 @@ func applicationsListing(t *testing.T) []string {
 		names = append(names, bundle+" = "+bundleFingerprint(filepath.Join("/Applications", bundle)))
 	}
 	return names
+}
+
+// isWritabilityProbe reports whether a name is the file the lifecycle
+// package's writability probe creates and removes to answer whether this
+// account can write a directory (writableDir in internal/lifecycle/doctor.go).
+// Choosing the install destination asks that of /Applications, and the test
+// that proves the live-environment guard can be opened builds that
+// environment — so on a Mac where /Applications is writable, the probe's file
+// can exist there for the instant this listing is taken, in a package that
+// runs alongside this one. It is not something install.sh writes, and the
+// bundle fingerprints beside the listing are what catch an install; the name
+// is left out of the comparison rather than read as an install
+// (iss-2609120444017291 records the race itself).
+func isWritabilityProbe(name string) bool {
+	return strings.HasPrefix(name, ".doctor-") && strings.HasSuffix(name, ".tmp")
+}
+
+// The listing's one exemption is exactly the probe's name and nothing wider: a
+// bundle, a hidden file of another shape, or the probe's name with either end
+// changed all still count as a change to /Applications.
+func TestTheTripwireExemptsOnlyTheWritabilityProbe(t *testing.T) {
+	for name, probe := range map[string]bool{
+		".doctor-400466334.tmp": true,
+		".doctor-.tmp":          true,
+		"Gropius.app":           false,
+		".localized":            false,
+		".doctor-1.tmp.app":     false,
+		"doctor-1.tmp":          false,
+		".DS_Store":             false,
+	} {
+		if got := isWritabilityProbe(name); got != probe {
+			t.Errorf("isWritabilityProbe(%q) = %v, want %v", name, got, probe)
+		}
+	}
 }
 
 // bundleFingerprint identifies a bundle directory by its modification time and
