@@ -577,6 +577,168 @@ func TestTheInstallerRefusesTheAssetDirectorySeamOutsideCI(t *testing.T) {
 	}
 }
 
+// TestTheInstallerVerifiesTheArchiveItDownloadedIsInTheChecksums holds the
+// scope of the one integrity control in the whole install path.
+//
+// `shasum -c --ignore-missing` answers for the files the checksums file NAMES.
+// Absent names are skipped; names that are present and irrelevant are verified
+// and reported as a pass. Nothing in that invocation asserted that the archive
+// it protects was in scope, so a checksums file naming any other readable file
+// with a correct digest exited 0 with the download never looked at — and the
+// unverified archive went on to be unpacked, have its quarantine cleared and
+// hand its binary the install (iss-2609120417422598, reproduced against this
+// Mac's own /usr/bin/shasum).
+//
+// The bootstrap now takes the same three moves the update verb took
+// (internal/lifecycle/updatefetch.go): the checksums file is narrowed to the
+// archive's OWN line before shasum sees it, --ignore-missing goes with the
+// narrowing, a line naming a PATH is refused rather than matched, and the pass
+// is read line by line rather than as a substring — because
+// "/somewhere/GropiusChat.app.zip: OK" ends in the same characters as the line
+// this script is looking for.
+//
+// Narrowing the input is not making the verdict: the digest is still computed
+// and compared by /usr/bin/shasum, against a real archive, in every case below.
+func TestTheInstallerVerifiesTheArchiveItDownloadedIsInTheChecksums(t *testing.T) {
+	const archive = "GropiusChat.app.zip"
+
+	// THE REPRODUCTION, as the capture recorded it: a checksums file naming one
+	// readable file that is not the download. /dev/null is readable from every
+	// directory and its digest is fixed, which is what made this the cheapest
+	// possible forgery — and it exited 0.
+	t.Run("names another readable file and not the archive", func(t *testing.T) {
+		fx := installerFixture(t)
+		fx.writeChecksums(t, digestOf(t, fx.dir, "/dev/null")+"  /dev/null\n")
+
+		out, err := fx.run(t, "GITHUB_ACTIONS=true")
+		fx.assertRefusedUnverified(t, out, err, archive)
+	})
+
+	// The same hole reached without a readable decoy: a real checksums file for
+	// a real release that simply does not cover THIS download. It failed before
+	// the change too — shasum reports that no file was verified — but it failed
+	// as "corrupt or tampered", which sends a user looking at their network for
+	// a checksums file that is intact and answers about something else.
+	t.Run("names only the other bundle", func(t *testing.T) {
+		fx := installerFixture(t)
+		fx.writeChecksums(t, digestOf(t, fx.dir, "/dev/null")+"  Gropius.app.zip\n")
+
+		out, err := fx.run(t, "GITHUB_ACTIONS=true")
+		fx.assertRefusedUnverified(t, out, err, archive)
+	})
+
+	// A line naming the archive BY A PATH verifies a file that was never
+	// downloaded — here the asset directory's own copy, which is a different
+	// file from the one in the staging directory even when the bytes agree —
+	// and it makes shasum print a success line CONTAINING the one the script
+	// looks for. Both halves are refused: the line is not matched, and the pass
+	// is read line by line.
+	t.Run("names the archive by a path rather than a bare name", func(t *testing.T) {
+		fx := installerFixture(t)
+		byPath := filepath.Join(fx.assets, archive)
+		fx.writeChecksums(t, digestOf(t, fx.dir, byPath)+"  "+byPath+"\n")
+
+		out, err := fx.run(t, "GITHUB_ACTIONS=true")
+		fx.assertRefusedUnverified(t, out, err, archive)
+	})
+
+	// And the two cases that must not move. The fixture's own checksums file is
+	// the honest one: a bare name for the archive, with its real digest.
+	t.Run("names the archive with its own digest", func(t *testing.T) {
+		fx := installerFixture(t)
+
+		out, err := fx.run(t, "GITHUB_ACTIONS=true")
+		if err == nil {
+			t.Fatalf("install.sh succeeded against an asset carrying no bundle:\n%s", out)
+		}
+		if !printedChecksumPass(out) {
+			t.Errorf("install.sh refused a checksums file that names the archive with its own digest; the "+
+				"narrowing must not cost the honest case:\n%s", out)
+		}
+		// Past the verification, which is what a pass has to mean here.
+		if !strings.Contains(out, "did not contain "+strings.TrimSuffix(archive, ".zip")) {
+			t.Errorf("install.sh did not go on to unpack the verified archive:\n%s", out)
+		}
+	})
+
+	t.Run("names the archive with the wrong digest", func(t *testing.T) {
+		fx := installerFixture(t)
+		fx.writeChecksums(t, strings.Repeat("0", 64)+"  "+archive+"\n")
+
+		out, err := fx.run(t, "GITHUB_ACTIONS=true")
+		if err == nil {
+			t.Fatalf("install.sh installed an archive whose digest does not match its line:\n%s", out)
+		}
+		if printedChecksumPass(out) {
+			t.Errorf("install.sh printed a pass for an archive whose digest does not match:\n%s", out)
+		}
+		if !strings.Contains(out, "corrupt or tampered") {
+			t.Errorf("a digest mismatch must still be reported as a mismatch, not as a scope failure:\n%s", out)
+		}
+	})
+}
+
+// assertRefusedUnverified holds what every checksums file that does not cover
+// the download has to produce: a non-zero exit, no "Checksum OK.", a message
+// naming the archive that was not in scope, and nothing unpacked.
+func (fx *fixture) assertRefusedUnverified(t *testing.T, out string, err error, archive string) {
+	t.Helper()
+	if err == nil {
+		t.Fatalf("install.sh exited 0 with %s never verified — the archive was not in the checksums:\n%s", archive, out)
+	}
+	if printedChecksumPass(out) {
+		t.Errorf("install.sh printed a pass although the checksums carry no line for %s; the reassurance is the "+
+			"worst part of this failure:\n%s", archive, out)
+	}
+	if !strings.Contains(out, "no line for "+archive) {
+		t.Errorf("the refusal does not say that the checksums carry no line for %s, so a user cannot tell a "+
+			"substituted checksums file from a corrupt download:\n%s", archive, out)
+	}
+	// The refusal has to precede the unpacking: `ditto -x -k` on an unverified
+	// archive is the first thing that acts on attacker-chosen bytes.
+	if strings.Contains(out, "did not contain ") {
+		t.Errorf("install.sh unpacked an archive it never verified:\n%s", out)
+	}
+}
+
+// printedChecksumPass reports whether install.sh printed its pass — the line
+// "Checksum OK." and nothing else. Read as a LINE and not as a substring,
+// because the script's own warning about the CI seam quotes the same words
+// ("the \"Checksum OK.\" below proves only that the directory is
+// self-consistent"), and a substring match therefore reported every refused run
+// as a pass.
+func printedChecksumPass(out string) bool {
+	for _, line := range strings.Split(out, "\n") {
+		if strings.TrimSpace(line) == "Checksum OK." {
+			return true
+		}
+	}
+	return false
+}
+
+// writeChecksums replaces the asset directory's SHA256SUMS.txt — the file the
+// download is checked against, which `fetch` serves out of the same directory
+// as the download itself under the CI seam.
+func (fx *fixture) writeChecksums(t *testing.T, body string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(fx.assets, "SHA256SUMS.txt"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// digestOf is the hex digest /usr/bin/shasum computes for a file, which is what
+// makes every forged checksums file above internally correct: each one carries
+// a digest that matches the file it names, so what refuses it is the SCOPE and
+// nothing else.
+func digestOf(t *testing.T, dir, path string) string {
+	t.Helper()
+	fields := strings.Fields(runIn(t, dir, "shasum", "-a", "256", path))
+	if len(fields) == 0 {
+		t.Fatalf("shasum said nothing about %s", path)
+	}
+	return fields[0]
+}
+
 // installerFixture builds a local asset directory the installer accepts —
 // a zip that verifies against a SHA256SUMS.txt beside it — plus stubs that
 // record any reach for the network. The zip deliberately carries no .app, so
