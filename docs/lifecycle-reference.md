@@ -252,10 +252,12 @@ What every setting means is on the
   Every other verb answers from state that is already on this Mac: which build
   this is comes from the binary itself. Nothing runs on a timer, nothing checks
   for a release at launch, and Gropius never learns that a Mac is behind.
-- **Nothing else reaches the forge, and the origin cannot be moved.** The
-  release `update` fetches from is fixed in the binary: no environment variable
-  and no flag can point the download, or the checksums that verify it, at
-  anywhere else.
+- **Nothing else reaches the forge, and the address cannot be moved.** The
+  release `update` fetches from is fixed in the binary: nothing Gropius reads —
+  no environment variable, no flag, no setting — changes where the archive or
+  the checksums that verify it are asked for. Your own proxy and certificate
+  settings still apply, exactly as they do to the install command, because the
+  fetch is the same `curl` the installer uses.
 - **No verb is reachable from the control panel.** The HTTP surface cannot see
   the package these verbs live in, so no request arriving on this Mac can drive
   a removal, a replacement or an elevation.

@@ -202,7 +202,12 @@ func runUpdate(env Env, args []string, ue UpdateEnv) int {
 	// the code trying to reach further.
 	if _, err := os.Lstat(ue.Dest); err == nil {
 		if err := ue.Quit(); err != nil {
-			writeLine(env.Err, "warning: a running copy could not be asked to quit ("+err.Error()+")")
+			// Redacted like every sibling: the rule this repository adopted
+			// after the last leak is that the path arrives INSIDE a sentence
+			// somebody else wrote, so the rule is applied everywhere rather
+			// than where a leak has been demonstrated.
+			writeLine(env.Err, "warning: a running copy could not be asked to quit ("+
+				redact(err.Error(), ue.Home)+")")
 		}
 	}
 
@@ -283,6 +288,12 @@ func finishUpdate(ue UpdateEnv, r *updateReport) {
 			r.ServingReason = servingReasonUnanswered
 		case version == "":
 			r.ServingReason = servingReasonNoField
+		case !plausibleVersion.MatchString(version):
+			// Checked HERE, where it becomes a fact, rather than at the seam
+			// that read it: every path into this report — the live control
+			// plane, and any seam a test or a future caller puts in its place —
+			// goes through this switch.
+			r.ServingReason = servingReasonUnreadable
 		default:
 			r.Serving = version
 		}

@@ -26,12 +26,28 @@ import (
 // WHY THERE IS NO ASSET-DIRECTORY SEAM. The bootstrap has one, refused outside
 // CI, because the release workflow has to run the installer against artefacts
 // it has just built. A verb a person types on a Mac has no CI case at all, so
-// the origin is a constant in this file: no environment variable and no flag
-// can point the download, or the checksums that verify it, at anywhere else. A
-// caller who could set one variable would otherwise substitute the whole
-// integrity control silently, because the checksums would be read from the same
-// place as the bundle and the verification would prove only that a directory is
-// self-consistent.
+// the URL is a constant in this file: nothing Gropius reads — no environment
+// variable, no flag, no setting — changes where the archive or the checksums
+// that verify it are asked for. A caller who could set one variable would
+// otherwise substitute the whole integrity control silently, because the
+// checksums would be read from the same place as the bundle and the
+// verification would prove only that a directory is self-consistent.
+//
+// WHAT THAT DOES NOT COVER, measured rather than assumed. `-q` suppresses
+// .curlrc and nothing else, and this process's environment is inherited: curl
+// still honours https_proxy/ALL_PROXY (verified: "Uses proxy env variable
+// https_proxy") and CURL_CA_BUNDLE/SSL_CERT_FILE (verified: curl exits 77 on a
+// CA file that does not exist). So the operator's own proxy and trust
+// configuration still apply to this fetch.
+//
+// That is deliberate rather than overlooked. The bootstrap honours the same
+// variables, so refusing them here would make the verb fail on the machines
+// where the documented install works — a corporate proxy is the ordinary case,
+// not the attack. And it costs nothing against the adversary this package is
+// written for, which is ANOTHER ACCOUNT on this Mac (see elevate.go): that
+// account cannot set this account's environment, and anything that can set it
+// can replace ~/.local/bin/gropius outright. The claim is therefore about what
+// Gropius reads, and it is written that way rather than as a claim about curl.
 
 // The release, and the two assets an update reads from it.
 const (
@@ -356,8 +372,14 @@ func checkStagedBundle(bundle string) error {
 }
 
 // versionLine is how a build spells its own version: the word this command is
-// called by, and then the build.
+// called by, and then the build. Anchored and without (?m) or (?s), so the
+// whole of what came back must be one line.
 var versionLine = regexp.MustCompile(`^gropius\s+(\S+)$`)
+
+// maxVersionBytes caps what the downloaded build may say about itself. The
+// answer is one short line; the timeout bounds how long a hostile build can
+// take, and this bounds how much it can send.
+const maxVersionBytes = 4 << 10
 
 // stagedVersion is the version being installed, read by running the staged
 // build's OWN version verb inside the directory that was just verified.
@@ -372,7 +394,27 @@ func stagedVersion(program string) (string, error) {
 	defer cancel()
 	cmd := exec.CommandContext(ctx, program, "version")
 	cmd.Stdin = nil
-	out, err := cmd.Output()
+	// Run it INSIDE the directory that was verified, which is the rule this
+	// whole step is written under, and hand it nothing of this process's own
+	// environment: it is a binary that arrived over the network a moment ago
+	// and has not been installed.
+	cmd.Dir = filepath.Dir(program)
+	cmd.Env = []string{}
+	// Capped. The timeout bounds how LONG a hostile build can take and says
+	// nothing about how much it can send, and this read happens before
+	// anything about that build has been established.
+	var buf strings.Builder
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return "", err
+	}
+	if err := cmd.Start(); err != nil {
+		return "", fmt.Errorf("the downloaded build could not be run (%w)", err)
+	}
+	_, _ = io.Copy(&buf, io.LimitReader(stdout, maxVersionBytes))
+	_, _ = io.Copy(io.Discard, stdout)
+	err = cmd.Wait()
+	out := []byte(buf.String())
 	if ctx.Err() != nil {
 		return "", fmt.Errorf("the downloaded build did not answer its own version verb within %s", versionTimeout)
 	}

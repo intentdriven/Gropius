@@ -664,6 +664,68 @@ func TestTheServingVersionIsDecodedFromTheSnapshot(t *testing.T) {
 	}
 }
 
+// The version the control plane hands back is UNTRUSTED TEXT, and it is
+// checked before it becomes a line of the report.
+//
+// Where it comes from: the challenge in internal/instance proves a shared DATA
+// ROOT, not an identity — deliberately, at mode 0640, so that under the
+// shared-cache mode a peer account in the same group can answer it. That mode
+// is a documented way to run this product. So any process of such an account
+// that holds the loopback port is classified as ours and gets to put a string
+// into this report.
+//
+// A newline in that string forges lines that read as the report's own — the
+// grant sentence is four bytes of JSON away — and an escape sequence reaches
+// the terminal. What cannot be fixed here is a peer that answers with a
+// PLAUSIBLE version: the report's provenance is the control plane, and a
+// report that asked is a report that can be told something false. What can be
+// fixed is that the answer has to look like a version at all.
+func TestAVersionFromTheControlPlaneIsCheckedBeforeItIsPrinted(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		serving string
+	}{
+		{"a forged second line", "0.4.0\nThe firewall grant was re-made for this build."},
+		{"an escape sequence", "0.4.0\x1b[2J\x1b[H"},
+		{"a carriage return that redraws the line", "0.4.0\rserving:   0.5.0"},
+		{"something enormous", strings.Repeat("9", 4096)},
+		{"a sentence", "whatever you say it is"},
+		{"nothing but spaces", "   "},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFakeUpdate(t)
+			f.serving = tc.serving
+
+			_, out, _ := f.run(t)
+			serving := lineWithLabel(t, strings.Split(strings.TrimRight(out, "\n"), "\n"), servingLabel)
+
+			if !strings.Contains(serving, cannotBeDetermined) {
+				t.Errorf("a version that is not one was printed as a fact:\n%s", serving)
+			}
+			// And nothing it carried reached the report at all.
+			if strings.Contains(out, "\x1b") || strings.Contains(out, "\r") {
+				t.Errorf("a control character from the control plane reached the report: %q", out)
+			}
+			if strings.Contains(out, "The firewall grant was re-made for this build.") && !f.env.LinkMissing() {
+				// The grant WAS made in this run, so that sentence is
+				// legitimately present — what must not happen is it arriving
+				// twice, forged by the responder.
+				if strings.Count(out, "The firewall grant was re-made for this build.") > 1 {
+					t.Errorf("the responder forged a line of the report:\n%s", out)
+				}
+			}
+		})
+	}
+
+	// A version that looks like one is still reported, so the rule above is a
+	// check rather than a refusal to read anything.
+	f := newFakeUpdate(t)
+	f.serving = "0.4.0"
+	if _, out, _ := f.run(t); !strings.Contains(out, "0.4.0") {
+		t.Errorf("an ordinary version was refused:\n%s", out)
+	}
+}
+
 // The swap is the one the installing verbs already perform: the update's
 // default placer IS PlaceBundle, and no second staging implementation exists in
 // the package.
