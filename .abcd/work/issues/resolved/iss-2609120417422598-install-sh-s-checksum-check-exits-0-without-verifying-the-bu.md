@@ -9,6 +9,10 @@ found_during: "adversarial security review of spc-2609111812370705, the update v
 origin: researcher-authored
 production_mode: hand-written
 found_at: "install.sh"
+resolution: "install.sh now narrows SHA256SUMS.txt to the archive's own line before /usr/bin/shasum sees it, drops --ignore-missing with the narrowing, refuses a line naming a path, and reads the pass line by line — the same three moves the update verb took in d7e31ab (internal/lifecycle/updatefetch.go). Held by TestTheInstallerVerifiesTheArchiveItDownloadedIsInTheChecksums, five rows against the real script and a real /usr/bin/shasum: the capture's own /dev/null reproduction and a line naming the archive by a path both exited 0 with the download unpacked before the change, and both are refused after it; the honest bare-name line still passes and a wrong digest still fails as a mismatch. Test cb21caf, fix 9ecd1ad; TestTheInstallerVerifiesBeforeItHandsOver re-anchored off the removed flag."
+impact: fix
+resolved_by:
+  commit: "9ecd1ad"
 ---
 
 install.sh's checksum check exits 0 without verifying the bundle when SHA256SUMS.txt names any other readable file
@@ -69,3 +73,7 @@ looking at with the change.
 Not fixed here: the update verb's lane is the Go verb, and changing the
 bootstrap touches the release gate that runs it. It is written down as its own
 change so it is not assumed closed by a verb that fixed the same bug elsewhere.
+
+## Grounds
+
+- pursued: the bootstrap and the update verb now make the same assertion about scope, so a checksums file that does not cover the download refuses in both; it would be shown wrong by any path that reaches shasum without the narrowing, or by a release whose SHA256SUMS.txt names its assets other than by bare name
