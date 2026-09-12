@@ -553,12 +553,17 @@ func TestTheUpdateFailsClosedOnEveryBadDownload(t *testing.T) {
 			wantCause: causeMismatch,
 		},
 		{
-			name: "a checksums file naming no downloaded file",
+			// A real checksums file, from a real release, that simply does
+			// not cover the archive this command downloaded. Once the
+			// verification is scoped to the archive's own line, this and "the
+			// checksums name nothing that was downloaded" are the same thing
+			// to have found, and it is named as the thing that matters.
+			name: "a checksums file that does not cover the archive",
 			assets: map[string][]byte{
 				updateArchiveName: good,
 				checksumsName:     sums(digestOf(t, "GropiusChat.app.zip", good)),
 			},
-			wantCause: causeNamesNothing,
+			wantCause: causeArchiveNotCovered,
 		},
 		{
 			name: "an empty checksums file",

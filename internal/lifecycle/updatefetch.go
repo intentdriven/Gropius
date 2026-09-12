@@ -58,6 +58,8 @@ const (
 	causeNotChecksums   = "what arrived where the checksums were asked for is not a checksums file"
 	causeMismatch       = "the download does not match the checksums published with the release"
 	causeNamesNothing   = "the checksums file names no file that was downloaded"
+	// causeArchiveNotCovered is the one that used to pass.
+	causeArchiveNotCovered = "the checksums file carries no line for " + updateArchiveName
 )
 
 // maxChecksumsBytes caps what is read back from the checksums file. The real
@@ -132,43 +134,145 @@ func fetchAsset(name, dest string) error {
 // second integrity control, and a worse one.
 func verifyChecksums(dir string) error {
 	sums := filepath.Join(dir, checksumsName)
-	if _, err := os.Stat(sums); err != nil {
+	body, err := readCapped(sums, maxChecksumsBytes)
+	if err != nil {
 		return fmt.Errorf("%s: the release did not serve one, or it could not be written", causeNoChecksums)
 	}
 
+	// THE SCOPE, decided here and not by shasum.
+	//
+	// `shasum -c` answers for the files the checksums file NAMES. With
+	// --ignore-missing, names that are absent are skipped and names that are
+	// present and irrelevant are verified and reported as a pass — so a
+	// checksums file naming any readable file with known content (a system
+	// file, /dev/null) exited 0 with the archive never looked at, and the
+	// unverified download went on to be unpacked, executed to read its version,
+	// and installed. The one integrity control in the path had no assertion
+	// that the artefact it protects was in scope.
+	//
+	// So the file is narrowed to the line for THIS archive before shasum sees
+	// it, and --ignore-missing goes with the narrowing: there is then exactly
+	// one name, it is the file just downloaded, and a pass is a statement about
+	// that file. Narrowing the input is not making the verdict — the digest is
+	// still computed and compared by shasum, which stays the only thing in this
+	// product that decides whether bytes match.
+	line, ok := checksumLineFor(string(body), updateArchiveName)
+	if !ok {
+		return fmt.Errorf("%s (%s)", checksumScopeCause(string(body)), flattenOutput(string(body)))
+	}
+	scoped := filepath.Join(dir, scopedChecksumsName)
+	if err := os.WriteFile(scoped, []byte(line+"\n"), 0o600); err != nil {
+		return fmt.Errorf("the checksums could not be prepared for verification: %w", err)
+	}
+	defer os.Remove(scoped)
+
 	ctx, cancel := context.WithTimeout(context.Background(), verifyTimeout)
 	defer cancel()
-	// --ignore-missing skips the lines for the other assets of the same
-	// release, which is why the file can name every one of them.
-	cmd := exec.CommandContext(ctx, "/usr/bin/shasum", "-a", "256", "-c", "--ignore-missing", checksumsName)
+	cmd := exec.CommandContext(ctx, "/usr/bin/shasum", "-a", "256", "-c", scopedChecksumsName)
 	cmd.Dir = dir
 	cmd.Stdin = nil
 	out, err := cmd.CombinedOutput()
 	if ctx.Err() != nil {
 		return fmt.Errorf("/usr/bin/shasum did not answer within %s", verifyTimeout)
 	}
-	if err == nil {
-		return nil
+	if err != nil {
+		return fmt.Errorf("%s (%s)", checksumFailureCause(string(out)), flattenOutput(string(out)))
 	}
-	return fmt.Errorf("%s (%s)", checksumFailureCause(string(out), sums), flattenOutput(string(out)))
+	// And the pass is read as a pass for THAT file, by its own line, rather
+	// than by an exit code that means "nothing I was told about was wrong".
+	if !hasSuccessLine(string(out), updateArchiveName) {
+		return fmt.Errorf("%s (%s)", causeArchiveNotCovered, flattenOutput(string(out)))
+	}
+	return nil
 }
 
-// checksumFailureCause names which of the causes fired, from what shasum said
-// and — only to tell an empty file from a page that is not a checksums file at
-// all — from the file itself.
-func checksumFailureCause(output, sums string) string {
+// scopedChecksumsName is the one-line file shasum is actually pointed at. It
+// sits in the same staging directory, which nothing else can write.
+const scopedChecksumsName = ".gropius-update-checksum"
+
+// checksumLineFor finds the checksums line for exactly one file name.
+//
+// A line is `<digest><separator><name>`, where the separator is two spaces for
+// a text-mode digest and " *" for a binary one. The name must be exactly the
+// archive: a line naming a PATH is refused rather than matched, because
+// "/somewhere/Gropius.app.zip" would otherwise verify a file this command never
+// downloaded — and would make shasum print a success line that CONTAINS the
+// archive's own.
+func checksumLineFor(body, name string) (string, bool) {
+	for _, line := range strings.Split(body, "\n") {
+		line = strings.TrimRight(line, "\r")
+		digest, rest, ok := strings.Cut(line, " ")
+		if !ok || !isHexDigest(digest) {
+			continue
+		}
+		if strings.TrimPrefix(strings.TrimPrefix(rest, " "), "*") == name {
+			return line, true
+		}
+	}
+	return "", false
+}
+
+// hasSuccessLine reports whether shasum said this exact file was OK. Compared
+// line by line rather than as a substring: a checksums file naming
+// "/somewhere/Gropius.app.zip" produces a line ending in the same eighteen
+// characters.
+func hasSuccessLine(out, name string) bool {
+	for _, line := range strings.Split(out, "\n") {
+		if strings.TrimSpace(line) == name+": OK" {
+			return true
+		}
+	}
+	return false
+}
+
+func isHexDigest(s string) bool {
+	if len(s) != 64 {
+		return false
+	}
+	for _, c := range s {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') && (c < 'A' || c > 'F') {
+			return false
+		}
+	}
+	return true
+}
+
+// checksumScopeCause says why no line for the archive was found: an empty file,
+// something that is not a checksums file at all, or a real checksums file that
+// simply does not cover what was downloaded.
+func checksumScopeCause(body string) string {
+	switch {
+	case strings.TrimSpace(body) == "":
+		return causeEmptyChecksums
+	case !hasAnyChecksumLine(body):
+		return causeNotChecksums
+	default:
+		return causeArchiveNotCovered
+	}
+}
+
+func hasAnyChecksumLine(body string) bool {
+	for _, line := range strings.Split(body, "\n") {
+		if digest, _, ok := strings.Cut(strings.TrimRight(line, "\r"), " "); ok && isHexDigest(digest) {
+			return true
+		}
+	}
+	return false
+}
+
+// checksumFailureCause names which of the causes fired, from what shasum said.
+//
+// By the time this is reached the file it was pointed at holds exactly one
+// line, for exactly the archive, so the shapes it can report are narrow: the
+// digests differ, or the file it names is not readable.
+func checksumFailureCause(output string) string {
 	switch {
 	// Checked first: a mismatch ALSO reports that no file was verified, so
 	// reading that line first would report every corrupt download as a
 	// checksums file naming nothing.
 	case strings.Contains(output, ": FAILED"), strings.Contains(output, "did NOT match"):
 		return causeMismatch
-	case strings.Contains(output, "no properly formatted"):
-		if body, err := readCapped(sums, maxChecksumsBytes); err == nil && strings.TrimSpace(string(body)) == "" {
-			return causeEmptyChecksums
-		}
-		return causeNotChecksums
-	case strings.Contains(output, "no file was verified"):
+	case strings.Contains(output, "no file was verified"), strings.Contains(output, "No such file"):
 		return causeNamesNothing
 	default:
 		return "the download could not be verified against the checksums published with the release"
