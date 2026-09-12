@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -92,6 +93,18 @@ func digestOf(t *testing.T, name string, body []byte) string {
 	return hex.EncodeToString(sum[:]) + "  " + name
 }
 
+// And the positive control has to keep passing while the rows above are
+// refused, so the release's real shape is spelled once: the checksums file
+// names every asset of the release, and --ignore-missing is what lets it.
+func releaseSums(t *testing.T, archive []byte) []byte {
+	t.Helper()
+	return sums(
+		digestOf(t, updateArchiveName, archive),
+		digestOf(t, "GropiusChat.app.zip", []byte("the client bundle, which this verb never downloads")),
+		digestOf(t, "SHA256SUMS.txt", []byte("the release names this too on some runs")),
+	)
+}
+
 // Every bad input fails closed, and the failure says which of them it was.
 //
 // The four the intent names, plus the checksums file that never arrived at all.
@@ -125,12 +138,17 @@ func TestTheChecksumVerificationFailsClosedOnEveryBadInput(t *testing.T) {
 			wantCause: causeMismatch,
 		},
 		{
-			name: "a checksums file naming no downloaded file",
+			// A real checksums file, from a real release, that simply does
+			// not cover the archive this command downloaded. Once the
+			// verification is scoped to the archive's own line, this and "the
+			// checksums name nothing that was downloaded" are the same thing
+			// to have found, and it is named as the thing that matters.
+			name: "a checksums file that does not cover the archive",
 			assets: map[string][]byte{
 				updateArchiveName: good,
 				checksumsName:     sums(digestOf(t, "GropiusChat.app.zip", good)),
 			},
-			wantCause: causeNamesNothing,
+			wantCause: causeArchiveNotCovered,
 		},
 		{
 			name: "an empty checksums file",
@@ -153,6 +171,37 @@ func TestTheChecksumVerificationFailsClosedOnEveryBadInput(t *testing.T) {
 			assets:    map[string][]byte{updateArchiveName: good},
 			skipSums:  true,
 			wantCause: causeNoChecksums,
+		},
+		{
+			// THE ONE THAT EXITED ZERO. `shasum -c --ignore-missing` answers
+			// for the files the checksums file NAMES: names that are absent are
+			// skipped, and names that are present and irrelevant are verified
+			// and reported as a pass. A checksums file naming any file with
+			// known content — a system file, /dev/null — therefore verified
+			// successfully while the archive was never looked at, and the
+			// unverified download went on to be unpacked, executed to read its
+			// version, and installed.
+			//
+			// Nothing in the invocation asserted that the artefact it protects
+			// was in scope. That assertion is what this row is.
+			name: "a checksums file naming only a file that is not the archive",
+			assets: map[string][]byte{
+				updateArchiveName: []byte("hostile archive content, not the release"),
+				checksumsName:     sums(digestOf(t, "/dev/null", nil)),
+			},
+			wantCause: causeArchiveNotCovered,
+		},
+		{
+			// And the same trick spelled so that a substring check would be
+			// fooled: shasum would print "/somewhere/Gropius.app.zip: OK",
+			// which CONTAINS the archive's own success line. A checksums file
+			// has no business naming a path at all.
+			name: "a checksums file naming the archive somewhere else on the disk",
+			assets: map[string][]byte{
+				updateArchiveName: []byte("hostile archive content, not the release"),
+				checksumsName:     sums(digestOf(t, "/dev/null", nil), "deadbeef  /somewhere/"+updateArchiveName),
+			},
+			wantCause: causeArchiveNotCovered,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -184,7 +233,7 @@ func TestTheChecksumVerificationFailsClosedOnEveryBadInput(t *testing.T) {
 	t.Run("what the release published verifies", func(t *testing.T) {
 		release := newFakeRelease(t, map[string][]byte{
 			updateArchiveName: good,
-			checksumsName:     sums(digestOf(t, updateArchiveName, good), digestOf(t, "GropiusChat.app.zip", good)),
+			checksumsName:     releaseSums(t, good),
 		})
 		dir := t.TempDir()
 		for _, name := range []string{updateArchiveName, checksumsName} {
@@ -339,6 +388,52 @@ func TestTheInstalledVersionIsReadFromTheStagedBuild(t *testing.T) {
 		program := writeFakeProgram(t, "#!/bin/sh\necho 'gropius: unknown argument \"version\"' >&2\nexit 2\n")
 		if _, err := stagedVersion(program); err == nil {
 			t.Error("a build that refused the version verb was read as a version")
+		}
+	})
+}
+
+// The staged build is run the way the bootstrap runs it: inside the directory
+// that was verified, with nothing of this process's environment, and with a
+// bound on what it may say. Each row is a behaviour the exec was hardened to
+// have, held by a program that would give itself away without it.
+func TestTheStagedBuildIsRunIsolatedAndItsAnswerIsBounded(t *testing.T) {
+	// A version verb sees none of this process's environment. The probe is a
+	// variable set here and read by the build; a clean environment leaves the
+	// fallback, and a leaked one puts the variable's value into the report.
+	t.Run("the build sees nothing of this process's environment", func(t *testing.T) {
+		t.Setenv("GROPIUS_TEST_LEAK", "leaked")
+		program := writeFakeProgram(t, "#!/bin/sh\necho \"gropius ${GROPIUS_TEST_LEAK:-clean}\"\n")
+		got, err := stagedVersion(program)
+		if err != nil {
+			t.Fatalf("stagedVersion: %v", err)
+		}
+		if got != "clean" {
+			t.Errorf("stagedVersion = %q; the build was handed this process's environment", got)
+		}
+	})
+
+	// The verb runs inside the verified directory, which is the directory the
+	// program is in and never the caller's working directory.
+	t.Run("the build runs inside the verified directory", func(t *testing.T) {
+		program := writeFakeProgram(t, "#!/bin/sh\necho \"gropius $(/usr/bin/basename \"$PWD\")\"\n")
+		got, err := stagedVersion(program)
+		if err != nil {
+			t.Fatalf("stagedVersion: %v", err)
+		}
+		if want := filepath.Base(filepath.Dir(program)); got != want {
+			t.Errorf("the build ran in a directory named %q, want the verified one %q", got, want)
+		}
+	})
+
+	// What the build says is read up to the cap and no further. A build that
+	// pads its answer past the cap has put the answer where this command does
+	// not read, so it is a build that did not answer — and the padding is not
+	// buffered on its way to being ignored.
+	t.Run("the answer is read only up to the cap", func(t *testing.T) {
+		program := writeFakeProgram(t, "#!/bin/sh\n/usr/bin/head -c "+strconv.Itoa(maxVersionBytes+64)+
+			" /dev/zero | /usr/bin/tr '\\0' ' '\necho \"gropius 0.5.0\"\n")
+		if got, err := stagedVersion(program); err == nil {
+			t.Errorf("stagedVersion = %q; an answer beyond the cap was read", got)
 		}
 	})
 }

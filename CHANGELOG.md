@@ -102,6 +102,25 @@ GitHub release notes.
   are shown as `********` and never as their values. `--json` for a script.
   ([reference](docs/lifecycle-reference.md))
 
+### Security
+
+- **The checksum check now proves the archive it downloaded was checked.**
+  Both the one-line installer and `gropius update` verified whatever files the
+  published checksums file named, and accepted a pass for any of them: a
+  checksums file naming some other readable file with a correct digest, and
+  no line for the archive at all, passed the download through unverified. Each
+  now narrows the checksums to the archive's own line before it is verified,
+  refuses a line that names a path, and requires the pass to be reported for
+  that exact name; a checksums file with no line for the archive stops the
+  install and says so.
+- **`gropius update` no longer prints what the running server hands it.** The
+  version the control plane reported was written straight into the report, so
+  a server returning a line break could forge a second report line and a
+  control character reached the terminal. The value is now checked as a
+  version string before it is shown, the control-plane read follows no
+  redirect, and the staged binary's version query runs in the verified
+  directory with an empty environment and a bounded read.
+
 ### Fixed
 
 - **A save that changes whether this server is announced now says a restart is

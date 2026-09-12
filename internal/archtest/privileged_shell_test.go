@@ -467,9 +467,23 @@ func TestTheInstallerVerifiesBeforeItHandsOver(t *testing.T) {
 	root := repoRootDir(t)
 	src := readRepoFile(t, root, "install.sh")
 
-	verify := strings.Index(src, "/usr/bin/shasum -a 256 -c --ignore-missing")
+	// The invocation no longer carries --ignore-missing: the checksums file is
+	// narrowed to the archive's own line before shasum sees it, and the flag
+	// went with the narrowing (iss-2609120417422598). What this index has to
+	// find is the verification, not the flag it used to be spelled with.
+	verify := strings.Index(src, "/usr/bin/shasum -a 256 -c ")
 	if verify < 0 {
 		t.Fatal("install.sh no longer verifies the download against the published checksums")
+	}
+	// Comments are skipped: the script EXPLAINS the flag it used to carry, at
+	// length, and that prose is the record of why it is gone.
+	for i, line := range strings.Split(src, "\n") {
+		code, _, _ := strings.Cut(line, "#")
+		if strings.Contains(code, "--ignore-missing") {
+			t.Errorf("install.sh:%d verifies with --ignore-missing again: it makes shasum answer for whatever "+
+				"the checksums file names, so a file naming any other readable file passes with the download "+
+				"never looked at (iss-2609120417422598)", i+1)
+		}
 	}
 	handover := strings.Index(src, `handover=("$VERIFIED_BIN" install --bundle`)
 	if handover < 0 {

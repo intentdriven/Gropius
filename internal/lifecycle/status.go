@@ -187,7 +187,14 @@ func fetchState(port int) (ServerState, error) {
 // capped, so a wedged or hostile responder on the port cannot make a terminal
 // command read forever.
 func controlPlaneGet(port int, path string) ([]byte, error) {
-	c := &http.Client{Timeout: 2 * time.Second}
+	c := &http.Client{
+		Timeout: 2 * time.Second,
+		// Loopback is a property of the REQUEST, and a redirect is how a
+		// request stops being the request that was made. The responder on the
+		// port is whatever holds it, so without this a terminal command could
+		// be pointed at any host on the network by a 302.
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}
 	resp, err := c.Get("http://127.0.0.1:" + strconv.Itoa(port) + path)
 	if err != nil {
 		return nil, err

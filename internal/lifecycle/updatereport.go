@@ -1,9 +1,27 @@
 package lifecycle
 
 import (
+	"regexp"
 	"strconv"
 	"strings"
 )
+
+// plausibleVersion is the shape a build's own version may take before this
+// product will print it as a fact.
+//
+// IT IS A CHECK ON UNTRUSTED TEXT, not a formatting preference. The version on
+// the serving line arrives from whatever holds the loopback port, and the
+// challenge that let it in proves a shared DATA ROOT rather than an identity —
+// deliberately, at mode 0640, so that a peer account can answer it under the
+// shared-cache mode this product documents. So a string from there is a string
+// a peer account chose: a newline in it forges lines that read as the report's
+// own, and an escape sequence reaches the terminal.
+//
+// What this cannot check is whether a plausible version is a TRUE one. The
+// report's provenance for that line is the control plane, and a report that
+// asks is a report that can be told something false; what it must not do is
+// let the answer stop being a version at all.
+var plausibleVersion = regexp.MustCompile(`^[0-9A-Za-z][0-9A-Za-z.+_-]{0,63}$`)
 
 // What an update says when it is over, as a value and a pure rendering of it.
 //
@@ -101,6 +119,7 @@ const (
 	servingReasonSilent      = "something holds the port and answered no identity challenge"
 	servingReasonUnproven    = "something holds the port and answered the identity challenge wrongly"
 	servingReasonIdle        = "nothing is serving on this Mac"
+	servingReasonUnreadable  = "the running server answered with something that is not a version"
 	installedReasonNoVersion = "the downloaded build did not answer its own version verb"
 )
 
