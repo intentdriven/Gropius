@@ -202,10 +202,10 @@ func runUpdate(env Env, args []string, ue UpdateEnv) int {
 	// the code trying to reach further.
 	if _, err := os.Lstat(ue.Dest); err == nil {
 		if err := ue.Quit(); err != nil {
-			// Redacted like every sibling: the rule this repository adopted
-			// after the last leak is that the path arrives INSIDE a sentence
-			// somebody else wrote, so the rule is applied everywhere rather
-			// than where a leak has been demonstrated.
+			// Redacted: the path arrives INSIDE a sentence somebody else
+			// wrote, so the error text is passed through redact the way the
+			// swap-failure line is. The install verb's warnings do not yet do
+			// this (iss-2609120438396694); this line does.
 			writeLine(env.Err, "warning: a running copy could not be asked to quit ("+
 				redact(err.Error(), ue.Home)+")")
 		}

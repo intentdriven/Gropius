@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -387,6 +388,52 @@ func TestTheInstalledVersionIsReadFromTheStagedBuild(t *testing.T) {
 		program := writeFakeProgram(t, "#!/bin/sh\necho 'gropius: unknown argument \"version\"' >&2\nexit 2\n")
 		if _, err := stagedVersion(program); err == nil {
 			t.Error("a build that refused the version verb was read as a version")
+		}
+	})
+}
+
+// The staged build is run the way the bootstrap runs it: inside the directory
+// that was verified, with nothing of this process's environment, and with a
+// bound on what it may say. Each row is a behaviour the exec was hardened to
+// have, held by a program that would give itself away without it.
+func TestTheStagedBuildIsRunIsolatedAndItsAnswerIsBounded(t *testing.T) {
+	// A version verb sees none of this process's environment. The probe is a
+	// variable set here and read by the build; a clean environment leaves the
+	// fallback, and a leaked one puts the variable's value into the report.
+	t.Run("the build sees nothing of this process's environment", func(t *testing.T) {
+		t.Setenv("GROPIUS_TEST_LEAK", "leaked")
+		program := writeFakeProgram(t, "#!/bin/sh\necho \"gropius ${GROPIUS_TEST_LEAK:-clean}\"\n")
+		got, err := stagedVersion(program)
+		if err != nil {
+			t.Fatalf("stagedVersion: %v", err)
+		}
+		if got != "clean" {
+			t.Errorf("stagedVersion = %q; the build was handed this process's environment", got)
+		}
+	})
+
+	// The verb runs inside the verified directory, which is the directory the
+	// program is in and never the caller's working directory.
+	t.Run("the build runs inside the verified directory", func(t *testing.T) {
+		program := writeFakeProgram(t, "#!/bin/sh\necho \"gropius $(/usr/bin/basename \"$PWD\")\"\n")
+		got, err := stagedVersion(program)
+		if err != nil {
+			t.Fatalf("stagedVersion: %v", err)
+		}
+		if want := filepath.Base(filepath.Dir(program)); got != want {
+			t.Errorf("the build ran in a directory named %q, want the verified one %q", got, want)
+		}
+	})
+
+	// What the build says is read up to the cap and no further. A build that
+	// pads its answer past the cap has put the answer where this command does
+	// not read, so it is a build that did not answer — and the padding is not
+	// buffered on its way to being ignored.
+	t.Run("the answer is read only up to the cap", func(t *testing.T) {
+		program := writeFakeProgram(t, "#!/bin/sh\n/usr/bin/head -c "+strconv.Itoa(maxVersionBytes+64)+
+			" /dev/zero | /usr/bin/tr '\\0' ' '\necho \"gropius 0.5.0\"\n")
+		if got, err := stagedVersion(program); err == nil {
+			t.Errorf("stagedVersion = %q; an answer beyond the cap was read", got)
 		}
 	})
 }

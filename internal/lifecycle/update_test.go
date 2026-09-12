@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -661,6 +662,28 @@ func TestTheServingVersionIsDecodedFromTheSnapshot(t *testing.T) {
 	// than a build with no field, and the report says which.
 	if _, err := fetchServingVersion(1); err == nil {
 		t.Error("a control plane that does not answer was read as a version")
+	}
+}
+
+// The control-plane read is loopback by construction, and a redirect is how a
+// request stops being the request that was made: whatever holds the port could
+// answer 302 and point a terminal command at any host. The read stops at the
+// redirect, and the target is never asked.
+func TestTheControlPlaneReadFollowsNoRedirect(t *testing.T) {
+	var asked int32
+	target := serveOnLoopback(t, func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&asked, 1)
+		_, _ = w.Write([]byte(`{"version":"9.9.9","config":{"port":11535}}`))
+	})
+	redirecting := serveOnLoopback(t, func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL+"/api/state", http.StatusFound)
+	})
+	got, err := fetchServingVersion(portOfServer(t, redirecting))
+	if err == nil {
+		t.Errorf("fetchServingVersion = %q; a redirect was followed and read as the control plane", got)
+	}
+	if n := atomic.LoadInt32(&asked); n != 0 {
+		t.Errorf("the redirect's target was asked %d time(s); the read must stop at the port it was given", n)
 	}
 }
 
