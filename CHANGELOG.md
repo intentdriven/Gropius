@@ -11,6 +11,8 @@ GitHub release notes.
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-09-12
+
 ### Changed
 
 - **The one-line installer hands over to the binary it just verified, and does
