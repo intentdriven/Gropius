@@ -30,7 +30,7 @@ leaves the models you downloaded.
 ## Status
 
 Experimental. Runs and is tested end-to-end on macOS 26 / Apple Silicon.
-Cross-machine LAN use works; TLS and notarized distribution are not yet included.
+Cross-machine LAN use works; TLS and notarised distribution are not yet included.
 
 ## Features
 
@@ -94,15 +94,21 @@ Cross-machine LAN use works; TLS and notarized distribution are not yet included
   announced over Bonjour, what the request log writes down, and what is
   recorded and for how long — and says where Gropius's own view stops
   ([what each line is read from](docs/posture-reference.md)).
-- **It installs, repairs, removes and diagnoses itself** — `gropius install`
-  does the provisioning in the foreground and, run again, repairs what is
-  missing rather than reinstalling what is not. `gropius uninstall` removes the
-  app, the runtime, the settings and the firewall entry every hand-written
-  instruction forgets, and leaves the models you downloaded with their size and
-  the flag that removes them too. `gropius doctor` separates what it verified
-  from what it could only observe — the firewall entry is never a verdict — and
-  says outright that Local Network Privacy cannot be determined from here,
-  rather than guessing it ([how to](docs/lifecycle.md),
+- **It installs, updates, repairs, removes and diagnoses itself** —
+  `gropius install` does the provisioning in the foreground and, run again,
+  repairs what is missing rather than reinstalling what is not.
+  `gropius update` fetches the current release, verifies it against the
+  published checksums, swaps it in and reports two facts under two labels —
+  the version installed and the version this Mac is serving — saying plainly
+  when the second cannot be known rather than printing the first in its place.
+  `gropius uninstall` removes the app, the runtime, the settings and the
+  firewall entry every hand-written instruction forgets, and leaves the models
+  you downloaded with their size and the flag that removes them too.
+  `gropius doctor` separates what it verified from what it could only observe
+  — the firewall entry is never a verdict — and says outright that Local
+  Network Privacy cannot be determined from here, rather than guessing it.
+  `gropius config show` prints every setting in force, with the API key and
+  the HuggingFace token masked ([how to](docs/lifecycle.md),
   [reference](docs/lifecycle-reference.md)).
 - **Multi-account** — other user accounts on the same Mac share one copy of each
   model on disk and on the GPU. The models are shared; each account keeps its
@@ -166,7 +172,7 @@ gh attestation verify Gropius.app.zip --repo intentdriven/Gropius
 ```
 
 There is no offline signing key; building from source is the escape hatch. The
-binaries are ad-hoc signed, not notarized; because the installer has verified
+binaries are ad-hoc signed, not notarised; because the installer has verified
 the download, it clears the Gatekeeper quarantine so it launches without a
 prompt. The MLX runtime installs while `gropius install` runs, in the terminal
 and with a proportion (a few minutes); a launch from the Finder finishes what
