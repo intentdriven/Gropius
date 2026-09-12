@@ -39,7 +39,9 @@
 # script IS standard input, so a read would consume the rest of the installer.
 # The one step that needs consent — the firewall grant — is asked for by the
 # binary, through the system authorisation panel, which is also the only way a
-# standard account can answer it at all.
+# standard account can answer it at all. The one `read` below is the checksums
+# scan, and its loop is fed by a REDIRECT from a file: a redirection replaces
+# the loop's standard input, so the script's own is never touched.
 set -euo pipefail
 
 REPO="intentdriven/Gropius"
@@ -167,26 +169,103 @@ fetch "$ASSET" "$zip"
 
 # Verify the download is exactly what the release workflow built, BEFORE
 # unpacking it, clearing its quarantine, or placing it. The checksums file comes
-# from the same Release as the asset; --ignore-missing skips the other app's
-# line.
+# from the same Release as the asset.
 echo "Verifying checksum…"
 fetch "SHA256SUMS.txt" "$tmp/SHA256SUMS.txt"
-# /usr/bin/shasum, not shasum: this line is the only integrity control in the
-# whole install path, so the binary that runs it must not be one PATH chose. A
-# planted shim is the hostile case, but the ordinary one matters too — a
-# Homebrew coreutils or another implementation earlier on PATH need not accept
-# `--ignore-missing`, and a checksum check that silently stops checking is worse
-# than none, because it still prints reassurance. Verified against this exact
-# binary: a matching file exits 0, while a wrong hash, a checksums file naming
-# no downloaded file, an empty file and an HTML error page each exit non-zero.
-# It fails closed on all four.
+
+# THE SCOPE, decided here and not by shasum.
 #
-# The output is captured rather than discarded so the failure says which of
-# those fired. Sending it to /dev/null made every cause look identical, and this
-# is the one message a user most needs to be able to act on.
-if ! checksum_output="$( cd "$tmp" && /usr/bin/shasum -a 256 -c --ignore-missing SHA256SUMS.txt 2>&1 )"; then
+# `shasum -c` answers for the files the checksums file NAMES. This line used to
+# carry `--ignore-missing`, to skip the other app's line — and with it, names
+# that are absent are skipped while names that are present and irrelevant are
+# verified and reported as a pass. Nothing in that invocation asserted that the
+# archive it protects was in scope, so a checksums file naming any other
+# readable file with a correct digest (/dev/null will do) exited 0 with the
+# download never looked at, and the unverified archive went on to be unpacked,
+# have its quarantine cleared and hand its own binary the install
+# (iss-2609120417422598). The reassurance was the worst part: the run printed
+# "Checksum OK." on its way past.
+#
+# So the file is narrowed to the line for THIS archive before shasum sees it,
+# and --ignore-missing goes with the narrowing: there is then exactly one name,
+# it is the file just downloaded, and a pass is a statement about that file.
+# Narrowing the input is not making the verdict — the digest is still computed
+# and compared by /usr/bin/shasum, which stays the only thing in this script
+# that decides whether bytes match. The same three moves are taken by the
+# update verb, in internal/lifecycle/updatefetch.go.
+#
+# A line is `<digest><separator><name>`, where the separator is two spaces for a
+# text-mode digest and " *" for a binary one. The name must be EXACTLY the
+# archive: a line naming a PATH is refused rather than matched, because
+# "/somewhere/$ASSET" would verify a file this script never downloaded.
+#
+# No new tool to name by absolute path: the scan is bash's own `read`, and it is
+# fed by a REDIRECT from the checksums file, so it does not touch the standard
+# input that `curl … | bash` is feeding this script from.
+sums_line=""
+while IFS= read -r line || [ -n "$line" ]; do
+	line="${line%$'\r'}"
+	digest="${line%% *}"
+	name="${line#* }"
+	name="${name# }"
+	name="${name#\*}"
+	[ "${#digest}" -eq 64 ] || continue
+	case "$digest" in
+	*[!0-9a-fA-F]*)
+		continue
+		;;
+	esac
+	# Belt and braces: an exact match against $ASSET already refuses a name with
+	# a directory in it, and this says so where a reader is looking.
+	case "$name" in
+	*/*)
+		continue
+		;;
+	esac
+	[ "$name" = "$ASSET" ] || continue
+	sums_line="$line"
+	break
+done <"$tmp/SHA256SUMS.txt"
+[ -n "$sums_line" ] ||
+	die "the checksums published with the release carry no line for $ASSET — an empty or truncated file, a page that is not a checksums file at all, or a checksums file that answers about something else. Nothing verified the download. Refusing to install."
+
+# The one-line file shasum is actually pointed at, in the staging directory
+# mktemp made, which nothing else can write.
+scoped=".gropius-checksum"
+printf '%s\n' "$sums_line" >"$tmp/$scoped"
+
+# /usr/bin/shasum, not shasum: this is the only integrity control in the whole
+# install path, so the binary that runs it must not be one PATH chose. A planted
+# shim is the hostile case, but the ordinary one matters too — a Homebrew
+# coreutils or another implementation earlier on PATH need not behave the same,
+# and a checksum check that silently stops checking is worse than none, because
+# it still prints reassurance. Verified against this exact binary: the archive's
+# own line and matching bytes exit 0, while a wrong hash exits non-zero, and an
+# empty file, an HTML error page, a checksums file naming no downloaded file and
+# one naming a file that is not the download are all refused above, before
+# shasum is reached.
+#
+# The output is captured rather than discarded so the failure says which cause
+# fired. Sending it to /dev/null made every cause look identical, and this is
+# the one message a user most needs to be able to act on.
+if ! checksum_output="$( cd "$tmp" && /usr/bin/shasum -a 256 -c "$scoped" 2>&1 )"; then
 	echo "$checksum_output" >&2
 	die "checksum mismatch for $ASSET — the download is corrupt or tampered. Refusing to install."
+fi
+
+# And the pass is read as a pass for THAT FILE, by its own line, rather than as
+# an exit status meaning "nothing I was told about was wrong" or as a substring:
+# a line for "/somewhere/$ASSET" ends in the same characters as the one this is
+# looking for. The newlines around both sides are what make it a line match.
+verified=""
+case $'\n'"$checksum_output"$'\n' in
+*$'\n'"$ASSET: OK"$'\n'*)
+	verified="yes"
+	;;
+esac
+if [ -z "$verified" ]; then
+	echo "$checksum_output" >&2
+	die "/usr/bin/shasum did not report $ASSET as verified, so the download was not checked against the checksums published with the release. Refusing to install."
 fi
 echo "Checksum OK."
 
